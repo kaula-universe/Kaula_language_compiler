@@ -43,9 +43,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 生成参数处理并添加到符号表
 	for _, param := range stmt.Params {
 		code += fg.codegen.indentString()
-		code += fmt.Sprintf("void* %s = arg;\n", param)
+		code += fmt.Sprintf("i64 %s = (i64)(intptr_t)arg;\n", param)
 		// 添加参数到符号表
-		fg.codegen.AddSymbol(param, "void*", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		fg.codegen.AddSymbol(param, "i64", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
 	
 	// 生成函数体

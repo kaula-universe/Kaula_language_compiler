@@ -545,11 +545,22 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
 		p.log("开始解析函数参数")
-		for p.curTok.Type != lexer.TOKEN_RPAREN {
+		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
 			if p.curTok.Type == lexer.TOKEN_IDENT {
-				stmt.Params = append(stmt.Params, p.curTok.Value)
-				p.log("解析参数：%s", p.curTok.Value)
+				// 第一个 IDENT 是类型，第二个是参数名
+				typeOrName := p.curTok.Value
 				p.nextToken()
+				// 检查下一个 token 是否是 IDENT（参数名）
+				if p.curTok.Type == lexer.TOKEN_IDENT {
+					// typeOrName 是类型，curTok 是参数名
+					stmt.Params = append(stmt.Params, p.curTok.Value)
+					p.log("解析参数：%s (类型：%s)", p.curTok.Value, typeOrName)
+					p.nextToken()
+				} else {
+					// 只有参数名，没有类型（可能是旧语法）
+					stmt.Params = append(stmt.Params, typeOrName)
+					p.log("解析参数：%s (无类型)", typeOrName)
+				}
 			}
 			if p.curTok.Type == lexer.TOKEN_COMMA {
 				p.nextToken()
@@ -566,27 +577,15 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		p.log("开始解析函数体")
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
 				p.log("函数体添加语句：%s", bodyStmt.String())
 			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
-				isStatementStart := false
-				switch p.curTok.Type {
-				case lexer.TOKEN_VO, lexer.TOKEN_SPEND, lexer.TOKEN_SPEND_CALL, lexer.TOKEN_CALL, lexer.TOKEN_TASK, lexer.TOKEN_PREFIX, lexer.TOKEN_TREE, lexer.TOKEN_OBJECT, lexer.TOKEN_FUNC, lexer.TOKEN_IF, lexer.TOKEN_WHILE, lexer.TOKEN_FOR, lexer.TOKEN_SWITCH, lexer.TOKEN_RETURN, lexer.TOKEN_IMPORT, lexer.TOKEN_NONLOCAL, lexer.TOKEN_PRINTLN, lexer.TOKEN_IDENT:
-					isStatementStart = true
-				}
-				if !isStatementStart {
-					p.nextToken()
-				}
-			}
 		}
 		p.log("函数体解析完成，共 %d 条语句", len(stmt.Body))
-		if p.curTok.Type == lexer.TOKEN_RBRACE {
-			p.nextToken()
-		}
+		// 不消费 RBRACE，让 parseProgram 来消费
 	}
 	p.log("函数语句解析完成")
 	return stmt
@@ -1412,6 +1411,7 @@ var precedences = map[lexer.TokenType]int{
 	lexer.TOKEN_MINUS:  6,
 	lexer.TOKEN_MULTIPLY: 7,
 	lexer.TOKEN_DIVIDE: 7,
+	lexer.TOKEN_MOD:    7,
 }
 
 // precedence 获取运算符优先级

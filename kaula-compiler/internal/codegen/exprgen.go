@@ -3,8 +3,16 @@ package codegen
 import (
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"regexp"
 	"strings"
 )
+
+// isIntegerLiteral 检查是否是整数常量
+func isIntegerLiteral(code string) bool {
+	// 匹配整数常量（包括负数）
+	matched, _ := regexp.MatchString(`^-?\d+$`, code)
+	return matched
+}
 
 // ExpressionGenerator 负责表达式相关的代码生成
 type ExpressionGenerator struct {
@@ -101,19 +109,25 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		right := eg.GenerateExpression(e.Right)
 		return left + " = " + right
 	case "PLUS":
-		return eg.generatePlusOperation(e.Left, e.Right)
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " + " + right
 	case "MINUS":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
-		return "int_object_subtract(" + left + ", " + right + ")"
+		return left + " - " + right
 	case "MULTIPLY":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
-		return "int_object_multiply(" + left + ", " + right + ")"
+		return left + " * " + right
 	case "DIVIDE":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
-		return "int_object_divide(" + left + ", " + right + ")"
+		return left + " / " + right
+	case "MOD":
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " % " + right
 	case "EQ":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
@@ -122,8 +136,22 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
 		return "!object_equals((Object*)" + left + ", (Object*)" + right + ")"
-	case "LT", "GT", "LE", "GE":
-		return "0"
+	case "LT", "<":
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " < " + right
+	case "GT", ">":
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " > " + right
+	case "LE", "<=":
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " <= " + right
+	case "GE", ">=":
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " >= " + right
 	case "AND":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
@@ -191,11 +219,21 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	
 	// 其他函数调用
 	code := funcName + "("
-	for i, arg := range e.Args {
-		if i > 0 {
-			code += ", "
+	// 如果没有参数，传递 NULL
+	if len(e.Args) == 0 {
+		code += "NULL"
+	} else {
+		// 传递第一个参数，并进行类型转换（假设只有一个参数）
+		argCode := eg.GenerateExpression(e.Args[0])
+		// 检查参数是否是整数类型或整数常量，如果是，需要转换为 void*
+		if strings.HasPrefix(argCode, "i64") || strings.HasPrefix(argCode, "int") {
+			code += "(void*)(intptr_t)" + argCode
+		} else if isIntegerLiteral(argCode) {
+			// 整数常量也需要转换
+			code += "(void*)(intptr_t)(" + argCode + ")"
+		} else {
+			code += argCode
 		}
-		code += eg.GenerateExpression(arg)
 	}
 	code += ")"
 	return code

@@ -55,6 +55,7 @@ const (
 	TOKEN_MINUS
 	TOKEN_MULTIPLY
 	TOKEN_DIVIDE
+	TOKEN_MOD
 	TOKEN_ASSIGN
 	TOKEN_EQ
 	TOKEN_NE
@@ -151,6 +152,9 @@ func (l *Lexer) Next() Token {
 		case char == '/':
 			l.next()
 			return Token{Type: TOKEN_DIVIDE, Value: "/", Line: l.line, Column: l.column}
+		case char == '%':
+			l.next()
+			return Token{Type: TOKEN_MOD, Value: "%", Line: l.line, Column: l.column}
 		case char == '=':
 			if l.peek() == '=' {
 				l.next()
@@ -528,6 +532,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "MULTIPLY"
 	case TOKEN_DIVIDE:
 		return "DIVIDE"
+	case TOKEN_MOD:
+		return "MOD"
 	case TOKEN_ASSIGN:
 		return "ASSIGN"
 	case TOKEN_EQ:

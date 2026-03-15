@@ -36,5 +36,6 @@
 
 // 对象系统
 #include "obj/obj.h"
+#include "obj/int_object_ext.h"
 
 #endif // STD_H

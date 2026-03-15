@@ -3,6 +3,7 @@
 
 #include "object.h"
 #include "int_object.h"
+#include "int_object_ext.h"
 #include "float_object.h"
 #include "bool_object.h"
 #include "string_object.h"

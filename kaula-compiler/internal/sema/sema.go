@@ -82,10 +82,24 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 	}
 }
 
-// Analyze 分析程序
+// Analyze 分析程序（两遍分析）
 func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
+	// 第一遍：将所有函数和变量添加到符号表（不分析函数体）
 	for _, stmt := range program.Statements {
-		sa.analyzeStatement(stmt)
+		if funcStmt, ok := stmt.(*ast.FunctionStatement); ok {
+			// 只添加函数到符号表，不分析函数体
+			sa.symbolTable.AddSymbol(funcStmt.Name, "function", false, "global", funcStmt.Pos.Line, funcStmt.Pos.Column)
+		} else {
+			// 其他语句直接分析
+			sa.analyzeStatement(stmt)
+		}
+	}
+	
+	// 第二遍：分析函数体
+	for _, stmt := range program.Statements {
+		if funcStmt, ok := stmt.(*ast.FunctionStatement); ok {
+			sa.analyzeFunctionStatement(funcStmt)
+		}
 	}
 }
 
@@ -349,17 +363,15 @@ func (sa *SemanticAnalyzer) analyzeForStatement(stmt *ast.ForStatement) {
 	}
 }
 
-// analyzeReturnStatement 分析return语句
+// analyzeReturnStatement 分析 return 语句
 func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 	if stmt.Value != nil {
-		returnType := sa.analyzeExpression(stmt.Value)
+		// 暂时允许 TypeAny 作为返回值（用于递归等场景）
+		// returnType := sa.analyzeExpression(stmt.Value)
+		sa.analyzeExpression(stmt.Value)
 		// 检查返回值类型是否与函数返回类型匹配
 		if sa.currentFunction != nil {
 			// 这里可以添加更详细的函数返回类型检查
-			// 暂时检查返回值是否存在
-			if returnType == TypeAny {
-				sa.error("return value has undefined type")
-			}
 		}
 	} else {
 		// 检查函数是否需要返回值
@@ -423,17 +435,20 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(ident *ast.Identifier) Type {
 		sa.error(fmt.Sprintf("undefined identifier: %s", ident.Name))
 		return TypeAny
 	}
-	// 根据symbol的Type字段返回对应的Type类型
+	// 根据 symbol 的 Type 字段返回对应的 Type 类型
 	switch symbol.Type {
-	case "int":
+	case "int", "i8", "i16", "i32", "i64", "uint", "uint8", "uint16", "uint32", "uint64":
 		return TypeInt
-	case "float":
+	case "float", "f32", "f64":
 		return TypeFloat
-	case "string":
+	case "string", "String":
 		return TypeString
-	case "bool":
+	case "bool", "Bool":
 		return TypeBool
+	case "void*", "void":
+		return TypeAny
 	default:
+		// 对于其他类型（如 Vector*, Mutex* 等），暂时返回 Any
 		return TypeAny
 	}
 }
@@ -489,11 +504,11 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		if leftType == TypeString || rightType == TypeString {
 			return TypeString
 		}
-		// 算术运算符要求操作数为数字类型
-		if leftType != TypeInt && leftType != TypeFloat {
+		// 算术运算符要求操作数为数字类型（允许 TypeAny 用于递归等场景）
+		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeAny {
 			sa.error("left operand of arithmetic operator must be a number")
 		}
-		if rightType != TypeInt && rightType != TypeFloat {
+		if rightType != TypeInt && rightType != TypeFloat && rightType != TypeAny {
 			sa.error("right operand of arithmetic operator must be a number")
 		}
 		// 结果类型为浮点数如果有一个操作数是浮点数
@@ -502,11 +517,11 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		}
 		return TypeInt
 	case "MINUS", "-":
-		// 算术运算符要求操作数为数字类型
-		if leftType != TypeInt && leftType != TypeFloat {
+		// 算术运算符要求操作数为数字类型（允许 TypeAny 用于递归等场景）
+		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeAny {
 			sa.error("left operand of arithmetic operator must be a number")
 		}
-		if rightType != TypeInt && rightType != TypeFloat {
+		if rightType != TypeInt && rightType != TypeFloat && rightType != TypeAny {
 			sa.error("right operand of arithmetic operator must be a number")
 		}
 		// 结果类型为浮点数如果有一个操作数是浮点数
@@ -515,11 +530,11 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		}
 		return TypeInt
 	case "MULTIPLY", "*":
-		// 算术运算符要求操作数为数字类型
-		if leftType != TypeInt && leftType != TypeFloat {
+		// 算术运算符要求操作数为数字类型（允许 TypeAny 用于递归等场景）
+		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeAny {
 			sa.error("left operand of arithmetic operator must be a number")
 		}
-		if rightType != TypeInt && rightType != TypeFloat {
+		if rightType != TypeInt && rightType != TypeFloat && rightType != TypeAny {
 			sa.error("right operand of arithmetic operator must be a number")
 		}
 		// 结果类型为浮点数如果有一个操作数是浮点数
@@ -528,11 +543,11 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		}
 		return TypeInt
 	case "DIVIDE", "/":
-		// 算术运算符要求操作数为数字类型
-		if leftType != TypeInt && leftType != TypeFloat {
+		// 算术运算符要求操作数为数字类型（允许 TypeAny 用于递归等场景）
+		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeAny {
 			sa.error("left operand of arithmetic operator must be a number")
 		}
-		if rightType != TypeInt && rightType != TypeFloat {
+		if rightType != TypeInt && rightType != TypeFloat && rightType != TypeAny {
 			sa.error("right operand of arithmetic operator must be a number")
 		}
 		// 结果类型为浮点数如果有一个操作数是浮点数
