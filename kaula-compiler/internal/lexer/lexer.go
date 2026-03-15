@@ -47,6 +47,8 @@ const (
 	TOKEN_INT
 	TOKEN_FLOAT
 	TOKEN_STRING
+	TOKEN_TRUE
+	TOKEN_FALSE
 
 	// 运算符
 	TOKEN_PLUS
@@ -342,6 +344,10 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_STRUCT
 	case "this":
 		tokenType = TOKEN_IDENT
+	case "true":
+		tokenType = TOKEN_TRUE
+	case "false":
+		tokenType = TOKEN_FALSE
 	case "null":
 		tokenType = TOKEN_NULL
 	}
@@ -510,6 +516,10 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "FLOAT"
 	case TOKEN_STRING:
 		return "STRING"
+	case TOKEN_TRUE:
+		return "TRUE"
+	case TOKEN_FALSE:
+		return "FALSE"
 	case TOKEN_PLUS:
 		return "PLUS"
 	case TOKEN_MINUS:

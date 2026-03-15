@@ -4,6 +4,25 @@
 #include <time.h>
 #include <stdio.h>
 
+// 路径安全检查
+static bool is_path_safe(const char* path) {
+    if (!path) return false;
+    
+    if (strstr(path, "..") != NULL) {
+        return false;
+    }
+    
+    if (path[0] == '\\' && path[1] == '\\') {
+        return false;
+    }
+    
+    if (strstr(path, "\\\\") ) {
+        return false;
+    }
+    
+    return true;
+}
+
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>

@@ -15,6 +15,11 @@ __thread kmm_context_t* g_kaula_scope = NULL;
 static kmm_context_t g_default_scope;
 static int g_scope_initialized = 0;
 
+// 内存池全局变量
+static uint8_t* memory_pool = NULL;
+static size_t memory_pool_size = 0;
+static size_t memory_pool_used = 0;
+
 /**
  * 进入新的作用域（函数调用时）
  * 编译器生成的代码将在每个函数入口处调用此函数

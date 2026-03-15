@@ -64,6 +64,14 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	case *ast.VariableDeclaration:
 		return sg.generateVariableDeclaration(s)
 	case *ast.ExpressionStatement:
+		// 检查是否是模块调用（MemberAccessExpression 作为 CallExpression 的函数部分）
+		if callExpr, ok := s.Expression.(*ast.CallExpression); ok {
+			if _, isMemberAccess := callExpr.Function.(*ast.MemberAccessExpression); isMemberAccess {
+				// 这是模块函数调用，直接生成函数调用代码
+				return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
+			}
+		}
+		// 其他表达式语句
 		return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 	case *ast.BlockStatement:
 		return sg.generateBlockStatement(s)

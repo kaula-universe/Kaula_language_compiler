@@ -77,11 +77,25 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	code := "int main() {\n"
 	fg.codegen.indent++
 	
+	// ========== 新增：注入 ScopedAllocator 作用域入口 ==========
+	code += fg.codegen.indentString()
+	code += "// KMM ScopedAllocator 作用域开始\n"
+	code += fg.codegen.indentString()
+	code += "kaula_scope_enter();\n"
+	// =========================================================
+	
 	// 生成函数体
 	for _, bodyStmt := range stmt.Body {
 		code += fg.codegen.indentString()
 		code += fg.codegen.generateStatement(bodyStmt)
 	}
+	
+	// ========== 新增：注入 ScopedAllocator 作用域出口 ==========
+	code += fg.codegen.indentString()
+	code += "// KMM ScopedAllocator 作用域结束\n"
+	code += fg.codegen.indentString()
+	code += "kaula_scope_exit();\n"
+	// =========================================================
 	
 	// 添加默认返回语句
 	code += fg.codegen.indentString() + "return 0;\n"

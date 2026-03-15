@@ -34,6 +34,11 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return fmt.Sprintf("%f", e.Value)
 	case *ast.StringLiteral:
 		return fmt.Sprintf("\"%s\"", e.Value)
+	case *ast.BooleanLiteral:
+		if e.Value {
+			return "true"
+		}
+		return "false"
 	case *ast.BinaryExpression:
 		return eg.generateBinaryExpression(e)
 	case *ast.CallExpression:
@@ -208,7 +213,14 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		if eg.codegen.stdlibConfig != nil {
 			if _, exists := eg.codegen.stdlibConfig.Modules[moduleName]; exists {
 				// 生成标准库函数调用
-				code := methodName + "("
+				// 注意：stdlib.json 中的函数名有些已经包含了模块前缀（如 string_create）
+				// 但 io 模块的函数名没有前缀（如 println），需要特殊处理
+				funcName := methodName
+				// 对于 io 模块，需要添加 io_ 前缀
+				if moduleName == "io" {
+					funcName = "io_" + methodName
+				}
+				code := funcName + "("
 				for i, arg := range args {
 					if i > 0 {
 						code += ", "

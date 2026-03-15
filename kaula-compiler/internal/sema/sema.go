@@ -276,6 +276,7 @@ func (sa *SemanticAnalyzer) analyzeNonLocalStatement(stmt *ast.NonLocalStatement
 // analyzeVariableDeclaration 分析变量声明语句
 func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclaration) {
 	// 添加变量到符号表
+	// 对于指针类型（如 Vector*），我们接受它作为有效类型
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 
 	// 分析值
@@ -383,6 +384,8 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) Type {
 		return TypeFloat
 	case *ast.StringLiteral:
 		return TypeString
+	case *ast.BooleanLiteral:
+		return TypeBool
 	case *ast.BinaryExpression:
 		return sa.analyzeBinaryExpression(e)
 	case *ast.CallExpression:
@@ -619,12 +622,25 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) Type
 		// 首先检查标识符是否在符号表中存在
 		symbol := sa.symbolTable.GetSymbol(ident.Name)
 		if symbol == nil {
-			sa.error(fmt.Sprintf("function not defined: %s", ident.Name))
-			return TypeAny
-		}
-		// 检查可空类型
-		if symbol.Nullable {
-			sa.error(fmt.Sprintf("nullable type '%s' cannot be used as function without null check", ident.Name))
+			// 检查是否是标准库函数
+			isStdlibFunc := false
+			if sa.stdlibConfig != nil {
+				for _, module := range sa.stdlibConfig.Modules {
+					if _, ok := module.Functions[ident.Name]; ok {
+						isStdlibFunc = true
+						break
+					}
+				}
+			}
+			// 如果不是标准库函数，才报错
+			if !isStdlibFunc {
+				sa.error(fmt.Sprintf("function not defined: %s", ident.Name))
+			}
+		} else {
+			// 检查可空类型
+			if symbol.Nullable {
+				sa.error(fmt.Sprintf("nullable type '%s' cannot be used as function without null check", ident.Name))
+			}
 		}
 	}
 
@@ -633,7 +649,7 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) Type
 		argType := sa.analyzeExpression(arg)
 		// 检查参数类型是否有效
 		if argType == TypeAny {
-			// 暂时允许参数类型为Any，因为我们可能调用的是标准库函数
+			// 暂时允许参数类型为 Any，因为我们可能调用的是标准库函数
 			// sa.error("argument has undefined type")
 		}
 		// 检查可空类型参数
@@ -658,7 +674,7 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) Type
 		}
 	}
 
-	// 暂时返回Any类型，后续可以根据函数定义返回具体类型
+	// 暂时返回 Any 类型，后续可以根据函数定义返回具体类型
 	return TypeAny
 }
 
@@ -813,15 +829,28 @@ func (sa *SemanticAnalyzer) checkInterfaceImplementation(class *ast.ClassStateme
 
 // analyzeMemberAccessExpression 分析成员访问表达式
 func (sa *SemanticAnalyzer) analyzeMemberAccessExpression(expr *ast.MemberAccessExpression) Type {
-	// 分析对象
-	objectType := sa.analyzeExpression(expr.Object)
+	// 检查对象是否是标准库模块
+	isStdlibModule := false
+	if sa.stdlibConfig != nil {
+		if objIdent, ok := expr.Object.(*ast.Identifier); ok {
+			if _, ok := sa.stdlibConfig.Modules[objIdent.Name]; ok {
+				isStdlibModule = true
+			}
+		}
+	}
 	
-	// 检查对象是否存在
-	if objectType == TypeAny {
-		sa.error("object not defined")
+	// 如果不是标准库模块，才分析对象
+	if !isStdlibModule {
+		// 分析对象
+		objectType := sa.analyzeExpression(expr.Object)
+		
+		// 检查对象是否存在
+		if objectType == TypeAny {
+			sa.error("object not defined")
+		}
 	}
 
-	// 暂时返回Any类型，后续可以根据成员类型返回具体类型
+	// 暂时返回 Any 类型，后续可以根据成员类型返回具体类型
 	return TypeAny
 }
 

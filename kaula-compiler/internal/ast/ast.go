@@ -973,22 +973,49 @@ type StringLiteral struct {
 	Pos   Position
 }
 
-// expressionNode 实现Expression接口
+// expressionNode 实现 Expression 接口
 func (s *StringLiteral) expressionNode() {}
 
-// String 实现Node接口
+// String 实现 Node 接口
 func (s *StringLiteral) String() string {
 	return "StringLiteral(" + s.Value + ")"
 }
 
-// GetPosition 实现Node接口
+// GetPosition 实现 Node 接口
 func (s *StringLiteral) GetPosition() Position {
 	return s.Pos
 }
 
-// SetPosition 实现Node接口
+// SetPosition 实现 Node 接口
 func (s *StringLiteral) SetPosition(pos Position) {
 	s.Pos = pos
+}
+
+// BooleanLiteral 表示布尔字面量
+type BooleanLiteral struct {
+	Value bool
+	Pos   Position
+}
+
+// expressionNode 实现 Expression 接口
+func (b *BooleanLiteral) expressionNode() {}
+
+// String 实现 Node 接口
+func (b *BooleanLiteral) String() string {
+	if b.Value {
+		return "BooleanLiteral(true)"
+	}
+	return "BooleanLiteral(false)"
+}
+
+// GetPosition 实现 Node 接口
+func (b *BooleanLiteral) GetPosition() Position {
+	return b.Pos
+}
+
+// SetPosition 实现 Node 接口
+func (b *BooleanLiteral) SetPosition(pos Position) {
+	b.Pos = pos
 }
 
 // BinaryExpression 表示二元表达式
