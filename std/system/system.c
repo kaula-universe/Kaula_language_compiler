@@ -246,13 +246,49 @@ ProcessId system_get_parent_process_id() {
 #endif
 }
 
+static bool is_safe_command(const char* cmd) {
+    if (!cmd) return false;
+    
+    const char* dangerous_chars[] = {"&", "|", ";", "`", "$", "(", ")", "<", ">", "\\", "\n", "\r", NULL};
+    for (int i = 0; dangerous_chars[i] != NULL; i++) {
+        if (strstr(cmd, dangerous_chars[i]) != NULL) {
+            return false;
+        }
+    }
+    
+    const char* dangerous_cmds[] = {"del", "rm", "format", "fdisk", "shutdown", "reboot", "curl", "wget", "powershell", "cmd", "bash", NULL};
+    for (int i = 0; dangerous_cmds[i] != NULL; i++) {
+        if (strstr(cmd, dangerous_cmds[i]) != NULL) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
 int system_execute(const char* command, char* output, size_t output_size) {
+    if (!command) {
+        return -1;
+    }
+    
+    if (!is_safe_command(command)) {
+        fprintf(stderr, "Error: Command contains unsafe characters or commands\n");
+        return -1;
+    }
+    
 #ifdef _WIN32
     FILE* pipe = _popen(command, "r");
     if (!pipe) return -1;
     if (output && output_size > 0) {
-        fread(output, 1, output_size - 1, pipe);
-        output[output_size - 1] = '\0';
+        size_t total_read = 0;
+        size_t bytes_read;
+        while ((bytes_read = fread(output + total_read, 1, 1, pipe)) > 0) {
+            total_read += bytes_read;
+            if (total_read >= output_size - 1) {
+                break;
+            }
+        }
+        output[total_read] = '\0';
     }
     int result = _pclose(pipe);
     return result;
@@ -260,8 +296,15 @@ int system_execute(const char* command, char* output, size_t output_size) {
     FILE* pipe = popen(command, "r");
     if (!pipe) return -1;
     if (output && output_size > 0) {
-        fread(output, 1, output_size - 1, pipe);
-        output[output_size - 1] = '\0';
+        size_t total_read = 0;
+        size_t bytes_read;
+        while ((bytes_read = fread(output + total_read, 1, 1, pipe)) > 0) {
+            total_read += bytes_read;
+            if (total_read >= output_size - 1) {
+                break;
+            }
+        }
+        output[total_read] = '\0';
     }
     int result = pclose(pipe);
     return result;
@@ -269,19 +312,30 @@ int system_execute(const char* command, char* output, size_t output_size) {
 }
 
 int system_execute_with_args(const char* command, char* const args[], char* output, size_t output_size) {
-    // 简单实现，将参数拼接成命令字符串
+    if (!command || !args) {
+        return -1;
+    }
+    
     size_t cmd_len = strlen(command);
     size_t args_len = 0;
     for (int i = 0; args[i]; i++) {
+        if (!is_safe_command(args[i])) {
+            fprintf(stderr, "Error: Argument %d contains unsafe characters\n", i);
+            return -1;
+        }
         args_len += strlen(args[i]) + 1;
     }
-    char* full_cmd = (char*)malloc(cmd_len + args_len + 1);
+    
+    size_t full_len = cmd_len + args_len + 1;
+    char* full_cmd = (char*)malloc(full_len);
     if (!full_cmd) return -1;
+    
     strcpy(full_cmd, command);
     for (int i = 0; args[i]; i++) {
         strcat(full_cmd, " ");
         strcat(full_cmd, args[i]);
     }
+    
     int result = system_execute(full_cmd, output, output_size);
     free(full_cmd);
     return result;
@@ -289,6 +343,7 @@ int system_execute_with_args(const char* command, char* const args[], char* outp
 
 // 文件系统函数
 bool system_file_exists(const char* path) {
+    if (!path) return false;
 #ifdef _WIN32
     return GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES;
 #else
@@ -298,6 +353,7 @@ bool system_file_exists(const char* path) {
 }
 
 bool system_file_is_regular(const char* path) {
+    if (!path) return false;
 #ifdef _WIN32
     DWORD attr = GetFileAttributes(path);
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
@@ -311,6 +367,7 @@ bool system_file_is_regular(const char* path) {
 }
 
 bool system_file_is_directory(const char* path) {
+    if (!path) return false;
 #ifdef _WIN32
     DWORD attr = GetFileAttributes(path);
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
@@ -324,6 +381,7 @@ bool system_file_is_directory(const char* path) {
 }
 
 size_t system_file_size(const char* path) {
+    if (!path) return 0;
 #ifdef _WIN32
     WIN32_FIND_DATA data;
     HANDLE hFind = FindFirstFile(path, &data);
@@ -340,6 +398,7 @@ size_t system_file_size(const char* path) {
 }
 
 bool system_file_delete(const char* path) {
+    if (!path) return false;
 #ifdef _WIN32
     return DeleteFile(path) != 0;
 #else
@@ -348,6 +407,7 @@ bool system_file_delete(const char* path) {
 }
 
 bool system_file_copy(const char* src, const char* dst) {
+    if (!src || !dst) return false;
 #ifdef _WIN32
     return CopyFile(src, dst, FALSE) != 0;
 #else
@@ -374,6 +434,7 @@ bool system_file_copy(const char* src, const char* dst) {
 }
 
 bool system_file_move(const char* src, const char* dst) {
+    if (!src || !dst) return false;
 #ifdef _WIN32
     return MoveFile(src, dst) != 0;
 #else
@@ -382,6 +443,7 @@ bool system_file_move(const char* src, const char* dst) {
 }
 
 bool system_directory_create(const char* path) {
+    if (!path) return false;
 #ifdef _WIN32
     return CreateDirectory(path, NULL) != 0;
 #else
@@ -390,6 +452,7 @@ bool system_directory_create(const char* path) {
 }
 
 bool system_directory_delete(const char* path) {
+    if (!path) return false;
 #ifdef _WIN32
     return RemoveDirectory(path) != 0;
 #else
@@ -403,6 +466,16 @@ bool system_directory_exists(const char* path) {
 
 char** system_directory_list(const char* path, size_t* count) {
     if (count) *count = 0;
+    
+    if (!path) {
+        return NULL;
+    }
+    
+    if (!is_path_safe(path)) {
+        fprintf(stderr, "Error: Unsafe path in directory_list\n");
+        return NULL;
+    }
+    
 #ifdef _WIN32
     WIN32_FIND_DATA data;
     char search_path[1024];

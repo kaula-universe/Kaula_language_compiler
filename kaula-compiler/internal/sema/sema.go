@@ -110,6 +110,8 @@ func (sa *SemanticAnalyzer) analyzeStatement(stmt ast.Statement) {
 		sa.analyzeClassStatement(s)
 	case *ast.InterfaceStatement:
 		sa.analyzeInterfaceStatement(s)
+	case *ast.StructStatement:
+		sa.analyzeStructStatement(s)
 	case *ast.IfStatement:
 		sa.analyzeIfStatement(s)
 	case *ast.WhileStatement:
@@ -563,43 +565,16 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 			sa.error("operands of comparison operator must be comparable")
 		}
 		return TypeBool
-	case "LT", "<":
+	case "LT", "<", "GT", ">", "LE", "<=", "GE", ">=":
 		// 比较运算符要求操作数类型相同
-		if leftType != rightType {
-			sa.error("operands of comparison operator must have the same type")
+		if leftType != rightType && leftType != TypeAny && rightType != TypeAny {
+			sa.error(fmt.Sprintf("operands of comparison operator must have the same type (got %s and %s)", leftType, rightType))
 		}
 		// 比较运算符要求操作数为可比较类型
-		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeString && leftType != TypeBool {
+		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeString && leftType != TypeBool && leftType != TypeAny {
 			sa.error("operands of comparison operator must be comparable")
 		}
-		return TypeBool
-	case "GT", ">":
-		// 比较运算符要求操作数类型相同
-		if leftType != rightType {
-			sa.error("operands of comparison operator must have the same type")
-		}
-		// 比较运算符要求操作数为可比较类型
-		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeString && leftType != TypeBool {
-			sa.error("operands of comparison operator must be comparable")
-		}
-		return TypeBool
-	case "LE", "<=":
-		// 比较运算符要求操作数类型相同
-		if leftType != rightType {
-			sa.error("operands of comparison operator must have the same type")
-		}
-		// 比较运算符要求操作数为可比较类型
-		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeString && leftType != TypeBool {
-			sa.error("operands of comparison operator must be comparable")
-		}
-		return TypeBool
-	case "GE", ">=":
-		// 比较运算符要求操作数类型相同
-		if leftType != rightType {
-			sa.error("operands of comparison operator must have the same type")
-		}
-		// 比较运算符要求操作数为可比较类型
-		if leftType != TypeInt && leftType != TypeFloat && leftType != TypeString && leftType != TypeBool {
+		if rightType != TypeInt && rightType != TypeFloat && rightType != TypeString && rightType != TypeBool && rightType != TypeAny {
 			sa.error("operands of comparison operator must be comparable")
 		}
 		return TypeBool
@@ -749,6 +724,26 @@ func (sa *SemanticAnalyzer) analyzeInterfaceStatement(stmt *ast.InterfaceStateme
 	// 分析方法
 	for _, method := range stmt.Methods {
 		sa.analyzeMethodStatement(method)
+	}
+
+	// 恢复旧的作用域
+	sa.symbolTable = oldSymbolTable
+	sa.scope--
+}
+
+// analyzeStructStatement 分析结构体定义
+func (sa *SemanticAnalyzer) analyzeStructStatement(stmt *ast.StructStatement) {
+	// 添加结构体到符号表
+	sa.symbolTable.AddSymbol(stmt.Name, "struct", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+
+	// 创建新的作用域
+	oldSymbolTable := sa.symbolTable
+	sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "struct_"+stmt.Name)
+	sa.scope++
+
+	// 添加字段到符号表
+	for _, field := range stmt.Fields {
+		sa.symbolTable.AddSymbol(field.Name, field.Type, field.Nullable, "field", field.Pos.Line, field.Pos.Column)
 	}
 
 	// 恢复旧的作用域

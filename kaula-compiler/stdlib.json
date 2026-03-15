@@ -86,6 +86,11 @@
     "string_count_string": {"args": ["String", "String"], "return": "size_t"}
   },
   "memory": {
+    "alloc": {"args": ["size_t"], "return": "void*"},
+    "kaula_scope_enter": {"args": []},
+    "kaula_scope_exit": {"args": []},
+    "kaula_scope_alloc": {"args": ["size_t"], "return": "void*"},
+    "kaula_scope_free": {"args": ["void*"]},
     "fast_allocator_init": {"args": []},
     "fast_alloc": {"args": ["size_t"], "return": "void*"},
     "fast_calloc": {"args": ["size_t", "size_t"], "return": "void*"},

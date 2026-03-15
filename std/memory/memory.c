@@ -1,16 +1,82 @@
 #include "memory.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
-// 使用src目录中的高性能内存分配器
-// 这些函数在src/allocator.c中实现
+// ==================== ScopedAllocator 全局作用域 ====================
+// 线程局部存储：每个线程/协程一个作用域上下文
+#ifdef _WIN32
+__declspec(thread) kmm_context_t* g_kaula_scope = NULL;
+#else
+__thread kmm_context_t* g_kaula_scope = NULL;
+#endif
 
-// 内存池
-static uint8_t* memory_pool = NULL;
-static size_t memory_pool_size = 0;
-static size_t memory_pool_used = 0;
+// 全局默认作用域
+static kmm_context_t g_default_scope;
+static int g_scope_initialized = 0;
 
-// 标准内存分配函数
+/**
+ * 进入新的作用域（函数调用时）
+ * 编译器生成的代码将在每个函数入口处调用此函数
+ */
+void kaula_scope_enter(void) {
+    // 如果还没有作用域，初始化默认作用域
+    if (!g_kaula_scope) {
+        if (kmm_init(&g_default_scope) == 0) {
+            g_kaula_scope = &g_default_scope;
+            g_scope_initialized = 1;
+            #ifdef KMM_DEBUG
+            printf("[KMM] 作用域初始化完成\n");
+            #endif
+        }
+    }
+}
+
+/**
+ * 退出作用域（函数返回时）
+ * 编译器生成的代码将在每个函数出口处调用此函数
+ */
+void kaula_scope_exit(void) {
+    if (g_kaula_scope) {
+        #ifdef KMM_DEBUG
+        printf("[KMM] 作用域清理开始\n");
+        #endif
+        
+        // 销毁作用域，释放所有资源
+        kmm_destroy(g_kaula_scope);
+        g_kaula_scope = NULL;
+    }
+}
+
+/**
+ * Kaula 作用域分配函数
+ * 这是编译器生成代码时调用的主要分配接口
+ */
+void* kaula_scope_alloc(size_t size) {
+    if (!g_kaula_scope) {
+        kaula_scope_enter();
+    }
+    
+    void* ptr = kmm_alloc(g_kaula_scope, size, "<kaula>", 0);
+    
+    #ifdef KMM_DEBUG
+    printf("[KMM] 分配 %zu bytes @ %p\n", size, ptr);
+    #endif
+    
+    return ptr;
+}
+
+/**
+ * Kaula 作用域释放函数
+ * 注意：Arena 分配的对象不需要单独释放，会在作用域退出时批量释放
+ */
+void kaula_scope_free(void* ptr) {
+    if (ptr) {
+        kmm_free(ptr);
+    }
+}
+
+// ==================== 标准内存分配函数 ====================
 void* std_malloc(size_t size) {
     return malloc(size);
 }

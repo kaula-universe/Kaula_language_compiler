@@ -51,25 +51,54 @@ void vo_data_load(VOModule* vo, int index, void* value) {
 }
 
 void vo_code_load(VOModule* vo, int index, void* (*func)(void*)) {
+    if (!vo || !func) {
+        return;
+    }
+    
+    if (index >= 0 || index < -VO_CACHE_SIZE) {
+        fprintf(stderr, "Error: Invalid code cache index %d\n", index);
+        return;
+    }
+    
     (*vo->code_cache)[-index] = func;
 }
 
 void vo_associate(VOModule* vo, int data_index, int code_index) {
+    if (!vo) {
+        return;
+    }
+    
+    if (data_index < 0 || data_index > vo->cache_max) {
+        fprintf(stderr, "Error: Invalid data index %d\n", data_index);
+        return;
+    }
+    
+    if (code_index >= 0 || code_index < -VO_CACHE_SIZE) {
+        fprintf(stderr, "Error: Invalid code index %d\n", code_index);
+        return;
+    }
+    
     vo->data_cache[data_index].code = (*vo->code_cache)[-code_index];
     vo->data_cache[data_index].has_code = 1;
     vo->data_cache[data_index].code_index = code_index;
 }
 
 void* vo_access(VOModule* vo, int index) {
+    if (!vo) {
+        return NULL;
+    }
+    
     if (index > 0 && index <= vo->cache_max) {
         VOData* data = &vo->data_cache[index];
-        // 更新访问时间
         data->last_access = get_current_time_ns();
         if (data->has_code) {
             return data->code(data->value);
         }
         return data->value;
-    } else {
+    } else if (index < 0 && index >= -VO_CACHE_SIZE) {
         return (void*)(*vo->code_cache)[-index];
+    } else {
+        fprintf(stderr, "Error: Invalid VO access index %d\n", index);
+        return NULL;
     }
 }

@@ -38,6 +38,7 @@ const (
 	TOKEN_INTERFACE
 	TOKEN_IMPLEMENTS
 	TOKEN_CONSTRUCTOR
+	TOKEN_STRUCT
 
 	// 标识符
 	TOKEN_IDENT
@@ -337,6 +338,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_IMPLEMENTS
 	case "constructor":
 		tokenType = TOKEN_CONSTRUCTOR
+	case "struct":
+		tokenType = TOKEN_STRUCT
 	case "this":
 		tokenType = TOKEN_IDENT
 	case "null":
@@ -497,6 +500,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "IMPLEMENTS"
 	case TOKEN_CONSTRUCTOR:
 		return "CONSTRUCTOR"
+	case TOKEN_STRUCT:
+		return "STRUCT"
 	case TOKEN_IDENT:
 		return "IDENT"
 	case TOKEN_INT:

@@ -105,6 +105,16 @@ func (p *Program) FindInterface(name string) *InterfaceStatement {
 	return nil
 }
 
+// FindStruct 查找结构体声明
+func (p *Program) FindStruct(name string) *StructStatement {
+	for _, stmt := range p.Statements {
+		if structStmt, ok := stmt.(*StructStatement); ok && structStmt.Name == name {
+			return structStmt
+		}
+	}
+	return nil
+}
+
 // Traverse 遍历所有节点
 func (p *Program) Traverse(visitor func(Node)) {
 	visitor(p)
@@ -319,6 +329,10 @@ func traverseNode(node Node, visitor func(Node)) {
 	case *InterfaceStatement:
 		for _, method := range n.Methods {
 			traverseNode(method, visitor)
+		}
+	case *StructStatement:
+		for _, field := range n.Fields {
+			traverseNode(field, visitor)
 		}
 	case *MemberAccessExpression:
 		if n.Object != nil {
@@ -1348,20 +1362,45 @@ type ImplementsClause struct {
 	Pos        Position
 }
 
-// statementNode 实现Statement接口
+// statementNode 实现 Statement 接口
 func (i *ImplementsClause) statementNode() {}
 
-// String 实现Node接口
+// String 实现 Node 接口
 func (i *ImplementsClause) String() string {
 	return "ImplementsClause"
 }
 
-// GetPosition 实现Node接口
+// GetPosition 实现 Node 接口
 func (i *ImplementsClause) GetPosition() Position {
 	return i.Pos
 }
 
-// SetPosition 实现Node接口
+// SetPosition 实现 Node 接口
 func (i *ImplementsClause) SetPosition(pos Position) {
 	i.Pos = pos
+}
+
+// StructStatement 表示结构体定义
+type StructStatement struct {
+	Name   string
+	Fields []*FieldDeclaration
+	Pos    Position
+}
+
+// statementNode 实现 Statement 接口
+func (s *StructStatement) statementNode() {}
+
+// String 实现 Node 接口
+func (s *StructStatement) String() string {
+	return "StructStatement(" + s.Name + ")"
+}
+
+// GetPosition 实现 Node 接口
+func (s *StructStatement) GetPosition() Position {
+	return s.Pos
+}
+
+// SetPosition 实现 Node 接口
+func (s *StructStatement) SetPosition(pos Position) {
+	s.Pos = pos
 }

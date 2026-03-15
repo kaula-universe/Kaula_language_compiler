@@ -11,6 +11,10 @@
 #include <fcntl.h>
 
 ssize_t getline(char** lineptr, size_t* n, FILE* stream) {
+    if (!lineptr || !n || !stream) {
+        return -1;
+    }
+    
     if (*lineptr == NULL || *n == 0) {
         *n = 128;
         *lineptr = (char*)malloc(*n);
@@ -24,6 +28,9 @@ ssize_t getline(char** lineptr, size_t* n, FILE* stream) {
     while ((c = fgetc(stream)) != EOF) {
         if (pos + 1 >= *n) {
             size_t new_size = *n * 2;
+            if (new_size > 10 * 1024 * 1024) {
+                return -1;
+            }
             char* new_line = (char*)realloc(*lineptr, new_size);
             if (new_line == NULL) {
                 return -1;
@@ -105,15 +112,24 @@ f64 read_float() {
 
 bool read_bool() {
     char buffer[10];
-    scanf("%s", buffer);
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+        return false;
+    }
+    buffer[sizeof(buffer) - 1] = '\0';
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') {
+        buffer[len - 1] = '\0';
+    }
     return strcmp(buffer, "true") == 0 || strcmp(buffer, "1") == 0;
 }
 
 char* read_line() {
     char* line = NULL;
     size_t len = 0;
-    getline(&line, &len, stdin);
-    // 移除换行符
+    ssize_t result = getline(&line, &len, stdin);
+    if (result == -1 || !line) {
+        return NULL;
+    }
     size_t line_len = strlen(line);
     if (line_len > 0 && line[line_len - 1] == '\n') {
         line[line_len - 1] = '\0';
@@ -122,10 +138,25 @@ char* read_line() {
 }
 
 char* read_string(size_t max_length) {
-    char* buffer = (char*)malloc(max_length + 1);
-    if (buffer) {
-        scanf("%s", buffer);
+    if (max_length == 0 || max_length > 1024 * 1024) {
+        return NULL;
     }
+    
+    char* buffer = (char*)malloc(max_length + 1);
+    if (!buffer) {
+        return NULL;
+    }
+    
+    if (fgets(buffer, max_length + 1, stdin) == NULL) {
+        free(buffer);
+        return NULL;
+    }
+    
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') {
+        buffer[len - 1] = '\0';
+    }
+    
     return buffer;
 }
 
@@ -260,7 +291,34 @@ bool directory_exists(const char* path) {
 }
 
 // 路径操作函数
+static bool is_path_safe(const char* path) {
+    if (!path) return false;
+    
+    if (strstr(path, "..") != NULL) {
+        return false;
+    }
+    
+    if (path[0] == '\\' && path[1] == '\\') {
+        return false;
+    }
+    
+    if (strstr(path, "\\\\") ) {
+        return false;
+    }
+    
+    return true;
+}
+
 char* path_join(const char* path1, const char* path2) {
+    if (!path1 || !path2) {
+        return NULL;
+    }
+    
+    if (!is_path_safe(path1) || !is_path_safe(path2)) {
+        fprintf(stderr, "Error: Unsafe path detected\n");
+        return NULL;
+    }
+    
     size_t len1 = strlen(path1);
     size_t len2 = strlen(path2);
     char* result = (char*)malloc(len1 + len2 + 2); // +2 for '/' and null terminator
@@ -275,6 +333,15 @@ char* path_join(const char* path1, const char* path2) {
 }
 
 char* path_basename(const char* path) {
+    if (!path) {
+        return NULL;
+    }
+    
+    if (!is_path_safe(path)) {
+        fprintf(stderr, "Error: Unsafe path detected in path_basename\n");
+        return NULL;
+    }
+    
     const char* last_slash = strrchr(path, '/');
     #ifdef _WIN32
     const char* last_backslash = strrchr(path, '\\');
@@ -283,12 +350,23 @@ char* path_basename(const char* path) {
     }
     #endif
     if (last_slash) {
-        return (char*)(last_slash + 1);
+        char* result = strdup(last_slash + 1);
+        return result;
     }
-    return (char*)path;
+    char* result = strdup(path);
+    return result;
 }
 
 char* path_dirname(const char* path) {
+    if (!path) {
+        return NULL;
+    }
+    
+    if (!is_path_safe(path)) {
+        fprintf(stderr, "Error: Unsafe path detected in path_dirname\n");
+        return NULL;
+    }
+    
     const char* last_slash = strrchr(path, '/');
     #ifdef _WIN32
     const char* last_backslash = strrchr(path, '\\');
@@ -305,7 +383,12 @@ char* path_dirname(const char* path) {
         }
         return result;
     }
-    return (char*)"";
+    char* result = (char*)malloc(2);
+    if (result) {
+        result[0] = '.';
+        result[1] = '\0';
+    }
+    return result;
 }
 
 bool path_is_absolute(const char* path) {

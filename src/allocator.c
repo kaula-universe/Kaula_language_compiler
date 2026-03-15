@@ -26,7 +26,17 @@ void* fast_alloc(size_t size) {
     if (!global_allocator.base) {
         fast_allocator_init();
     }
+    
+    if (size == 0) {
+        return NULL;
+    }
+    
     size = (size + 63) & ~63;
+    
+    if (global_allocator.offset + size > MEMORY_POOL_SIZE) {
+        fprintf(stderr, "Error: Memory pool exhausted (requested %zu bytes)\n", size);
+        exit(1);
+    }
     
     void* ptr = global_allocator.base + global_allocator.offset;
     global_allocator.offset += size;
@@ -34,6 +44,15 @@ void* fast_alloc(size_t size) {
 }
 
 void* fast_calloc(size_t num, size_t size) {
+    if (num == 0 || size == 0) {
+        return NULL;
+    }
+    
+    if (size > SIZE_MAX / num) {
+        fprintf(stderr, "Error: Integer overflow in fast_calloc\n");
+        return NULL;
+    }
+    
     size_t total = num * size;
     void* ptr = fast_alloc(total);
     if (ptr) {

@@ -29,10 +29,19 @@
 static inline uint64_t get_clock_cycles();
 static inline double get_clock_frequency();
 
-// Time conversion macros
-#define CYCLES_TO_NS(cycles) ((cycles) * 1000000000.0 / get_clock_frequency())
-#define CYCLES_TO_US(cycles) ((cycles) * 1000000.0 / get_clock_frequency())
-#define CYCLES_TO_MS(cycles) ((cycles) * 1000.0 / get_clock_frequency())
+// Time conversion macros with division by zero protection
+#define CYCLES_TO_NS(cycles) ({ \
+    double freq = get_clock_frequency(); \
+    (freq != 0.0) ? ((cycles) * 1000000000.0 / freq) : 0.0; \
+})
+#define CYCLES_TO_US(cycles) ({ \
+    double freq = get_clock_frequency(); \
+    (freq != 0.0) ? ((cycles) * 1000000.0 / freq) : 0.0; \
+})
+#define CYCLES_TO_MS(cycles) ({ \
+    double freq = get_clock_frequency(); \
+    (freq != 0.0) ? ((cycles) * 1000.0 / freq) : 0.0; \
+})
 
 // ==================== 2. High-Speed Memory Allocator ====================
 typedef struct FastAllocator {

@@ -107,6 +107,8 @@ func (p *Parser) parseStatement() ast.Statement {
 		return p.parseClassStatement()
 	case lexer.TOKEN_INTERFACE:
 		return p.parseInterfaceStatement()
+	case lexer.TOKEN_STRUCT:
+		return p.parseStructStatement()
 	case lexer.TOKEN_IF:
 		return p.parseIfStatement()
 	case lexer.TOKEN_ELSE:
@@ -1078,7 +1080,7 @@ func (p *Parser) parseInterfaceStatement() *ast.InterfaceStatement {
 		Methods: []*ast.MethodStatement{},
 		Pos:     pos,
 	}
-	p.nextToken() // 跳过INTERFACE
+	p.nextToken() // 跳过 INTERFACE
 	// 解析接口名
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -1097,13 +1099,56 @@ func (p *Parser) parseInterfaceStatement() *ast.InterfaceStatement {
 				// 跳过其他标识符
 				p.nextToken()
 			} else {
-				// 跳过其他token
+				// 跳过其他 token
 				p.nextToken()
 			}
 		}
-		// 不要跳过右大括号，因为parseProgram函数会负责前进到下一个token
+		// 不要跳过右大括号，因为 parseProgram 函数会负责前进到下一个 token
 	}
 
+	return stmt
+}
+
+// parseStructStatement 解析结构体定义
+func (p *Parser) parseStructStatement() *ast.StructStatement {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	stmt := &ast.StructStatement{
+		Fields: []*ast.FieldDeclaration{},
+		Pos:    pos,
+	}
+	p.nextToken() // 跳过 STRUCT
+	// 解析结构体名
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		stmt.Name = p.curTok.Value
+		p.nextToken() // 跳过结构体名
+	}
+	// 解析结构体体
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken() // 跳过{
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			p.log("当前 token: %s, 开始解析结构体字段", lexer.TokenTypeToString(p.curTok.Type))
+			
+			// 尝试解析字段声明
+			if field := p.parseFieldDeclaration(); field != nil {
+				p.log("解析完成字段声明：%s", field.String())
+				stmt.Fields = append(stmt.Fields, field)
+			} else if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+				// 跳过分号
+				p.log("跳过分号")
+				p.nextToken()
+			} else {
+				// 跳过其他 token
+				p.log("跳过 token: %s", lexer.TokenTypeToString(p.curTok.Type))
+				p.nextToken()
+			}
+		}
+		p.log("解析完成结构体体")
+	}
+	p.log("结构体解析完成：%s, 字段数：%d", stmt.Name, len(stmt.Fields))
 	return stmt
 }
 
