@@ -30,6 +30,9 @@ type CodeGenerator struct {
 	functionGenerator   *FunctionGenerator
 	expressionGenerator *ExpressionGenerator
 	statementGenerator  *StatementGenerator
+	
+	// 追踪使用的第三方库
+	usedThirdPartyLibs map[string]bool
 }
 
 // NewCodeGenerator 创建一个新的代码生成器
@@ -69,6 +72,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		symbolTable:     symbolTable,
 		currentScope:    symbolTable,
 		errors:          []string{},
+		usedThirdPartyLibs: make(map[string]bool),
 	}
 	
 	// 初始化模块化生成器
@@ -97,6 +101,9 @@ func (cg *CodeGenerator) HasErrors() bool {
 
 // Generate 生成代码
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
+	// 重置第三方库使用追踪
+	cg.usedThirdPartyLibs = make(map[string]bool)
+	
 	typeCode := ""
 	functionCode := ""
 	hasMain := false
@@ -121,13 +128,37 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		}
 	}
 	
+	// 生成基础包含语句
+	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"std/std.h\"\n#include \"std/memory/memory.h\"\n"
+	
+	// 只添加实际使用的第三方库头文件
+	thirdPartyIncludes := ""
+	if cg.stdlibConfig != nil && len(cg.usedThirdPartyLibs) > 0 {
+		for _, lib := range cg.stdlibConfig.ThirdParty {
+			if cg.usedThirdPartyLibs[lib.Name] {
+				for _, header := range lib.Headers {
+					// 头文件已经包含 <> 或 ""，直接使用
+					// 如果路径以 ../ 开头，去掉它（因为生成的 C 文件和源文件在同一目录）
+					cleanHeader := header
+					if len(header) > 3 && header[0] == '"' && header[1] == '.' && header[2] == '.' && header[3] == '/' {
+						cleanHeader = "\"" + header[4:]
+					}
+					thirdPartyIncludes += "#include " + cleanHeader + "\n"
+				}
+			}
+		}
+	}
+	
+	allIncludes := baseIncludes + thirdPartyIncludes
+	
 	if !hasMain {
 		template, ok := cg.templateManager.GetTemplate("main")
 		if !ok {
-			template = "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"../std/std.h\"\n#include \"../std/memory/memory.h\"\n\n{{type_code}}\n{{function_code}}\n\nint main() {\n    {{main_code}}\n    return 0;\n}\n"
+			template = "{{includes}}\n\n{{type_code}}\n{{function_code}}\n\nint main() {\n    {{main_code}}\n    return 0;\n}\n"
 		}
 		
 		result := template
+		result = strings.ReplaceAll(result, "{{includes}}", allIncludes)
 		result = strings.ReplaceAll(result, "{{type_code}}", typeCode)
 		result = strings.ReplaceAll(result, "{{function_code}}", functionCode)
 		result = strings.ReplaceAll(result, "{{main_code}}", mainCode)
@@ -135,7 +166,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		
 		return result
 	} else {
-		return "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"../std/std.h\"\n#include \"../std/memory/memory.h\"\n\n" + typeCode + functionCode
+		return allIncludes + "\n" + typeCode + functionCode
 	}
 }
 

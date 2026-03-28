@@ -35,17 +35,26 @@ const (
 	TOKEN_NONLOCAL
 	TOKEN_PRINTLN
 	TOKEN_CLASS
-	TOKEN_INTERFACE
+	TOKEN_LITERAL_INTERFACE
 	TOKEN_IMPLEMENTS
 	TOKEN_CONSTRUCTOR
 	TOKEN_STRUCT
+	TOKEN_VAR
+	// 类型关键字
+	TOKEN_TYPE_INT
+	TOKEN_TYPE_FLOAT
+	TOKEN_TYPE_DOUBLE
+	TOKEN_TYPE_BOOL
+	TOKEN_TYPE_CHAR
+	TOKEN_TYPE_STRING
+	TOKEN_TYPE_VOID
 
 	// 标识符
 	TOKEN_IDENT
 
 	// 字面量
-	TOKEN_INT
-	TOKEN_FLOAT
+	TOKEN_LITERAL_INT
+	TOKEN_LITERAL_FLOAT
 	TOKEN_STRING
 	TOKEN_TRUE
 	TOKEN_FALSE
@@ -83,6 +92,7 @@ const (
 	TOKEN_COLON
 	TOKEN_DOUBLE_COLON
 	TOKEN_DOT
+	TOKEN_NEWLINE
 
 	// 其他
 	TOKEN_COMMENT
@@ -125,12 +135,18 @@ func (l *Lexer) Next() Token {
 	for l.pos < l.inputLen {
 		char := l.input[l.pos]
 		switch {
-		case unicode.IsSpace(rune(char)):
+		case char == '\n':
+			l.next()
+			return Token{Type: TOKEN_NEWLINE, Value: "\n", Line: l.line - 1, Column: l.column}
+		case unicode.IsSpace(rune(char)) && char != '\n':
 			l.skipWhitespace()
+			continue
 		case char == '#':
 			l.skipComment()
+			continue
 		case char == '/' && l.peek() == '/':
 			l.skipComment()
+			continue
 		case unicode.IsLetter(rune(char)) || char == '_' || (char >= 0x80): // 允许中文字符
 			return l.scanIdentifier()
 		case unicode.IsDigit(rune(char)):
@@ -339,11 +355,28 @@ func (l *Lexer) scanIdentifier() Token {
 	case "class":
 		tokenType = TOKEN_CLASS
 	case "interface":
-		tokenType = TOKEN_INTERFACE
+		tokenType = TOKEN_LITERAL_INTERFACE
 	case "implements":
 		tokenType = TOKEN_IMPLEMENTS
 	case "constructor":
 		tokenType = TOKEN_CONSTRUCTOR
+	case "var":
+		tokenType = TOKEN_VAR
+	// 类型关键字
+	case "int":
+		tokenType = TOKEN_TYPE_INT
+	case "float":
+		tokenType = TOKEN_TYPE_FLOAT
+	case "double":
+		tokenType = TOKEN_TYPE_DOUBLE
+	case "bool":
+		tokenType = TOKEN_TYPE_BOOL
+	case "char":
+		tokenType = TOKEN_TYPE_CHAR
+	case "string":
+		tokenType = TOKEN_TYPE_STRING
+	case "void":
+		tokenType = TOKEN_TYPE_VOID
 	case "struct":
 		tokenType = TOKEN_STRUCT
 	case "this":
@@ -373,10 +406,10 @@ func (l *Lexer) scanNumber() Token {
 			l.pos++
 		}
 		l.column += l.pos - start
-		return Token{Type: TOKEN_FLOAT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
+		return Token{Type: TOKEN_LITERAL_FLOAT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
 	} else {
 		l.column += l.pos - start
-		return Token{Type: TOKEN_INT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
+		return Token{Type: TOKEN_LITERAL_INT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
 	}
 }
 
@@ -504,7 +537,7 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "PRINTLN"
 	case TOKEN_CLASS:
 		return "CLASS"
-	case TOKEN_INTERFACE:
+	case TOKEN_LITERAL_INTERFACE:
 		return "INTERFACE"
 	case TOKEN_IMPLEMENTS:
 		return "IMPLEMENTS"
@@ -514,9 +547,9 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "STRUCT"
 	case TOKEN_IDENT:
 		return "IDENT"
-	case TOKEN_INT:
+	case TOKEN_LITERAL_INT:
 		return "INT"
-	case TOKEN_FLOAT:
+	case TOKEN_LITERAL_FLOAT:
 		return "FLOAT"
 	case TOKEN_STRING:
 		return "STRING"
@@ -584,6 +617,24 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "COMMENT"
 	case TOKEN_EOF:
 		return "EOF"
+	case TOKEN_VAR:
+		return "VAR"
+	case TOKEN_TYPE_INT:
+		return "TYPE_INT"
+	case TOKEN_TYPE_FLOAT:
+		return "TYPE_FLOAT"
+	case TOKEN_TYPE_DOUBLE:
+		return "TYPE_DOUBLE"
+	case TOKEN_TYPE_BOOL:
+		return "TYPE_BOOL"
+	case TOKEN_TYPE_CHAR:
+		return "TYPE_CHAR"
+	case TOKEN_TYPE_STRING:
+		return "TYPE_STRING"
+	case TOKEN_TYPE_VOID:
+		return "TYPE_VOID"
+	case TOKEN_NEWLINE:
+		return "NEWLINE"
 	default:
 		return "UNKNOWN"
 	}

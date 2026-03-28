@@ -1,7 +1,9 @@
 #include "memory_pool.h"
 #include "memory.h"
+#include "fast_alloc.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 // 预定义的内存块大小
 static const size_t BLOCK_SIZES[] = {
@@ -172,20 +174,20 @@ void memory_pool_manager_free(void* ptr) {
     
     if (is_large_block) {
         // 大内存块，直接释放
-        fast_free(ptr);
-        // 注意：大内存块的大小无法直接获取，这里不更新used_memory
+        free(ptr);
+        // 注意：大内存块的大小无法直接获取，这里不更新 used_memory
         // 实际应用中应该在分配时记录大小
         return;
     }
     
-    // 计算MemoryBlock的地址
+    // 计算 MemoryBlock 的地址
     MemoryBlock* block = (MemoryBlock*)((uint8_t*)ptr - sizeof(MemoryBlock));
     
     // 找到对应的内存池
     MemoryPool* pool = find_suitable_pool(block->size);
     if (!pool) {
         // 超出最大块大小，使用标准释放
-        fast_free(ptr);
+        free(ptr);
         return;
     }
     

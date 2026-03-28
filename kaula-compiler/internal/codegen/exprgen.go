@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"kaula-compiler/internal/stdlib"
 	"regexp"
 	"strings"
 )
@@ -28,6 +29,11 @@ func NewExpressionGenerator(cg *CodeGenerator) *ExpressionGenerator {
 
 // GenerateExpression 生成表达式代码
 func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
+	// 如果表达式为 nil，返回 0
+	if expr == nil {
+		return "0"
+	}
+	
 	// 首先尝试使用插件生成代码
 	if code, ok := eg.codegen.pluginManager.GenerateExpression(expr, eg.codegen); ok {
 		return code
@@ -89,19 +95,7 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 
 // generateBinaryExpression 生成二元表达式代码
 func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression) string {
-	// 特殊处理变量声明，如 int x = 10
-	if ident, ok := e.Left.(*ast.Identifier); ok {
-		if ident.Name == "int" {
-			// 这是一个变量声明
-			if binaryExpr, ok := e.Right.(*ast.BinaryExpression); ok && binaryExpr.Operator == "ASSIGN" {
-				return "int " + eg.GenerateExpression(binaryExpr.Left) + " = " + eg.GenerateExpression(binaryExpr.Right)
-			}
-			// 处理只有类型的情况，如 int i
-			return "int " + eg.GenerateExpression(e.Right)
-		}
-	}
-	
-	// 处理对象操作
+	// 处理二元表达式操作
 	operator := e.Operator
 	switch operator {
 	case "ASSIGN":
@@ -131,10 +125,18 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	case "EQ":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
+		// 检查是否是整数比较
+		if isIntegerLiteral(left) || isIntegerLiteral(right) {
+			return left + " == " + right
+		}
 		return "object_equals((Object*)" + left + ", (Object*)" + right + ")"
 	case "NE":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
+		// 检查是否是整数比较
+		if isIntegerLiteral(left) || isIntegerLiteral(right) {
+			return left + " != " + right
+		}
 		return "!object_equals((Object*)" + left + ", (Object*)" + right + ")"
 	case "LT", "<":
 		left := eg.GenerateExpression(e.Left)
@@ -217,6 +219,14 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		return eg.generatePrintlnCall(e.Args)
 	}
 	
+	// 检查是否是第三方库函数
+	if eg.codegen.stdlibConfig != nil {
+		if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(funcName); isThirdParty {
+			// 生成第三方库函数调用
+			return eg.generateThirdPartyCall(funcName, e.Args, lib)
+		}
+	}
+	
 	// 其他函数调用
 	code := funcName + "("
 	// 如果没有参数，传递 NULL
@@ -244,20 +254,25 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	object := eg.GenerateExpression(memberAccess.Object)
 	methodName := memberAccess.Member
 	
-	// 检查是否是标准库模块调用
+	// 检查是否是标准库模块调用（如 std.io.println）
+	// 处理多级成员访问：获取实际的模块名
+	moduleName := ""
 	if ident, ok := memberAccess.Object.(*ast.Identifier); ok {
-		moduleName := ident.Name
-		
-		if eg.codegen.stdlibConfig != nil {
-			if _, exists := eg.codegen.stdlibConfig.Modules[moduleName]; exists {
-				// 生成标准库函数调用
-				// 注意：stdlib.json 中的函数名有些已经包含了模块前缀（如 string_create）
-				// 但 io 模块的函数名没有前缀（如 println），需要特殊处理
-				funcName := methodName
-				// 对于 io 模块，需要添加 io_ 前缀
-				if moduleName == "io" {
-					funcName = "io_" + methodName
-				}
+		// 一级成员访问：io.println 或 std.println
+		moduleName = ident.Name
+	} else if nestedMember, ok := memberAccess.Object.(*ast.MemberAccessExpression); ok {
+		// 多级成员访问：std.io.println，methodName 是 "println"
+		// 模块名应该是 nestedMember.Member，即 "io"
+		moduleName = nestedMember.Member
+	}
+	
+	if moduleName != "" && eg.codegen.stdlibConfig != nil {
+		if module, exists := eg.codegen.stdlibConfig.Modules[moduleName]; exists {
+			// 生成标准库函数调用
+			funcName := methodName
+			
+			// 检查 stdlib.json 中是否有这个函数
+			if _, funcExists := module.Functions[funcName]; funcExists {
 				code := funcName + "("
 				for i, arg := range args {
 					if i > 0 {
@@ -267,6 +282,16 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 				}
 				code += ")"
 				return code
+			}
+		}
+		
+		// 检查是否是第三方库模块调用（如 zlib.compress）
+		if lib := eg.codegen.stdlibConfig.GetThirdPartyLibrary(moduleName); lib != nil {
+			if _, funcExists := lib.Functions[methodName]; funcExists {
+				// 标记该第三方库已被使用
+				eg.codegen.usedThirdPartyLibs[lib.Name] = true
+				// 生成第三方库函数调用
+				return eg.generateThirdPartyCall(methodName, args, lib)
 			}
 		}
 	}
@@ -308,6 +333,53 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	return ""
 }
 
+// generateThirdPartyCall 生成第三方库函数调用代码
+func (eg *ExpressionGenerator) generateThirdPartyCall(funcName string, args []ast.Expression, lib *stdlib.ThirdPartyLibrary) string {
+	// 检查该第三方库是否已被导入
+	if !eg.codegen.usedThirdPartyLibs[lib.Name] {
+		// 库未被导入，标记为已使用（兼容性考虑，仍然生成代码）
+		eg.codegen.usedThirdPartyLibs[lib.Name] = true
+	}
+	
+	// 获取函数定义
+	funcDef, exists := lib.Functions[funcName]
+	if !exists {
+		// 函数不存在，返回空调用
+		return funcName + "()"
+	}
+	
+	// 生成函数调用
+	code := funcName + "("
+	
+	// 如果没有参数且函数不需要参数
+	if len(args) == 0 && len(funcDef.Args) == 0 {
+		// 空参数列表
+	} else {
+		for i, arg := range args {
+			if i > 0 {
+				code += ", "
+			}
+			argCode := eg.GenerateExpression(arg)
+			
+			// 根据函数定义的类型进行转换
+			if i < len(funcDef.Args) {
+				expectedType := funcDef.Args[i]
+				// 如果期望类型是整数类型，而参数是整数常量，需要转换
+				if (expectedType == "int" || expectedType == "i64" || expectedType == "i32") && isIntegerLiteral(argCode) {
+					code += "(" + expectedType + ")(" + argCode + ")"
+				} else {
+					code += argCode
+				}
+			} else {
+				code += argCode
+			}
+		}
+	}
+	
+	code += ")"
+	return code
+}
+
 // generateObjectMethodCall 生成对象方法调用代码
 func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName string, args []ast.Expression) string {
 	className := ""
@@ -327,8 +399,22 @@ func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName strin
 	return code
 }
 
+// escapeCString 转义 C 字符串中的特殊字符
+func escapeCString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	s = strings.ReplaceAll(s, "\t", "\\t")
+	return s
+}
+
 // generatePrintlnCall 生成 println 调用代码
 func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string {
+	if len(args) == 0 {
+		return "printf(\"\\n\")"
+	}
+	
 	if len(args) == 1 {
 		arg := eg.GenerateExpression(args[0])
 		if strings.HasPrefix(arg, "printf(") {
@@ -342,19 +428,43 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 				return code
 			}
 		} else {
-			code := "printf(\"%s\\n\", " + arg + ")"
+			// 检查是否是字符串字面量
+			if strings.HasPrefix(arg, "\"") && strings.HasSuffix(arg, "\"") {
+				// 字符串字面量，提取内容并转义
+				strContent := arg[1 : len(arg)-1]
+				escapedContent := escapeCString(strContent)
+				code := "printf(\"" + escapedContent + "\\n\")"
+				return code
+			}
+			// 其他类型，使用 %d 格式（假设是整数）
+			code := "printf(\"%d\\n\", " + arg + ")"
 			return code
 		}
 	} else {
-		code := ""
-		for i, arg := range args {
+		// 多参数处理：构建格式字符串和参数列表
+		formatParts := []string{}
+		argList := []string{}
+		
+		for _, arg := range args {
 			argExpr := eg.GenerateExpression(arg)
-			if i > 0 {
-				code += "printf(\" \");\n"
+			if strings.HasPrefix(argExpr, "\"") && strings.HasSuffix(argExpr, "\"") {
+				// 字符串字面量，提取内容并转义
+				strContent := argExpr[1 : len(argExpr)-1]
+				escapedContent := escapeCString(strContent)
+				formatParts = append(formatParts, escapedContent)
+			} else {
+				// 其他表达式，使用 %d 格式
+				formatParts = append(formatParts, "%d")
+				argList = append(argList, argExpr)
 			}
-			code += argExpr + ";\n"
 		}
-		code += "printf(\"\\n\")"
+		
+		formatStr := strings.Join(formatParts, " ") + "\\n"
+		code := "printf(\"" + formatStr + "\""
+		for _, arg := range argList {
+			code += ", " + arg
+		}
+		code += ")"
 		return code
 	}
 	
@@ -380,8 +490,19 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 		return object + "->" + e.Member
 	}
 	
-	if _, ok := e.Object.(*ast.Identifier); ok {
-		return object + "->" + e.Member
+	// 对于标识符，检查是否是 struct 类型（使用 .）还是指针类型（使用 ->）
+	if ident, ok := e.Object.(*ast.Identifier); ok {
+		// 检查符号表，确定是否是 struct 类型
+		if sym := eg.codegen.symbolTable.GetSymbol(ident.Name); sym != nil {
+			// 如果类型包含 *，使用 ->
+			if strings.Contains(sym.Type, "*") {
+				return object + "->" + e.Member
+			}
+			// 否则使用 .
+			return object + "." + e.Member
+		}
+		// 默认使用 .
+		return object + "." + e.Member
 	}
 	
 	return object + "." + e.Member

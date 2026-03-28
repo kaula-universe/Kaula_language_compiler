@@ -1,10 +1,11 @@
 #include "memory.h"
+#include "memory_pool.h"
+#include "../../src/kmm_scoped_allocator_v2.c"  // 包含内联函数实现
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-// ==================== ScopedAllocator 全局作用域 ====================
-// 线程局部存储：每个线程/协程一个作用域上下文
+// ==================== KMM V2 全局作用域 ====================
 #ifdef _WIN32
 __declspec(thread) kmm_context_t* g_kaula_scope = NULL;
 #else
@@ -21,41 +22,55 @@ static size_t memory_pool_size = 0;
 static size_t memory_pool_used = 0;
 
 /**
- * 进入新的作用域（函数调用时）
- * 编译器生成的代码将在每个函数入口处调用此函数
+ * 进入新的作用域（函数调用时）- KMM V2 版本
+ * 支持联合域和延迟初始化
  */
 void kaula_scope_enter(void) {
-    // 如果还没有作用域，初始化默认作用域
     if (!g_kaula_scope) {
         if (kmm_init(&g_default_scope) == 0) {
             g_kaula_scope = &g_default_scope;
             g_scope_initialized = 1;
             #ifdef KMM_DEBUG
-            printf("[KMM] 作用域初始化完成\n");
+            printf("[KMM V2] 作用域初始化完成\n");
             #endif
         }
+    } else {
+        // 嵌套作用域：增加联合域深度
+        #if KMM_ENABLE_UNION_DOMAIN
+        g_union_domain.scope_depth++;
+        #endif
     }
 }
 
 /**
- * 退出作用域（函数返回时）
- * 编译器生成的代码将在每个函数出口处调用此函数
+ * 退出作用域（函数返回时）- KMM V2 版本
+ * 处理联合域代表对象的生命周期提升
  */
 void kaula_scope_exit(void) {
     if (g_kaula_scope) {
         #ifdef KMM_DEBUG
-        printf("[KMM] 作用域清理开始\n");
+        printf("[KMM V2] 作用域清理开始\n");
         #endif
         
-        // 销毁作用域，释放所有资源
+        // 处理联合域代表对象
+        #if KMM_ENABLE_UNION_DOMAIN
+        if (g_kaula_scope->union_rep) {
+            kmm_union_promote(g_kaula_scope->union_rep);
+        }
+        
+        if (g_union_domain.scope_depth > 0) {
+            g_union_domain.scope_depth--;
+        }
+        #endif
+        
         kmm_destroy(g_kaula_scope);
         g_kaula_scope = NULL;
     }
 }
 
 /**
- * Kaula 作用域分配函数
- * 这是编译器生成代码时调用的主要分配接口
+ * Kaula 作用域分配函数 - KMM V2 版本
+ * 支持联合域选举
  */
 void* kaula_scope_alloc(size_t size) {
     if (!g_kaula_scope) {
@@ -65,7 +80,7 @@ void* kaula_scope_alloc(size_t size) {
     void* ptr = kmm_alloc(g_kaula_scope, size, "<kaula>", 0);
     
     #ifdef KMM_DEBUG
-    printf("[KMM] 分配 %zu bytes @ %p\n", size, ptr);
+    printf("[KMM V2] 分配 %zu bytes @ %p\n", size, ptr);
     #endif
     
     return ptr;
@@ -73,7 +88,6 @@ void* kaula_scope_alloc(size_t size) {
 
 /**
  * Kaula 作用域释放函数
- * 注意：Arena 分配的对象不需要单独释放，会在作用域退出时批量释放
  */
 void kaula_scope_free(void* ptr) {
     if (ptr) {
@@ -99,39 +113,34 @@ void std_free(void* ptr) {
 }
 
 // 内存使用统计
-size_t memory_used() {
-    if (global_allocator.base) {
-        return global_allocator.offset;
-    }
-    return 0;
+size_t memory_used(void) {
+    return memory_pool_used;
 }
 
-size_t memory_available() {
-    if (global_allocator.base) {
-        return MEMORY_POOL_SIZE - global_allocator.offset;
-    }
-    return 0;
+size_t memory_available(void) {
+    return memory_pool_size - memory_pool_used;
 }
 
-size_t memory_total() {
-    return MEMORY_POOL_SIZE;
+size_t memory_total(void) {
+    return memory_pool_size;
 }
 
 // 内存安全检查
 bool memory_is_valid(void* ptr) {
-    if (global_allocator.base == NULL) {
+    if (memory_pool == NULL) {
         return false;
     }
     uint8_t* byte_ptr = (uint8_t*)ptr;
-    return byte_ptr >= global_allocator.base && byte_ptr < global_allocator.base + MEMORY_POOL_SIZE;
+    return byte_ptr >= memory_pool && byte_ptr < memory_pool + memory_pool_size;
 }
 
 bool memory_is_allocated(void* ptr) {
     if (!memory_is_valid(ptr)) {
         return false;
     }
+    // 简单检查：如果指针在已使用范围内则认为已分配
     uint8_t* byte_ptr = (uint8_t*)ptr;
-    return byte_ptr < global_allocator.base + global_allocator.offset;
+    return (size_t)(byte_ptr - memory_pool) < memory_pool_used;
 }
 
 // 内存操作函数

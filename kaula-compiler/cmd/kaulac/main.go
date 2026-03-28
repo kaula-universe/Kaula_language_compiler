@@ -43,7 +43,7 @@ func main() {
 	// 语法分析
 	p := parser.NewParser(lex)
 	p.SetErrorCollector(errorCollector)
-	p.EnableLogging(true)
+	p.EnableLogging(false)
 	program := p.Parse()
 
 	// 检查词法和语法错误
@@ -68,7 +68,9 @@ func main() {
 		}
 	}
 	sa := sema.NewSemanticAnalyzerWithConfig(stdlibPath, errorCollector)
-	sa.Run(program)
+	sa.Analyze(program)
+
+	fmt.Println("Semantic analysis completed, starting code generation...")
 
 	// 检查语义错误
 	if errorCollector.HasErrors() {

@@ -57,13 +57,13 @@ extern void rwlock_write_unlock(ReadWriteLock rwlock);
 extern bool rwlock_try_read_lock(ReadWriteLock rwlock);
 extern bool rwlock_try_write_lock(ReadWriteLock rwlock);
 
-// 原子操作
-extern int atomic_add(volatile int* ptr, int value);
-extern int atomic_sub(volatile int* ptr, int value);
-extern int atomic_exchange(volatile int* ptr, int value);
-extern bool atomic_compare_exchange(volatile int* ptr, int expected, int desired);
-extern void atomic_store(volatile int* ptr, int value);
-extern int atomic_load(volatile int* ptr);
+// 原子操作（使用 kaula_ 前缀避免与编译器内置函数冲突）
+extern int kaula_atomic_add(volatile int* ptr, int value);
+extern int kaula_atomic_sub(volatile int* ptr, int value);
+extern int kaula_atomic_exchange(volatile int* ptr, int value);
+extern bool kaula_atomic_compare_exchange(volatile int* ptr, int expected, int desired);
+extern void kaula_atomic_store(volatile int* ptr, int value);
+extern int kaula_atomic_load(volatile int* ptr);
 
 // 任务调度
 

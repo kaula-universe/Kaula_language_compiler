@@ -11,5 +11,51 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Dependency directories
+vendor/
+
+# Generated files
+*.kl.c
+*.o
+*.d
+*.a
+*.out
+
+# Build directories
+build/
+dist/
+bin/
+obj/
+
+# Test and demo files
+test_*.kl
+test_*.c
+demo_*.kl
+demo_*.c
+benchmark*.kl
+benchmark*.c
+verify_*.kl
+verify_*.c
+stress_test_*.c
+comprehensive_test_*.c
+
+# Temporary and report files
+*_REPORT.md
+*_COMPLETE.md
+*_INTEGRATION_*.md
+*_TEST_*.md
+*_FIX_REPORT.md
+*_COMPARISON.md
+
+# Build scripts
+build.bat
+build.sh
+build_stdlib.bat
+build_test.ps1
+CMakeLists.txt
+Makefile
+
+# Other temporary files
+nul/
+*.tmp
+*.log

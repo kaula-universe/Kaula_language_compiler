@@ -1,10 +1,12 @@
 #include "object.h"
 #include "../memory/memory.h"
+#include "../memory/fast_alloc.h"
 #include <string.h>
+#include <stdlib.h>
 
-// 内存管理函数别名
-#define memory_alloc memory_pool_manager_alloc
-#define memory_free memory_pool_manager_free
+// 内存管理函数别名 - 使用标准分配
+#define memory_alloc(size) malloc(size)
+#define memory_free(ptr) free(ptr)
 
 // 基础虚函数表
 static ObjectVTable object_vtable = {

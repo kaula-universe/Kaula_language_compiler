@@ -3,6 +3,9 @@
 
 #include "../base/types.h"
 
+// 内存池大小配置
+#define MEMORY_POOL_SIZE (1024 * 1024)  // 1MB 默认内存池
+
 // 内存块结构
 typedef struct MemoryBlock {
     size_t size;              // 块大小
