@@ -338,6 +338,34 @@ static inline bool kmm_union_has_dependency(kmm_union_node_t* node, kmm_union_no
     return false;
 }
 
+static inline kmm_union_node_t* kmm_find_node_by_pointer(void* ptr) {
+    kmm_union_node_t* current = g_union_domain.root;
+    while (current) {
+        if (current->object == ptr) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+static inline void kmm_union_auto_detect_dependencies(kmm_union_node_t* node) {
+    void** ptr = (void**)node->object;
+    size_t word_count = node->object_size / sizeof(void*);
+    
+    for (size_t i = 0; i < word_count; i++) {
+        void* potential_ptr = ptr[i];
+        if (potential_ptr) {
+            kmm_union_node_t* target = kmm_find_node_by_pointer(potential_ptr);
+            if (target && target != node && !kmm_union_has_dependency(node, target)) {
+                if (node->dependency_count < KMM_MAX_DEPENDENCIES) {
+                    node->dependencies[node->dependency_count++] = target;
+                }
+            }
+        }
+    }
+}
+
 bool kmm_union_detect_cycle(kmm_union_node_t* node) {
     if (node->scope_depth == 0) {
         return false;
@@ -392,6 +420,8 @@ void* kmm_union_elect(kmm_context_t* ctx, size_t size, const char* file, int lin
     
     ctx->union_rep = node;
     ctx->domain = &g_union_domain;
+    
+    kmm_union_auto_detect_dependencies(node);
     
     if (kmm_union_detect_cycle(node)) {
         node->status = KMM_DOMAIN_LOCAL;
