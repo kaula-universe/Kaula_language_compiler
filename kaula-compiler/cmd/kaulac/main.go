@@ -88,7 +88,7 @@ func main() {
 	
 	p := parser.NewParser(lex)
 	p.SetErrorCollector(errorCollector)
-	p.EnableLogging(false)
+	p.EnableLogging(false) // 禁用日志以减少内存分配
 	program := p.Parse()
 	
 	// 检查语法分析后

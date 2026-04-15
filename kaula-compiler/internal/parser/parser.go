@@ -91,12 +91,14 @@ func (p *Parser) parseProgram() *ast.Program {
 		File:   p.file,
 	}
 	program := &ast.Program{
-		Statements: []ast.Statement{},
+		Statements: make([]ast.Statement, 0, 256), // 预分配容量，避免频繁扩容
 		Pos:        pos,
 	}
 
 	for p.curTok.Type != lexer.TOKEN_EOF {
-		p.log("当前 token: %s, 开始解析语句", lexer.TokenTypeToString(p.curTok.Type))
+		if p.loggingEnabled {
+			p.log("当前 token: %s, 开始解析语句", lexer.TokenTypeToString(p.curTok.Type))
+		}
 		
 		// 跳过空语句（分号、换行符等）
 		if p.curTok.Type == lexer.TOKEN_SEMICOLON {
@@ -106,8 +108,10 @@ func (p *Parser) parseProgram() *ast.Program {
 		
 		stmt := p.parseStatementIterative()
 		if stmt != nil {
+			if p.loggingEnabled {
+				p.log("解析完成语句：%s", stmt.String())
+			}
 			program.Statements = append(program.Statements, stmt)
-			p.log("解析完成语句：%s", stmt.String())
 		} else {
 			// 如果无法解析，跳过当前 token 避免死循环
 			p.nextToken()
@@ -927,16 +931,32 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 		File:   p.file,
 	}
 	stmt := &ast.ClassStatement{
-		Fields:      []*ast.FieldDeclaration{},
-		Methods:     []*ast.MethodStatement{},
-		Constructors: []*ast.ConstructorStatement{},
-		Implements:  []string{},
+		Fields:      make([]*ast.FieldDeclaration, 0, 16),
+		Methods:     make([]*ast.MethodStatement, 0, 16),
+		Constructors: make([]*ast.ConstructorStatement, 0, 4),
+		Implements:  make([]string, 0, 4),
 		Pos:         pos,
 	}
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
 		p.nextToken()
+	}
+	// 解析泛型参数（如果存在）
+	if p.curTok.Type == lexer.TOKEN_LT {
+		p.nextToken()
+		for p.curTok.Type == lexer.TOKEN_IDENT {
+			stmt.TypeParams = append(stmt.TypeParams, &ast.TypeParameter{Name: p.curTok.Value})
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			} else if p.curTok.Type == lexer.TOKEN_GT {
+				break
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_GT {
+			p.nextToken()
+		}
 	}
 	if p.curTok.Type == lexer.TOKEN_IMPLEMENTS {
 		p.nextToken()
@@ -1039,7 +1059,7 @@ func (p *Parser) parseStructStatementIterative() *ast.StructStatement {
 		File:   p.file,
 	}
 	stmt := &ast.StructStatement{
-		Fields: []*ast.FieldDeclaration{},
+		Fields: make([]*ast.FieldDeclaration, 0, 16),
 		Pos:    pos,
 	}
 	p.nextToken()
@@ -1047,23 +1067,39 @@ func (p *Parser) parseStructStatementIterative() *ast.StructStatement {
 		stmt.Name = p.curTok.Value
 		p.nextToken()
 	}
+	// 解析泛型参数（如果存在）
+	if p.curTok.Type == lexer.TOKEN_LT {
+		p.nextToken()
+		for p.curTok.Type == lexer.TOKEN_IDENT {
+			stmt.TypeParams = append(stmt.TypeParams, &ast.TypeParameter{Name: p.curTok.Value})
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			} else if p.curTok.Type == lexer.TOKEN_GT {
+				break
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_GT {
+			p.nextToken()
+		}
+	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
-			p.log("当前 token: %s, 开始解析结构体字段", lexer.TokenTypeToString(p.curTok.Type))
+			prevTok := p.curTok
 			
 			if field := p.parseFieldDeclarationIterative(); field != nil {
-				p.log("解析完成字段声明：%s", field.String())
 				stmt.Fields = append(stmt.Fields, field)
 			} else if p.curTok.Type == lexer.TOKEN_SEMICOLON {
-				p.log("跳过分号")
 				p.nextToken()
 			} else {
-				p.log("跳过 token: %s", lexer.TokenTypeToString(p.curTok.Type))
 				p.nextToken()
+				// 如果 nextToken 后 token 没变，说明无法解析，跳出循环避免死循环
+				if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+					break
+				}
 			}
 		}
-		p.log("解析完成结构体体")
 	}
 	p.log("结构体解析完成：%s, 字段数：%d", stmt.Name, len(stmt.Fields))
 	return stmt
@@ -1390,13 +1426,9 @@ func (p *Parser) parseExpressionStatementIterative() *ast.ExpressionStatement {
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	p.log("开始解析表达式语句，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 	expr := p.parseExpressionIterative()
-	p.log("解析表达式完成，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 	if p.curTok.Type == lexer.TOKEN_SEMICOLON {
-		p.log("消费分号")
 		p.nextToken()
-		p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 	}
 	stmt := &ast.ExpressionStatement{
 		Expression: expr,
@@ -1419,15 +1451,26 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 		return nil
 	}
 	
-	for precedence < p.precedence(p.curTok.Type) {
+	// 使用迭代方式处理相同优先级的运算符
+	for {
 		op := p.curTok.Type
+		opPrecedence := p.precedence(op)
+		
+		// 如果没有运算符或优先级不够高，退出循环
+		if opPrecedence == 0 || precedence >= opPrecedence {
+			break
+		}
+		
 		p.nextToken()
 		
+		// 解析右侧表达式
 		var right ast.Expression
 		if op == lexer.TOKEN_ASSIGN {
-			right = p.parseBinaryExpressionIterative(p.precedence(op) - 1)
+			// 赋值运算符是右结合的，使用 precedence - 1
+			right = p.parseBinaryExpressionIterative(opPrecedence)
 		} else {
-			right = p.parseBinaryExpressionIterative(p.precedence(op))
+			// 其他运算符是左结合的，使用相同的优先级
+			right = p.parseBinaryExpressionIterative(opPrecedence)
 		}
 		
 		// 如果右侧解析失败，返回已解析的左侧
@@ -1435,6 +1478,7 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 			return left
 		}
 		
+		// 构建新的二元表达式
 		left = &ast.BinaryExpression{
 			Left:     left,
 			Operator: lexer.TokenTypeToString(op),
@@ -1563,7 +1607,7 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			Value: false,
 			Pos:   pos,
 		}
-	case lexer.TOKEN_RBRACE, lexer.TOKEN_LBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN:
+	case lexer.TOKEN_RBRACE, lexer.TOKEN_LBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT:
 		return nil
 	default:
 		p.error(fmt.Sprintf("unexpected token: %s", lexer.TokenTypeToString(p.curTok.Type)))
