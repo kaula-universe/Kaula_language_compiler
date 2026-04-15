@@ -573,8 +573,23 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
-		p.log("解析函数名：%s", stmt.Name)
 		p.nextToken()
+	}
+	// 解析泛型参数（如果存在）
+	if p.curTok.Type == lexer.TOKEN_LT {
+		p.nextToken()
+		for p.curTok.Type == lexer.TOKEN_IDENT {
+			stmt.TypeParams = append(stmt.TypeParams, &ast.TypeParameter{Name: p.curTok.Value})
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			} else if p.curTok.Type == lexer.TOKEN_GT {
+				break
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_GT {
+			p.nextToken()
+		}
 	}
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
@@ -1731,7 +1746,23 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 		Args:     []ast.Expression{},
 	}
 	p.nextToken()
-	for p.curTok.Type != lexer.TOKEN_RPAREN {
+	// 解析泛型参数（如果存在）
+	if p.curTok.Type == lexer.TOKEN_LT {
+		p.nextToken()
+		for p.curTok.Type == lexer.TOKEN_IDENT {
+			call.TypeArgs = append(call.TypeArgs, p.curTok.Value)
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			} else if p.curTok.Type == lexer.TOKEN_GT {
+				break
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_GT {
+			p.nextToken()
+		}
+	}
+	for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
 		if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
 			p.nextToken()
 			p.nextToken()

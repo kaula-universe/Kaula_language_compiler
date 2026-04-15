@@ -213,5 +213,5 @@ func printStageStats() {
 	// 这里需要 timeout 包提供获取阶段统计的接口
 	// 暂时简化处理
 	fmt.Printf("Total compilation completed in %v\n", timeout.GetElapsed())
-	fmt.Println("================================\n")
+	fmt.Println("================================")
 }

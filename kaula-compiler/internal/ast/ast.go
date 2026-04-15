@@ -1190,9 +1190,10 @@ func (b *BinaryExpression) Traverse(visitor func(Node)) {
 
 // CallExpression 表示函数调用表达式
 type CallExpression struct {
-	Function Expression
-	Args     []Expression
-	Pos      Position
+	Function  Expression
+	TypeArgs  []string   // 泛型类型参数
+	Args      []Expression
+	Pos       Position
 }
 
 // expressionNode 实现Expression接口

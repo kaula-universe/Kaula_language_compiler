@@ -3,7 +3,6 @@ package semantic
 import (
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/errors"
-	"kaula-compiler/internal/lexer"
 )
 
 // Analyzer 表示语义分析器
@@ -158,13 +157,7 @@ func (a *Analyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclaration) {
 func (a *Analyzer) analyzeFunctionStatement(stmt *ast.FunctionStatement) {
 	// 检查函数名是否合法
 	if !isValidIdentifier(stmt.Name) {
-		a.errorCollector.AddError(errors.Error{
-			Type:     errors.ErrorTypeSemantic,
-			Message:  "Invalid function name: " + stmt.Name,
-			Line:     stmt.Pos.Line,
-			Column:   stmt.Pos.Column,
-			Suggestion: "Use a valid identifier starting with a letter or underscore",
-		})
+		a.errorCollector.AddError(errors.ErrorSemantic, "Invalid function name: "+stmt.Name, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid identifier starting with a letter or underscore")
 		return
 	}
 	
@@ -177,15 +170,9 @@ func (a *Analyzer) analyzeFunctionStatement(stmt *ast.FunctionStatement) {
 	// 分析函数参数
 	for _, param := range stmt.Params {
 		if !isValidIdentifier(param) {
-			a.errorCollector.AddError(errors.Error{
-				Type:     errors.ErrorTypeSemantic,
-				Message:  "Invalid parameter name: " + param,
-				Line:     stmt.Pos.Line,
-				Column:   stmt.Pos.Column,
-				Suggestion: "Use a valid identifier starting with a letter or underscore",
-			})
-			continue
-		}
+				a.errorCollector.AddError(errors.ErrorSemantic, "Invalid parameter name: "+param, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid identifier starting with a letter or underscore")
+				continue
+			}
 		a.AddSymbol(param, "void*", false, stmt.Pos.Line, stmt.Pos.Column)
 	}
 	
@@ -305,13 +292,7 @@ func (a *Analyzer) analyzeIdentifier(expr *ast.Identifier) {
 	
 	// 检查变量是否已声明
 	if !a.HasSymbol(expr.Name) {
-		a.errorCollector.AddError(errors.Error{
-			Type:     errors.ErrorTypeSemantic,
-			Message:  "Undefined variable: " + expr.Name,
-			Line:     expr.Pos.Line,
-			Column:   expr.Pos.Column,
-			Suggestion: "Declare the variable before using it",
-		})
+		a.errorCollector.AddError(errors.ErrorSemantic, "Undefined variable: "+expr.Name, expr.Pos.Line, expr.Pos.Column, "", "Declare the variable before using it")
 	}
 }
 
