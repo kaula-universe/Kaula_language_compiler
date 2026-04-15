@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"fmt"
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/config"
 	"kaula-compiler/internal/core"
@@ -10,6 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// GenericInstanceCache 泛型实例缓存
+type GenericInstanceCache struct {
+	OriginalName   string
+	TypeArguments  []string
+	GeneratedCode  string
+	InstantiatedAt int // 实例化位置
+}
 
 // CodeGenerator 表示代码生成器
 type CodeGenerator struct {
@@ -33,6 +42,10 @@ type CodeGenerator struct {
 	
 	// 追踪使用的第三方库
 	usedThirdPartyLibs map[string]bool
+	
+	// 泛型实例缓存
+	genericCache       map[string]*GenericInstanceCache
+	genericInstantiated map[string]bool // 已实例化的泛型
 }
 
 // NewCodeGenerator 创建一个新的代码生成器
@@ -73,6 +86,8 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		currentScope:    symbolTable,
 		errors:          []string{},
 		usedThirdPartyLibs: make(map[string]bool),
+		genericCache:       make(map[string]*GenericInstanceCache),
+		genericInstantiated: make(map[string]bool),
 	}
 	
 	// 初始化模块化生成器
@@ -235,4 +250,89 @@ func (cg *CodeGenerator) GetLocalSymbol(name string) *symbol.Symbol {
 // HasLocalSymbol 检查当前作用域是否存在符号
 func (cg *CodeGenerator) HasLocalSymbol(name string) bool {
 	return cg.currentScope.HasLocalSymbol(name)
+}
+
+// InstantiateGeneric 实例化泛型函数
+func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, line int) (string, error) {
+	// 生成缓存键
+	cacheKey := funcName + "<"
+	for i, arg := range typeArgs {
+		if i > 0 {
+			cacheKey += ","
+		}
+		cacheKey += arg
+	}
+	cacheKey += ">"
+	
+	// 检查缓存
+	if cached, ok := cg.genericCache[cacheKey]; ok {
+		return cached.GeneratedCode, nil
+	}
+	
+	// 检查是否已经实例化
+	instName := funcName + "_"
+	for _, arg := range typeArgs {
+		instName += arg + "_"
+	}
+	
+	if cg.genericInstantiated[instName] {
+		return "", nil // 已经实例化过
+	}
+	
+	// 获取原始函数
+	program := cg.getProgram() // 需要从某个地方获取 program
+	if program == nil {
+		return "", fmt.Errorf("cannot find program for generic instantiation")
+	}
+	
+	fnStmt := program.FindFunction(funcName)
+	if fnStmt == nil || !fnStmt.IsGeneric() {
+		return "", fmt.Errorf("function %s is not generic", funcName)
+	}
+	
+	// 创建实例化后的函数
+	instFunc := &ast.FunctionStatement{
+		Name:       instName,
+		Params:     fnStmt.Params,
+		Body:       fnStmt.Body,
+		ReturnType: fnStmt.ReturnType,
+		Generic:    false,
+	}
+	
+	// 生成代码
+	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
+	
+	// 添加到缓存
+	cg.genericCache[cacheKey] = &GenericInstanceCache{
+		OriginalName:   funcName,
+		TypeArguments:  typeArgs,
+		GeneratedCode:  code,
+		InstantiatedAt: line,
+	}
+	cg.genericInstantiated[instName] = true
+	
+	return code, nil
+}
+
+// getProgram 获取程序 AST（简化实现，实际需要从编译器获取）
+func (cg *CodeGenerator) getProgram() *ast.Program {
+	// 这是一个简化实现，实际应该从编译器获取
+	return nil
+}
+
+// GetGenericCachedCode 获取缓存的泛型代码
+func (cg *CodeGenerator) GetGenericCachedCode(funcName string, typeArgs []string) (string, bool) {
+	cacheKey := funcName + "<"
+	for i, arg := range typeArgs {
+		if i > 0 {
+			cacheKey += ","
+		}
+		cacheKey += arg
+	}
+	cacheKey += ">"
+	
+	if cached, ok := cg.genericCache[cacheKey]; ok {
+		return cached.GeneratedCode, true
+	}
+	return "", false
 }

@@ -92,7 +92,6 @@ const (
 	TOKEN_COLON
 	TOKEN_DOUBLE_COLON
 	TOKEN_DOT
-	TOKEN_NEWLINE
 
 	// 其他
 	TOKEN_COMMENT
@@ -135,10 +134,7 @@ func (l *Lexer) Next() Token {
 	for l.pos < l.inputLen {
 		char := l.input[l.pos]
 		switch {
-		case char == '\n':
-			l.next()
-			return Token{Type: TOKEN_NEWLINE, Value: "\n", Line: l.line - 1, Column: l.column}
-		case unicode.IsSpace(rune(char)) && char != '\n':
+		case unicode.IsSpace(rune(char)):
 			l.skipWhitespace()
 			continue
 		case char == '#':
@@ -617,24 +613,6 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "COMMENT"
 	case TOKEN_EOF:
 		return "EOF"
-	case TOKEN_VAR:
-		return "VAR"
-	case TOKEN_TYPE_INT:
-		return "TYPE_INT"
-	case TOKEN_TYPE_FLOAT:
-		return "TYPE_FLOAT"
-	case TOKEN_TYPE_DOUBLE:
-		return "TYPE_DOUBLE"
-	case TOKEN_TYPE_BOOL:
-		return "TYPE_BOOL"
-	case TOKEN_TYPE_CHAR:
-		return "TYPE_CHAR"
-	case TOKEN_TYPE_STRING:
-		return "TYPE_STRING"
-	case TOKEN_TYPE_VOID:
-		return "TYPE_VOID"
-	case TOKEN_NEWLINE:
-		return "NEWLINE"
 	default:
 		return "UNKNOWN"
 	}

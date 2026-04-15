@@ -179,6 +179,11 @@ func traverseNode(node Node, visitor func(Node)) {
 			traverseNode(n.Value, visitor)
 		}
 	case *FunctionStatement:
+		for _, tp := range n.TypeParams {
+			if tp != nil {
+				visitor(tp)
+			}
+		}
 		for _, stmt := range n.Body {
 			traverseNode(stmt, visitor)
 		}
@@ -301,6 +306,11 @@ func traverseNode(node Node, visitor func(Node)) {
 			traverseNode(stmt, visitor)
 		}
 	case *ClassStatement:
+		for _, tp := range n.TypeParams {
+			if tp != nil {
+				visitor(tp)
+			}
+		}
 		for _, field := range n.Fields {
 			traverseNode(field, visitor)
 		}
@@ -510,12 +520,81 @@ func (o *ObjectStatement) SetPosition(pos Position) {
 	o.Pos = pos
 }
 
+// TypeParameter 表示泛型类型参数
+type TypeParameter struct {
+	Name      string
+	Constraint string // 类型约束，如 "any", "comparable" 等
+	Pos       Position
+}
+
+// GetPosition 实现 Node 接口
+func (tp *TypeParameter) GetPosition() Position {
+	return tp.Pos
+}
+
+// SetPosition 实现 Node 接口
+func (tp *TypeParameter) SetPosition(pos Position) {
+	tp.Pos = pos
+}
+
+// String 实现 Node 接口
+func (tp *TypeParameter) String() string {
+	return "TypeParameter(" + tp.Name + ")"
+}
+
+// TypeArgument 表示泛型类型实参
+type TypeArgument struct {
+	Type string
+	Pos  Position
+}
+
+// GetPosition 实现 Node 接口
+func (ta *TypeArgument) GetPosition() Position {
+	return ta.Pos
+}
+
+// SetPosition 实现 Node 接口
+func (ta *TypeArgument) SetPosition(pos Position) {
+	ta.Pos = pos
+}
+
+// String 实现 Node 接口
+func (ta *TypeArgument) String() string {
+	return "TypeArgument(" + ta.Type + ")"
+}
+
+// GenericInstance 表示泛型实例
+type GenericInstance struct {
+	OriginalName   string
+	TypeArguments  []TypeArgument
+	InstantiatedName string
+	Pos            Position
+}
+
+// GetPosition 实现 Node 接口
+func (gi *GenericInstance) GetPosition() Position {
+	return gi.Pos
+}
+
+// SetPosition 实现 Node 接口
+func (gi *GenericInstance) SetPosition(pos Position) {
+	gi.Pos = pos
+}
+
+// String 实现 Node 接口
+func (gi *GenericInstance) String() string {
+	return "GenericInstance(" + gi.OriginalName + ")"
+}
+
 // FunctionStatement 表示函数语句
 type FunctionStatement struct {
-	Name   string
-	Params []string
-	Body   []Statement
-	Pos    Position
+	Name          string
+	TypeParams    []*TypeParameter // 泛型类型参数
+	Params        []string
+	Body          []Statement
+	ReturnType    string
+	Generic       bool // 是否是泛型函数
+	Pos           Position
 }
 
 // statementNode 实现Statement接口
@@ -539,6 +618,12 @@ func (f *FunctionStatement) SetPosition(pos Position) {
 // AddParam 添加参数
 func (f *FunctionStatement) AddParam(param string) {
 	f.Params = append(f.Params, param)
+}
+
+// AddTypeParam 添加类型参数
+func (f *FunctionStatement) AddTypeParam(tp *TypeParameter) {
+	f.TypeParams = append(f.TypeParams, tp)
+	f.Generic = true
 }
 
 // AddStatement 添加语句到函数体
@@ -580,6 +665,30 @@ func (f *FunctionStatement) GetStatement(index int) Statement {
 		return f.Body[index]
 	}
 	return nil
+}
+
+// IsGeneric 检查是否是泛型函数
+func (f *FunctionStatement) IsGeneric() bool {
+	return f.Generic || len(f.TypeParams) > 0
+}
+
+// GetGenericSignature 获取泛型签名
+func (f *FunctionStatement) GetGenericSignature() string {
+	if !f.IsGeneric() {
+		return ""
+	}
+	sig := "["
+	for i, tp := range f.TypeParams {
+		if i > 0 {
+			sig += ", "
+		}
+		sig += tp.Name
+		if tp.Constraint != "" && tp.Constraint != "any" {
+			sig += ": " + tp.Constraint
+		}
+	}
+	sig += "]"
+	return sig
 }
 
 // Traverse 遍历函数节点及其子节点
@@ -1230,10 +1339,12 @@ func (p *Param) String() string {
 // ClassStatement 表示类定义
 type ClassStatement struct {
 	Name        string
+	TypeParams  []*TypeParameter // 泛型类型参数
 	Fields      []*FieldDeclaration
 	Methods     []*MethodStatement
 	Constructors []*ConstructorStatement
 	Implements  []string
+	Generic     bool // 是否是泛型类
 	Pos         Position
 }
 
@@ -1409,9 +1520,11 @@ func (i *ImplementsClause) SetPosition(pos Position) {
 
 // StructStatement 表示结构体定义
 type StructStatement struct {
-	Name   string
-	Fields []*FieldDeclaration
-	Pos    Position
+	Name       string
+	TypeParams []*TypeParameter // 泛型类型参数
+	Fields     []*FieldDeclaration
+	Generic    bool // 是否是泛型结构体
+	Pos        Position
 }
 
 // statementNode 实现 Statement 接口

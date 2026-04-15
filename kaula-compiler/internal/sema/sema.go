@@ -15,6 +15,8 @@ type SemanticAnalyzer struct {
 	errorCollector  *errors.ErrorCollector
 	currentFunction *ast.FunctionStatement
 	stdlibConfig    *stdlib.StdlibConfig
+	genericStack    []*ast.FunctionStatement // 泛型函数栈
+	typeConstraints map[string][]string      // 类型约束映射
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -50,6 +52,8 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		errorCollector:  errorCollector,
 		currentFunction: nil,
 		stdlibConfig:    stdlibConfig,
+		genericStack:    make([]*ast.FunctionStatement, 0),
+		typeConstraints: make(map[string][]string),
 	}
 }
 
@@ -77,6 +81,19 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 	oldFunction := sa.currentFunction
 	sa.currentFunction = stmt
 
+	// 处理泛型类型参数
+	if stmt.IsGeneric() {
+		sa.genericStack = append(sa.genericStack, stmt)
+		typeParams := make([]string, 0, len(stmt.TypeParams))
+		for _, tp := range stmt.TypeParams {
+			typeParams = append(typeParams, tp.Name)
+			sa.symbolTable.AddGenericSymbol(tp.Name, "type", []string{tp.Name}, false, "parameter", tp.Pos.Line, tp.Pos.Column)
+			if tp.Constraint != "" && tp.Constraint != "any" {
+				sa.typeConstraints[tp.Name] = []string{tp.Constraint}
+			}
+		}
+	}
+
 	paramMap := make(map[string]bool)
 	for _, param := range stmt.Params {
 		if paramMap[param] {
@@ -91,17 +108,19 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 		sa.analyzeStatement(bodyStmt)
 	}
 
+	// 弹出泛型函数栈
+	if stmt.IsGeneric() {
+		sa.genericStack = sa.genericStack[:len(sa.genericStack)-1]
+	}
+
 	sa.currentFunction = oldFunction
 	sa.symbolTable = oldSymbolTable
 	sa.scope--
 }
 
 // analyzeStatement 分析语句
-func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
-	if s == nil {
-		return
-	}
-	switch s := s.(type) {
+func (sa *SemanticAnalyzer) analyzeStatement(stmt ast.Statement) {
+	switch s := stmt.(type) {
 	case *ast.VOStatement:
 		sa.analyzeVOStatement(s)
 	case *ast.SpendCallStatement:
@@ -116,7 +135,11 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		sa.analyzeObjectStatement(s)
 	case *ast.FunctionStatement:
 		// 第一遍只添加函数到符号表，不分析函数体
-		sa.symbolTable.AddSymbol(s.Name, "function", false, "global", s.Pos.Line, s.Pos.Column)
+		if s.IsGeneric() {
+			sa.symbolTable.AddGenericSymbol(s.Name, "function", make([]string, 0, len(s.TypeParams)), false, "global", s.Pos.Line, s.Pos.Column)
+		} else {
+			sa.symbolTable.AddSymbol(s.Name, "function", false, "global", s.Pos.Line, s.Pos.Column)
+		}
 	case *ast.ClassStatement:
 		sa.analyzeClassStatement(s)
 	case *ast.InterfaceStatement:
@@ -138,9 +161,7 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 	case *ast.ImportStatement:
 		sa.analyzeImportStatement(s)
 	case *ast.ExpressionStatement:
-		if s.Expression != nil {
-			sa.analyzeExpression(s.Expression)
-		}
+		sa.analyzeExpression(s.Expression)
 	}
 }
 
@@ -311,4 +332,63 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 
 func (sa *SemanticAnalyzer) error(msg string, line, column int) {
 	sa.errorCollector.AddSemanticError(msg, line, column, "", "")
+}
+
+// checkTypeConstraint 检查类型约束
+func (sa *SemanticAnalyzer) checkTypeConstraint(typeName, constraint string, line, column int) bool {
+	if constraint == "" || constraint == "any" {
+		return true
+	}
+	
+	// 检查类型是否满足约束
+	switch constraint {
+	case "comparable":
+		// 可比较类型：基本类型、指针等
+		if typeName == "int" || typeName == "float" || typeName == "string" || 
+		   typeName == "bool" || typeName == "char*" {
+			return true
+		}
+	case "ordered":
+		// 有序类型：可以进行大小比较
+		if typeName == "int" || typeName == "float" || typeName == "string" {
+			return true
+		}
+	case "number":
+		// 数值类型
+		if typeName == "int" || typeName == "float" || typeName == "double" {
+			return true
+		}
+	}
+	
+	sa.error(fmt.Sprintf("type %s does not satisfy constraint %s", typeName, constraint), line, column)
+	return false
+}
+
+// validateGenericInstantiation 验证泛型实例化
+func (sa *SemanticAnalyzer) validateGenericInstantiation(funcName string, typeArgs []string, line, column int) bool {
+	symbol := sa.symbolTable.GetSymbol(funcName)
+	if symbol == nil || !symbol.IsGeneric {
+		return false
+	}
+	
+	if symbol.GenericInst != nil {
+		expectedCount := len(symbol.GenericInst.TypeArguments)
+		if len(typeArgs) != expectedCount {
+			sa.error(fmt.Sprintf("expected %d type arguments, got %d", expectedCount, len(typeArgs)), line, column)
+			return false
+		}
+	}
+	
+	// 检查每个类型参数是否满足约束
+	for _, typeArg := range typeArgs {
+		if constraints, ok := sa.typeConstraints[typeArg]; ok {
+			for _, constraint := range constraints {
+				if !sa.checkTypeConstraint(typeArg, constraint, line, column) {
+					return false
+				}
+			}
+		}
+	}
+	
+	return true
 }

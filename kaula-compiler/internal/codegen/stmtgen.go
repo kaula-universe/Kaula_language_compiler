@@ -80,89 +80,43 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	}
 }
 
-// generateVariableDeclaration 生成变量声明代码（支持联合域选举）
+// generateVariableDeclaration 生成变量声明代码
 func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDeclaration) string {
+	// 调试输出
+	fmt.Printf("DEBUG: VariableDeclaration - Type='%s', Name='%s', Value=%v\n", stmt.Type, stmt.Name, stmt.Value)
+	
 	// 将变量添加到当前作用域的符号表
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 	
 	var code string
 	
-	// 将类型转换为小写以进行匹配
-	typeLower := strings.ToLower(stmt.Type)
-	
-	// 检查是否需要联合域选举（返回值或跨作用域引用）
-	needsUnion := sg.analyzeUnionRequirement(stmt)
-	
-	if needsUnion {
-		// 生成联合域选举代码
-		switch typeLower {
-		case "int":
-			code = "int " + stmt.Name + " = (int)(intptr_t)KMM_UNION_ELECT(_kmm_ctx, sizeof(int))"
-		case "float":
-			code = "float " + stmt.Name + " = *(float*)KMM_UNION_ELECT(_kmm_ctx, sizeof(float))"
-		case "double":
-			code = "double " + stmt.Name + " = *(double*)KMM_UNION_ELECT(_kmm_ctx, sizeof(double))"
-		case "bool":
-			code = "bool " + stmt.Name + " = *(bool*)KMM_UNION_ELECT(_kmm_ctx, sizeof(bool))"
-		case "char":
-			code = "char " + stmt.Name + " = *(char*)KMM_UNION_ELECT(_kmm_ctx, sizeof(char))"
-		case "string":
-			code = "char* " + stmt.Name + " = (char*)KMM_UNION_ELECT(_kmm_ctx, sizeof(char*))"
-		default:
-			// 自定义类型
-			code = stmt.Type + "* " + stmt.Name + " = (" + stmt.Type + "*)KMM_UNION_ELECT(_kmm_ctx, sizeof(" + stmt.Type + "))"
-		}
-		
-		// 如果有初始化值，需要复制数据
-		if stmt.Value != nil {
-			code += ";\n"
-			code += sg.codegen.indentString()
-			code += fmt.Sprintf("memcpy(%s, &", stmt.Name)
-			code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
-			code += fmt.Sprintf(", sizeof(%s))", stmt.Type)
-		}
-	} else {
-		// 生成普通变量声明
-		switch typeLower {
-		case "int":
-			code = "int " + stmt.Name
-		case "float":
-			code = "float " + stmt.Name
-		case "double":
-			code = "double " + stmt.Name
-		case "bool":
-			code = "bool " + stmt.Name
-		case "char":
-			code = "char " + stmt.Name
-		case "string":
-			code = "char* " + stmt.Name
-		case "void":
-			code = "void " + stmt.Name
-		default:
-			// 自定义类型
-			code = stmt.Type + " " + stmt.Name
-		}
-		
-		if stmt.Value != nil {
-			code += " = " + sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
-		} else if stmt.Nullable {
-			// 对于可空类型，如果没有初始化值，初始化为 NULL
-			code += " = NULL"
-		}
+	// 生成 C 风格的变量声明
+	switch stmt.Type {
+	case "int":
+		code = "int " + stmt.Name
+	case "float":
+		code = "float " + stmt.Name
+	case "double":
+		code = "double " + stmt.Name
+	case "bool":
+		code = "bool " + stmt.Name
+	case "char":
+		code = "char " + stmt.Name
+	case "string":
+		code = "char* " + stmt.Name
+	default:
+		// 自定义类型
+		code = stmt.Type + " " + stmt.Name
 	}
 	
+	if stmt.Value != nil {
+		code += " = " + sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+	} else if stmt.Nullable {
+		// 对于可空类型，如果没有初始化值，初始化为 NULL
+		code += " = NULL"
+	}
 	code += ";\n"
 	return code
-}
-
-// analyzeUnionRequirement 分析变量是否需要联合域选举
-func (sg *StatementGenerator) analyzeUnionRequirement(stmt *ast.VariableDeclaration) bool {
-	// 简化实现：如果变量名以 "union_" 或 "elect_" 开头，则需要联合域选举
-	// 实际实现应该基于逃逸分析
-	if strings.HasPrefix(stmt.Name, "union_") || strings.HasPrefix(stmt.Name, "elect_") {
-		return true
-	}
-	return false
 }
 
 // generateVOStatement 生成 VO 语句代码
@@ -438,14 +392,7 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 
 // generateImportStatement 生成 import 语句代码
 func (sg *StatementGenerator) generateImportStatement(stmt *ast.ImportStatement) string {
-	// 检查是否是第三方库导入
-	if sg.codegen.stdlibConfig != nil {
-		if lib := sg.codegen.stdlibConfig.GetThirdPartyLibrary(stmt.Module); lib != nil {
-			// 标记该第三方库已被导入
-			sg.codegen.usedThirdPartyLibs[lib.Name] = true
-		}
-	}
-	// import 语句在 C 中不需要生成代码
+	// import 语句在 C 中不需要特殊处理
 	return ""
 }
 
