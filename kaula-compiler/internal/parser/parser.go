@@ -95,6 +95,8 @@ func (p *Parser) parseProgram() *ast.Program {
 		Pos:        pos,
 	}
 
+	maxStatements := 10000 // 限制最大语句数量
+	statementCount := 0
 	for p.curTok.Type != lexer.TOKEN_EOF {
 		if p.loggingEnabled {
 			p.log("当前 token: %s, 开始解析语句", lexer.TokenTypeToString(p.curTok.Type))
@@ -112,6 +114,11 @@ func (p *Parser) parseProgram() *ast.Program {
 				p.log("解析完成语句：%s", stmt.String())
 			}
 			program.Statements = append(program.Statements, stmt)
+			statementCount++
+			if statementCount > maxStatements {
+				// 超过最大语句数，跳出循环避免内存爆炸
+				break
+			}
 		} else {
 			// 如果无法解析，跳过当前 token 避免死循环
 			p.nextToken()
@@ -165,7 +172,7 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 	case lexer.TOKEN_PRINTLN:
 		return p.parseExpressionStatementIterative()
 	case lexer.TOKEN_IDENT:
-		if p.peekTok.Type == lexer.TOKEN_IDENT || p.peekTok.Type == lexer.TOKEN_QUESTION || p.peekTok.Type == lexer.TOKEN_MULTIPLY {
+		if p.peekTok.Type == lexer.TOKEN_IDENT || p.peekTok.Type == lexer.TOKEN_QUESTION || p.peekTok.Type == lexer.TOKEN_MULTIPLY || p.peekTok.Type == lexer.TOKEN_LT {
 			if stmt := p.parseVariableDeclarationIterative(); stmt != nil {
 				return stmt
 			}
@@ -190,9 +197,64 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 	stmt := &ast.VariableDeclaration{}
 	
-	// 直接解析类型，不再支持 var 关键字
-	// 现在 curTok 应该是类型关键字（如 int, float 等）
-	if p.isTypeToken(p.curTok.Type) {
+	// 解析类型（可能是泛型类型如 Box<int>）
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		typeName := p.curTok.Value
+		p.nextToken()
+		
+		// 检查是否是泛型类型（如 Box<int>）
+		if p.curTok.Type == lexer.TOKEN_LT {
+			p.nextToken()
+			typeArgs := []string{}
+			for p.curTok.Type == lexer.TOKEN_IDENT {
+				typeArgs = append(typeArgs, p.curTok.Value)
+				p.nextToken()
+				if p.curTok.Type == lexer.TOKEN_COMMA {
+					p.nextToken()
+				} else if p.curTok.Type == lexer.TOKEN_GT {
+					break
+				}
+			}
+			if p.curTok.Type == lexer.TOKEN_GT {
+				p.nextToken()
+				// 构建泛型类型名称
+				typeName = typeName + "<"
+				for i, arg := range typeArgs {
+					if i > 0 {
+						typeName += ","
+					}
+					typeName += arg
+				}
+				typeName += ">"
+			}
+		}
+		
+		stmt.Type = typeName
+		
+		// 检查是否是指针类型（*）或可空类型（?）
+		if p.curTok.Type == lexer.TOKEN_QUESTION {
+			stmt.Nullable = true
+			p.nextToken()
+		} else if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			// 指针类型，在类型名后添加 *
+			stmt.Type = stmt.Type + "*"
+			p.nextToken()
+		}
+		
+		// 现在 curTok 应该是变量名
+		if p.curTok.Type == lexer.TOKEN_IDENT {
+			stmt.Name = p.curTok.Value
+			p.nextToken()
+			
+			// 检查是否有赋值
+			if p.curTok.Type == lexer.TOKEN_ASSIGN {
+				p.nextToken()
+				stmt.Value = p.parseExpressionIterative()
+			}
+			return stmt
+		}
+	} else if p.isTypeToken(p.curTok.Type) {
+		// 普通类型（如 int, string 等）
 		stmt.Type = lexer.TokenTypeToString(p.curTok.Type)
 		// 移除 TYPE_ 前缀
 		stmt.Type = strings.TrimPrefix(stmt.Type, "TYPE_")
@@ -630,10 +692,17 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
+		maxStatements := 10000 // 限制最大语句数量
+		statementCount := 0
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
+				statementCount++
+				if statementCount > maxStatements {
+					// 超过最大语句数，跳出循环避免内存爆炸
+					break
+				}
 			} else {
 				// 如果无法解析，跳过当前 token 避免死循环
 				p.nextToken()
@@ -1443,14 +1512,16 @@ func (p *Parser) parseExpressionStatementIterative() *ast.ExpressionStatement {
 		File:   p.file,
 	}
 	expr := p.parseExpressionIterative()
+	if expr == nil {
+		return nil
+	}
 	if p.curTok.Type == lexer.TOKEN_SEMICOLON {
 		p.nextToken()
 	}
-	stmt := &ast.ExpressionStatement{
+	return &ast.ExpressionStatement{
 		Expression: expr,
 		Pos:        pos,
 	}
-	return stmt
 }
 
 // parseExpressionIterative 迭代解析表达式（使用栈替代递归）

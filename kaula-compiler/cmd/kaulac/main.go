@@ -17,7 +17,7 @@ import (
 func main() {
 	// 初始化超时控制
 	timeout.Init()
-	timeout.SetLimits(2048, 120) // 2GB 内存限制，120 秒时间限制
+	timeout.SetLimits(4096, 120) // 4GB 内存限制，120 秒时间限制
 	
 	// 启动内存监控和 GC 协程
 	go func() {

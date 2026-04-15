@@ -29,15 +29,15 @@ fn main() {
     print<string>("hello");
     
     // 测试泛型结构体
-    let box = Box<int> { value: 42 };
+    Box<int> box = Box<int> { value: 42 };
     println(box.value);
     
     // 测试泛型类
-    let container = Container<int>::new(42);
+    Container<int> container = Container<int>::new(42);
     println(container.get());
     
     // 测试多参数泛型
-    let pair = Pair<int, string> { first: 42, second: "hello" };
+    Pair<int, string> pair = Pair<int, string> { first: 42, second: "hello" };
     println(pair.first);
     println(pair.second);
 }

@@ -490,14 +490,55 @@ static inline bool kmm_union_has_active_dependencies(kmm_union_node_t* node) {
 }
 
 static inline void kmm_union_topological_sort(kmm_union_node_t** nodes, size_t count) {
-    for (size_t i = 0; i < count - 1; i++) {
-        for (size_t j = 0; j < count - i - 1; j++) {
-            if (kmm_union_has_dependency(nodes[j], nodes[j + 1])) {
-                kmm_union_node_t* temp = nodes[j];
-                nodes[j] = nodes[j + 1];
-                nodes[j + 1] = temp;
+    if (count <= 1) return;
+    
+    for (size_t i = 0; i < count; i++) {
+        nodes[i]->temp_in_degree = 0;
+        nodes[i]->temp_visited = false;
+    }
+    
+    for (size_t i = 0; i < count; i++) {
+        for (size_t j = 0; j < nodes[i]->dependency_count; j++) {
+            kmm_union_node_t* dep = nodes[i]->dependencies[j];
+            nodes[i]->temp_in_degree++;
+        }
+    }
+    
+    kmm_union_node_t** queue = (kmm_union_node_t**)fast_alloc(sizeof(kmm_union_node_t*) * count);
+    size_t queue_front = 0;
+    size_t queue_back = 0;
+    
+    for (size_t i = 0; i < count; i++) {
+        if (nodes[i]->temp_in_degree == 0) {
+            queue[queue_back++] = nodes[i];
+        }
+    }
+    
+    size_t sorted_count = 0;
+    
+    while (queue_front < queue_back) {
+        kmm_union_node_t* current = queue[queue_front++];
+        nodes[sorted_count++] = current;
+        
+        for (size_t i = 0; i < count; i++) {
+            if (nodes[i]->temp_visited) continue;
+            
+            for (size_t j = 0; j < nodes[i]->dependency_count; j++) {
+                if (nodes[i]->dependencies[j] == current) {
+                    nodes[i]->temp_in_degree--;
+                    if (nodes[i]->temp_in_degree == 0) {
+                        nodes[i]->temp_visited = true;
+                        queue[queue_back++] = nodes[i];
+                    }
+                    break;
+                }
             }
         }
+    }
+    
+    for (size_t i = 0; i < count; i++) {
+        nodes[i]->temp_in_degree = 0;
+        nodes[i]->temp_visited = false;
     }
 }
 

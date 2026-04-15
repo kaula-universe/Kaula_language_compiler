@@ -74,6 +74,8 @@ struct kmm_union_node {
     size_t dependency_count;
     bool is_root;
     bool is_elected;
+    size_t temp_in_degree;
+    bool temp_visited;
 };
 
 struct kmm_union_domain {
