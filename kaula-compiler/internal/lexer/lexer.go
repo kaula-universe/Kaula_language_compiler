@@ -39,7 +39,6 @@ const (
 	TOKEN_IMPLEMENTS
 	TOKEN_CONSTRUCTOR
 	TOKEN_STRUCT
-	TOKEN_VAR
 	// 类型关键字
 	TOKEN_TYPE_INT
 	TOKEN_TYPE_FLOAT
@@ -356,8 +355,6 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_IMPLEMENTS
 	case "constructor":
 		tokenType = TOKEN_CONSTRUCTOR
-	case "var":
-		tokenType = TOKEN_VAR
 	// 类型关键字
 	case "int":
 		tokenType = TOKEN_TYPE_INT

@@ -190,11 +190,7 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 	stmt := &ast.VariableDeclaration{}
 	
-	// 检查是否有 var 关键字，如果有则跳过
-	if p.curTok.Type == lexer.TOKEN_VAR {
-		p.nextToken()
-	}
-	
+	// 直接解析类型，不再支持 var 关键字
 	// 现在 curTok 应该是类型关键字（如 int, float 等）
 	if p.isTypeToken(p.curTok.Type) {
 		stmt.Type = lexer.TokenTypeToString(p.curTok.Type)
