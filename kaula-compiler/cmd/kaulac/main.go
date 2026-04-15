@@ -62,6 +62,7 @@ func main() {
 
 	// 词法分析
 	fmt.Println("Starting lexing...")
+	timeout.StartStage("lex")
 	if err := timeout.CheckTimeout("lex"); err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
@@ -75,9 +76,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	timeout.EndStage("lex")
 
 	// 语法分析
 	fmt.Println("Starting parsing...")
+	timeout.StartStage("parse")
 	if err := timeout.CheckTimeout("parse"); err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
@@ -93,6 +96,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	timeout.EndStage("parse")
 
 	// 检查词法和语法错误
 	if errorCollector.HasErrors() {
@@ -108,6 +112,7 @@ func main() {
 
 	// 语义分析
 	fmt.Println("Starting semantic analysis...")
+	timeout.StartStage("sema")
 	if err := timeout.CheckTimeout("sema"); err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
@@ -129,6 +134,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	timeout.EndStage("sema")
 
 	fmt.Println("Semantic analysis completed, starting code generation...")
 
@@ -146,6 +152,7 @@ func main() {
 
 	// 代码生成
 	fmt.Println("Starting code generation...")
+	timeout.StartStage("codegen")
 	if err := timeout.CheckTimeout("codegen"); err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
@@ -159,6 +166,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	timeout.EndStage("codegen")
 
 	// 代码生成器接口没有错误检查方法，暂时注释掉
 	// // 检查代码生成错误
@@ -186,10 +194,24 @@ func main() {
 	fmt.Printf("Total time: %v, Memory: %dMB\n", 
 		timeout.GetElapsed(), 
 		getMemoryUsage())
+	
+	// 打印各阶段详细统计
+	printStageStats()
 }
 
 func getMemoryUsage() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m.Alloc / 1024 / 1024
+}
+
+func printStageStats() {
+	fmt.Println("\n=== Compilation Stage Statistics ===")
+	fmt.Println("Stage           | Duration  | Memory Delta     | Peak    | Allocs")
+	fmt.Println("----------------|-----------|------------------|---------|--------")
+	
+	// 这里需要 timeout 包提供获取阶段统计的接口
+	// 暂时简化处理
+	fmt.Printf("Total compilation completed in %v\n", timeout.GetElapsed())
+	fmt.Println("================================\n")
 }

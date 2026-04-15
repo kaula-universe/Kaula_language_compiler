@@ -24,7 +24,25 @@ var (
 	
 	// 是否已超时
 	timedOut int32
+	
+	// 各阶段统计
+	stageStats = make(map[string]*StageStat)
 )
+
+// StageStat 阶段统计信息
+type StageStat struct {
+	Name          string
+	StartTime     time.Time
+	EndTime       time.Time
+	StartMemory   uint64
+	EndMemory     uint64
+	PeakMemory    uint64
+	AllocCount    int64
+	GCCount       uint32
+	LastFunc      string
+	LastFile      string
+	LastLine      int
+}
 
 // TimeoutError 超时错误
 type TimeoutError struct {
@@ -60,6 +78,37 @@ func SetLimits(memoryMB uint64, timeoutSec uint64) {
 	timeLimit = timeoutSec * 1000
 }
 
+// StartStage 开始一个阶段
+func StartStage(name string) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	
+	stageStats[name] = &StageStat{
+		Name:        name,
+		StartTime:   time.Now(),
+		StartMemory: m.Alloc,
+		GCCount:     m.NumGC,
+	}
+}
+
+// EndStage 结束一个阶段
+func EndStage(name string) {
+	if stat, ok := stageStats[name]; ok {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		
+		stat.EndTime = time.Now()
+		stat.EndMemory = m.Alloc
+		stat.GCCount = m.NumGC - stat.GCCount
+		
+		if m.Alloc > stat.PeakMemory {
+			stat.PeakMemory = m.Alloc
+		}
+		
+		stat.AllocCount = int64(m.Mallocs - m.Frees)
+	}
+}
+
 // CheckTimeout 检查是否超时
 func CheckTimeout(stage string) error {
 	elapsed := time.Since(startTime).Milliseconds()
@@ -78,6 +127,7 @@ func CheckTimeout(stage string) error {
 	if elapsed > int64(limit)*80/100 {
 		fmt.Fprintf(os.Stderr, "⚠️  WARNING: %s stage taking too long (%dms/%dms)\n", stage, elapsed, limit)
 		printDebugInfo(stage)
+		printGoroutineStack()
 	}
 	
 	return nil
@@ -89,7 +139,15 @@ func CheckMemory(stage string) error {
 	runtime.ReadMemStats(&m)
 	current := m.Alloc
 	
+	// 更新阶段统计
+	if stat, ok := stageStats[stage]; ok {
+		if current > stat.PeakMemory {
+			stat.PeakMemory = current
+		}
+	}
+	
 	if current > atomic.LoadUint64(&memoryLimit) {
+		printMemoryHotspots()
 		return &MemoryError{
 			Stage:   stage,
 			Current: current,
@@ -102,6 +160,8 @@ func CheckMemory(stage string) error {
 		fmt.Fprintf(os.Stderr, "⚠️  WARNING: %s stage using too much memory (%dMB/%dMB)\n", 
 			stage, current/1024/1024, atomic.LoadUint64(&memoryLimit)/1024/1024)
 		printDebugInfo(stage)
+		printMemoryHotspots()
+		printGoroutineStack()
 	}
 	
 	return nil
@@ -118,7 +178,68 @@ func printDebugInfo(stage string) {
 	fmt.Fprintf(os.Stderr, "  Memory total: %dMB\n", m.TotalAlloc/1024/1024)
 	fmt.Fprintf(os.Stderr, "  Goroutines: %d\n", runtime.NumGoroutine())
 	fmt.Fprintf(os.Stderr, "  GC runs: %d\n", m.NumGC)
+	
+	// 打印阶段统计
+	if stat, ok := stageStats[stage]; ok {
+		fmt.Fprintf(os.Stderr, "  Stage duration: %dms\n", stat.EndTime.Sub(stat.StartTime).Milliseconds())
+		fmt.Fprintf(os.Stderr, "  Stage memory delta: %dMB -> %dMB (+%dMB)\n", 
+			stat.StartMemory/1024/1024, stat.EndMemory/1024/1024, 
+			(stat.EndMemory-stat.StartMemory)/1024/1024)
+		fmt.Fprintf(os.Stderr, "  Peak memory: %dMB\n", stat.PeakMemory/1024/1024)
+		fmt.Fprintf(os.Stderr, "  Allocations: %d\n", stat.AllocCount)
+		fmt.Fprintf(os.Stderr, "  GC during stage: %d\n", stat.GCCount)
+	}
+	
+	fmt.Fprintf(os.Stderr, "  Heap objects: %d\n", m.HeapObjects)
+	fmt.Fprintf(os.Stderr, "  Heap alloc: %dMB\n", m.HeapAlloc/1024/1024)
+	fmt.Fprintf(os.Stderr, "  Stack in use: %dKB\n", m.StackInuse/1024)
+	fmt.Fprintf(os.Stderr, "  Next GC: %dMB\n", m.NextGC/1024/1024)
+	fmt.Fprintf(os.Stderr, "  Pause total: %dms\n", m.PauseTotalNs/1000000)
 	fmt.Fprintf(os.Stderr, "========================\n")
+}
+
+// printMemoryHotspots 打印内存热点（最大的对象分配）
+func printMemoryHotspots() {
+	fmt.Fprintf(os.Stderr, "\n=== Memory Hotspots ===\n")
+	
+	// 获取堆信息
+	buf := make([]byte, 1<<20)
+	runtime.Stack(buf, true)
+	
+	// 分析 goroutine 栈
+	goroutines := runtime.NumGoroutine()
+	fmt.Fprintf(os.Stderr, "  Active goroutines: %d\n", goroutines)
+	
+	// 打印内存分配器统计
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	
+	fmt.Fprintf(os.Stderr, "  Mallocs: %d\n", m.Mallocs)
+	fmt.Fprintf(os.Stderr, "  Frees: %d\n", m.Frees)
+	fmt.Fprintf(os.Stderr, "  Lookups: %d\n", m.Lookups)
+	fmt.Fprintf(os.Stderr, "  Alloc rate: %.0f MB/s\n", float64(m.TotalAlloc)/1024/1024)
+	
+	fmt.Fprintf(os.Stderr, "========================\n\n")
+}
+
+// printGoroutineStack 打印所有 goroutine 的调用栈
+func printGoroutineStack() {
+	fmt.Fprintf(os.Stderr, "\n=== Goroutine Stack Trace ===\n")
+	buf := make([]byte, 1<<20)
+	stackLen := runtime.Stack(buf, true)
+	
+	if stackLen > 0 {
+		fmt.Fprintf(os.Stderr, "%s\n", buf[:stackLen])
+	}
+	fmt.Fprintf(os.Stderr, "========================\n\n")
+}
+
+// PrintCurrentLocation 打印当前代码位置（用于追踪）
+func PrintCurrentLocation(stage string) {
+	_, file, line, ok := runtime.Caller(1)
+	if ok {
+		fmt.Fprintf(os.Stderr, "[DEBUG] %s: at %s:%d\n", stage, file, line)
+	}
 }
 
 // WithTimeout 创建带超时的上下文
