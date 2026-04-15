@@ -153,7 +153,7 @@ static inline void* kmm_safe_malloc(size_t size, const char* file, int line) {
     size_t aligned_size = kmm_align_up(size, KMM_ALIGNMENT);
     size_t total = kmm_safe_block_total_size(aligned_size);
     
-    uint8_t* raw = (uint8_t*)malloc(total);
+    uint8_t* raw = (uint8_t*)fast_alloc(total);
     if (KMM_UNLIKELY(!raw)) return NULL;
     
     kmm_safe_header_t* hdr = (kmm_safe_header_t*)raw;
@@ -182,9 +182,6 @@ static inline void kmm_safe_free(void* user_ptr) {
         fprintf(stderr, "🚨 内存损坏检测！文件：%s, 行：%d\n", hdr->file, hdr->line);
         abort();
     }
-    
-    kmm_safe_header_t* hdr = kmm_get_header_from_user(user_ptr);
-    free(hdr);
 }
 
 // ==================== Arena 延迟初始化 ====================
@@ -198,7 +195,7 @@ static inline int kmm_arena_ensure_initialized(kmm_arena_t* arena, size_t min_si
         initial_capacity = max_size;
     }
     
-    arena->buffer = (uint8_t*)malloc(initial_capacity);
+    arena->buffer = (uint8_t*)fast_alloc(initial_capacity);
     if (!arena->buffer) return -1;
     
     arena->capacity = initial_capacity;
@@ -228,8 +225,10 @@ static inline int kmm_arena_expand(kmm_arena_t* arena, size_t additional_size) {
         return -1;
     }
     
-    uint8_t* new_buffer = (uint8_t*)realloc(arena->buffer, new_capacity);
+    uint8_t* new_buffer = (uint8_t*)fast_alloc(new_capacity);
     if (!new_buffer) return -1;
+    
+    memcpy(new_buffer, arena->buffer, arena->offset);
     
     arena->buffer = new_buffer;
     arena->capacity = new_capacity;
@@ -311,7 +310,7 @@ static inline void* kmm_arena_alloc_tiny(kmm_arena_t* arena, size_t size) {
 
 // ==================== 清理栈管理 ====================
 static inline int kmm_register_cleanup(kmm_context_t* ctx, void* ptr) {
-    kmm_cleanup_node_t* node = (kmm_cleanup_node_t*)malloc(sizeof(kmm_cleanup_node_t));
+    kmm_cleanup_node_t* node = (kmm_cleanup_node_t*)fast_alloc(sizeof(kmm_cleanup_node_t));
     if (KMM_UNLIKELY(!node)) return -1;
     
     node->resource = ptr;
@@ -326,7 +325,7 @@ static inline int kmm_register_cleanup(kmm_context_t* ctx, void* ptr) {
 #if KMM_ENABLE_UNION_DOMAIN
 
 static inline kmm_union_node_t* kmm_union_node_alloc(void) {
-    return (kmm_union_node_t*)malloc(sizeof(kmm_union_node_t));
+    return (kmm_union_node_t*)fast_alloc(sizeof(kmm_union_node_t));
 }
 
 static inline bool kmm_union_has_dependency(kmm_union_node_t* node, kmm_union_node_t* target) {
@@ -456,7 +455,7 @@ void kmm_union_set_dependencies(void* obj, void** deps, size_t count) {
         count = KMM_MAX_DEPENDENCIES;
     }
     
-    node->dependencies = (kmm_union_node_t**)malloc(sizeof(kmm_union_node_t*) * count);
+    node->dependencies = (kmm_union_node_t**)fast_alloc(sizeof(kmm_union_node_t*) * count);
     node->dependency_count = count;
     
     for (size_t i = 0; i < count; i++) {
@@ -501,15 +500,11 @@ static inline void kmm_union_topological_sort(kmm_union_node_t** nodes, size_t c
     if (count <= 1) return;
     
     for (size_t i = 0; i < count; i++) {
-        nodes[i]->temp_in_degree = 0;
+        nodes[i]->temp_in_degree = nodes[i]->dependency_count;
         nodes[i]->temp_visited = false;
     }
     
-    for (size_t i = 0; i < count; i++) {
-        nodes[i]->temp_in_degree = nodes[i]->dependency_count;
-    }
-    
-    kmm_union_node_t** queue = (kmm_union_node_t**)malloc(sizeof(kmm_union_node_t*) * count);
+    kmm_union_node_t** queue = (kmm_union_node_t**)fast_alloc(sizeof(kmm_union_node_t*) * count);
     if (!queue) return;
     
     size_t queue_front = 0;
@@ -544,17 +539,12 @@ static inline void kmm_union_topological_sort(kmm_union_node_t** nodes, size_t c
     }
     
     free(queue);
-    
-    for (size_t i = 0; i < count; i++) {
-        nodes[i]->temp_in_degree = 0;
-        nodes[i]->temp_visited = false;
-    }
 }
 
 void kmm_union_destroy(kmm_union_domain_t* domain) {
     if (!domain->root) return;
     
-    kmm_union_node_t** nodes = (kmm_union_node_t**)malloc(sizeof(kmm_union_node_t*) * domain->node_count);
+    kmm_union_node_t** nodes = (kmm_union_node_t**)fast_alloc(sizeof(kmm_union_node_t*) * domain->node_count);
     if (!nodes) return;
     
     size_t count = 0;
@@ -570,22 +560,13 @@ void kmm_union_destroy(kmm_union_domain_t* domain) {
     for (size_t i = count; i > 0; i--) {
         kmm_union_node_t* node = nodes[i - 1];
         
-        if (!kmm_union_has_active_dependencies(node)) {
-            if (node->status != KMM_DOMAIN_LOCAL) {
-                free(node->object);
-            }
-        }
-        
         if (node->dependencies) {
-            free(node->dependencies);
             node->dependencies = NULL;
             node->dependency_count = 0;
         }
         
-        free(node);
+        node = NULL;
     }
-    
-    free(nodes);
     
     domain->root = NULL;
     domain->current = NULL;
@@ -631,18 +612,22 @@ void kmm_destroy(kmm_context_t* ctx) {
         }
         kmm_cleanup_node_t* temp = current;
         current = current->next;
-        free(temp);
     }
     
     ctx->cleanup_stack = NULL;
     
-    if (ctx->tiny_arena.buffer) free(ctx->tiny_arena.buffer);
-    if (ctx->small_arena.buffer) free(ctx->small_arena.buffer);
-    if (ctx->medium_arena.buffer) free(ctx->medium_arena.buffer);
+    if (ctx->tiny_arena.buffer) {
+    }
+    if (ctx->small_arena.buffer) {
+    }
+    if (ctx->medium_arena.buffer) {
+    }
     
     ctx->tiny_arena.buffer = NULL;
     ctx->small_arena.buffer = NULL;
     ctx->medium_arena.buffer = NULL;
+    
+    fast_free_all();
 }
 
 void* kmm_alloc(kmm_context_t* ctx, size_t size, const char* file, int line) {
@@ -741,8 +726,6 @@ void kmm_free(void* ptr) {
     if (KMM_UNLIKELY(!ptr)) return;
     
     if (kmm_check_redzone(ptr)) {
-        kmm_safe_header_t* hdr = kmm_get_header_from_user(ptr);
-        free(hdr);
     }
 }
 

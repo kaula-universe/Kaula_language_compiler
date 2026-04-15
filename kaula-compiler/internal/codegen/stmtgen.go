@@ -22,6 +22,7 @@ func NewStatementGenerator(cg *CodeGenerator) *StatementGenerator {
 // GenerateStatement 生成语句代码
 func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	if stmt == nil {
+		fmt.Printf("DEBUG: GenerateStatement received nil statement\n")
 		return ""
 	}
 	// 首先尝试使用插件生成代码
@@ -67,11 +68,12 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	case *ast.VariableDeclaration:
 		return sg.generateVariableDeclaration(s)
 	case *ast.ExpressionStatement:
-		if s.Expression == nil {
+		if s == nil || s.Expression == nil {
 			return ""
 		}
-		// 检查是否是模块调用（MemberAccessExpression 作为 CallExpression 的函数部分）
-		if callExpr, ok := s.Expression.(*ast.CallExpression); ok {
+		// 安全地进行类型断言
+		callExpr, isCall := interface{}(s.Expression).(*ast.CallExpression)
+		if isCall && callExpr != nil && callExpr.Function != nil {
 			if _, isMemberAccess := callExpr.Function.(*ast.MemberAccessExpression); isMemberAccess {
 				// 这是模块函数调用，直接生成函数调用代码
 				return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"

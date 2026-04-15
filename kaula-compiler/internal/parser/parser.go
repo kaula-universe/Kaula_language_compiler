@@ -1167,6 +1167,7 @@ func (p *Parser) parseStructStatementIterative() *ast.StructStatement {
 		if p.curTok.Type == lexer.TOKEN_GT {
 			p.nextToken()
 		}
+		stmt.Generic = true // 标记为泛型结构体
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
@@ -1198,63 +1199,54 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 		File:   p.file,
 	}
 	
-	p.log("开始解析字段声明，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-	
 	if p.curTok.Type != lexer.TOKEN_IDENT {
-		p.log("不是字段声明，返回 nil")
 		return nil
 	}
 	
 	savedCurTok := p.curTok
 	savedPeekTok := p.peekTok
-	p.log("保存 token 位置，curTok: %s, 值：%s, peekTok: %s, 值：%s", lexer.TokenTypeToString(savedCurTok.Type), savedCurTok.Value, lexer.TokenTypeToString(savedPeekTok.Type), savedPeekTok.Value)
+	
+	// 尝试解析 "字段名：类型，" 语法（类 C 风格）
+	fieldName := p.curTok.Value
+	p.nextToken()
+	
+	// 检查下一个 token 是否是冒号
+	if p.curTok.Type != lexer.TOKEN_COLON {
+		// 不是字段声明，恢复 token 位置
+		p.curTok = savedCurTok
+		p.peekTok = savedPeekTok
+		return nil
+	}
+	
+	// 跳过冒号
+	p.nextToken()
+	
+	// 解析类型
+	if p.curTok.Type != lexer.TOKEN_IDENT {
+		p.curTok = savedCurTok
+		p.peekTok = savedPeekTok
+		return nil
+	}
 	
 	typeName := p.curTok.Value
-	p.log("解析类型：%s", typeName)
 	p.nextToken()
-	p.log("跳过类型后，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 	
-	nullable := false
-	if p.curTok.Type == lexer.TOKEN_QUESTION {
-		nullable = true
-		p.log("跳过 QUESTION token")
-		p.nextToken()
-		p.log("跳过 QUESTION 后，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-	}
-	
-	if p.curTok.Type != lexer.TOKEN_IDENT {
-		p.log("不是字段声明，恢复 token 位置")
+	// 检查是否是逗号或分号
+	if p.curTok.Type != lexer.TOKEN_COMMA && p.curTok.Type != lexer.TOKEN_SEMICOLON {
 		p.curTok = savedCurTok
 		p.peekTok = savedPeekTok
-		p.log("恢复 token 位置后，curTok: %s, 值：%s, peekTok: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value, lexer.TokenTypeToString(p.peekTok.Type), p.peekTok.Value)
 		return nil
 	}
 	
-	p.log("检查下一个 token 是否是分号，peekTok: %s, 值：%s", lexer.TokenTypeToString(p.peekTok.Type), p.peekTok.Value)
-	if p.peekTok.Type != lexer.TOKEN_SEMICOLON {
-		p.log("不是字段声明，恢复 token 位置")
-		p.curTok = savedCurTok
-		p.peekTok = savedPeekTok
-		p.log("恢复 token 位置后，curTok: %s, 值：%s, peekTok: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value, lexer.TokenTypeToString(p.peekTok.Type), p.peekTok.Value)
-		return nil
-	}
-	
-	fieldName := p.curTok.Value
-	p.log("解析字段名：%s", fieldName)
+	// 跳过分隔符
 	p.nextToken()
-	p.log("跳过字段名后，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-	
-	p.log("跳过分号")
-	p.nextToken()
-	p.log("跳过分号后，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 	
 	field := &ast.FieldDeclaration{
 		Name:     fieldName,
 		Type:     typeName,
-		Nullable: nullable,
+		Nullable: false,
 		Pos:      pos,
 	}
-	p.log("字段声明解析完成：%s", field.String())
 	return field
 }
 

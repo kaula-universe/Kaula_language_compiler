@@ -22,7 +22,12 @@ func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 
 // eraseGenericType 执行类型擦除，将泛型类型转换为 void*
 func (tg *TypeGenerator) eraseGenericType(typeName string) string {
-	// 检查是否是泛型类型参数
+	// 检查是否是泛型类型参数（单个大写字母如 T, U, V 等）
+	if len(typeName) == 1 && typeName[0] >= 'A' && typeName[0] <= 'Z' {
+		return "void*"
+	}
+	
+	// 检查是否是泛型类型（如 Box<T>）
 	if strings.Contains(typeName, "<") {
 		return "void*"
 	}
@@ -34,7 +39,7 @@ func (tg *TypeGenerator) eraseGenericType(typeName string) string {
 	
 	// 基本类型保持不变
 	switch typeName {
-	case "int", "float", "double", "bool", "char", "string":
+	case "int", "float", "double", "bool", "char", "string", "i32", "i64", "f32", "f64":
 		tg.typeErasure[typeName] = typeName
 		return typeName
 	}
@@ -149,10 +154,11 @@ func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement
 
 // GenerateStructStatement 生成结构体定义代码
 func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) string {
-	code := fmt.Sprintf("// Struct: %s\n", stmt.Name)
+	code := fmt.Sprintf("// Struct: %s (Generic=%v, TypeParams=%d)\n", stmt.Name, stmt.Generic, len(stmt.TypeParams))
 	
 	// 处理泛型结构体
 	if stmt.Generic {
+		fmt.Printf("DEBUG: Generating generic struct for %s\n", stmt.Name)
 		return tg.GenerateGenericStructStatement(stmt)
 	}
 	
