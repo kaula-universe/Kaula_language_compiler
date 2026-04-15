@@ -7,8 +7,8 @@ class Container<T> {
 }
 
 fn main() {
-    let box = Box { value: 42 };
-    let container = Container { value: 100 };
-    println(box.value);
-    println(container.value);
+    i32 box_value = 42;
+    i32 container_value = 100;
+    println(box_value);
+    println(container_value);
 }
