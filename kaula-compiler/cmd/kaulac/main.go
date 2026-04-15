@@ -231,15 +231,55 @@ func compileCCode(cFile string) error {
 		return fmt.Errorf("clang not found in PATH")
 	}
 	
-	// 生成输出文件名：移除 .c 后缀，添加 .exe 后缀（Windows）或空后缀（Unix）
+	// 生成输出文件名：从 .kaula.c 文件名生成简洁的 .exe 文件名
+	// 例如：test.kaula.c -> test.exe
 	var outputFile string
-	if runtime.GOOS == "windows" {
-		outputFile = cFile[:len(cFile)-2] + ".exe" // test.kaula.c -> test.kaula.exe
-	} else {
-		outputFile = cFile[:len(cFile)-2] // test.kaula.c -> test.kaula
+	
+	// 移除 .c 后缀
+	cFileNoExt := cFile
+	if len(cFileNoExt) > 2 && cFileNoExt[len(cFileNoExt)-2:] == ".c" {
+		cFileNoExt = cFileNoExt[:len(cFileNoExt)-2]
 	}
 	
-	// 检查是否存在 kaula_runtime.c（提供 kaula_scope_enter/exit）
+	// 移除 .kaula 后缀
+	if len(cFileNoExt) > 6 && cFileNoExt[len(cFileNoExt)-6:] == ".kaula" {
+		cFileNoExt = cFileNoExt[:len(cFileNoExt)-6]
+	}
+	
+	// 添加 .exe 后缀（Windows）或不添加（Unix）
+	if runtime.GOOS == "windows" {
+		outputFile = cFileNoExt + ".exe"
+	} else {
+		outputFile = cFileNoExt
+	}
+	
+	// 检查是否存在 kaula_runtime_simple.c（简化版运行时，用于测试）
+	simpleRuntime := "kaula_runtime_simple.c"
+	if _, err := os.Stat(simpleRuntime); err == nil {
+		// 存在简化版运行时文件，一起编译
+		cmd := exec.Command(clangPath, cFile, simpleRuntime, "-o", outputFile)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+		}
+		fmt.Printf("C code compiled successfully: %s\n", outputFile)
+		return nil
+	}
+	
+	// 检查是否存在 std/memory/memory.c（包含 kaula_scope_enter/exit）
+	memoryRuntime := "std/memory/memory.c"
+	if _, err := os.Stat(memoryRuntime); err == nil {
+		// 存在运行时文件，一起编译
+		cmd := exec.Command(clangPath, cFile, memoryRuntime, "-o", outputFile)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+		}
+		fmt.Printf("C code compiled successfully: %s\n", outputFile)
+		return nil
+	}
+	
+	// 检查是否存在 kaula_runtime.c（备用）
 	runtimeStub := "kaula_runtime.c"
 	if _, err := os.Stat(runtimeStub); err == nil {
 		// 存在运行时 stub 文件，一起编译

@@ -1,8 +1,0 @@
-struct Box<T> {
-    value: T,
-}
-
-fn main() {
-    Box<int> box = Box { value: 42 };
-    println(box.value);
-}

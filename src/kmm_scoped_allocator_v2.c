@@ -50,7 +50,7 @@ static inline int clock_gettime(int clk_id, struct timespec* ts) {
 kmm_union_domain_t g_union_domain = {0};
 #endif
 
-// ==================== 线程缓存实现 ====================
+// ==================== 线程缓存实现（优化版） ====================
 #if KMM_ENABLE_THREAD_CACHE
 #ifdef _WIN32
 __declspec(thread) kmm_thread_cache_t g_thread_cache = {0};
@@ -64,14 +64,16 @@ static inline void kmm_thread_cache_init(kmm_context_t* ctx) {
 }
 
 static inline void* kmm_thread_cache_alloc(size_t size) {
-    if (g_thread_cache.cache_size > 0) {
+    // 超快速路径：直接从缓存获取
+    if (KMM_LIKELY(g_thread_cache.cache_size > 0)) {
         return g_thread_cache.cache[--g_thread_cache.cache_size];
     }
     return NULL;
 }
 
 static inline void kmm_thread_cache_free(void* ptr, size_t size) {
-    if (g_thread_cache.cache_size < KMM_THREAD_CACHE_SIZE) {
+    // 超快速路径：回收到缓存
+    if (KMM_LIKELY(g_thread_cache.cache_size < KMM_THREAD_CACHE_SIZE)) {
         g_thread_cache.cache[g_thread_cache.cache_size++] = ptr;
     }
 }
@@ -696,10 +698,16 @@ void* kmm_alloc(kmm_context_t* ctx, size_t size, const char* file, int line) {
 void kmm_free(void* ptr) {
     if (KMM_UNLIKELY(!ptr)) return;
     
+    // 超快速路径：回收到线程缓存
+#if KMM_ENABLE_THREAD_CACHE
+    kmm_thread_cache_free(ptr, 0);
+    return;
+#else
     if (kmm_check_redzone(ptr)) {
         kmm_safe_header_t* hdr = kmm_get_header_from_user(ptr);
         free(hdr);
     }
+#endif
 }
 
 void** kmm_alloc_batch(kmm_context_t* ctx, size_t size, size_t count, const char* file, int line) {

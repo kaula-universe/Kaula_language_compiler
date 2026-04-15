@@ -346,6 +346,13 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 				return code
 			}
 		} else {
+			// 检查参数类型，选择正确的格式
+			// 如果是整数字面量或看起来像整数的表达式，使用 %d
+			if isIntegerLiteral(arg) {
+				code := "printf(\"%d\\n\", " + arg + ")"
+				return code
+			}
+			// 默认使用 %s
 			code := "printf(\"%s\\n\", " + arg + ")"
 			return code
 		}

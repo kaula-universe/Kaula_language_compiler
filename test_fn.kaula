@@ -1,7 +1,0 @@
-fn print(value: string) {
-    println(value);
-}
-
-fn main() {
-    println("test");
-}
