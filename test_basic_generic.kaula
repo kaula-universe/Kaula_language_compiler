@@ -1,0 +1,14 @@
+struct Box<T> {
+    value: T,
+}
+
+class Container<T> {
+    value: T,
+}
+
+fn main() {
+    let box = Box { value: 42 };
+    let container = Container { value: 100 };
+    println(box.value);
+    println(container.value);
+}

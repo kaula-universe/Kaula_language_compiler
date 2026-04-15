@@ -595,6 +595,8 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		p.nextToken()
 		p.log("开始解析函数参数")
 		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+			prevTok := p.curTok
+			
 			if p.curTok.Type == lexer.TOKEN_IDENT {
 				// 第一个 IDENT 是类型，第二个是参数名
 				typeOrName := p.curTok.Value
@@ -611,6 +613,13 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 					p.log("解析参数：%s (无类型)", typeOrName)
 				}
 			}
+			
+			// 如果解析失败，跳过当前 token 避免死循环
+			if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+				p.log("跳过无法解析的参数 token: %s=%q", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+				p.nextToken()
+			}
+			
 			if p.curTok.Type == lexer.TOKEN_COMMA {
 				p.nextToken()
 			}
@@ -625,24 +634,20 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		p.log("开始解析函数体")
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
-				p.log("函数体添加语句：%s", bodyStmt.String())
 			} else {
 				// 如果无法解析，跳过当前 token 避免死循环
 				p.nextToken()
 			}
 		}
-		p.log("函数体解析完成，共 %d 条语句", len(stmt.Body))
 		// 消费 RBRACE
 		if p.curTok.Type == lexer.TOKEN_RBRACE {
 			p.nextToken()
 		}
 	}
-	p.log("函数语句解析完成")
 	return stmt
 }
 
@@ -1476,7 +1481,13 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 			break
 		}
 		
+		prevTok := p.curTok
 		p.nextToken()
+		
+		// 如果 nextToken 后 token 没变，说明无法解析，跳出循环避免死循环
+		if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+			break
+		}
 		
 		// 解析右侧表达式
 		var right ast.Expression
@@ -1745,7 +1756,12 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 		Function: function,
 		Args:     []ast.Expression{},
 	}
+	// 当前 token 是 LPAREN，跳过它
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		return nil
+	}
 	p.nextToken()
+	
 	// 解析泛型参数（如果存在）
 	if p.curTok.Type == lexer.TOKEN_LT {
 		p.nextToken()
@@ -1763,15 +1779,27 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 		}
 	}
 	for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+		prevTok := p.curTok
+		
 		if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
 			p.nextToken()
 			p.nextToken()
 			arg := p.parseExpressionIterative()
-			call.Args = append(call.Args, arg)
+			if arg != nil {
+				call.Args = append(call.Args, arg)
+			}
 		} else {
 			arg := p.parseExpressionIterative()
-			call.Args = append(call.Args, arg)
+			if arg != nil {
+				call.Args = append(call.Args, arg)
+			}
 		}
+		
+		// 如果 parseExpressionIterative 没有消费任何 token，跳过当前 token 避免死循环
+		if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+			p.nextToken()
+		}
+		
 		if p.curTok.Type == lexer.TOKEN_COMMA {
 			p.nextToken()
 		}

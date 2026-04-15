@@ -1,0 +1,6 @@
+fn print<T>(value: T) {
+    println(value);
+}
+
+fn main() {
+}

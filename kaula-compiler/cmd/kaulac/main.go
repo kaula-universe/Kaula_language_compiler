@@ -17,7 +17,7 @@ import (
 func main() {
 	// 初始化超时控制
 	timeout.Init()
-	timeout.SetLimits(1024, 120) // 1GB 内存限制，120 秒时间限制
+	timeout.SetLimits(2048, 120) // 2GB 内存限制，120 秒时间限制
 	
 	// 启动内存监控和 GC 协程
 	go func() {
@@ -88,7 +88,7 @@ func main() {
 	
 	p := parser.NewParser(lex)
 	p.SetErrorCollector(errorCollector)
-	p.EnableLogging(false) // 禁用日志以减少内存分配
+	p.EnableLogging(false) // 禁用日志以提高性能
 	program := p.Parse()
 	
 	// 检查语法分析后
