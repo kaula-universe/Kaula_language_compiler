@@ -6,9 +6,6 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 
-// 包含快速分配器
-#include "../std/memory/fast_alloc.h"
-
 // ==================== 核心配置宏 ====================
 #define KMM_REDZONE_SIZE         8
 #define KMM_REDZONE_PATTERN      0xCD
@@ -17,26 +14,26 @@
 #define KMM_CACHE_LINE_SIZE      64
 
 // ==================== 分层对象阈值 ====================
-#define KMM_SIZE_TINY            (16)
-#define KMM_SIZE_SMALL           (128)
-#define KMM_SIZE_MEDIUM          (1024)
-#define KMM_SIZE_LARGE           (4 * 1024)
+#define KMM_SIZE_TINY            (64)
+#define KMM_SIZE_SMALL           (256)
+#define KMM_SIZE_MEDIUM          (2048)
+#define KMM_SIZE_LARGE           (8 * 1024)
 
 // ==================== 延迟初始化 + 动态扩展配置 ====================
-// 初始容量（0 = 延迟分配）
-#define KMM_ARENA_TINY_INITIAL     (0)
-#define KMM_ARENA_SMALL_INITIAL    (0)
-#define KMM_ARENA_MEDIUM_INITIAL   (0)
+// 初始容量（优化：直接分配，避免延迟检查）
+#define KMM_ARENA_TINY_INITIAL     (64 * 1024)
+#define KMM_ARENA_SMALL_INITIAL    (512 * 1024)
+#define KMM_ARENA_MEDIUM_INITIAL   (2 * 1024 * 1024)
 
-// 最小容量（首次分配时的初始大小）
-#define KMM_ARENA_TINY_MIN         (4 * 1024)
-#define KMM_ARENA_SMALL_MIN        (64 * 1024)
-#define KMM_ARENA_MEDIUM_MIN       (256 * 1024)
+// 最小容量（与初始容量相同，避免二次分配）
+#define KMM_ARENA_TINY_MIN         (64 * 1024)
+#define KMM_ARENA_SMALL_MIN        (512 * 1024)
+#define KMM_ARENA_MEDIUM_MIN       (2 * 1024 * 1024)
 
 // 最大容量（防止无限扩张）
-#define KMM_ARENA_TINY_MAX         (128 * 1024)
-#define KMM_ARENA_SMALL_MAX        (2 * 1024 * 1024)
-#define KMM_ARENA_MEDIUM_MAX       (8 * 1024 * 1024)
+#define KMM_ARENA_TINY_MAX         (256 * 1024)
+#define KMM_ARENA_SMALL_MAX        (4 * 1024 * 1024)
+#define KMM_ARENA_MEDIUM_MAX       (16 * 1024 * 1024)
 
 // 扩展策略：倍增因子
 #define KMM_ARENA_GROWTH_FACTOR    2
@@ -46,11 +43,12 @@
 #define KMM_MAX_DEPENDENCIES       32
 
 // ==================== 特性开关 ====================
-#define KMM_ENABLE_STATS           1
+#define KMM_ENABLE_STATS           0  // 禁用统计以提升性能
 #define KMM_ENABLE_ARENA_RESET     1
-#define KMM_ENABLE_FREE_LIST       0  // 禁用空闲列表，简化设计
-#define KMM_ENABLE_THREAD_CACHE    0
-#define KMM_ENABLE_UNION_DOMAIN    1   // 启用联合域
+#define KMM_ENABLE_FREE_LIST       0
+#define KMM_ENABLE_THREAD_CACHE    1  // 启用线程缓存
+#define KMM_ENABLE_UNION_DOMAIN    1
+#define KMM_ENABLE_UNSAFE          0  // 默认禁用，仅用于特殊场景
 
 // ==================== 前向声明 ====================
 typedef struct kmm_union_node kmm_union_node_t;

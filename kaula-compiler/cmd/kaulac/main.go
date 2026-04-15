@@ -10,6 +10,7 @@ import (
 	"kaula-compiler/internal/sema"
 	"kaula-compiler/internal/timeout"
 	"os"
+	"os/exec"
 	"runtime"
 	"time"
 )
@@ -197,6 +198,13 @@ func main() {
 	
 	// 打印各阶段详细统计
 	printStageStats()
+	
+	// 自动编译生成的 C 代码
+	fmt.Println("\n=== Compiling C code ===")
+	if err := compileCCode(outputFile); err != nil {
+		fmt.Printf("Warning: C compilation failed: %v\n", err)
+		fmt.Println("You can compile manually with: clang <file>.c -o <file>.exe")
+	}
 }
 
 func getMemoryUsage() uint64 {
@@ -214,4 +222,55 @@ func printStageStats() {
 	// 暂时简化处理
 	fmt.Printf("Total compilation completed in %v\n", timeout.GetElapsed())
 	fmt.Println("================================")
+}
+
+func compileCCode(cFile string) error {
+	// 尝试查找 clang 编译器
+	clangPath, err := exec.LookPath("clang")
+	if err != nil {
+		return fmt.Errorf("clang not found in PATH")
+	}
+	
+	// 生成输出文件名：移除 .c 后缀，添加 .exe 后缀（Windows）或空后缀（Unix）
+	var outputFile string
+	if runtime.GOOS == "windows" {
+		outputFile = cFile[:len(cFile)-2] + ".exe" // test.kaula.c -> test.kaula.exe
+	} else {
+		outputFile = cFile[:len(cFile)-2] // test.kaula.c -> test.kaula
+	}
+	
+	// 检查是否存在 kaula_runtime.c（提供 kaula_scope_enter/exit）
+	runtimeStub := "kaula_runtime.c"
+	if _, err := os.Stat(runtimeStub); err == nil {
+		// 存在运行时 stub 文件，一起编译
+		cmd := exec.Command(clangPath, cFile, runtimeStub, "-o", outputFile)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+		}
+		fmt.Printf("C code compiled successfully: %s\n", outputFile)
+		return nil
+	}
+	
+	// 检查是否存在 src/kmm_scoped_allocator_v2.c
+	runtimeFile := "src/kmm_scoped_allocator_v2.c"
+	if _, err := os.Stat(runtimeFile); err == nil {
+		// 存在运行时文件，一起编译
+		cmd := exec.Command(clangPath, cFile, runtimeFile, "-o", outputFile)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+		}
+		fmt.Printf("C code compiled successfully: %s\n", outputFile)
+		return nil
+	}
+	
+	// 没有运行时文件，只编译 C 文件（可能需要外部链接）
+	cmd := exec.Command(clangPath, cFile, "-o", outputFile)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+	}
+	fmt.Printf("C code compiled successfully: %s\n", outputFile)
+	return nil
 }

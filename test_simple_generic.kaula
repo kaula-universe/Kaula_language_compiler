@@ -1,0 +1,8 @@
+struct Box<T> {
+    value: T,
+}
+
+fn main() {
+    Box box = Box;
+    println(42);
+}

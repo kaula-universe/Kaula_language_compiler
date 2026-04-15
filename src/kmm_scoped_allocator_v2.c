@@ -39,6 +39,12 @@ static inline int clock_gettime(int clk_id, struct timespec* ts) {
 #endif
 #endif
 
+// ==================== 内部工具宏 ====================
+#ifndef KMM_LIKELY
+#define KMM_LIKELY(x) __builtin_expect(!!(x), 1)
+#define KMM_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#endif
+
 // ==================== 全局联合域实例 ====================
 #if KMM_ENABLE_UNION_DOMAIN
 kmm_union_domain_t g_union_domain = {0};
@@ -237,30 +243,21 @@ static inline int kmm_arena_expand(kmm_arena_t* arena, size_t additional_size) {
     return 0;
 }
 
-// ==================== Arena 分配（优化路径） ====================
+// ==================== Arena 分配（超快速路径） ====================
 static inline void* kmm_arena_alloc(kmm_arena_t* arena, size_t size, size_t min_capacity, size_t max_capacity) {
     size_t aligned_size = kmm_align_up(size, KMM_ALIGNMENT);
+    size_t new_offset = arena->offset + aligned_size;
     
-    if (KMM_LIKELY(arena->is_initialized)) {
-        size_t new_offset = arena->offset + aligned_size;
-        
-        if (KMM_LIKELY(new_offset <= arena->capacity)) {
-            void* ptr = arena->buffer + arena->offset;
-            arena->offset = new_offset;
-            arena->allocations++;
-            
-            if (new_offset > arena->peak) {
-                arena->peak = new_offset;
-            }
-            
-            return ptr;
-        }
-    } else {
-        if (kmm_arena_ensure_initialized(arena, min_capacity, max_capacity) != 0) {
-            return NULL;
-        }
+    // 超快速路径：无检查，直接分配
+    if (KMM_LIKELY(new_offset <= arena->capacity)) {
+        void* ptr = arena->buffer + arena->offset;
+        arena->offset = new_offset;
+        arena->allocations++;
+        arena->peak = (new_offset > arena->peak) ? new_offset : arena->peak;
+        return ptr;
     }
     
+    // 慢速路径：扩展
     if (kmm_arena_expand(arena, aligned_size) != 0) {
         return NULL;
     }
@@ -268,11 +265,7 @@ static inline void* kmm_arena_alloc(kmm_arena_t* arena, size_t size, size_t min_
     void* ptr = arena->buffer + arena->offset;
     arena->offset += aligned_size;
     arena->allocations++;
-    
-    if (arena->offset > arena->peak) {
-        arena->peak = arena->offset;
-    }
-    
+    arena->peak = (arena->offset > arena->peak) ? arena->offset : arena->peak;
     return ptr;
 }
 
@@ -631,53 +624,31 @@ void kmm_destroy(kmm_context_t* ctx) {
 }
 
 void* kmm_alloc(kmm_context_t* ctx, size_t size, const char* file, int line) {
-#if KMM_ENABLE_STATS
-    ctx->stats.total_allocs++;
-    double start_time = get_time_us();
-#endif
-    
     void* ptr = NULL;
     
+    // 超快速路径 1: 线程缓存（最快）
 #if KMM_ENABLE_THREAD_CACHE
     ptr = kmm_thread_cache_alloc(size);
     if (KMM_LIKELY(ptr)) {
-#if KMM_ENABLE_STATS
-        ctx->stats.arena_hits++;
-        ctx->stats.tiny_total_time += (get_time_us() - start_time);
-#endif
         return ptr;
     }
 #endif
     
+    // 超快速路径 2: Arena 分配
     if (KMM_LIKELY(KMM_IS_TINY(size))) {
         ptr = kmm_arena_alloc_tiny(&ctx->tiny_arena, size);
         if (KMM_LIKELY(ptr)) {
-#if KMM_ENABLE_STATS
-            ctx->stats.tiny_hits++;
-            ctx->stats.arena_hits++;
-            ctx->stats.tiny_total_time += (get_time_us() - start_time);
-#endif
             return ptr;
         }
         
         ptr = kmm_arena_alloc(&ctx->small_arena, size, KMM_ARENA_SMALL_MIN, KMM_ARENA_SMALL_MAX);
         if (ptr) {
-#if KMM_ENABLE_STATS
-            ctx->stats.small_hits++;
-            ctx->stats.arena_hits++;
-            ctx->stats.small_total_time += (get_time_us() - start_time);
-#endif
             return ptr;
         }
     } 
     else if (KMM_LIKELY(KMM_IS_SMALL(size))) {
         ptr = kmm_arena_alloc(&ctx->small_arena, size, KMM_ARENA_SMALL_MIN, KMM_ARENA_SMALL_MAX);
         if (KMM_LIKELY(ptr)) {
-#if KMM_ENABLE_STATS
-            ctx->stats.small_hits++;
-            ctx->stats.arena_hits++;
-            ctx->stats.small_total_time += (get_time_us() - start_time);
-#endif
             return ptr;
         }
         
