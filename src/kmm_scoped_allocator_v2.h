@@ -49,7 +49,7 @@
 #define KMM_ENABLE_STATS           1
 #define KMM_ENABLE_ARENA_RESET     1
 #define KMM_ENABLE_FREE_LIST       0  // 禁用空闲列表，简化设计
-#define KMM_ENABLE_THREAD_CACHE    1
+#define KMM_ENABLE_THREAD_CACHE    0
 #define KMM_ENABLE_UNION_DOMAIN    1   // 启用联合域
 
 // ==================== 前向声明 ====================

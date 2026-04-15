@@ -50,6 +50,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	
 	// 生成函数体
 	for _, bodyStmt := range stmt.Body {
+		if bodyStmt == nil {
+			continue
+		}
 		code += fg.codegen.indentString()
 		code += fg.codegen.generateStatement(bodyStmt)
 	}

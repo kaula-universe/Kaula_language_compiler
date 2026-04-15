@@ -326,7 +326,7 @@ static inline int kmm_register_cleanup(kmm_context_t* ctx, void* ptr) {
 #if KMM_ENABLE_UNION_DOMAIN
 
 static inline kmm_union_node_t* kmm_union_node_alloc(void) {
-    return (kmm_union_node_t*)fast_alloc(sizeof(kmm_union_node_t));
+    return (kmm_union_node_t*)malloc(sizeof(kmm_union_node_t));
 }
 
 static inline bool kmm_union_has_dependency(kmm_union_node_t* node, kmm_union_node_t* target) {
@@ -350,6 +350,10 @@ static inline kmm_union_node_t* kmm_find_node_by_pointer(void* ptr) {
 }
 
 static inline void kmm_union_auto_detect_dependencies(kmm_union_node_t* node) {
+    if (!node->dependencies) {
+        return;
+    }
+    
     void** ptr = (void**)node->object;
     size_t word_count = node->object_size / sizeof(void*);
     
@@ -452,7 +456,7 @@ void kmm_union_set_dependencies(void* obj, void** deps, size_t count) {
         count = KMM_MAX_DEPENDENCIES;
     }
     
-    node->dependencies = (kmm_union_node_t**)fast_alloc(sizeof(kmm_union_node_t*) * count);
+    node->dependencies = (kmm_union_node_t**)malloc(sizeof(kmm_union_node_t*) * count);
     node->dependency_count = count;
     
     for (size_t i = 0; i < count; i++) {
@@ -481,6 +485,10 @@ static inline void kmm_union_promote(kmm_union_node_t* node) {
 }
 
 static inline bool kmm_union_has_active_dependencies(kmm_union_node_t* node) {
+    if (!node->dependencies || node->dependency_count == 0) {
+        return false;
+    }
+    
     for (size_t i = 0; i < node->dependency_count; i++) {
         if (node->dependencies[i]->status != KMM_DOMAIN_LOCAL) {
             return true;
@@ -498,13 +506,12 @@ static inline void kmm_union_topological_sort(kmm_union_node_t** nodes, size_t c
     }
     
     for (size_t i = 0; i < count; i++) {
-        for (size_t j = 0; j < nodes[i]->dependency_count; j++) {
-            kmm_union_node_t* dep = nodes[i]->dependencies[j];
-            nodes[i]->temp_in_degree++;
-        }
+        nodes[i]->temp_in_degree = nodes[i]->dependency_count;
     }
     
-    kmm_union_node_t** queue = (kmm_union_node_t**)fast_alloc(sizeof(kmm_union_node_t*) * count);
+    kmm_union_node_t** queue = (kmm_union_node_t**)malloc(sizeof(kmm_union_node_t*) * count);
+    if (!queue) return;
+    
     size_t queue_front = 0;
     size_t queue_back = 0;
     
@@ -536,6 +543,8 @@ static inline void kmm_union_topological_sort(kmm_union_node_t** nodes, size_t c
         }
     }
     
+    free(queue);
+    
     for (size_t i = 0; i < count; i++) {
         nodes[i]->temp_in_degree = 0;
         nodes[i]->temp_visited = false;
@@ -545,7 +554,9 @@ static inline void kmm_union_topological_sort(kmm_union_node_t** nodes, size_t c
 void kmm_union_destroy(kmm_union_domain_t* domain) {
     if (!domain->root) return;
     
-    kmm_union_node_t** nodes = (kmm_union_node_t**)fast_alloc(sizeof(kmm_union_node_t*) * domain->node_count);
+    kmm_union_node_t** nodes = (kmm_union_node_t**)malloc(sizeof(kmm_union_node_t*) * domain->node_count);
+    if (!nodes) return;
+    
     size_t count = 0;
     
     kmm_union_node_t* current = domain->root;
@@ -564,7 +575,17 @@ void kmm_union_destroy(kmm_union_domain_t* domain) {
                 free(node->object);
             }
         }
+        
+        if (node->dependencies) {
+            free(node->dependencies);
+            node->dependencies = NULL;
+            node->dependency_count = 0;
+        }
+        
+        free(node);
     }
+    
+    free(nodes);
     
     domain->root = NULL;
     domain->current = NULL;

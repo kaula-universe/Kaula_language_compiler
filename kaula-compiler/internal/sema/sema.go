@@ -119,8 +119,11 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 }
 
 // analyzeStatement 分析语句
-func (sa *SemanticAnalyzer) analyzeStatement(stmt ast.Statement) {
-	switch s := stmt.(type) {
+func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
+	if s == nil {
+		return
+	}
+	switch s := s.(type) {
 	case *ast.VOStatement:
 		sa.analyzeVOStatement(s)
 	case *ast.SpendCallStatement:
@@ -161,6 +164,9 @@ func (sa *SemanticAnalyzer) analyzeStatement(stmt ast.Statement) {
 	case *ast.ImportStatement:
 		sa.analyzeImportStatement(s)
 	case *ast.ExpressionStatement:
+		if s == nil || s.Expression == nil {
+			return
+		}
 		sa.analyzeExpression(s.Expression)
 	}
 }

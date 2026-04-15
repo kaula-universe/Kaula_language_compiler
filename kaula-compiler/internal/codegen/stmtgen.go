@@ -21,6 +21,9 @@ func NewStatementGenerator(cg *CodeGenerator) *StatementGenerator {
 
 // GenerateStatement 生成语句代码
 func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
+	if stmt == nil {
+		return ""
+	}
 	// 首先尝试使用插件生成代码
 	if code, ok := sg.codegen.pluginManager.GenerateStatement(stmt, sg.codegen); ok {
 		return code
@@ -64,6 +67,9 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	case *ast.VariableDeclaration:
 		return sg.generateVariableDeclaration(s)
 	case *ast.ExpressionStatement:
+		if s.Expression == nil {
+			return ""
+		}
 		// 检查是否是模块调用（MemberAccessExpression 作为 CallExpression 的函数部分）
 		if callExpr, ok := s.Expression.(*ast.CallExpression); ok {
 			if _, isMemberAccess := callExpr.Function.(*ast.MemberAccessExpression); isMemberAccess {
