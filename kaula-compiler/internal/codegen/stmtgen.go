@@ -118,7 +118,14 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	}
 	
 	if stmt.Value != nil {
-		code += " = " + sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		// 检查是否是结构体字面量的简写（如 Box box = Box）
+		if ident, ok := stmt.Value.(*ast.Identifier); ok && ident != nil {
+			// 检查标识符是否是类型名（结构体名）
+			// 如果是，则生成零初始化
+			code += " = {0}"
+		} else {
+			code += " = " + sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		}
 	} else if stmt.Nullable {
 		// 对于可空类型，如果没有初始化值，初始化为 NULL
 		code += " = NULL"

@@ -1,0 +1,14 @@
+struct Box<T> {
+    value: T,
+}
+
+struct Pair<T, U> {
+    first: T,
+    second: U,
+}
+
+fn main() {
+    Box box = Box;
+    Pair pair = Pair;
+    println(42);
+}
