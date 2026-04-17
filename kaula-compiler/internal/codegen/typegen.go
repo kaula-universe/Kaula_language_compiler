@@ -217,7 +217,7 @@ func (tg *TypeGenerator) GenerateConstructorStatement(className string, construc
 	}
 	code += ") {\n"
 	
-	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = malloc(sizeof(%s));\n", className, className)
+	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className)
 	code += tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n"
 	
 	// 生成构造函数体
@@ -247,7 +247,7 @@ func (tg *TypeGenerator) GenerateGenericConstructorStatement(className string, c
 	}
 	code += ") {\n"
 	
-	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = malloc(sizeof(%s));\n", className, className)
+	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className)
 	code += tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n"
 	
 	// 生成构造函数体

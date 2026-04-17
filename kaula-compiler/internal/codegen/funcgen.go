@@ -33,12 +33,14 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	code += "(void* arg) {\n"
 	fg.codegen.indent++
 	
-	// ========== 新增：注入 ScopedAllocator 作用域入口 ==========
+	// ========== KMM V4 作用域分配器入口 ==========
+	// 使用 KMM_V4_SCOPE_START 宏自动管理内存生命周期
 	code += fg.codegen.indentString()
-	code += "// KMM ScopedAllocator 作用域开始\n"
+	code += "// KMM V4 ScopedAllocator: 自动内存管理开始\n"
 	code += fg.codegen.indentString()
-	code += "kaula_scope_enter();\n"
-	// =========================================================
+	code += "KMM_V4_SCOPE_START {\n"
+	fg.codegen.indent++
+	// ===========================================
 	
 	// 生成参数处理并添加到符号表
 	for _, param := range stmt.Params {
@@ -57,12 +59,13 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		code += fg.codegen.generateStatement(bodyStmt)
 	}
 	
-	// ========== 新增：注入 ScopedAllocator 作用域出口 ==========
+	// ========== KMM V4 作用域分配器出口 ==========
+	fg.codegen.indent--
 	code += fg.codegen.indentString()
-	code += "// KMM ScopedAllocator 作用域结束\n"
+	code += "// KMM V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
 	code += fg.codegen.indentString()
-	code += "kaula_scope_exit();\n"
-	// =========================================================
+	code += "} KMM_V4_SCOPE_END;\n"
+	// ===========================================
 	
 	// 添加默认返回语句
 	code += fg.codegen.indentString() + "return NULL;\n"
@@ -80,12 +83,13 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	code := "int main() {\n"
 	fg.codegen.indent++
 	
-	// ========== 新增：注入 ScopedAllocator 作用域入口 ==========
+	// ========== KMM V4 作用域分配器入口 ==========
 	code += fg.codegen.indentString()
-	code += "// KMM ScopedAllocator 作用域开始\n"
+	code += "// KMM V4 ScopedAllocator: 自动内存管理开始\n"
 	code += fg.codegen.indentString()
-	code += "kaula_scope_enter();\n"
-	// =========================================================
+	code += "KMM_V4_SCOPE_START {\n"
+	fg.codegen.indent++
+	// ===========================================
 	
 	// 生成函数体
 	for _, bodyStmt := range stmt.Body {
@@ -93,12 +97,13 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code += fg.codegen.generateStatement(bodyStmt)
 	}
 	
-	// ========== 新增：注入 ScopedAllocator 作用域出口 ==========
+	// ========== KMM V4 作用域分配器出口 ==========
+	fg.codegen.indent--
 	code += fg.codegen.indentString()
-	code += "// KMM ScopedAllocator 作用域结束\n"
+	code += "// KMM V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
 	code += fg.codegen.indentString()
-	code += "kaula_scope_exit();\n"
-	// =========================================================
+	code += "} KMM_V4_SCOPE_END;\n"
+	// ===========================================
 	
 	// 添加默认返回语句
 	code += fg.codegen.indentString() + "return 0;\n"
