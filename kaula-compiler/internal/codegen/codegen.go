@@ -48,6 +48,21 @@ type CodeGenerator struct {
 	genericInstantiated map[string]bool // 已实例化的泛型
 }
 
+// error 报告错误
+func (cg *CodeGenerator) error(message string) {
+	cg.errors = append(cg.errors, message)
+}
+
+// Errors 返回错误列表
+func (cg *CodeGenerator) Errors() []string {
+	return cg.errors
+}
+
+// HasErrors 检查是否有错误
+func (cg *CodeGenerator) HasErrors() bool {
+	return len(cg.errors) > 0
+}
+
 // NewCodeGenerator 创建一个新的代码生成器
 func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	tm := NewTemplateManager()
@@ -99,21 +114,6 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	return cg
 }
 
-// error 报告错误
-func (cg *CodeGenerator) error(message string) {
-	cg.errors = append(cg.errors, message)
-}
-
-// Errors 返回错误列表
-func (cg *CodeGenerator) Errors() []string {
-	return cg.errors
-}
-
-// HasErrors 检查是否有错误
-func (cg *CodeGenerator) HasErrors() bool {
-	return len(cg.errors) > 0
-}
-
 // Generate 生成代码
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	// 重置第三方库使用追踪
@@ -144,7 +144,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	}
 	
 	// 生成基础包含语句
-	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"std/std.h\"\n#include \"std/memory/memory.h\"\n"
+	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n"
 	
 	// 只添加实际使用的第三方库头文件
 	thirdPartyIncludes := ""

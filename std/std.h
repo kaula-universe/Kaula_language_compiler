@@ -1,6 +1,15 @@
 #ifndef STD_H
 #define STD_H
 
+// 跨平台支持
+#if defined(_WIN32) || defined(_WIN64)
+    #define STD_PLATFORM_WINDOWS 1
+    #define STD_PLATFORM_UNIX 0
+#else
+    #define STD_PLATFORM_WINDOWS 0
+    #define STD_PLATFORM_UNIX 1
+#endif
+
 // 基础数据类型
 #include "base/types.h"
 
@@ -12,6 +21,9 @@
 
 // 字符串处理
 #include "string/string.h"
+
+// 格式化库
+#include "format/format.h"
 
 // 容器和数据结构
 #include "container/container.h"
@@ -29,7 +41,7 @@
 // 错误处理
 #include "error/error.h"
 
-// Kaula核心机制
+// Kaula 核心机制
 #include "vo/vo.h"
 #include "prefix/prefix.h"
 #include "task/task.h"

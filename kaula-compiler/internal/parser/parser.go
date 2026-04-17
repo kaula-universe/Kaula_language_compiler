@@ -5,6 +5,7 @@ import (
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/errors"
 	"kaula-compiler/internal/lexer"
+	"kaula-compiler/internal/stdlib"
 	"log"
 	"os"
 	"strconv"
@@ -167,10 +168,15 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 		return p.parseReturnStatementIterative()
 	case lexer.TOKEN_IMPORT:
 		return p.parseImportStatementIterative()
+	case lexer.TOKEN_EXPORT:
+		return p.parseExportStatementIterative()
 	case lexer.TOKEN_NONLOCAL:
 		return p.parseNonLocalStatementIterative()
 	case lexer.TOKEN_PRINTLN:
 		return p.parseExpressionStatementIterative()
+	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE, lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING, lexer.TOKEN_TYPE_VOID:
+		// 类型关键字开头，尝试解析变量声明
+		return p.parseVariableDeclarationIterative()
 	case lexer.TOKEN_IDENT:
 		if p.peekTok.Type == lexer.TOKEN_IDENT || p.peekTok.Type == lexer.TOKEN_QUESTION || p.peekTok.Type == lexer.TOKEN_MULTIPLY || p.peekTok.Type == lexer.TOKEN_LT {
 			if stmt := p.parseVariableDeclarationIterative(); stmt != nil {
@@ -194,12 +200,24 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 }
 
 // parseVariableDeclarationIterative 迭代解析变量声明
+// 语法：类型 变量名 [= 表达式]
+// 例如：int x = 10  或者  int x
 func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 	stmt := &ast.VariableDeclaration{}
 	
-	// 解析类型（可能是泛型类型如 Box<int>）
-	if p.curTok.Type == lexer.TOKEN_IDENT {
-		typeName := p.curTok.Value
+	// 首先检查是否有类型关键字
+	var typeName string
+	
+	// 检查是否是基本类型关键字（int, float, string 等）
+	if p.isTypeToken(p.curTok.Type) {
+		typeName = lexer.TokenTypeToString(p.curTok.Type)
+		typeName = strings.TrimPrefix(typeName, "TYPE_")
+		// 转换为小写（如 "INT" -> "int"）
+		typeName = strings.ToLower(typeName)
+		p.nextToken()
+	} else if p.curTok.Type == lexer.TOKEN_IDENT {
+		// 可能是自定义类型（如类名、结构体名等）
+		typeName = p.curTok.Value
 		p.nextToken()
 		
 		// 检查是否是泛型类型（如 Box<int>）
@@ -228,62 +246,45 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 				typeName += ">"
 			}
 		}
-		
-		stmt.Type = typeName
-		
-		// 检查是否是指针类型（*）或可空类型（?）
-		if p.curTok.Type == lexer.TOKEN_QUESTION {
-			stmt.Nullable = true
-			p.nextToken()
-		} else if p.curTok.Type == lexer.TOKEN_MULTIPLY {
-			// 指针类型，在类型名后添加 *
-			stmt.Type = stmt.Type + "*"
-			p.nextToken()
-		}
-		
-		// 现在 curTok 应该是变量名
-		if p.curTok.Type == lexer.TOKEN_IDENT {
-			stmt.Name = p.curTok.Value
-			p.nextToken()
-			
-			// 检查是否有赋值
-			if p.curTok.Type == lexer.TOKEN_ASSIGN {
-				p.nextToken()
-				stmt.Value = p.parseExpressionIterative()
-			}
-			return stmt
-		}
-	} else if p.isTypeToken(p.curTok.Type) {
-		// 普通类型（如 int, string 等）
-		stmt.Type = lexer.TokenTypeToString(p.curTok.Type)
-		// 移除 TYPE_ 前缀
-		stmt.Type = strings.TrimPrefix(stmt.Type, "TYPE_")
-		p.nextToken()
-		
-		// 检查是否是指针类型（*）或可空类型（?）
-		if p.curTok.Type == lexer.TOKEN_QUESTION {
-			stmt.Nullable = true
-			p.nextToken()
-		} else if p.curTok.Type == lexer.TOKEN_MULTIPLY {
-			// 指针类型，在类型名后添加 *
-			stmt.Type = stmt.Type + "*"
-			p.nextToken()
-		}
-		
-		// 现在 curTok 应该是变量名
-		if p.curTok.Type == lexer.TOKEN_IDENT {
-			stmt.Name = p.curTok.Value
-			p.nextToken()
-			
-			// 检查是否有赋值
-			if p.curTok.Type == lexer.TOKEN_ASSIGN {
-				p.nextToken()
-				stmt.Value = p.parseExpressionIterative()
-			}
-			return stmt
-		}
+	} else {
+		// 不是类型，返回 nil
+		return nil
 	}
-	return nil
+	
+	// 现在必须有变量名
+	// 检查是否是指针类型（*）在变量名前面
+	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+		// 指针类型，在类型名后添加 *
+		typeName = typeName + "*"
+		p.nextToken()
+	}
+	
+	if p.curTok.Type != lexer.TOKEN_IDENT {
+		p.error(fmt.Sprintf("变量声明缺少变量名，当前 token: %s", lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
+	
+	stmt.Type = typeName
+	stmt.Name = p.curTok.Value
+	p.nextToken()
+	
+	// 检查是否是指针类型（*）或可空类型（?）
+	if p.curTok.Type == lexer.TOKEN_QUESTION {
+		stmt.Nullable = true
+		p.nextToken()
+	} else if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+		// 指针类型，在类型名后添加 *
+		stmt.Type = stmt.Type + "*"
+		p.nextToken()
+	}
+	
+	// 检查是否有赋值
+	if p.curTok.Type == lexer.TOKEN_ASSIGN {
+		p.nextToken()
+		stmt.Value = p.parseExpressionIterative()
+	}
+	
+	return stmt
 }
 
 // isTypeToken 检查是否是类型关键字
@@ -515,6 +516,12 @@ func (p *Parser) parsePrefixStatementIterative() *ast.PrefixStatement {
 				stmt.Body = append(stmt.Body, bodyStmt)
 			}
 			if p.curTok.Type != lexer.TOKEN_RBRACE {
+				// 检查当前 token 是否是 IDENT 且下一个 token 是 ASSIGN
+				// 如果是，说明这是下一个赋值语句的开始，不要调用 nextToken()
+				if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
+					// 跳过 nextToken()，直接继续循环
+					continue
+				}
 				p.nextToken()
 			}
 		}
@@ -744,6 +751,22 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 				stmt.Body = append(stmt.Body, bodyStmt)
 			}
 			if p.curTok.Type != lexer.TOKEN_RBRACE {
+				// 检查当前 token 是否是语句开头（IDENT、类型关键字、WHILE 等）
+				// 如果是，说明这是下一个语句的开始，不要调用 nextToken()
+				isStmtStart := p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN ||
+					p.curTok.Type == lexer.TOKEN_TYPE_INT ||
+					p.curTok.Type == lexer.TOKEN_TYPE_FLOAT ||
+					p.curTok.Type == lexer.TOKEN_TYPE_DOUBLE ||
+					p.curTok.Type == lexer.TOKEN_TYPE_BOOL ||
+					p.curTok.Type == lexer.TOKEN_WHILE ||
+					p.curTok.Type == lexer.TOKEN_FOR ||
+					p.curTok.Type == lexer.TOKEN_IF ||
+					p.curTok.Type == lexer.TOKEN_RETURN ||
+					p.curTok.Type == lexer.TOKEN_PRINTLN
+				if isStmtStart {
+					// 跳过 nextToken()，直接继续循环
+					continue
+				}
 				p.nextToken()
 			}
 		}
@@ -799,6 +822,22 @@ func (p *Parser) parseWhileStatementIterative() *ast.WhileStatement {
 				stmt.Body = append(stmt.Body, bodyStmt)
 			}
 			if p.curTok.Type != lexer.TOKEN_RBRACE {
+				// 检查当前 token 是否是语句开头（IDENT、类型关键字、WHILE 等）
+				// 如果是，说明这是下一个语句的开始，不要调用 nextToken()
+				isStmtStart := p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN ||
+					p.curTok.Type == lexer.TOKEN_TYPE_INT ||
+					p.curTok.Type == lexer.TOKEN_TYPE_FLOAT ||
+					p.curTok.Type == lexer.TOKEN_TYPE_DOUBLE ||
+					p.curTok.Type == lexer.TOKEN_TYPE_BOOL ||
+					p.curTok.Type == lexer.TOKEN_WHILE ||
+					p.curTok.Type == lexer.TOKEN_FOR ||
+					p.curTok.Type == lexer.TOKEN_IF ||
+					p.curTok.Type == lexer.TOKEN_RETURN ||
+					p.curTok.Type == lexer.TOKEN_PRINTLN
+				if isStmtStart {
+					// 跳过 nextToken()，直接继续循环
+					continue
+				}
 				p.nextToken()
 			}
 		}
@@ -979,6 +1018,60 @@ func (p *Parser) parseImportStatementIterative() *ast.ImportStatement {
 			}
 		}
 	}
+	return stmt
+}
+
+// parseExportStatementIterative 迭代解析 export 语句
+func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	stmt := &ast.ExportStatement{
+		Pos: pos,
+	}
+	
+	// 消耗 export 关键字
+	p.nextToken()
+	
+	// 解析导出类型（可选）
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		// 检查是否是类型关键字
+		lookahead := p.peekTok
+		if lookahead.Type == lexer.TOKEN_IDENT || lookahead.Type == lexer.TOKEN_LPAREN {
+			// 可能是导出函数：export fn name()
+			switch p.curTok.Value {
+			case "fn", "func", "function":
+				stmt.Type = "function"
+				p.nextToken()
+			case "class":
+				stmt.Type = "class"
+				p.nextToken()
+			case "obj", "object":
+				stmt.Type = "object"
+				p.nextToken()
+			case "var", "let", "const":
+				stmt.Type = "variable"
+				p.nextToken()
+			default:
+				// 没有类型，直接是名称
+				stmt.Type = "function" // 默认是函数
+			}
+		} else {
+			// 直接是名称
+			stmt.Type = "function" // 默认是函数
+		}
+	}
+	
+	// 解析导出名称
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		stmt.Name = p.curTok.Value
+		p.nextToken()
+	} else {
+		p.error("export 语句后应该跟标识符")
+	}
+	
 	return stmt
 }
 
@@ -1551,8 +1644,8 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 		// 解析右侧表达式
 		var right ast.Expression
 		if op == lexer.TOKEN_ASSIGN {
-			// 赋值运算符是右结合的，使用 precedence - 1
-			right = p.parseBinaryExpressionIterative(opPrecedence)
+			// 赋值运算符是右结合的，使用 precedence - 1 以允许连续的赋值
+			right = p.parseBinaryExpressionIterative(opPrecedence - 1)
 		} else {
 			// 其他运算符是左结合的，使用相同的优先级
 			right = p.parseBinaryExpressionIterative(opPrecedence)
@@ -2069,6 +2162,19 @@ func (p *Parser) Validate(program *ast.Program) {
 		// 系统模块
 		"windows":    true,
 		"syscall":    true,
+	}
+	
+	// 加载第三方库配置，将第三方库名称添加到有效模块列表
+	// 尝试多个路径
+	stdlibPaths := []string{"stdlib.json", "kaula-compiler/stdlib.json", "../stdlib.json"}
+	for _, path := range stdlibPaths {
+		stdlibConfig, err := stdlib.LoadStdlibConfig(path)
+		if err == nil && stdlibConfig != nil {
+			for _, lib := range stdlibConfig.ThirdParty {
+				validModules[lib.Name] = true
+			}
+			break // 加载成功后退出
+		}
 	}
 	
 	for _, stmt := range program.Statements {

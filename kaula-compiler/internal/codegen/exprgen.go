@@ -128,14 +128,14 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
 		return left + " % " + right
-	case "EQ":
+	case "EQ", "==":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
-		return "object_equals((Object*)" + left + ", (Object*)" + right + ")"
-	case "NE":
+		return left + " == " + right
+	case "NE", "!=":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
-		return "!object_equals((Object*)" + left + ", (Object*)" + right + ")"
+		return left + " != " + right
 	case "LT", "<":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
@@ -212,6 +212,13 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	
 	funcName := eg.GenerateExpression(e.Function)
 	
+	// 追踪第三方库的使用
+	if eg.codegen.stdlibConfig != nil {
+		if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(funcName); isThirdParty {
+			eg.codegen.usedThirdPartyLibs[lib.Name] = true
+		}
+	}
+	
 	// 直接使用标准库中定义的 println 函数
 	if funcName == "println" {
 		return eg.generatePrintlnCall(e.Args)
@@ -219,21 +226,13 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	
 	// 其他函数调用
 	code := funcName + "("
-	// 如果没有参数，传递 NULL
+	// 如果没有参数，传递 0
 	if len(e.Args) == 0 {
-		code += "NULL"
+		code += "0"
 	} else {
-		// 传递第一个参数，并进行类型转换（假设只有一个参数）
+		// 传递第一个参数
 		argCode := eg.GenerateExpression(e.Args[0])
-		// 检查参数是否是整数类型或整数常量，如果是，需要转换为 void*
-		if strings.HasPrefix(argCode, "i64") || strings.HasPrefix(argCode, "int") {
-			code += "(void*)(intptr_t)" + argCode
-		} else if isIntegerLiteral(argCode) {
-			// 整数常量也需要转换
-			code += "(void*)(intptr_t)(" + argCode + ")"
-		} else {
-			code += argCode
-		}
+		code += argCode
 	}
 	code += ")"
 	return code
@@ -262,6 +261,11 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 			
 			// 检查 stdlib.json 中是否有这个函数
 			if _, funcExists := module.Functions[funcName]; funcExists {
+				// 追踪第三方库的使用
+				if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(funcName); isThirdParty {
+					eg.codegen.usedThirdPartyLibs[lib.Name] = true
+				}
+				
 				code := funcName + "("
 				for i, arg := range args {
 					if i > 0 {
@@ -347,8 +351,8 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 			}
 		} else {
 			// 检查参数类型，选择正确的格式
-			// 如果是整数字面量或看起来像整数的表达式，使用 %d
-			if isIntegerLiteral(arg) {
+			// 如果是整数字面量、变量或看起来像整数的表达式，使用 %d
+			if isIntegerLiteral(arg) || isIdentifier(arg) {
 				code := "printf(\"%d\\n\", " + arg + ")"
 				return code
 			}
@@ -370,6 +374,13 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 	}
 	
 	return ""
+}
+
+// isIdentifier 检查是否是标识符（变量）
+func isIdentifier(code string) bool {
+	// 匹配标识符（字母开头，后跟字母、数字或下划线）
+	matched, _ := regexp.MatchString(`^[a-zA-Z_][a-zA-Z0-9_]*$`, code)
+	return matched
 }
 
 // generatePrefixCallExpression 生成前缀调用表达式代码

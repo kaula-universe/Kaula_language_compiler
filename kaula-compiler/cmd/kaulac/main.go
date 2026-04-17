@@ -11,6 +11,7 @@ import (
 	"kaula-compiler/internal/timeout"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -50,6 +51,14 @@ func main() {
 	}
 
 	inputFile := os.Args[len(os.Args)-1] // 最后一个参数是输入文件
+	
+	// 检查文件扩展名是否为 .kl
+	if len(inputFile) < 4 || inputFile[len(inputFile)-3:] != ".kl" {
+		fmt.Printf("Error: Input file must have .kl extension (got: %s)\n", inputFile)
+		fmt.Println("Usage: kaulac <input.kl>")
+		os.Exit(1)
+	}
+	
 	data, err := os.ReadFile(inputFile)
 	if err != nil {
 		fmt.Printf("Error reading file: %v\n", err)
@@ -169,29 +178,43 @@ func main() {
 	}
 	timeout.EndStage("codegen")
 
-	// 代码生成器接口没有错误检查方法，暂时注释掉
-	// // 检查代码生成错误
-	// if cg.HasErrors() {
-	// 	fmt.Println("Errors found during code generation:")
-	// 	for _, err := range cg.Errors() {
-	// 		fmt.Printf("Code generation error: %s\n", err)
-	// 	}
-	// 	os.Exit(1)
-	// }
+	// 检查代码生成错误
+	if cg.HasErrors() {
+		fmt.Println("Errors found during code generation:")
+		for _, err := range cg.Errors() {
+			fmt.Printf("Code generation error: %s\n", err)
+		}
+		os.Exit(1)
+	}
 
 	// 输出结果
 	fmt.Println("Generated code:")
 	fmt.Println(output)
 
-	// 保存到文件
-	outputFile := inputFile + ".c"
-	err = os.WriteFile(outputFile, []byte(output), 0644)
+	// 获取输入文件的目录和文件名
+	inputDir := filepath.Dir(inputFile)
+	inputBase := filepath.Base(inputFile)
+	inputName := inputBase[:len(inputBase)-3] // 去掉 .kl 后缀
+	
+	// 在父目录创建 cache 目录
+	cwd, _ := os.Getwd()
+	cacheDir := filepath.Join(cwd, "cache")
+	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(cacheDir, 0755); err != nil {
+			fmt.Printf("Error creating cache directory: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	
+	// 保存到 cache 目录
+	cacheFile := filepath.Join(cacheDir, inputName+".c")
+	err = os.WriteFile(cacheFile, []byte(output), 0644)
 	if err != nil {
 		fmt.Printf("Error writing output file: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Code generated successfully and saved to %s\n", outputFile)
+	fmt.Printf("Code generated successfully and saved to %s\n", cacheFile)
 	fmt.Printf("Total time: %v, Memory: %dMB\n", 
 		timeout.GetElapsed(), 
 		getMemoryUsage())
@@ -201,7 +224,11 @@ func main() {
 	
 	// 自动编译生成的 C 代码
 	fmt.Println("\n=== Compiling C code ===")
-	if err := compileCCode(outputFile); err != nil {
+	outputExe := filepath.Join(inputDir, inputName+".exe")
+	if runtime.GOOS != "windows" {
+		outputExe = filepath.Join(inputDir, inputName)
+	}
+	if err := compileCCode(cacheFile, outputExe, inputDir); err != nil {
 		fmt.Printf("Warning: C compilation failed: %v\n", err)
 		fmt.Println("You can compile manually with: clang <file>.c -o <file>.exe")
 	}
@@ -224,89 +251,57 @@ func printStageStats() {
 	fmt.Println("================================")
 }
 
-func compileCCode(cFile string) error {
+func compileCCode(cFile string, outputFile string, workDir string) error {
 	// 尝试查找 clang 编译器
 	clangPath, err := exec.LookPath("clang")
 	if err != nil {
 		return fmt.Errorf("clang not found in PATH")
 	}
 	
-	// 生成输出文件名：从 .kaula.c 文件名生成简洁的 .exe 文件名
-	// 例如：test.kaula.c -> test.exe
-	var outputFile string
+	// 获取项目根目录（当前工作目录）
+	cwd, _ := os.Getwd()
 	
-	// 移除 .c 后缀
-	cFileNoExt := cFile
-	if len(cFileNoExt) > 2 && cFileNoExt[len(cFileNoExt)-2:] == ".c" {
-		cFileNoExt = cFileNoExt[:len(cFileNoExt)-2]
+	// 尝试多个路径：当前目录、父目录
+	srcPaths := []string{
+		filepath.Join(cwd, "src"),
+		filepath.Join(cwd, "..", "src"),
+	}
+	stdPaths := []string{
+		filepath.Join(cwd, "std"),
+		filepath.Join(cwd, "..", "std"),
 	}
 	
-	// 移除 .kaula 后缀
-	if len(cFileNoExt) > 6 && cFileNoExt[len(cFileNoExt)-6:] == ".kaula" {
-		cFileNoExt = cFileNoExt[:len(cFileNoExt)-6]
-	}
-	
-	// 添加 .exe 后缀（Windows）或不添加（Unix）
-	if runtime.GOOS == "windows" {
-		outputFile = cFileNoExt + ".exe"
-	} else {
-		outputFile = cFileNoExt
-	}
-	
-	// 检查是否存在 kaula_runtime_simple.c（简化版运行时，用于测试）
-	simpleRuntime := "kaula_runtime_simple.c"
-	if _, err := os.Stat(simpleRuntime); err == nil {
-		// 存在简化版运行时文件，一起编译
-		cmd := exec.Command(clangPath, cFile, simpleRuntime, "-o", outputFile)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+	// 检查哪个路径存在
+	var validSrcPaths []string
+	var validStdPaths []string
+	for _, p := range srcPaths {
+		if _, err := os.Stat(p); err == nil {
+			validSrcPaths = append(validSrcPaths, p)
 		}
-		fmt.Printf("C code compiled successfully: %s\n", outputFile)
-		return nil
 	}
-	
-	// 检查是否存在 std/memory/memory.c（包含 kaula_scope_enter/exit）
-	memoryRuntime := "std/memory/memory.c"
-	if _, err := os.Stat(memoryRuntime); err == nil {
-		// 存在运行时文件，一起编译
-		cmd := exec.Command(clangPath, cFile, memoryRuntime, "-o", outputFile)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+	for _, p := range stdPaths {
+		if _, err := os.Stat(p); err == nil {
+			validStdPaths = append(validStdPaths, p)
 		}
-		fmt.Printf("C code compiled successfully: %s\n", outputFile)
-		return nil
 	}
 	
-	// 检查是否存在 kaula_runtime.c（备用）
-	runtimeStub := "kaula_runtime.c"
-	if _, err := os.Stat(runtimeStub); err == nil {
-		// 存在运行时 stub 文件，一起编译
-		cmd := exec.Command(clangPath, cFile, runtimeStub, "-o", outputFile)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
-		}
-		fmt.Printf("C code compiled successfully: %s\n", outputFile)
-		return nil
+	// 构建 clang 参数，使用 -O3 优化级别
+	clangArgs := []string{cFile, "-o", outputFile, "-O3"}
+	for _, p := range validSrcPaths {
+		clangArgs = append(clangArgs, "-I", p)
+	}
+	for _, p := range validStdPaths {
+		clangArgs = append(clangArgs, "-I", p)
 	}
 	
-	// 检查是否存在 src/kmm_scoped_allocator_v2.c
-	runtimeFile := "src/kmm_scoped_allocator_v2.c"
+	// 检查是否存在运行时文件
+	runtimeFile := filepath.Join(cwd, "src", "kmm_scoped_allocator.c")
 	if _, err := os.Stat(runtimeFile); err == nil {
 		// 存在运行时文件，一起编译
-		cmd := exec.Command(clangPath, cFile, runtimeFile, "-o", outputFile)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
-		}
-		fmt.Printf("C code compiled successfully: %s\n", outputFile)
-		return nil
+		clangArgs = append(clangArgs, runtimeFile)
 	}
 	
-	// 没有运行时文件，只编译 C 文件（可能需要外部链接）
-	cmd := exec.Command(clangPath, cFile, "-o", outputFile)
+	cmd := exec.Command(clangPath, clangArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))

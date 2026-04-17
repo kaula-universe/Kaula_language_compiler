@@ -12,6 +12,12 @@ type Generator interface {
 	
 	// RegisterPlugin 注册插件
 	RegisterPlugin(plugin Plugin)
+	
+	// HasErrors 检查是否有错误
+	HasErrors() bool
+	
+	// Errors 返回错误列表
+	Errors() []string
 }
 
 // NewGenerator 创建一个新的代码生成器

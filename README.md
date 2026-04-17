@@ -42,7 +42,8 @@ Kaula/
 │   └── go.mod
 ├── src/                     # 运行时系统（C 实现）
 │   ├── kaula.h              # 核心头文件
-│   ├── kmm_scoped_allocator_v2.c  # 作用域分配器
+│   ├── kmm_scoped_allocator.c   # 作用域分配器（增强版 V4：Arena + ThreadCache + SafeAlloc）
+│   ├── kmm_scoped_allocator_v4.h # V4 核心头文件
 │   ├── allocator.c          # 快速分配器
 │   ├── vo.c                 # VO 系统
 │   ├── spend_call.c         # Spend/Call机制

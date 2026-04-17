@@ -3,7 +3,6 @@ package codegen
 import (
 	"fmt"
 	"kaula-compiler/internal/ast"
-	"kaula-compiler/internal/core"
 	"strings"
 )
 
@@ -22,7 +21,6 @@ func NewStatementGenerator(cg *CodeGenerator) *StatementGenerator {
 // GenerateStatement 生成语句代码
 func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	if stmt == nil {
-		fmt.Printf("DEBUG: GenerateStatement received nil statement\n")
 		return ""
 	}
 	// 首先尝试使用插件生成代码
@@ -63,6 +61,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.generateReturnStatement(s)
 	case *ast.ImportStatement:
 		return sg.generateImportStatement(s)
+	case *ast.ExportStatement:
+		return sg.generateExportStatement(s)
 	case *ast.NonLocalStatement:
 		return sg.generateNonLocalStatement(s)
 	case *ast.VariableDeclaration:
@@ -136,29 +136,29 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 
 // generateVOStatement 生成 VO 语句代码
 func (sg *StatementGenerator) generateVOStatement(stmt *ast.VOStatement) string {
-	code := fmt.Sprintf("VO* vo = std_vo_create(%d);\n", sg.codegen.config.VOCacheSize)
+	code := fmt.Sprintf("VOModule* vo = vo_create(%d);\n", sg.codegen.config.VOCacheSize)
 	if stmt.Value != nil {
 		code += "// Load data\n"
-		code += "std_vo_data_load(vo, 0, "
+		code += "vo_data_load(vo, 0, "
 		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 		code += ");\n"
 	}
 	if stmt.Code != nil {
 		code += "// Load code\n"
-		code += "std_vo_code_load(vo, -1, "
+		code += "vo_code_load(vo, -1, "
 		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Code)
 		code += ");\n"
 	}
 	// 处理 associate 操作
 	code += "// Associate data and code\n"
-	code += "std_vo_associate(vo, 0, -1);\n"
+	code += "vo_associate(vo, 0, -1);\n"
 	if stmt.Access != nil {
 		code += "// Access data\n"
-		code += "void* result = std_vo_access(vo, "
+		code += "void* result = vo_access(vo, "
 		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Access)
 		code += ");\n"
 	}
-	code += "std_vo_destroy(vo);\n"
+	code += "// VO cleanup handled by KMM\n"
 	return code
 }
 
@@ -172,7 +172,7 @@ func (sg *StatementGenerator) generateSpendCallStatement(stmt *ast.SpendCallStat
 		code += ");\n"
 	}
 	for i, callStmt := range stmt.Calls {
-		code += "// Call component " + fmt.Sprintf("%d\n", i+1)
+		code += fmt.Sprintf("// Call component %d\n", i+1)
 		code += "void* component = spendable_call(sp);\n"
 		code += "// Process component\n"
 		// 处理 call 语句的 body
@@ -186,6 +186,7 @@ func (sg *StatementGenerator) generateSpendCallStatement(stmt *ast.SpendCallStat
 			code += sg.codegen.indentString() + "}\n"
 		}
 	}
+	code += "// Spendable cleanup handled by KMM\n"
 	return code
 }
 
@@ -209,10 +210,8 @@ func (sg *StatementGenerator) generateTaskStatement(stmt *ast.TaskStatement) str
 	}
 	code += ");\n"
 	code += "// Execute task\n"
-	code += "priority_queue_execute_next(pq);\n"
-	// 添加内存释放逻辑
-	code += "// Cleanup\n"
-	code += "// Note: PriorityQueue uses fast_alloc, no need to free\n"
+	code += "void* result = priority_queue_execute_next(pq);\n"
+	code += "// Task cleanup handled by KMM\n"
 	return code
 }
 
@@ -231,31 +230,21 @@ func (sg *StatementGenerator) generatePrefixStatement(stmt *ast.PrefixStatement)
 	}
 	
 	code += "prefix_leave();\n"
-	code += "prefix_system_destroy(prefix_system);\n"
+	code += "// Prefix cleanup handled by KMM\n"
 	return code
 }
 
 // generateTreeStatement 生成 tree 语句代码
 func (sg *StatementGenerator) generateTreeStatement(stmt *ast.TreeStatement) string {
-	// 在 TreeManager 中创建树结构
-	if stmt.Root != nil {
-		rootValue := sg.codegen.expressionGenerator.GenerateExpression(stmt.Root)
-		rootNode := core.NewTreeNode(rootValue)
-		sg.codegen.treeManager.AddNode(sg.codegen.treeManager.Root, rootNode)
-	}
-	
-	// 生成 C 代码，使用简单的实现
 	code := "// Tree structure implementation\n"
-	code += "// Create a simple tree structure\n"
-	
-	// 创建根节点
+	code += "Tree* tree = tree_create();\n"
 	if stmt.Root != nil {
-		code += "// Create root node\n"
-		code += "int root_value = " + sg.codegen.expressionGenerator.GenerateExpression(stmt.Root) + ";\n"
-		code += "// Print tree structure\n"
-		code += "printf(\"Tree root value: %d\\n\", root_value);\n"
+		code += "// Set root value\n"
+		code += "tree_set_root(tree, "
+		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Root)
+		code += ");\n"
 	}
-	
+	code += "// Tree cleanup handled by KMM\n"
 	return code
 }
 
@@ -399,7 +388,7 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 	if stmt.Value != nil {
 		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 	} else {
-		code += "NULL"
+		code += "0"
 	}
 	code += ";\n"
 	return code
@@ -409,6 +398,32 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 func (sg *StatementGenerator) generateImportStatement(stmt *ast.ImportStatement) string {
 	// import 语句在 C 中不需要特殊处理
 	return ""
+}
+
+// generateExportStatement 生成 export 语句代码
+func (sg *StatementGenerator) generateExportStatement(stmt *ast.ExportStatement) string {
+	code := ""
+	
+	// 根据导出类型生成不同的代码
+	switch stmt.Type {
+	case "function":
+		code += fmt.Sprintf("// Export function: %s\n", stmt.Name)
+		code += fmt.Sprintf("KAULA_EXPORT %s;\n", stmt.Name)
+	case "class":
+		code += fmt.Sprintf("// Export class: %s\n", stmt.Name)
+		code += fmt.Sprintf("KAULA_EXPORT %s;\n", stmt.Name)
+	case "object":
+		code += fmt.Sprintf("// Export object: %s\n", stmt.Name)
+		code += fmt.Sprintf("KAULA_EXPORT %s_obj;\n", stmt.Name)
+	case "variable":
+		code += fmt.Sprintf("// Export variable: %s\n", stmt.Name)
+		code += fmt.Sprintf("KAULA_EXPORT %s;\n", stmt.Name)
+	default:
+		code += fmt.Sprintf("// Export: %s (%s)\n", stmt.Name, stmt.Type)
+		code += fmt.Sprintf("KAULA_EXPORT %s;\n", stmt.Name)
+	}
+	
+	return code
 }
 
 // generateNonLocalStatement 生成 nonlocal 语句代码

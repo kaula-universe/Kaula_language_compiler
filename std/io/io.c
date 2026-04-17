@@ -1,67 +1,34 @@
 #include "io.h"
-#include <stdio.h>
-#include <stdarg.h>
+#include "../format/format.h"
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
+#include <stdarg.h>
 
-// 为Windows平台提供getline函数的替代实现
-#ifdef _WIN32
-#include <io.h>
-#include <fcntl.h>
-
-ssize_t getline(char** lineptr, size_t* n, FILE* stream) {
-    if (!lineptr || !n || !stream) {
-        return -1;
-    }
-    
-    if (*lineptr == NULL || *n == 0) {
-        *n = 128;
-        *lineptr = (char*)malloc(*n);
-        if (*lineptr == NULL) {
-            return -1;
-        }
-    }
-
-    size_t pos = 0;
-    int c;
-    while ((c = fgetc(stream)) != EOF) {
-        if (pos + 1 >= *n) {
-            size_t new_size = *n * 2;
-            if (new_size > 10 * 1024 * 1024) {
-                return -1;
-            }
-            char* new_line = (char*)realloc(*lineptr, new_size);
-            if (new_line == NULL) {
-                return -1;
-            }
-            *lineptr = new_line;
-            *n = new_size;
-        }
-        (*lineptr)[pos++] = (char)c;
-        if (c == '\n') {
-            break;
-        }
-    }
-
-    if (pos == 0 && c == EOF) {
-        return -1;
-    }
-
-    (*lineptr)[pos] = '\0';
-    return (ssize_t)pos;
-}
-
-// 为Windows平台提供S_ISREG和S_ISDIR宏
-#define S_ISREG(mode) (((mode) & S_IFMT) == S_IFREG)
-#define S_ISDIR(mode) (((mode) & S_IFMT) == S_IFDIR)
+#if STD_PLATFORM_WINDOWS
+    #include <direct.h>
+    #include <io.h>
+    #include <windows.h>
+    #define ACCESS _access
+    #define STAT _stat64
+    #define MKDIR(path) _mkdir(path)
+    #define RMDIR _rmdir
+    #define GETCWD _getcwd
+    #define CHDIR _chdir
+#else
+    #include <unistd.h>
+    #include <sys/stat.h>
+    #include <sys/types.h>
+    #include <dirent.h>
+    #define ACCESS access
+    #define STAT stat
+    #define MKDIR(path) mkdir(path, 0755)
+    #define RMDIR rmdir
+    #define GETCWD getcwd
+    #define CHDIR chdir
 #endif
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
+// ==================== 标准输入输出实现 ====================
 
-// 标准输入输出函数
 void print(const char* format, ...) {
     va_list args;
     va_start(args, format);
@@ -82,87 +49,229 @@ void print_char(char c) {
 }
 
 void print_int(i64 value) {
-    printf("%lld", value);
+    printf("%lld", (long long)value);
 }
 
 void print_float(f64 value) {
-    printf("%lf", value);
+    printf("%f", value);
 }
 
 void print_bool(bool value) {
-    printf(value ? "true" : "false");
+    printf("%s", value ? "true" : "false");
 }
 
-// 标准输入函数
-char read_char() {
-    return getchar();
+// ==================== 跨平台路径操作实现 ====================
+
+char* path_join(const char* path1, const char* path2) {
+    if (!path1 || !path2) {
+        return NULL;
+    }
+    
+    size_t len1 = strlen(path1);
+    size_t len2 = strlen(path2);
+    
+    // 检查 path1 是否已有分隔符
+    bool has_separator = false;
+    if (len1 > 0) {
+        char last_char = path1[len1 - 1];
+        has_separator = (last_char == '/' || last_char == '\\');
+    }
+    
+    size_t total_len = len1 + len2 + 1;
+    if (!has_separator) {
+        total_len += 2; // 需要添加分隔符
+    }
+    
+    char* result = (char*)malloc(total_len);
+    if (!result) {
+        return NULL;
+    }
+    
+    strcpy(result, path1);
+    
+    if (!has_separator) {
+        strcat(result, PATH_SEPARATOR_STR);
+    }
+    
+    // 跳过 path2 开头的分隔符
+    const char* path2_start = path2;
+    while (*path2_start == '/' || *path2_start == '\\') {
+        path2_start++;
+    }
+    
+    strcat(result, path2_start);
+    
+    return result;
 }
 
-i64 read_int() {
-    i64 value;
-    scanf("%lld", &value);
-    return value;
+char* path_join_multiple(const char* path1, const char* path2, const char* path3) {
+    if (!path1 || !path2) {
+        return NULL;
+    }
+    
+    char* temp = path_join(path1, path2);
+    if (!temp) {
+        return NULL;
+    }
+    
+    if (!path3) {
+        return temp;
+    }
+    
+    char* result = path_join(temp, path3);
+    free(temp);
+    
+    return result;
 }
 
-f64 read_float() {
-    f64 value;
-    scanf("%lf", &value);
-    return value;
+char* path_basename(const char* path) {
+    if (!path) {
+        return NULL;
+    }
+    
+    const char* last_sep = NULL;
+    const char* p = path;
+    
+    while (*p) {
+        if (*p == '/' || *p == '\\') {
+            last_sep = p;
+        }
+        p++;
+    }
+    
+    if (last_sep) {
+        return strdup(last_sep + 1);
+    } else {
+        return strdup(path);
+    }
 }
 
-bool read_bool() {
-    char buffer[10];
-    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+char* path_dirname(const char* path) {
+    if (!path) {
+        return NULL;
+    }
+    
+    const char* last_sep = NULL;
+    const char* p = path;
+    
+    while (*p) {
+        if (*p == '/' || *p == '\\') {
+            last_sep = p;
+        }
+        p++;
+    }
+    
+    if (last_sep) {
+        size_t len = last_sep - path;
+        char* result = (char*)malloc(len + 1);
+        if (!result) {
+            return NULL;
+        }
+        strncpy(result, path, len);
+        result[len] = '\0';
+        return result;
+    } else {
+        return strdup(".");
+    }
+}
+
+bool path_is_absolute(const char* path) {
+    if (!path) {
         return false;
     }
-    buffer[sizeof(buffer) - 1] = '\0';
-    size_t len = strlen(buffer);
-    if (len > 0 && buffer[len - 1] == '\n') {
-        buffer[len - 1] = '\0';
+    
+#if STD_PLATFORM_WINDOWS
+    // Windows: 检查盘符 (C:\) 或 UNC 路径 (\\server)
+    if ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) {
+        return path[1] == ':';
     }
-    return strcmp(buffer, "true") == 0 || strcmp(buffer, "1") == 0;
+    return path[0] == '\\' && path[1] == '\\';
+#else
+    // Unix: 检查是否以 / 开头
+    return path[0] == '/';
+#endif
 }
 
-char* read_line() {
-    char* line = NULL;
-    size_t len = 0;
-    ssize_t result = getline(&line, &len, stdin);
-    if (result == -1 || !line) {
+char* path_normalize(const char* path) {
+    if (!path) {
         return NULL;
     }
-    size_t line_len = strlen(line);
-    if (line_len > 0 && line[line_len - 1] == '\n') {
-        line[line_len - 1] = '\0';
+    
+    // 简化实现：统一使用当前平台的分隔符
+    char* result = strdup(path);
+    if (!result) {
+        return NULL;
     }
-    return line;
+    
+    char* p = result;
+    while (*p) {
+        if (*p == '/') {
+            *p = PATH_SEPARATOR;
+        }
+        p++;
+    }
+    
+    return result;
 }
 
-char* read_string(size_t max_length) {
-    if (max_length == 0 || max_length > 1024 * 1024) {
+char* path_to_unix(const char* path) {
+    if (!path) {
         return NULL;
     }
     
-    char* buffer = (char*)malloc(max_length + 1);
-    if (!buffer) {
+    char* result = strdup(path);
+    if (!result) {
         return NULL;
     }
     
-    if (fgets(buffer, max_length + 1, stdin) == NULL) {
-        free(buffer);
-        return NULL;
+    char* p = result;
+    while (*p) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+        p++;
     }
     
-    size_t len = strlen(buffer);
-    if (len > 0 && buffer[len - 1] == '\n') {
-        buffer[len - 1] = '\0';
-    }
-    
-    return buffer;
+    return result;
 }
 
-// 文件操作函数
+char* path_to_windows(const char* path) {
+    if (!path) {
+        return NULL;
+    }
+    
+    char* result = strdup(path);
+    if (!result) {
+        return NULL;
+    }
+    
+    char* p = result;
+    while (*p) {
+        if (*p == '/') {
+            *p = '\\';
+        }
+        p++;
+    }
+    
+    return result;
+}
+
+// ==================== 文件操作实现 ====================
+
 File file_open(const char* path, const char* mode) {
+    if (!path || !mode) {
+        return NULL;
+    }
+    
+#if STD_PLATFORM_WINDOWS && defined(_MSC_VER)
+    FILE* file;
+    if (fopen_s(&file, path, mode) != 0) {
+        return NULL;
+    }
+    return file;
+#else
     return fopen(path, mode);
+#endif
 }
 
 void file_close(File file) {
@@ -172,35 +281,42 @@ void file_close(File file) {
 }
 
 size_t file_read(File file, void* buffer, size_t size) {
-    if (!file) return 0;
+    if (!file || !buffer) {
+        return 0;
+    }
     return fread(buffer, 1, size, file);
 }
 
 size_t file_write(File file, const void* buffer, size_t size) {
-    if (!file) return 0;
+    if (!file || !buffer) {
+        return 0;
+    }
     return fwrite(buffer, 1, size, file);
 }
 
 size_t file_read_line(File file, char* buffer, size_t size) {
-    if (!file || !buffer) return 0;
-    if (fgets(buffer, size, file)) {
-        // 移除换行符
-        size_t len = strlen(buffer);
-        if (len > 0 && buffer[len - 1] == '\n') {
-            buffer[len - 1] = '\0';
-        }
-        return len;
+    if (!file || !buffer || size == 0) {
+        return 0;
     }
-    return 0;
+    
+    if (!fgets(buffer, (int)size, file)) {
+        return 0;
+    }
+    
+    return strlen(buffer);
 }
 
 int file_seek(File file, long offset, int whence) {
-    if (!file) return -1;
+    if (!file) {
+        return -1;
+    }
     return fseek(file, offset, whence);
 }
 
 long file_tell(File file) {
-    if (!file) return -1;
+    if (!file) {
+        return -1;
+    }
     return ftell(file);
 }
 
@@ -211,207 +327,135 @@ void file_flush(File file) {
 }
 
 bool file_eof(File file) {
-    if (!file) return true;
+    if (!file) {
+        return false;
+    }
     return feof(file) != 0;
 }
 
 bool file_error(File file) {
-    if (!file) return true;
+    if (!file) {
+        return false;
+    }
     return ferror(file) != 0;
 }
 
-// 格式化文件输入输出函数
 int file_printf(File file, const char* format, ...) {
-    if (!file) return 0;
+    if (!file || !format) {
+        return -1;
+    }
+    
     va_list args;
     va_start(args, format);
     int result = vfprintf(file, format, args);
     va_end(args);
+    
     return result;
 }
 
 int file_scanf(File file, const char* format, ...) {
-    if (!file) return 0;
+    if (!file || !format) {
+        return -1;
+    }
+    
     va_list args;
     va_start(args, format);
     int result = vfscanf(file, format, args);
     va_end(args);
+    
     return result;
 }
 
-// 文件状态函数
+// ==================== 文件状态函数实现 ====================
+
 bool file_exists(const char* path) {
-    struct stat st;
-    return stat(path, &st) == 0;
+    if (!path) {
+        return false;
+    }
+    return ACCESS(path, 0) == 0;
 }
 
 size_t file_size(const char* path) {
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        return (size_t)st.st_size;
+    if (!path) {
+        return 0;
     }
-    return 0;
+    
+    struct STAT st;
+    if (STAT(path, &st) != 0) {
+        return 0;
+    }
+    
+    return (size_t)st.st_size;
 }
 
 bool file_is_regular(const char* path) {
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        return S_ISREG(st.st_mode);
+    if (!path) {
+        return false;
     }
-    return false;
+    
+    struct STAT st;
+    if (STAT(path, &st) != 0) {
+        return false;
+    }
+    
+    return S_ISREG(st.st_mode);
 }
 
 bool file_is_directory(const char* path) {
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        return S_ISDIR(st.st_mode);
+    if (!path) {
+        return false;
     }
-    return false;
+    
+    struct STAT st;
+    if (STAT(path, &st) != 0) {
+        return false;
+    }
+    
+    return S_ISDIR(st.st_mode);
 }
 
-// 目录操作函数
+// ==================== 目录操作实现 ====================
+
 bool directory_create(const char* path) {
-    #ifdef _WIN32
-    return CreateDirectory(path, NULL) != 0;
-    #else
-    return mkdir(path, 0755) == 0;
-    #endif
+    if (!path) {
+        return false;
+    }
+    return MKDIR(path) == 0;
 }
 
 bool directory_remove(const char* path) {
-    #ifdef _WIN32
-    return RemoveDirectory(path) != 0;
-    #else
-    return rmdir(path) == 0;
-    #endif
+    if (!path) {
+        return false;
+    }
+    return RMDIR(path) == 0;
 }
 
 bool directory_exists(const char* path) {
+    if (!path) {
+        return false;
+    }
     return file_is_directory(path);
 }
 
-// 路径操作函数
-static bool is_path_safe(const char* path) {
-    if (!path) return false;
-    
-    if (strstr(path, "..") != NULL) {
-        return false;
-    }
-    
-    if (path[0] == '\\' && path[1] == '\\') {
-        return false;
-    }
-    
-    if (strstr(path, "\\\\") ) {
-        return false;
-    }
-    
-    return true;
-}
+// ==================== 错误处理实现 ====================
 
-char* path_join(const char* path1, const char* path2) {
-    if (!path1 || !path2) {
-        return NULL;
-    }
-    
-    if (!is_path_safe(path1) || !is_path_safe(path2)) {
-        fprintf(stderr, "Error: Unsafe path detected\n");
-        return NULL;
-    }
-    
-    size_t len1 = strlen(path1);
-    size_t len2 = strlen(path2);
-    char* result = (char*)malloc(len1 + len2 + 2); // +2 for '/' and null terminator
-    if (result) {
-        strcpy(result, path1);
-        if (len1 > 0 && path1[len1 - 1] != '\\' && path1[len1 - 1] != '/') {
-            strcat(result, "/");
-        }
-        strcat(result, path2);
-    }
-    return result;
-}
-
-char* path_basename(const char* path) {
-    if (!path) {
-        return NULL;
-    }
-    
-    if (!is_path_safe(path)) {
-        fprintf(stderr, "Error: Unsafe path detected in path_basename\n");
-        return NULL;
-    }
-    
-    const char* last_slash = strrchr(path, '/');
-    #ifdef _WIN32
-    const char* last_backslash = strrchr(path, '\\');
-    if (last_backslash && (!last_slash || last_backslash > last_slash)) {
-        last_slash = last_backslash;
-    }
-    #endif
-    if (last_slash) {
-        char* result = strdup(last_slash + 1);
-        return result;
-    }
-    char* result = strdup(path);
-    return result;
-}
-
-char* path_dirname(const char* path) {
-    if (!path) {
-        return NULL;
-    }
-    
-    if (!is_path_safe(path)) {
-        fprintf(stderr, "Error: Unsafe path detected in path_dirname\n");
-        return NULL;
-    }
-    
-    const char* last_slash = strrchr(path, '/');
-    #ifdef _WIN32
-    const char* last_backslash = strrchr(path, '\\');
-    if (last_backslash && (!last_slash || last_backslash > last_slash)) {
-        last_slash = last_backslash;
-    }
-    #endif
-    if (last_slash) {
-        size_t len = last_slash - path;
-        char* result = (char*)malloc(len + 1);
-        if (result) {
-            strncpy(result, path, len);
-            result[len] = '\0';
-        }
-        return result;
-    }
-    char* result = (char*)malloc(2);
-    if (result) {
-        result[0] = '.';
-        result[1] = '\0';
-    }
-    return result;
-}
-
-bool path_is_absolute(const char* path) {
-    #ifdef _WIN32
-    return (path[0] && (path[1] == ':' && (path[2] == '\\' || path[2] == '/'))) || (path[0] == '\\' && path[1] == '\\');
-    #else
-    return path[0] == '/';
-    #endif
-}
-
-// 输入输出错误处理
-static int io_error = 0;
-static char io_error_message[256] = "";
+static int g_io_error = 0;
 
 int io_get_error() {
-    return io_error;
+    return g_io_error;
 }
 
 const char* io_get_error_message() {
-    return io_error_message;
+    switch (g_io_error) {
+        case 0: return "No error";
+        case 1: return "File not found";
+        case 2: return "Permission denied";
+        case 3: return "Out of memory";
+        case 4: return "Invalid argument";
+        default: return "Unknown error";
+    }
 }
 
 void io_clear_error() {
-    io_error = 0;
-    io_error_message[0] = '\0';
+    g_io_error = 0;
 }

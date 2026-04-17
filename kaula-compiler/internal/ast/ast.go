@@ -868,12 +868,37 @@ func (i *ImportStatement) GetPosition() Position {
 	return i.Pos
 }
 
-// SetPosition 实现Node接口
+// SetPosition 实现 Node 接口
 func (i *ImportStatement) SetPosition(pos Position) {
 	i.Pos = pos
 }
 
-// NonLocalStatement 表示nonlocal语句
+// ExportStatement 表示 export 语句
+type ExportStatement struct {
+	Name string    // 导出的名称（函数、类、对象等）
+	Type string    // 导出类型："function", "class", "object", "variable"
+	Pos  Position  // 源代码位置
+}
+
+// statementNode 实现 Statement 接口
+func (e *ExportStatement) statementNode() {}
+
+// String 实现 Node 接口
+func (e *ExportStatement) String() string {
+	return "ExportStatement"
+}
+
+// GetPosition 实现 Node 接口
+func (e *ExportStatement) GetPosition() Position {
+	return e.Pos
+}
+
+// SetPosition 实现 Node 接口
+func (e *ExportStatement) SetPosition(pos Position) {
+	e.Pos = pos
+}
+
+// NonLocalStatement 表示 nonlocal 语句
 type NonLocalStatement struct {
 	Type  string
 	Name  string

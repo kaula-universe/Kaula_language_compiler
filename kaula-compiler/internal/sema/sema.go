@@ -6,6 +6,7 @@ import (
 	"kaula-compiler/internal/errors"
 	"kaula-compiler/internal/symbol"
 	"kaula-compiler/internal/stdlib"
+	"strings"
 )
 
 // SemanticAnalyzer 表示语义分析器
@@ -17,6 +18,7 @@ type SemanticAnalyzer struct {
 	stdlibConfig    *stdlib.StdlibConfig
 	genericStack    []*ast.FunctionStatement // 泛型函数栈
 	typeConstraints map[string][]string      // 类型约束映射
+	exportedSymbols map[string]bool          // 导出符号列表
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -54,6 +56,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		stdlibConfig:    stdlibConfig,
 		genericStack:    make([]*ast.FunctionStatement, 0),
 		typeConstraints: make(map[string][]string),
+		exportedSymbols: make(map[string]bool),
 	}
 }
 
@@ -163,6 +166,8 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		sa.analyzeVariableDeclaration(s)
 	case *ast.ImportStatement:
 		sa.analyzeImportStatement(s)
+	case *ast.ExportStatement:
+		sa.analyzeExportStatement(s)
 	case *ast.ExpressionStatement:
 		if s == nil || s.Expression == nil {
 			return
@@ -177,13 +182,36 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 	sa.symbolTable.AddSymbol(moduleName, "module", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 
 	if sa.stdlibConfig != nil {
+		// 检查是否是标准库模块
 		if _, ok := sa.stdlibConfig.Modules[moduleName]; ok {
 			module := sa.stdlibConfig.Modules[moduleName]
 			for funcName := range module.Functions {
 				sa.symbolTable.AddSymbol(funcName, "any", false, "global", 0, 0)
 			}
+		} else if lib := sa.stdlibConfig.GetThirdPartyLibrary(moduleName); lib != nil {
+			// 检查是否是第三方库
+			for funcName := range lib.Functions {
+				sa.symbolTable.AddSymbol(funcName, "any", false, "global", 0, 0)
+			}
 		}
 	}
+}
+
+// analyzeExportStatement 分析导出语句
+func (sa *SemanticAnalyzer) analyzeExportStatement(stmt *ast.ExportStatement) {
+	// 1. 检查符号是否已存在
+	symbol := sa.symbolTable.GetSymbol(stmt.Name)
+	if symbol == nil {
+		// 符号还未定义，可能是前向声明，先添加到符号表
+		sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "exported", stmt.Pos.Line, stmt.Pos.Column)
+		return
+	}
+	
+	// 2. 标记符号为导出
+	symbol.Scope = "exported"
+	
+	// 3. 添加到导出符号列表
+	sa.exportedSymbols[stmt.Name] = true
 }
 
 // analyzeVOStatement 分析 VO 语句
@@ -278,10 +306,74 @@ func (sa *SemanticAnalyzer) analyzeNonLocalStatement(stmt *ast.NonLocalStatement
 
 // analyzeVariableDeclaration 分析变量声明语句
 func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclaration) {
+	// 1. 检查类型是否存在
+	if !sa.isTypeValid(stmt.Type) {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("未知类型 '%s'，变量声明必须使用已定义的类型", stmt.Type),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"检查类型名称是否正确，或者是否已定义该类型（类、结构体等）",
+		)
+	}
+	
+	// 2. 添加变量到符号表
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
+	
+	// 3. 分析初始化表达式
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
 	}
+}
+
+// isTypeValid 检查类型是否有效
+func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
+	// 基本类型
+	basicTypes := map[string]bool{
+		"int":    true,
+		"i8":     true,
+		"i16":    true,
+		"i32":    true,
+		"i64":    true,
+		"u8":     true,
+		"u16":    true,
+		"u32":    true,
+		"u64":    true,
+		"float":  true,
+		"f32":    true,
+		"f64":    true,
+		"double": true,
+		"bool":   true,
+		"char":   true,
+		"string": true,
+		"void":   true,
+		"any":    true,
+	}
+	
+	// 检查是否是基本类型
+	if basicTypes[typeName] {
+		return true
+	}
+	
+	// 检查是否是指针类型（如 int*）
+	if len(typeName) > 0 && typeName[len(typeName)-1] == '*' {
+		baseType := typeName[:len(typeName)-1]
+		return sa.isTypeValid(baseType)
+	}
+	
+	// 检查符号表中是否有该类型（类、结构体、接口等）
+	symbol := sa.symbolTable.GetSymbol(typeName)
+	if symbol != nil && (symbol.Type == "class" || symbol.Type == "struct" || symbol.Type == "interface" || symbol.Type == "type") {
+		return true
+	}
+	
+	// 检查是否是泛型类型（如 Box<int>）
+	if idx := strings.Index(typeName, "<"); idx > 0 {
+		baseType := typeName[:idx]
+		return sa.isTypeValid(baseType)
+	}
+	
+	return false
 }
 
 // analyzeIfStatement 分析 if 语句

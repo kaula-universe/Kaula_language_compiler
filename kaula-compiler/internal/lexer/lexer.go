@@ -31,6 +31,7 @@ const (
 	TOKEN_DEFAULT
 	TOKEN_RETURN
 	TOKEN_IMPORT
+	TOKEN_EXPORT
 	TOKEN_SELF
 	TOKEN_NONLOCAL
 	TOKEN_PRINTLN
@@ -39,6 +40,7 @@ const (
 	TOKEN_IMPLEMENTS
 	TOKEN_CONSTRUCTOR
 	TOKEN_STRUCT
+	TOKEN_LET
 	// 类型关键字
 	TOKEN_TYPE_INT
 	TOKEN_TYPE_FLOAT
@@ -341,6 +343,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_RETURN
 	case "import":
 		tokenType = TOKEN_IMPORT
+	case "export":
+		tokenType = TOKEN_EXPORT
 	case "self":
 		tokenType = TOKEN_SELF
 	case "nonlocal":
@@ -538,6 +542,22 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "CONSTRUCTOR"
 	case TOKEN_STRUCT:
 		return "STRUCT"
+	case TOKEN_TYPE_INT:
+		return "INT"
+	case TOKEN_TYPE_FLOAT:
+		return "FLOAT"
+	case TOKEN_TYPE_DOUBLE:
+		return "DOUBLE"
+	case TOKEN_TYPE_BOOL:
+		return "BOOL"
+	case TOKEN_TYPE_CHAR:
+		return "CHAR"
+	case TOKEN_TYPE_STRING:
+		return "STRING"
+	case TOKEN_TYPE_VOID:
+		return "VOID"
+	case TOKEN_LET:
+		return "LET"
 	case TOKEN_IDENT:
 		return "IDENT"
 	case TOKEN_LITERAL_INT:

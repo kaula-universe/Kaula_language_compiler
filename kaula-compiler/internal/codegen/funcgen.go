@@ -28,15 +28,16 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}
 	
 	// 生成普通函数定义
-	code := "void* "
+	// 使用 int64_t 作为参数和返回类型，支持递归和整数运算
+	code := "int64_t "
 	code += stmt.Name
-	code += "(void* arg) {\n"
+	code += "(int64_t arg) {\n"
 	fg.codegen.indent++
 	
-	// ========== KMM V4 作用域分配器入口 ==========
-	// 使用 KMM_V4_SCOPE_START 宏自动管理内存生命周期
+	// ========== KMM Enhanced V4 作用域分配器入口 ==========
+	// 使用 KMM_V4_SCOPE_START 宏自动管理内存生命周期（包含 Arena、线程缓存、清理栈）
 	code += fg.codegen.indentString()
-	code += "// KMM V4 ScopedAllocator: 自动内存管理开始\n"
+	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理开始（Arena + ThreadCache + CleanupStack）\n"
 	code += fg.codegen.indentString()
 	code += "KMM_V4_SCOPE_START {\n"
 	fg.codegen.indent++
@@ -45,9 +46,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 生成参数处理并添加到符号表
 	for _, param := range stmt.Params {
 		code += fg.codegen.indentString()
-		code += fmt.Sprintf("i64 %s = (i64)(intptr_t)arg;\n", param)
+		code += fmt.Sprintf("int64_t %s = arg;\n", param)
 		// 添加参数到符号表
-		fg.codegen.AddSymbol(param, "i64", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		fg.codegen.AddSymbol(param, "int64_t", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
 	
 	// 生成函数体
@@ -59,16 +60,16 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		code += fg.codegen.generateStatement(bodyStmt)
 	}
 	
-	// ========== KMM V4 作用域分配器出口 ==========
+	// ========== KMM Enhanced V4 作用域分配器出口 ==========
 	fg.codegen.indent--
 	code += fg.codegen.indentString()
-	code += "// KMM V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
+	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
 	code += fg.codegen.indentString()
 	code += "} KMM_V4_SCOPE_END;\n"
 	// ===========================================
 	
-	// 添加默认返回语句
-	code += fg.codegen.indentString() + "return NULL;\n"
+	// 添加默认返回语句（非 main 函数返回 0）
+	code += fg.codegen.indentString() + "return 0;\n"
 	fg.codegen.indent--
 	code += "}\n"
 	
@@ -83,9 +84,9 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	code := "int main() {\n"
 	fg.codegen.indent++
 	
-	// ========== KMM V4 作用域分配器入口 ==========
+	// ========== KMM Enhanced V4 作用域分配器入口 ==========
 	code += fg.codegen.indentString()
-	code += "// KMM V4 ScopedAllocator: 自动内存管理开始\n"
+	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理开始（Arena + ThreadCache + CleanupStack）\n"
 	code += fg.codegen.indentString()
 	code += "KMM_V4_SCOPE_START {\n"
 	fg.codegen.indent++
@@ -97,10 +98,10 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code += fg.codegen.generateStatement(bodyStmt)
 	}
 	
-	// ========== KMM V4 作用域分配器出口 ==========
+	// ========== KMM Enhanced V4 作用域分配器出口 ==========
 	fg.codegen.indent--
 	code += fg.codegen.indentString()
-	code += "// KMM V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
+	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
 	code += fg.codegen.indentString()
 	code += "} KMM_V4_SCOPE_END;\n"
 	// ===========================================
