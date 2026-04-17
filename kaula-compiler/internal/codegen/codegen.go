@@ -144,7 +144,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	}
 	
 	// 生成基础包含语句
-	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n"
+	// 硬编码 src/kaula.h 路径，确保生成的代码能正确找到头文件
+	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"src/kaula.h\"\n"
 	
 	// 只添加实际使用的第三方库头文件
 	thirdPartyIncludes := ""

@@ -152,6 +152,14 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
 		return left + " >= " + right
+	case "SHIFT_LEFT", "<<":
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " << " + right
+	case "SHIFT_RIGHT", ">>":
+		left := eg.GenerateExpression(e.Left)
+		right := eg.GenerateExpression(e.Right)
+		return left + " >> " + right
 	case "AND":
 		left := eg.GenerateExpression(e.Left)
 		right := eg.GenerateExpression(e.Right)
@@ -226,9 +234,9 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	
 	// 其他函数调用
 	code := funcName + "("
-	// 如果没有参数，传递 0
+	// 如果没有参数，不传递任何值（函数签名会是 void）
 	if len(e.Args) == 0 {
-		code += "0"
+		// 无参数调用
 	} else {
 		// 传递第一个参数
 		argCode := eg.GenerateExpression(e.Args[0])

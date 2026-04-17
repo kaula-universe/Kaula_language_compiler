@@ -287,6 +287,10 @@ func compileCCode(cFile string, outputFile string, workDir string) error {
 	
 	// 构建 clang 参数，使用 -O3 优化级别
 	clangArgs := []string{cFile, "-o", outputFile, "-O3"}
+	
+	// 添加项目根目录到包含路径，使 "src/kaula.h" 能正确找到
+	clangArgs = append(clangArgs, "-I", cwd)
+	
 	for _, p := range validSrcPaths {
 		clangArgs = append(clangArgs, "-I", p)
 	}

@@ -27,11 +27,18 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		return fg.generateMainFunction(stmt)
 	}
 	
+	// 检查函数是否有参数
+	hasParams := len(stmt.Params) > 0
+	
 	// 生成普通函数定义
 	// 使用 int64_t 作为参数和返回类型，支持递归和整数运算
 	code := "int64_t "
 	code += stmt.Name
-	code += "(int64_t arg) {\n"
+	if hasParams {
+		code += "(int64_t arg) {\n"
+	} else {
+		code += "(void) {\n"
+	}
 	fg.codegen.indent++
 	
 	// ========== KMM Enhanced V4 作用域分配器入口 ==========
@@ -44,11 +51,26 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// ===========================================
 	
 	// 生成参数处理并添加到符号表
-	for _, param := range stmt.Params {
+	// 优化：如果只有一个参数，直接使用 arg 作为参数名，避免拷贝
+	if len(stmt.Params) == 1 {
+		paramName := stmt.Params[0]
 		code += fg.codegen.indentString()
-		code += fmt.Sprintf("int64_t %s = arg;\n", param)
+		code += fmt.Sprintf("#define %s arg\n", paramName)
 		// 添加参数到符号表
-		fg.codegen.AddSymbol(param, "int64_t", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		fg.codegen.AddSymbol(paramName, "int64_t", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+	} else {
+		// 多个参数或无参数，使用原有方式
+		for i, param := range stmt.Params {
+			if len(stmt.Params) > 1 {
+				code += fg.codegen.indentString()
+				code += fmt.Sprintf("int64_t %s = args[%d];\n", param, i)
+			} else {
+				code += fg.codegen.indentString()
+				code += fmt.Sprintf("int64_t %s = arg;\n", param)
+			}
+			// 添加参数到符号表
+			fg.codegen.AddSymbol(param, "int64_t", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		}
 	}
 	
 	// 生成函数体
@@ -67,6 +89,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	code += fg.codegen.indentString()
 	code += "} KMM_V4_SCOPE_END;\n"
 	// ===========================================
+	
+	// 如果使用了宏定义参数，需要取消宏
+	if len(stmt.Params) == 1 {
+		code += fg.codegen.indentString()
+		code += fmt.Sprintf("#undef %s\n", stmt.Params[0])
+	}
 	
 	// 添加默认返回语句（非 main 函数返回 0）
 	code += fg.codegen.indentString() + "return 0;\n"
