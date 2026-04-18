@@ -1,0 +1,43 @@
+{
+  "name": "zlib",
+  "header": "zlib/zlib.h",
+  "headers": ["<zlib.h>"],
+  "functions": {
+    "zlibVersion": {
+      "args": [],
+      "return": "const char*"
+    },
+    "deflateInit_": {
+      "args": ["void*", "int", "const char*", "int"],
+      "return": "int"
+    },
+    "deflate": {
+      "args": ["void*", "int"],
+      "return": "int"
+    },
+    "deflateEnd": {
+      "args": ["void*"],
+      "return": "int"
+    },
+    "inflateInit_": {
+      "args": ["void*", "const char*", "int"],
+      "return": "int"
+    },
+    "inflate": {
+      "args": ["void*", "int"],
+      "return": "int"
+    },
+    "inflateEnd": {
+      "args": ["void*"],
+      "return": "int"
+    },
+    "compress": {
+      "args": ["void*", "unsigned long*", "const void*", "unsigned long"],
+      "return": "int"
+    },
+    "uncompress": {
+      "args": ["void*", "unsigned long*", "const void*", "unsigned long"],
+      "return": "int"
+    }
+  }
+}

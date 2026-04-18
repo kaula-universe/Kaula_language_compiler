@@ -234,12 +234,12 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	
 	// 其他函数调用
 	code := funcName + "("
-	// 如果没有参数，不传递任何值（函数签名会是 void）
-	if len(e.Args) == 0 {
-		// 无参数调用
-	} else {
-		// 传递第一个参数
-		argCode := eg.GenerateExpression(e.Args[0])
+	// 生成所有参数
+	for i, arg := range e.Args {
+		if i > 0 {
+			code += ", "
+		}
+		argCode := eg.GenerateExpression(arg)
 		code += argCode
 	}
 	code += ")"

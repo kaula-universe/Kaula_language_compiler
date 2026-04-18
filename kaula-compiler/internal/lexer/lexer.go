@@ -96,6 +96,7 @@ const (
 
 	// 其他
 	TOKEN_COMMENT
+	TOKEN_ATTRIBUTE // #[ 注解标记
 	TOKEN_EOF
 )
 
@@ -139,8 +140,31 @@ func (l *Lexer) Next() Token {
 			l.skipWhitespace()
 			continue
 		case char == '#':
-			l.skipComment()
-			continue
+			if l.pos+1 < l.inputLen && l.input[l.pos+1] == '[' {
+				// 注解标记 #[...]
+				startLine := l.line
+				startColumn := l.column
+				l.next() // 跳过 #
+				l.next() // 跳过 [
+				
+				// 收集注解内容直到遇到 ]
+				content := ""
+				for l.pos < l.inputLen && l.input[l.pos] != ']' && l.input[l.pos] != '\n' {
+					content += string(l.input[l.pos])
+					l.next()
+				}
+				
+				// 跳过 ]
+				if l.pos < l.inputLen && l.input[l.pos] == ']' {
+					l.next()
+				}
+				
+				return Token{Type: TOKEN_ATTRIBUTE, Value: "#[" + content + "]", Line: startLine, Column: startColumn}
+			} else {
+				// 注释
+				l.skipComment()
+				continue
+			}
 		case char == '/' && l.peek() == '/':
 			l.skipComment()
 			continue
@@ -628,6 +652,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "DOT"
 	case TOKEN_COMMENT:
 		return "COMMENT"
+	case TOKEN_ATTRIBUTE:
+		return "ATTRIBUTE"
 	case TOKEN_EOF:
 		return "EOF"
 	default:

@@ -283,3 +283,35 @@ func Reset() {
 func GetElapsed() time.Duration {
 	return time.Since(startTime)
 }
+
+// GetMemoryStats 获取内存统计信息
+func GetMemoryStats() (avgMemory uint64, maxMemory uint64) {
+	if len(stageStats) == 0 {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.Alloc / 1024 / 1024, m.Alloc / 1024 / 1024
+	}
+	
+	totalMemory := uint64(0)
+	maxMemory = 0
+	
+	for _, stat := range stageStats {
+		// 计算该阶段的平均内存使用（开始和结束的平均值）
+		avgStageMemory := (stat.StartMemory + stat.EndMemory) / 2
+		totalMemory += avgStageMemory
+		
+		// 更新最大内存使用
+		if stat.PeakMemory > maxMemory {
+			maxMemory = stat.PeakMemory
+		}
+	}
+	
+	// 计算平均值
+	avgMemory = totalMemory / uint64(len(stageStats))
+	
+	// 转换为 MB
+	avgMemory = avgMemory / 1024 / 1024
+	maxMemory = maxMemory / 1024 / 1024
+	
+	return avgMemory, maxMemory
+}

@@ -1,0 +1,35 @@
+{
+  "name": "nuklear",
+  "header": "nuklear/nuklear.h",
+  "headers": ["\"nuklear/nuklear.h\""],
+  "functions": {
+    "nk_init_default": {
+      "args": ["void*", "const void*"],
+      "return": "int"
+    },
+    "nk_begin": {
+      "args": ["void*", "const char*", "struct nk_rect", "int"],
+      "return": "int"
+    },
+    "nk_end": {
+      "args": ["void*"],
+      "return": "void"
+    },
+    "nk_button_label": {
+      "args": ["void*", "const char*"],
+      "return": "int"
+    },
+    "nk_layout_row_dynamic": {
+      "args": ["void*", "float", "int"],
+      "return": "void"
+    },
+    "nk_label": {
+      "args": ["void*", "const char*", "int"],
+      "return": "void"
+    },
+    "nk_free": {
+      "args": ["void*"],
+      "return": "void"
+    }
+  }
+}

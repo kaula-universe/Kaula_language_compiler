@@ -6,6 +6,90 @@
 #include <stdbool.h>
 #include <string.h>
 
+// ==================== KMM 功能配置 ====================
+// 启用所有高级功能
+#define KMM_ENABLE_ARENA 1
+#define KMM_ENABLE_THREAD_CACHE 1
+#define KMM_ENABLE_CLEANUP_STACK 1
+#define KMM_ENABLE_UNION_DOMAIN 1
+
+// ==================== 前向类型声明 ====================
+typedef struct kmm_arena kmm_arena_t;
+typedef struct kmm_thread_cache kmm_thread_cache_t;
+typedef struct kmm_cleanup_node kmm_cleanup_node_t;
+typedef struct kmm_union_node kmm_union_node_t;
+typedef struct kmm_union_domain kmm_union_domain_t;
+
+// ==================== 枚举类型定义 ====================
+// Union Domain 状态枚举
+typedef enum {
+    KMM_DOMAIN_LOCAL = 0,
+    KMM_DOMAIN_UNION = 1,
+    KMM_DOMAIN_ESCAPED = 2
+} kmm_domain_status_t;
+
+// ==================== 常量定义 ====================
+// 缓存行大小（用于对齐）
+#ifndef KMM_CACHE_LINE_SIZE
+#define KMM_CACHE_LINE_SIZE 64
+#endif
+
+// 线程缓存大小
+#ifndef KMM_THREAD_CACHE_SIZE
+#define KMM_THREAD_CACHE_SIZE 1024
+#endif
+
+// ==================== 结构体定义 ====================
+// Arena 结构（用于分级内存管理）
+struct kmm_arena {
+    uint8_t* buffer;
+    size_t capacity;
+    size_t max_capacity;
+    size_t allocations;
+    size_t peak;
+    size_t reset_count;
+    size_t offset;
+    bool is_initialized;
+} __attribute__((aligned(KMM_CACHE_LINE_SIZE)));
+
+// 清理节点
+struct kmm_cleanup_node {
+    void* resource;
+    void (*cleanup)(void* ptr);
+    struct kmm_cleanup_node* next;
+};
+
+// 线程缓存
+struct kmm_thread_cache {
+    void* cache[1024];  // KMM_THREAD_CACHE_SIZE 默认为 1024
+    size_t cache_size;
+};
+
+// Union Node 结构（用于联合域管理）
+struct kmm_union_node {
+    void* object;
+    size_t object_size;
+    kmm_domain_status_t status;
+    size_t scope_depth;
+    struct kmm_union_node* parent;
+    struct kmm_union_node* next;
+    struct kmm_union_node** dependencies;
+    size_t dependency_count;
+    bool is_root;
+    bool is_elected;
+    size_t temp_in_degree;
+    bool temp_visited;
+};
+
+// Union Domain 结构
+struct kmm_union_domain {
+    struct kmm_union_node* root;
+    struct kmm_union_node* current;
+    size_t scope_depth;
+    size_t node_count;
+    size_t max_depth;
+};
+
 // ==================== 智能配置系统 ====================
 // 自动检测编译器和平台
 #if defined(__GNUC__) || defined(__clang__)
@@ -18,8 +102,10 @@
 
 #ifdef _WIN32
     #define KMM_V4_WINDOWS 1
+    #define KMM_TLS __declspec(thread)
 #else
     #define KMM_V4_WINDOWS 0
+    #define KMM_TLS __thread
 #endif
 
 // 自动检测 SIMD 支持
@@ -241,6 +327,38 @@ static kmm_v4_stats_t g_kmm_v4_stats = {0};
 #endif
 
 // ==================== 自动化 API ====================
+
+// 缓存行大小（用于对齐）
+#ifndef KMM_CACHE_LINE_SIZE
+#define KMM_CACHE_LINE_SIZE 64
+#endif
+
+// 完整的 KMM 上下文结构
+typedef struct kmm_context {
+#if KMM_ENABLE_ARENA
+    kmm_arena_t tiny_arena;
+    kmm_arena_t small_arena;
+    kmm_arena_t medium_arena;
+#endif
+#if KMM_ENABLE_THREAD_CACHE
+    kmm_thread_cache_t* thread_cache;
+#endif
+#if KMM_ENABLE_CLEANUP_STACK
+    kmm_cleanup_node_t* cleanup_stack;
+#endif
+#if KMM_ENABLE_UNION_DOMAIN
+    kmm_union_node_t* union_rep;
+    kmm_union_domain_t* domain;
+#endif
+    size_t alloc_counter;
+    size_t total_bytes;
+    size_t peak_usage;
+    bool is_initialized;
+} kmm_context_t __attribute__((aligned(KMM_CACHE_LINE_SIZE)));
+
+// 全局上下文实例
+extern kmm_context_t g_kmm_ctx;
+
 static inline void* kmm_v4_malloc(size_t size) {
     void* ptr = kmm_v4_alloc_auto(size);
     KMM_V4_RECORD_ALLOC(size);
@@ -266,6 +384,8 @@ static inline size_t kmm_v4_usage(void) {
 static inline size_t kmm_v4_available(void) {
     return KMM_V4_POOL_SIZE - g_kmm_v4_offset;
 }
+
+#define KMM_ALLOC_ARRAY(type, count) ((type*)kmm_alloc(g_kaula_scope, sizeof(type) * (count), __FILE__, __LINE__))
 
 // ==================== 编译期检查 ====================
 _Static_assert(KMM_V4_POOL_SIZE > 0, "Pool size must be positive");

@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -70,13 +71,7 @@ static inline int clock_gettime(int clk_id, struct timespec* ts) {
 #endif
 
 // 智能配置参数（根据平台自动调整）
-#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
-    #define KMM_CACHE_LINE_SIZE 64
-    #define KMM_THREAD_CACHE_SIZE 256
-#else
-    #define KMM_CACHE_LINE_SIZE 32
-    #define KMM_THREAD_CACHE_SIZE 128
-#endif
+// 注意：KMM_CACHE_LINE_SIZE 和 KMM_THREAD_CACHE_SIZE 已在 kmm_scoped_allocator_v4.h 中定义
 
 // Arena 配置（v3 特色，v4 风格智能默认值）
 #ifndef KMM_ARENA_TINY_MIN
@@ -110,20 +105,9 @@ static inline int clock_gettime(int clk_id, struct timespec* ts) {
 #endif
 
 // ==================== 数据结构定义 ====================
+// 注意：所有结构体定义已在 kmm_scoped_allocator_v4.h 中提供
 
-// Arena 结构
-typedef struct {
-    uint8_t* buffer;
-    size_t offset;
-    size_t capacity;
-    size_t max_capacity;
-    size_t allocations;
-    size_t peak;
-    size_t reset_count;
-    bool is_initialized;
-} kmm_arena_t __attribute__((aligned(KMM_CACHE_LINE_SIZE)));
-
-// 安全分配头
+// 安全分配头（新增）
 typedef struct {
     size_t user_size;
     const char* file;
@@ -131,78 +115,11 @@ typedef struct {
     uint64_t canary;
 } kmm_safe_header_t;
 
-// 清理节点
-typedef struct kmm_cleanup_node {
-    void* resource;
-    void (*cleanup)(void* ptr);
-    struct kmm_cleanup_node* next;
-} kmm_cleanup_node_t;
-
-// 线程缓存
-typedef struct {
-    void* cache[KMM_THREAD_CACHE_SIZE];
-    size_t cache_size;
-} kmm_thread_cache_t;
-
-// ==================== 联合域数据结构（V3 特色） ====================
-#if KMM_ENABLE_UNION_DOMAIN
-
-typedef enum {
-    KMM_DOMAIN_LOCAL = 0,
-    KMM_DOMAIN_UNION = 1,
-    KMM_DOMAIN_ESCAPED = 2
-} kmm_domain_status_t;
-
-typedef struct kmm_union_node {
-    void* object;
-    size_t object_size;
-    kmm_domain_status_t status;
-    size_t scope_depth;
-    struct kmm_union_node* parent;
-    struct kmm_union_node* next;
-    struct kmm_union_node** dependencies;
-    size_t dependency_count;
-    bool is_root;
-    bool is_elected;
-    size_t temp_in_degree;
-    bool temp_visited;
-} kmm_union_node_t;
-
-typedef struct kmm_union_domain {
-    kmm_union_node_t* root;
-    kmm_union_node_t* current;
-    size_t scope_depth;
-    size_t node_count;
-    size_t max_depth;
-} kmm_union_domain_t;
-
-#endif
-
-// 完整的上下文结构
-typedef struct {
-#if KMM_ENABLE_ARENA
-    kmm_arena_t tiny_arena;
-    kmm_arena_t small_arena;
-    kmm_arena_t medium_arena;
-#endif
-#if KMM_ENABLE_THREAD_CACHE
-    kmm_thread_cache_t* thread_cache;
-#endif
-#if KMM_ENABLE_CLEANUP_STACK
-    kmm_cleanup_node_t* cleanup_stack;
-#endif
-#if KMM_ENABLE_UNION_DOMAIN
-    kmm_union_node_t* union_rep;
-    kmm_union_domain_t* domain;
-#endif
-    size_t alloc_counter;
-    size_t total_bytes;
-    size_t peak_usage;
-    bool is_initialized;
-} kmm_context_t __attribute__((aligned(KMM_CACHE_LINE_SIZE)));
+// ==================== KMM 上下文结构（使用头文件中的定义）====================
+// kmm_context_t 已在 kmm_scoped_allocator_v4.h 中定义
 
 // 全局上下文（用于统计）
-static kmm_context_t g_kmm_ctx = {0};
+kmm_context_t g_kmm_ctx = {0};
 
 // ==================== 联合域全局变量（V3 特色） ====================
 #if KMM_ENABLE_UNION_DOMAIN
@@ -242,11 +159,7 @@ void kmm_union_set_dependencies(void* obj, void** deps, size_t count);
 
 // ==================== 线程缓存实现（v4 自动化风格） ====================
 #if KMM_ENABLE_THREAD_CACHE
-#ifdef _WIN32
-__declspec(thread) kmm_thread_cache_t tls_kmm_thread_cache;
-#else
-__thread kmm_thread_cache_t tls_kmm_thread_cache;
-#endif
+KMM_TLS kmm_thread_cache_t tls_kmm_thread_cache;
 
 static inline void kmm_thread_cache_init(void) {
     if (KMM_V4_LIKELY(tls_kmm_thread_cache.cache_size == 0)) {

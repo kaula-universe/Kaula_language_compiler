@@ -168,6 +168,8 @@ func main() {
 		os.Exit(1)
 	}
 	
+	// 使用与语义分析器相同的 stdlibPath
+	cfg.StdlibPath = stdlibPath
 	cg := codegen.NewGenerator(cfg)
 	output := cg.Generate(program)
 	
@@ -215,12 +217,16 @@ func main() {
 	}
 
 	fmt.Printf("Code generated successfully and saved to %s\n", cacheFile)
-	fmt.Printf("Total time: %v, Memory: %dMB\n", 
-		timeout.GetElapsed(), 
-		getMemoryUsage())
 	
 	// 打印各阶段详细统计
 	printStageStats()
+	
+	// 输出总体统计（平均内存和最大内存）
+	avgMemory, maxMemory := timeout.GetMemoryStats()
+	fmt.Printf("Total time: %v, Avg Memory: %dMB, Max Memory: %dMB\n", 
+		timeout.GetElapsed(), 
+		avgMemory, 
+		maxMemory)
 	
 	// 自动编译生成的 C 代码
 	fmt.Println("\n=== Compiling C code ===")
@@ -232,12 +238,6 @@ func main() {
 		fmt.Printf("Warning: C compilation failed: %v\n", err)
 		fmt.Println("You can compile manually with: clang <file>.c -o <file>.exe")
 	}
-}
-
-func getMemoryUsage() uint64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return m.Alloc / 1024 / 1024
 }
 
 func printStageStats() {

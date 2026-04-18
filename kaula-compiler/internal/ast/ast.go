@@ -594,6 +594,8 @@ type FunctionStatement struct {
 	Body          []Statement
 	ReturnType    string
 	Generic       bool // 是否是泛型函数
+	NoKMM         bool // 是否禁用 KMM 内存管理
+	Inline        bool // 是否内联函数
 	Pos           Position
 }
 

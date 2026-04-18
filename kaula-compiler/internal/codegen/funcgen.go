@@ -30,9 +30,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 检查函数是否有参数
 	hasParams := len(stmt.Params) > 0
 	
-	// 生成普通函数定义
-	// 使用 int64_t 作为参数和返回类型，支持递归和整数运算
-	code := "int64_t "
+	// 生成函数签名（支持 inline 注解）
+	code := ""
+	if stmt.Inline {
+		code += "__attribute__((always_inline)) "
+	}
+	code += "int64_t "
 	code += stmt.Name
 	if hasParams {
 		code += "(int64_t arg) {\n"
@@ -42,20 +45,23 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	fg.codegen.indent++
 	
 	// ========== KMM Enhanced V4 作用域分配器入口 ==========
-	// 使用 KMM_V4_SCOPE_START 宏自动管理内存生命周期（包含 Arena、线程缓存、清理栈）
-	code += fg.codegen.indentString()
-	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理开始（Arena + ThreadCache + CleanupStack）\n"
-	code += fg.codegen.indentString()
-	code += "KMM_V4_SCOPE_START {\n"
-	fg.codegen.indent++
+	// 如果指定了 no_kmm 注解，则不插入 KMM 内存管理代码
+	if !stmt.NoKMM {
+		code += fg.codegen.indentString()
+		code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理开始\n"
+		code += fg.codegen.indentString()
+		code += "KMM_V4_SCOPE_START {\n"
+		fg.codegen.indent++
+	}
 	// ===========================================
 	
 	// 生成参数处理并添加到符号表
-	// 优化：如果只有一个参数，直接使用 arg 作为参数名，避免拷贝
+	// 优化：直接使用 arg 作为参数名，避免拷贝，让编译器优化
 	if len(stmt.Params) == 1 {
 		paramName := stmt.Params[0]
+		// 直接重命名参数为实际参数名，不使用宏定义
 		code += fg.codegen.indentString()
-		code += fmt.Sprintf("#define %s arg\n", paramName)
+		code += fmt.Sprintf("int64_t %s = arg;\n", paramName)
 		// 添加参数到符号表
 		fg.codegen.AddSymbol(paramName, "int64_t", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	} else {
@@ -83,17 +89,13 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}
 	
 	// ========== KMM Enhanced V4 作用域分配器出口 ==========
-	fg.codegen.indent--
-	code += fg.codegen.indentString()
-	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
-	code += fg.codegen.indentString()
-	code += "} KMM_V4_SCOPE_END;\n"
-	// ===========================================
-	
-	// 如果使用了宏定义参数，需要取消宏
-	if len(stmt.Params) == 1 {
+	if !stmt.NoKMM {
+		fg.codegen.indent--
 		code += fg.codegen.indentString()
-		code += fmt.Sprintf("#undef %s\n", stmt.Params[0])
+		code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理结束\n"
+		code += fg.codegen.indentString()
+		code += "} KMM_V4_SCOPE_END;\n"
+		// ===========================================
 	}
 	
 	// 添加默认返回语句（非 main 函数返回 0）
@@ -108,16 +110,23 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 // generateMainFunction 生成 main 函数代码
 func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) string {
-	// 生成 main 函数定义
-	code := "int main() {\n"
+	// 生成 main 函数定义（支持 inline 注解）
+	code := ""
+	if stmt.Inline {
+		code += "__attribute__((always_inline)) "
+	}
+	code += "int main() {\n"
 	fg.codegen.indent++
 	
 	// ========== KMM Enhanced V4 作用域分配器入口 ==========
-	code += fg.codegen.indentString()
-	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理开始（Arena + ThreadCache + CleanupStack）\n"
-	code += fg.codegen.indentString()
-	code += "KMM_V4_SCOPE_START {\n"
-	fg.codegen.indent++
+	// 如果指定了 no_kmm 注解，则不插入 KMM 内存管理代码
+	if !stmt.NoKMM {
+		code += fg.codegen.indentString()
+		code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理开始\n"
+		code += fg.codegen.indentString()
+		code += "KMM_V4_SCOPE_START {\n"
+		fg.codegen.indent++
+	}
 	// ===========================================
 	
 	// 生成函数体
@@ -127,12 +136,14 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	}
 	
 	// ========== KMM Enhanced V4 作用域分配器出口 ==========
-	fg.codegen.indent--
-	code += fg.codegen.indentString()
-	code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理结束（自动回收）\n"
-	code += fg.codegen.indentString()
-	code += "} KMM_V4_SCOPE_END;\n"
-	// ===========================================
+	if !stmt.NoKMM {
+		fg.codegen.indent--
+		code += fg.codegen.indentString()
+		code += "// KMM Enhanced V4 ScopedAllocator: 自动内存管理结束\n"
+		code += fg.codegen.indentString()
+		code += "} KMM_V4_SCOPE_END;\n"
+		// ===========================================
+	}
 	
 	// 添加默认返回语句
 	code += fg.codegen.indentString() + "return 0;\n"

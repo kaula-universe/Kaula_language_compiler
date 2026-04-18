@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"io/ioutil"
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/config"
 	"kaula-compiler/internal/core"
@@ -71,15 +72,24 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 
 	pm := NewPluginManager()
 
-	// 尝试从多个路径加载 stdlib.json
-	stdlibPath := "stdlib.json"
-	if _, err := os.Stat(stdlibPath); os.IsNotExist(err) {
-		stdlibPath = "kaula-compiler/stdlib.json"
+	// 使用配置中的 stdlibPath（与语义分析器保持一致）
+	stdlibPath := cfg.StdlibPath
+	if stdlibPath == "" {
+		// 回退到默认路径
+		stdlibPath = "stdlib.json"
 		if _, err := os.Stat(stdlibPath); os.IsNotExist(err) {
-			stdlibPath = "../stdlib.json"
+			stdlibPath = "kaula-compiler/stdlib.json"
+			if _, err := os.Stat(stdlibPath); os.IsNotExist(err) {
+				stdlibPath = "../stdlib.json"
+			}
 		}
 	}
-	stdlibConfig, _ := stdlib.LoadStdlibConfig(stdlibPath)
+	stdlibConfig, err := stdlib.LoadStdlibConfig(stdlibPath)
+	if err != nil {
+		fmt.Printf("Warning: Failed to load stdlib.json from %s: %v\n", stdlibPath, err)
+	} else {
+		fmt.Printf("Loaded stdlib.json from %s, modules: %d\n", stdlibPath, len(stdlibConfig.Modules))
+	}
 
 	// 初始化 Tree 和 Prefix 管理器
 	treeManager := core.NewTree()
@@ -125,6 +135,11 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	mainCode := ""
 	
 	for _, stmt := range program.Statements {
+		// 跳过 import 语句，不生成 C 代码
+		if _, ok := stmt.(*ast.ImportStatement); ok {
+			continue
+		}
+		
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
 			if fnStmt.Name == "main" {
 				hasMain = true
@@ -147,25 +162,72 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	// 硬编码 src/kaula.h 路径，确保生成的代码能正确找到头文件
 	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"src/kaula.h\"\n"
 	
+	// 收集所有导入的模块
+	importedModules := make(map[string]bool)
+	for _, stmt := range program.Statements {
+		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
+			importedModules[importStmt.Module] = true
+		}
+	}
+	
+	// 调试：输出导入信息到文件
+	debugInfo := fmt.Sprintf("Imported modules count: %d\nModules: %v\n", len(importedModules), importedModules)
+	ioutil.WriteFile("cache/import_debug.txt", []byte(debugInfo), 0644)
+	
+	// 辅助函数：获取 map 的 keys
+	getMapKeys := func(m map[string]stdlib.Module) []string {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		return keys
+	}
+	
 	// 只添加实际使用的第三方库头文件
 	thirdPartyIncludes := ""
-	if cg.stdlibConfig != nil && len(cg.usedThirdPartyLibs) > 0 {
-		for _, lib := range cg.stdlibConfig.ThirdParty {
-			if cg.usedThirdPartyLibs[lib.Name] {
-				for _, header := range lib.Headers {
-					// 头文件已经包含 <> 或 ""，直接使用
-					// 如果路径以 ../ 开头，去掉它（因为生成的 C 文件和源文件在同一目录）
-					cleanHeader := header
-					if len(header) > 3 && header[0] == '"' && header[1] == '.' && header[2] == '.' && header[3] == '/' {
-						cleanHeader = "\"" + header[4:]
+	if cg.stdlibConfig != nil {
+		// 调试：输出 stdlibConfig 信息
+		debugInfo2 := fmt.Sprintf("stdlibConfig.Modules count: %d\nModules keys: %v\nThirdParty count: %d\n", len(cg.stdlibConfig.Modules), getMapKeys(cg.stdlibConfig.Modules), len(cg.stdlibConfig.ThirdParty))
+		ioutil.WriteFile("cache/stdlib_debug.txt", []byte(debugInfo2), 0644)
+		
+		// 遍历所有导入的模块
+		for moduleName := range importedModules {
+			// 检查是否是标准库模块
+			if module, ok := cg.stdlibConfig.Modules[moduleName]; ok {
+				// 添加模块对应的头文件
+				if module.Header != "" {
+					thirdPartyIncludes += "#include \"" + module.Header + "\"\n"
+				}
+			} else {
+				// 检查是否是第三方库
+				found := false
+				for _, lib := range cg.stdlibConfig.ThirdParty {
+					if lib.Name == moduleName {
+						found = true
+						// 添加库的头文件
+						for _, header := range lib.Headers {
+							// 头文件已经包含 <> 或""，直接使用
+							// 如果路径以 ../ 开头，去掉它（因为生成的 C 文件和源文件在同一目录）
+							cleanHeader := header
+							if len(header) > 3 && header[0] == '"' && header[1] == '.' && header[2] == '.' && header[3] == '/' {
+								cleanHeader = "\"" + header[4:]
+							}
+							thirdPartyIncludes += "#include " + cleanHeader + "\n"
+						}
+						break
 					}
-					thirdPartyIncludes += "#include " + cleanHeader + "\n"
+				}
+				if !found {
+					// 未找到模块或库
 				}
 			}
 		}
 	}
 	
 	allIncludes := baseIncludes + thirdPartyIncludes
+	
+	// 写入调试信息
+	ioutil.WriteFile("cache/all_includes.txt", []byte(allIncludes), 0644)
 	
 	if !hasMain {
 		template, ok := cg.templateManager.GetTemplate("main")

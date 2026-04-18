@@ -14,6 +14,7 @@ type Function struct {
 }
 
 type Module struct {
+	Header    string                `json:"header"`
 	Functions map[string]Function `json:"functions"`
 }
 
@@ -37,17 +38,71 @@ type StdlibConfig struct {
 	ThirdParty []ThirdPartyLibrary
 }
 
+// LoadPkgLibraries 从 pkglib 目录自动加载第三方库
+func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
+	libraries := []ThirdPartyLibrary{}
+	
+	// 检查 pkglib 目录是否存在
+	if _, err := os.Stat(pkglibPath); os.IsNotExist(err) {
+		return libraries, nil // pkglib 不存在时返回空列表
+	}
+	
+	// 遍历 pkglib 目录中的所有子目录
+	entries, err := os.ReadDir(pkglibPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read pkglib directory: %w", err)
+	}
+	
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		
+		libName := entry.Name()
+		libDir := filepath.Join(pkglibPath, libName)
+		
+		// 查找与目录同名的 .json 配置文件
+		configFile := filepath.Join(libDir, libName+".json")
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			// 没有配置文件，跳过这个库
+			continue
+		}
+		
+		// 读取并解析配置文件
+		data, err := os.ReadFile(configFile)
+		if err != nil {
+			fmt.Printf("Warning: Failed to read %s: %v\n", configFile, err)
+			continue
+		}
+		
+		var libConfig ThirdPartyLibrary
+		if err := json.Unmarshal(data, &libConfig); err != nil {
+			fmt.Printf("Warning: Failed to parse %s: %v\n", configFile, err)
+			continue
+		}
+		
+		// 设置库名称（如果配置文件中没有指定）
+		if libConfig.Name == "" {
+			libConfig.Name = libName
+		}
+		
+		libraries = append(libraries, libConfig)
+		fmt.Printf("Loaded third-party library: %s from %s\n", libConfig.Name, configFile)
+	}
+	
+	return libraries, nil
+}
+
 func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read stdlib config: %w", err)
 	}
 
-	// stdlib.json 的顶层直接是模块，不是 {"modules": {...}} 格式
-	// 所以我们需要手动解析
-	var rawModules map[string]map[string]Function
+	// 尝试使用新的 Module 结构解析（支持 header 字段）
+	var rawModules map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawModules); err != nil {
-		return nil, fmt.Errorf("failed to parse stdlib config: %w", err)
+		return nil, fmt.Errorf("failed to parse stdlib config structure: %w", err)
 	}
 
 	config := &StdlibConfig{
@@ -55,13 +110,26 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 	}
 
 	// 将原始数据转换为 Module 结构
-	for moduleName, functions := range rawModules {
-		config.Modules[moduleName] = Module{
-			Functions: functions,
+	for moduleName, rawData := range rawModules {
+		// 尝试先解析为新的 Module 结构（带 header 字段）
+		var module Module
+		if err := json.Unmarshal(rawData, &module); err == nil && len(module.Functions) > 0 {
+			// 新格式成功解析
+			config.Modules[moduleName] = module
+		} else {
+			// 回退到旧格式（直接是 map[string]Function）
+			var functions map[string]Function
+			if err := json.Unmarshal(rawData, &functions); err != nil {
+				return nil, fmt.Errorf("failed to parse module %s: %w", moduleName, err)
+			}
+			config.Modules[moduleName] = Module{
+				Functions: functions,
+			}
 		}
 	}
 
-	// 尝试加载第三方库配置文件
+	// 不再从 thirdparty.json 加载，改为从 pkglib 目录自动加载
+	// 保留向后兼容，如果 thirdparty.json 存在则也加载
 	thirdPartyPath := filepath.Join(filepath.Dir(configPath), "thirdparty.json")
 	if _, err := os.Stat(thirdPartyPath); err == nil {
 		thirdPartyData, err := os.ReadFile(thirdPartyPath)
@@ -70,8 +138,37 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 				ThirdParty []ThirdPartyLibrary `json:"third_party"`
 			}
 			if err := json.Unmarshal(thirdPartyData, &thirdPartyConfig); err == nil {
-				config.ThirdParty = thirdPartyConfig.ThirdParty
+				config.ThirdParty = append(config.ThirdParty, thirdPartyConfig.ThirdParty...)
 			}
+		}
+	}
+	
+	// 从 pkglib 目录加载所有第三方库
+	// 使用可执行文件所在目录作为基准
+	exePath, err := os.Executable()
+	if err != nil {
+		exePath = configPath
+	}
+	exeDir := filepath.Dir(exePath)
+	// 尝试多个 pkglib 路径
+	pkglibPaths := []string{
+		filepath.Join(exeDir, "pkglib"),              // kaula-compiler/pkglib (kaula 目录内)
+		filepath.Join(filepath.Dir(filepath.Dir(configPath)), "pkglib"), // kaula/pkglib
+		filepath.Join(exeDir, "..", "pkglib"),        // kaula-compiler/../pkglib (旧位置)
+		"pkglib",                                     // 当前目录
+	}
+	
+	for _, pkglibPath := range pkglibPaths {
+		fmt.Printf("Attempting to load pkglib from: %s\n", pkglibPath)
+		if _, err := os.Stat(pkglibPath); err == nil {
+			pkgLibraries, loadErr := LoadPkgLibraries(pkglibPath)
+			if loadErr != nil {
+				fmt.Printf("Warning: Failed to load pkglib libraries: %v\n", loadErr)
+			} else {
+				fmt.Printf("Successfully loaded %d libraries from pkglib\n", len(pkgLibraries))
+				config.ThirdParty = append(config.ThirdParty, pkgLibraries...)
+			}
+			break // 找到并加载后退出
 		}
 	}
 

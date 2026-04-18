@@ -23,6 +23,8 @@ type Config struct {
 	SpendableSize int `json:"spendable_size"`
 	// 目标语言
 	TargetLanguage string `json:"target_language"`
+	// 标准库路径
+	StdlibPath string `json:"-"`
 }
 
 // DefaultConfig 返回默认配置

@@ -131,6 +131,11 @@ func (p *Parser) parseProgram() *ast.Program {
 
 // parseStatementIterative 迭代解析语句
 func (p *Parser) parseStatementIterative() ast.Statement {
+	// 检查是否有函数注解
+	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE && p.peekTok.Type == lexer.TOKEN_FUNC {
+		return p.parseFunctionStatementIterative()
+	}
+	
 	switch p.curTok.Type {
 	case lexer.TOKEN_VO:
 		return p.parseVOStatementIterative()
@@ -622,6 +627,37 @@ func (p *Parser) parseObjectStatementIterative() *ast.ObjectStatement {
 	return stmt
 }
 
+// parseFunctionAnnotations 解析函数注解
+func (p *Parser) parseFunctionAnnotations(stmt *ast.FunctionStatement) *ast.FunctionStatement {
+	// 检查当前 token 是否是注解标记 #[
+	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
+		// 从 token 值中提取注解内容 #[no_kmm,inline] -> no_kmm,inline
+		annotationValue := p.curTok.Value
+		// 去掉 #[ 和 ]
+		annotationContent := strings.TrimPrefix(annotationValue, "#[")
+		annotationContent = strings.TrimSuffix(annotationContent, "]")
+		
+		// 解析注解内容
+		// 支持格式：no_kmm,inline
+		annotations := strings.Split(annotationContent, ",")
+		for _, ann := range annotations {
+			ann = strings.TrimSpace(ann)
+			if ann == "no_kmm" {
+				stmt.NoKMM = true
+			} else if ann == "inline" {
+				stmt.Inline = true
+			}
+		}
+		
+		p.log("解析函数注解：%s -> no_kmm=%v, inline=%v", annotationContent, stmt.NoKMM, stmt.Inline)
+		
+		// 跳过注解 token
+		p.nextToken()
+	}
+	
+	return stmt
+}
+
 // parseFunctionStatementIterative 迭代解析函数语句
 func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	p.log("开始解析函数语句")
@@ -634,7 +670,13 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		Params: []string{},
 		Body:   []ast.Statement{},
 		Pos:    pos,
+		NoKMM:  false,
+		Inline: false,
 	}
+	
+	// 解析函数注解（如果存在）
+	stmt = p.parseFunctionAnnotations(stmt)
+	
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -2170,9 +2212,15 @@ func (p *Parser) Validate(program *ast.Program) {
 	for _, path := range stdlibPaths {
 		stdlibConfig, err := stdlib.LoadStdlibConfig(path)
 		if err == nil && stdlibConfig != nil {
+			// 添加标准库模块
+			for moduleName := range stdlibConfig.Modules {
+				validModules[moduleName] = true
+			}
+			// 添加第三方库
 			for _, lib := range stdlibConfig.ThirdParty {
 				validModules[lib.Name] = true
 			}
+			fmt.Printf("Parser: Loaded %d stdlib modules and %d third-party libraries from %s\n", len(stdlibConfig.Modules), len(stdlibConfig.ThirdParty), path)
 			break // 加载成功后退出
 		}
 	}
