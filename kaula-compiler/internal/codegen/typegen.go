@@ -158,7 +158,6 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 	
 	// 处理泛型结构体
 	if stmt.Generic {
-		fmt.Printf("DEBUG: Generating generic struct for %s\n", stmt.Name)
 		return tg.GenerateGenericStructStatement(stmt)
 	}
 	

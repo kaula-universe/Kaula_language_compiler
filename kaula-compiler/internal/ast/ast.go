@@ -1,6 +1,9 @@
 package ast
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 // Node 表示AST节点的接口
 type Node interface {
@@ -143,15 +146,12 @@ func traverseNode(node Node, visitor func(Node)) {
 		if n.Access != nil {
 			traverseNode(n.Access, visitor)
 		}
-	case *SpendCallStatement:
-		if n.Spend != nil {
-			traverseNode(n.Spend, visitor)
+	case *SpendStatement:
+		if n.Target != nil {
+			traverseNode(n.Target, visitor)
 		}
 		for _, call := range n.Calls {
-			traverseNode(&call, visitor)
-			if call.Target != nil {
-				traverseNode(call.Target, visitor)
-			}
+			traverseNode(call.Index, visitor)
 			for _, stmt := range call.Body {
 				traverseNode(stmt, visitor)
 			}
@@ -393,29 +393,56 @@ func (v *VOStatement) SetPosition(pos Position) {
 	v.Pos = pos
 }
 
-// SpendCallStatement 表示spend/call语句
-type SpendCallStatement struct {
-	Spend Expression
-	Calls []CallStatement
+// SpendStatement 表示spend语句 - 锁定并开启一个对象的消费流程
+// spend 用于锁定对象，call 必须被调用与元素数量对应的次数
+type SpendStatement struct {
+	Target  Expression     // 消费目标对象（如数组）
+	Calls   []*CallClause // call 子句列表
+	Pos     Position
+}
+
+// CallClause 表示call子句 - 消费一个元素
+// index 是从 1 开始的元素索引
+type CallClause struct {
+	Index Expression // 元素索引（1-based）
+	Body  []Statement // 处理逻辑
 	Pos   Position
 }
 
 // statementNode 实现Statement接口
-func (s *SpendCallStatement) statementNode() {}
+func (s *SpendStatement) statementNode() {}
 
 // String 实现Node接口
-func (s *SpendCallStatement) String() string {
-	return "SpendCallStatement"
+func (s *SpendStatement) String() string {
+	return fmt.Sprintf("SpendStatement(target=%s, calls=%d)", s.Target, len(s.Calls))
 }
 
 // GetPosition 实现Node接口
-func (s *SpendCallStatement) GetPosition() Position {
+func (s *SpendStatement) GetPosition() Position {
 	return s.Pos
 }
 
 // SetPosition 实现Node接口
-func (s *SpendCallStatement) SetPosition(pos Position) {
+func (s *SpendStatement) SetPosition(pos Position) {
 	s.Pos = pos
+}
+
+// statementNode 实现Statement接口
+func (c *CallClause) statementNode() {}
+
+// String 实现Node接口
+func (c *CallClause) String() string {
+	return fmt.Sprintf("CallClause(index=%s)", c.Index)
+}
+
+// GetPosition 实现Node接口
+func (c *CallClause) GetPosition() Position {
+	return c.Pos
+}
+
+// SetPosition 实现Node接口
+func (c *CallClause) SetPosition(pos Position) {
+	c.Pos = pos
 }
 
 // TaskStatement 表示task语句
@@ -469,10 +496,60 @@ func (p *PrefixStatement) SetPosition(pos Position) {
 	p.Pos = pos
 }
 
+// TreeAnnotationType tree annotation types
+type TreeAnnotationType int
+
+const (
+	TreeAnnotationNone TreeAnnotationType = iota
+	TreeAnnotationPrefix
+	TreeAnnotationTree
+	TreeAnnotationPrefixTree
+	TreeAnnotationRoot
+	TreeAnnotationRootTree
+)
+
+func (t TreeAnnotationType) String() string {
+	switch t {
+	case TreeAnnotationNone:
+		return "none"
+	case TreeAnnotationPrefix:
+		return "prefix"
+	case TreeAnnotationTree:
+		return "tree"
+	case TreeAnnotationPrefixTree:
+		return "prefix,tree"
+	case TreeAnnotationRoot:
+		return "root"
+	case TreeAnnotationRootTree:
+		return "root,tree"
+	default:
+		return "unknown"
+	}
+}
+
+func ParseTreeAnnotation(s string) TreeAnnotationType {
+	switch s {
+	case "prefix":
+		return TreeAnnotationPrefix
+	case "tree":
+		return TreeAnnotationTree
+	case "prefix,tree", "tree,prefix":
+		return TreeAnnotationPrefixTree
+	case "root":
+		return TreeAnnotationRoot
+	case "root,tree", "tree,root":
+		return TreeAnnotationRootTree
+	default:
+		return TreeAnnotationNone
+	}
+}
+
 // TreeStatement 表示tree语句
 type TreeStatement struct {
-	Root Expression
-	Pos  Position
+	Annotation TreeAnnotationType
+	Root       Expression
+	Body       []Statement
+	Pos        Position
 }
 
 // statementNode 实现Statement接口
@@ -480,7 +557,7 @@ func (t *TreeStatement) statementNode() {}
 
 // String 实现Node接口
 func (t *TreeStatement) String() string {
-	return "TreeStatement"
+	return "TreeStatement(" + t.Annotation.String() + ")"
 }
 
 // GetPosition 实现Node接口
@@ -491,6 +568,36 @@ func (t *TreeStatement) GetPosition() Position {
 // SetPosition 实现Node接口
 func (t *TreeStatement) SetPosition(pos Position) {
 	t.Pos = pos
+}
+
+// GetAnnotation 获取注解类型
+func (t *TreeStatement) GetAnnotation() TreeAnnotationType {
+	return t.Annotation
+}
+
+// IsRootTree 检查是否是root tree
+func (t *TreeStatement) IsRootTree() bool {
+	return t.Annotation == TreeAnnotationRoot || t.Annotation == TreeAnnotationRootTree
+}
+
+// IsPrefixTree 检查是否是prefix tree
+func (t *TreeStatement) IsPrefixTree() bool {
+	return t.Annotation == TreeAnnotationPrefix || t.Annotation == TreeAnnotationPrefixTree
+}
+
+// IsOrphan 检查是否是孤儿tree（没有root且不是prefix）
+func (t *TreeStatement) IsOrphan() bool {
+	return t.Annotation == TreeAnnotationTree
+}
+
+// AddStatement 添加语句到tree body
+func (t *TreeStatement) AddStatement(stmt Statement) {
+	t.Body = append(t.Body, stmt)
+}
+
+// GetBody 获取tree body
+func (t *TreeStatement) GetBody() []Statement {
+	return t.Body
 }
 
 // ObjectStatement 表示object语句
@@ -593,10 +700,28 @@ type FunctionStatement struct {
 	Params        []string
 	Body          []Statement
 	ReturnType    string
-	Generic       bool // 是否是泛型函数
-	NoKMM         bool // 是否禁用 KMM 内存管理
-	Inline        bool // 是否内联函数
+	Generic       bool      // 是否是泛型函数
+	NoKMM         bool      // 是否禁用 KMM 内存管理
+	Inline        bool      // 是否内联函数
+	Annotation    TreeAnnotationType // 函数注解 (prefix,tree, root,tree)
+	PrefixName    string    // 如果使用prefix，记录prefix名称
+	TaskParams    []*TaskParam // 任务参数列表（如 task(1)）
+	AsyncParams   []*AsyncParam // 异步参数列表（如 async(value)）
 	Pos           Position
+}
+
+// TaskParam 表示任务参数
+// 用于函数定义中的 task(优先级) 语法
+type TaskParam struct {
+	Priority Expression // 优先级表达式
+	Pos     Position
+}
+
+// AsyncParam 表示异步参数
+// 用于函数定义中的 async(值) 语法
+type AsyncParam struct {
+	Value Expression // 异步值表达式
+	Pos   Position
 }
 
 // statementNode 实现Statement接口
@@ -672,6 +797,35 @@ func (f *FunctionStatement) GetStatement(index int) Statement {
 // IsGeneric 检查是否是泛型函数
 func (f *FunctionStatement) IsGeneric() bool {
 	return f.Generic || len(f.TypeParams) > 0
+}
+
+// GetAnnotation 获取注解类型
+func (f *FunctionStatement) GetAnnotation() TreeAnnotationType {
+	return f.Annotation
+}
+
+// IsPrefixFunction 检查是否使用prefix
+func (f *FunctionStatement) IsPrefixFunction() bool {
+	return f.Annotation == TreeAnnotationPrefix || f.Annotation == TreeAnnotationPrefixTree
+}
+
+// IsTreeFunction 检查是否是tree函数
+func (f *FunctionStatement) IsTreeFunction() bool {
+	return f.Annotation == TreeAnnotationTree || f.Annotation == TreeAnnotationPrefixTree || f.Annotation == TreeAnnotationRootTree
+}
+
+// HasPrefixVar 检查是否有前缀变量（$开头）
+func (f *FunctionStatement) HasPrefixVar(name string) bool {
+	for _, stmt := range f.Body {
+		if exprStmt, ok := stmt.(*ExpressionStatement); ok {
+			if ident, ok := exprStmt.Expression.(*Identifier); ok {
+				if len(ident.Name) > 0 && ident.Name[0] == '$' && ident.Name[1:] == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // GetGenericSignature 获取泛型签名
@@ -1034,6 +1188,7 @@ func (e *ExpressionStatement) SetPosition(pos Position) {
 // Identifier 表示标识符
 type Identifier struct {
 	Name string
+	IsPrefixVar bool
 	Pos  Position
 }
 
@@ -1267,10 +1422,13 @@ func (i *IndexExpression) SetPosition(pos Position) {
 }
 
 // PrefixCallExpression 表示前缀调用表达式
+// 语法: @PrefixName(param1=value1, param2=value2) { body }
 type PrefixCallExpression struct {
-	Name string
-	Body []Statement
-	Pos  Position
+	Name       string
+	Params     map[string]Expression
+	Body       []Statement
+	Annotation TreeAnnotationType
+	Pos        Position
 }
 
 // expressionNode 实现Expression接口
@@ -1289,6 +1447,33 @@ func (p *PrefixCallExpression) GetPosition() Position {
 // SetPosition 实现Node接口
 func (p *PrefixCallExpression) SetPosition(pos Position) {
 	p.Pos = pos
+}
+
+// GetAnnotation 获取注解类型
+func (p *PrefixCallExpression) GetAnnotation() TreeAnnotationType {
+	return p.Annotation
+}
+
+// IsPrefixCall 检查是否是前缀调用
+func (p *PrefixCallExpression) IsPrefixCall() bool {
+	return true
+}
+
+// GetParam 获取参数值
+func (p *PrefixCallExpression) GetParam(name string) (Expression, bool) {
+	if p.Params == nil {
+		return nil, false
+	}
+	expr, ok := p.Params[name]
+	return expr, ok
+}
+
+// AddParam 添加参数
+func (p *PrefixCallExpression) AddParam(name string, expr Expression) {
+	if p.Params == nil {
+		p.Params = make(map[string]Expression)
+	}
+	p.Params[name] = expr
 }
 
 // BlockStatement 表示块语句

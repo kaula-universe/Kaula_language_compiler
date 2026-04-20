@@ -17,6 +17,8 @@ const (
 	ErrorTypeError
 	// 运行时错误
 	ErrorRuntime
+	// 警告
+	ErrorWarning
 )
 
 // Error 表示一个错误
@@ -98,6 +100,26 @@ func (ec *ErrorCollector) AddTypeError(message string, line, column int, file, s
 // AddRuntimeError 添加一个运行时错误
 func (ec *ErrorCollector) AddRuntimeError(message string, line, column int, file, suggestion string) {
 	ec.AddError(ErrorRuntime, message, line, column, file, suggestion)
+}
+
+// AddWarning 添加一个警告
+func (ec *ErrorCollector) AddWarning(message string, line, column int, file, suggestion string) {
+	ec.AddError(ErrorWarning, message, line, column, file, suggestion)
+}
+
+// AddSemanticWarning 添加一个语义警告
+func (ec *ErrorCollector) AddSemanticWarning(message string, line, column int, file, suggestion string) {
+	ec.AddError(ErrorWarning, message, line, column, file, suggestion)
+}
+
+// GetWarnings 获取所有警告
+func (ec *ErrorCollector) GetWarnings() []*Error {
+	return ec.GetErrorsByType(ErrorWarning)
+}
+
+// HasWarnings 检查是否有警告
+func (ec *ErrorCollector) HasWarnings() bool {
+	return len(ec.GetWarnings()) > 0
 }
 
 // Errors 返回错误列表
@@ -184,6 +206,8 @@ func ErrorTypeToString(errorType ErrorType) string {
 		return "Type"
 	case ErrorRuntime:
 		return "Runtime"
+	case ErrorWarning:
+		return "Warning"
 	default:
 		return "Unknown"
 	}

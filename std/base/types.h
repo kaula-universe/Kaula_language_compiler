@@ -4,6 +4,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// 平台检测宏
+#if defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)
+    #define STD_PLATFORM_WINDOWS 1
+    #define STD_PLATFORM_UNIX 0
+#else
+    #define STD_PLATFORM_WINDOWS 0
+    #define STD_PLATFORM_UNIX 1
+#endif
+
 // 基础数据类型定义
 
 // 整数类型
@@ -45,10 +54,16 @@ typedef ssize_t ssize_t;
 // 空类型
 typedef void void_t;
 
-// 类型常量
+// 类型常量（避免与Windows定义冲突）
+#ifndef TRUE
 #define TRUE true
+#endif
+#ifndef FALSE
 #define FALSE false
+#endif
+#ifndef NULL_PTR
 #define NULL_PTR NULL
+#endif
 
 // 类型大小常量
 #define SIZE_OF_I8 sizeof(i8)

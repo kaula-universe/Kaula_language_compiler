@@ -1,5 +1,6 @@
 {
   "io": {
+    "header": "std/io/io.h",
     "println": {"args": ["const char*"], "varargs": true},
     "print": {"args": ["const char*"], "varargs": true},
     "print_char": {"args": ["char"]},
@@ -40,6 +41,7 @@
     "io_clear_error": {"args": []}
   },
   "string": {
+    "header": "std/string/string.h",
     "string_create": {"args": ["const char*"], "return": "String"},
     "string_create_from_char": {"args": ["char"], "return": "String"},
     "string_create_from_int": {"args": ["i64"], "return": "String"},
@@ -86,6 +88,7 @@
     "string_count_string": {"args": ["String", "String"], "return": "size_t"}
   },
   "memory": {
+    "header": "std/memory/memory.h",
     "kaula_scope_enter": {"args": []},
     "kaula_scope_exit": {"args": []},
     "kaula_scope_alloc": {"args": ["size_t"], "return": "void*"},
@@ -97,6 +100,7 @@
     "std_free": {"args": ["void*"]}
   },
   "format": {
+    "header": "std/format/format.h",
     "format_printf": {"args": ["char*", "size_t", "const char*"], "varargs": true, "return": "int"},
     "format_alloc": {"args": ["const char*"], "varargs": true, "return": "char*"},
     "format_int": {"args": ["char*", "size_t", "i64", "int"], "return": "int"},
@@ -161,6 +165,7 @@
     }
   },
   "math": {
+    "header": "std/math/math.h",
     "math_abs": {"args": ["f64"], "return": "f64"},
     "math_floor": {"args": ["f64"], "return": "f64"},
     "math_ceil": {"args": ["f64"], "return": "f64"},
@@ -223,7 +228,36 @@
     "math_deg_to_rad": {"args": ["f64"], "return": "f64"},
     "math_rad_to_deg": {"args": ["f64"], "return": "f64"}
   },
+  "time": {
+    "header": "std/time/time.h",
+    "types": {
+      "TimeSpec": {"fields": ["i64 sec", "i64 nsec"]},
+      "DateTime": {"fields": ["i32 year", "i32 month", "i32 day", "i32 hour", "i32 minute", "i32 second", "i32 millisecond"]}
+    },
+    "functions": {
+      "time_now_i64": {"args": [], "return": "i64"},
+      "time_now_double": {"args": [], "return": "f64"},
+      "time_now_ms": {"args": [], "return": "i64"},
+      "time_now_us": {"args": [], "return": "i64"},
+      "time_now_ns": {"args": [], "return": "i64"},
+      "time_sleep": {"args": ["i32"]},
+      "time_sleep_us": {"args": ["i32"]},
+      "time_sleep_ns": {"args": ["i64"]},
+      "time_sleep_seconds": {"args": ["f64"]},
+      "time_get_spec": {"args": [], "return": "TimeSpec"},
+      "time_diff_ms": {"args": ["TimeSpec", "TimeSpec"], "return": "i64"},
+      "time_diff_seconds": {"args": ["TimeSpec", "TimeSpec"], "return": "f64"},
+      "time_to_datetime": {"args": ["i64"], "return": "DateTime"},
+      "time_from_datetime": {"args": ["DateTime"], "return": "i64"},
+      "time_format_string": {"args": ["i64", "const char*"], "return": "char*"},
+      "time_format_now": {"args": ["const char*"], "return": "char*"},
+      "time_parse_string": {"args": ["const char*", "const char*"], "return": "i64"},
+      "time_weekday_name": {"args": ["i32"], "return": "const char*"},
+      "time_month_name": {"args": ["i32"], "return": "const char*"}
+    }
+  },
   "system": {
+    "header": "std/system/system.h",
     "system_get_os_name": {"args": [], "return": "const char*"},
     "system_get_os_version": {"args": [], "return": "const char*"},
     "system_get_cpu_architecture": {"args": [], "return": "const char*"},
@@ -268,6 +302,7 @@
     "system_get_battery_percentage": {"args": [], "return": "int"}
   },
   "vo": {
+    "header": "std/vo/vo.h",
     "std_vo_create": {"args": ["int"], "return": "VO*"},
     "std_vo_destroy": {"args": ["VO*"]},
     "std_vo_data_load": {"args": ["VO*", "int", "void*"]},
@@ -277,6 +312,7 @@
     "std_vo_get_cache_max": {"args": ["VO*"], "return": "int"}
   },
   "prefix": {
+    "header": "std/prefix/prefix.h",
     "prefix_system_create": {"args": [], "return": "PrefixSystem*"},
     "prefix_system_destroy": {"args": ["PrefixSystem*"]},
     "prefix_enter": {"args": ["const char*"], "return": "int"},
@@ -287,6 +323,7 @@
     "prefix_system_get": {"args": [], "return": "PrefixSystem*"}
   },
   "task": {
+    "header": "std/task/task.h",
     "task_create": {"args": ["void*", "void*", "int"], "return": "Task"},
     "task_queue_create": {"args": ["int"], "return": "TaskQueue*"},
     "task_queue_destroy": {"args": ["TaskQueue*"]},
@@ -315,6 +352,7 @@
     "priority_queue_batch_execute": {"args": ["PriorityQueue*", "int"], "return": "int"}
   },
   "concurrent": {
+    "header": "std/concurrent/concurrent.h",
     "thread_create": {"args": ["ThreadFunction", "void*"], "return": "Thread"},
     "thread_join": {"args": ["Thread"]},
     "thread_detach": {"args": ["Thread"]},
@@ -443,6 +481,7 @@
     "system_syscall_calloc": {"args": ["size_t", "size_t"], "return": "void*"}
   },
   "async": {
+    "header": "std/async/async.h",
     "async_task_create": {"args": ["void* (*)(void*)", "void*", "void (*)(void*, void*)", "void*"], "return": "void*"},
     "async_task_cancel": {"args": ["void*"]},
     "async_task_get_status": {"args": ["void*"], "return": "int"},
@@ -464,5 +503,45 @@
     "coroutine_resume": {"args": ["void*"]},
     "coroutine_yield": {"args": []},
     "coroutine_destroy": {"args": ["void*"]}
+  },
+  "web": {
+    "header": "std/web/web.h",
+    "functions": {
+      "http_server_create": {"args": ["i32"], "return": "HttpServer*"},
+      "http_server_start": {"args": ["HttpServer*", "void*"], "return": "bool"},
+      "http_server_stop": {"args": ["HttpServer*"], "return": "bool"},
+      "http_server_destroy": {"args": ["HttpServer*"]},
+      "http_server_set_document_root": {"args": ["HttpServer*", "const char*"], "return": "bool"},
+      "http_server_enable_cors": {"args": ["HttpServer*", "const char*"]},
+      "http_request_parse": {"args": ["const char*", "size_t"], "return": "HttpRequest*"},
+      "http_request_destroy": {"args": ["HttpRequest*"]},
+      "http_request_get_header": {"args": ["HttpRequest*", "const char*"], "return": "const char*"},
+      "http_request_get_query_param": {"args": ["HttpRequest*", "const char*"], "return": "const char*"},
+      "http_response_create": {"args": [], "return": "HttpResponse*"},
+      "http_response_destroy": {"args": ["HttpResponse*"]},
+      "http_response_set_status": {"args": ["HttpResponse*", "int"]},
+      "http_response_set_body": {"args": ["HttpResponse*", "const char*", "size_t"]},
+      "http_response_set_content_type": {"args": ["HttpResponse*", "const char*"]},
+      "http_response_set_header": {"args": ["HttpResponse*", "const char*", "const char*"]},
+      "http_response_set_json": {"args": ["HttpResponse*", "const char*"]},
+      "http_response_set_html": {"args": ["HttpResponse*", "const char*"]},
+      "http_response_set_redirect": {"args": ["HttpResponse*", "const char*"]},
+      "http_response_to_string": {"args": ["HttpResponse*"], "return": "char*"},
+      "http_response_print": {"args": ["HttpResponse*"]},
+      "http_client_create": {"args": [], "return": "HttpClient*"},
+      "http_client_destroy": {"args": ["HttpClient*"]},
+      "http_client_set_timeout": {"args": ["HttpClient*", "i32"], "return": "bool"},
+      "http_client_get": {"args": ["HttpClient*", "const char*"], "return": "HttpResponse*"},
+      "http_client_post": {"args": ["HttpClient*", "const char*", "const char*", "const char*"], "return": "HttpResponse*"},
+      "http_client_put": {"args": ["HttpClient*", "const char*", "const char*", "const char*"], "return": "HttpResponse*"},
+      "http_client_delete": {"args": ["HttpClient*", "const char*"], "return": "HttpResponse*"},
+      "url_parse": {"args": ["const char*"], "return": "UrlParts*"},
+      "url_destroy": {"args": ["UrlParts*"]},
+      "url_encode": {"args": ["const char*"], "return": "char*"},
+      "url_decode": {"args": ["const char*"], "return": "char*"},
+      "http_method_to_string": {"args": ["int"], "return": "const char*"},
+      "http_status_to_string": {"args": ["int"], "return": "const char*"},
+      "http_get_mime_type": {"args": ["const char*"], "return": "char*"}
+    }
   }
 }

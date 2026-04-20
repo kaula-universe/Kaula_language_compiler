@@ -111,6 +111,15 @@ void spendable_destroy(Spendable* sp);
 void spendable_add(Spendable* sp, void* component);
 void* spendable_call(Spendable* sp);
 
+// 新 API: spend_lock - 锁定目标并开始消费流程
+void spend_lock(void* target);
+
+// 新 API: spend_call - 消费指定索引的元素
+void* spend_call(void* target, int index);
+
+// 新 API: spend_unlock - 解除锁定
+void spend_unlock(void* target);
+
 // ==================== Priority Queue 模块 ====================
 typedef struct PriorityQueue PriorityQueue;
 
@@ -140,12 +149,17 @@ void tree_add_node(Tree* tree, const char* parent_name, const char* node_name, v
 void* tree_get_node(Tree* tree, const char* node_name);
 
 // ==================== Time 模块 ====================
+// 注意：time_sleep 和 time_now 的具体实现在 std/time/time.h 中定义
+// 这里只保留模块结构定义
 typedef struct TimeModule TimeModule;
 
 TimeModule* time_create(void);
 void time_destroy(TimeModule* tm);
-double time_now(TimeModule* tm);
-void time_sleep(TimeModule* tm, double seconds);
+// double time_now(TimeModule* tm);  // 已移至 std/time/time.h
+// void time_sleep(TimeModule* tm, double seconds);  // 已移至 std/time/time.h
+
+// 包含 std/time/time.h 以获取 time_now 和 time_sleep 函数
+#include "../std/time/time.h"
 
 // ==================== Fast Allocator ====================
 typedef struct FastAllocator {

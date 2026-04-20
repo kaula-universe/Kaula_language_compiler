@@ -8,12 +8,19 @@
     #include <direct.h>
     #include <io.h>
     #include <windows.h>
+    #include <sys/stat.h>
     #define ACCESS _access
-    #define STAT _stat64
+    #define STAT _stat
     #define MKDIR(path) _mkdir(path)
-    #define RMDIR _rmdir
+    #define RMDIR(path) _rmdir(path)
     #define GETCWD _getcwd
     #define CHDIR _chdir
+    #ifndef S_ISREG
+        #define S_ISREG(mode) (((mode) & S_IFMT) == S_IFREG)
+    #endif
+    #ifndef S_ISDIR
+        #define S_ISDIR(mode) (((mode) & S_IFMT) == S_IFDIR)
+    #endif
 #else
     #include <unistd.h>
     #include <sys/stat.h>
@@ -22,7 +29,7 @@
     #define ACCESS access
     #define STAT stat
     #define MKDIR(path) mkdir(path, 0755)
-    #define RMDIR rmdir
+    #define RMDIR(path) rmdir(path)
     #define GETCWD getcwd
     #define CHDIR chdir
 #endif

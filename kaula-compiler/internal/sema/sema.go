@@ -3,22 +3,26 @@ package sema
 import (
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"kaula-compiler/internal/core"
 	"kaula-compiler/internal/errors"
 	"kaula-compiler/internal/symbol"
 	"kaula-compiler/internal/stdlib"
 	"strings"
 )
 
-// SemanticAnalyzer 表示语义分析器
 type SemanticAnalyzer struct {
-	symbolTable     *symbol.SymbolTable
-	scope           int
-	errorCollector  *errors.ErrorCollector
+	symbolTable      *symbol.SymbolTable
+	scope            int
+	errorCollector   *errors.ErrorCollector
 	currentFunction *ast.FunctionStatement
+	program         *ast.Program
 	stdlibConfig    *stdlib.StdlibConfig
-	genericStack    []*ast.FunctionStatement // 泛型函数栈
-	typeConstraints map[string][]string      // 类型约束映射
-	exportedSymbols map[string]bool          // 导出符号列表
+	genericStack    []*ast.FunctionStatement
+	typeConstraints map[string][]string
+	exportedSymbols map[string]bool
+	treeManager     *core.TreeManager
+	prefixManager   *core.PrefixManager
+	rootTreeFound   bool
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -38,13 +42,13 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 
 	stdlibConfig, err := stdlib.LoadStdlibConfig(configPath)
 	if err == nil && stdlibConfig != nil {
-		for moduleName, module := range stdlibConfig.Modules {
+		// 只添加模块名，不自动添加函数
+		// 函数必须通过显式 import 导入
+		for moduleName := range stdlibConfig.Modules {
 			globalSymbolTable.AddSymbol(moduleName, "module", false, "global", 0, 0)
-			for funcName := range module.Functions {
-				globalSymbolTable.AddSymbol(funcName, "any", false, "global", 0, 0)
-			}
 		}
 	} else {
+		// 如果 stdlib.json 加载失败，至少添加 println
 		globalSymbolTable.AddSymbol("println", "any", false, "global", 0, 0)
 	}
 
@@ -57,11 +61,17 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		genericStack:    make([]*ast.FunctionStatement, 0),
 		typeConstraints: make(map[string][]string),
 		exportedSymbols: make(map[string]bool),
+		treeManager:     core.NewTreeManager(),
+		prefixManager:   core.NewPrefixManager(),
+		rootTreeFound:   false,
 	}
 }
 
 // Analyze 分析程序（两遍分析）
 func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
+	// 保存 program 引用以便后续查找
+	sa.program = program
+
 	// 第一遍：将所有函数和变量添加到符号表（不分析函数体）
 	for _, stmt := range program.Statements {
 		sa.analyzeStatement(stmt)
@@ -129,8 +139,8 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 	switch s := s.(type) {
 	case *ast.VOStatement:
 		sa.analyzeVOStatement(s)
-	case *ast.SpendCallStatement:
-		sa.analyzeSpendCallStatement(s)
+	case *ast.SpendStatement:
+		sa.analyzeSpendStatement(s)
 	case *ast.TaskStatement:
 		sa.analyzeTaskStatement(s)
 	case *ast.PrefixStatement:
@@ -170,6 +180,11 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		sa.analyzeExportStatement(s)
 	case *ast.ExpressionStatement:
 		if s == nil || s.Expression == nil {
+			return
+		}
+		// 检查是否是前缀调用表达式
+		if prefixCall, ok := s.Expression.(*ast.PrefixCallExpression); ok {
+			sa.analyzePrefixCallExpression(prefixCall)
 			return
 		}
 		sa.analyzeExpression(s.Expression)
@@ -227,17 +242,40 @@ func (sa *SemanticAnalyzer) analyzeVOStatement(stmt *ast.VOStatement) {
 	}
 }
 
-// analyzeSpendCallStatement 分析spend/call语句
-func (sa *SemanticAnalyzer) analyzeSpendCallStatement(stmt *ast.SpendCallStatement) {
-	if stmt.Spend != nil {
-		sa.analyzeExpression(stmt.Spend)
+// analyzeSpendStatement 分析spend语句 - 锁定并开启消费流程
+func (sa *SemanticAnalyzer) analyzeSpendStatement(stmt *ast.SpendStatement) {
+	if stmt.Target != nil {
+		sa.analyzeExpression(stmt.Target)
 	}
+
+	// 分析每个 call 子句
 	for _, call := range stmt.Calls {
-		if call.Target != nil {
-			sa.analyzeExpression(call.Target)
+		if call.Index != nil {
+			sa.analyzeExpression(call.Index)
 		}
 		for _, bodyStmt := range call.Body {
 			sa.analyzeStatement(bodyStmt)
+		}
+	}
+
+	// 验证 call 次数与目标元素数量匹配
+	// 这需要在运行时验证，但可以做一些静态检查
+	expectedCalls := -1 // -1 表示未知，需要运行时确定
+	for _, call := range stmt.Calls {
+		// 检查索引是否为常量
+		if intLit, ok := call.Index.(*ast.IntegerLiteral); ok {
+			index := int(intLit.Value)
+			if expectedCalls == -1 {
+				expectedCalls = index
+			} else if index > expectedCalls {
+				sa.errorCollector.AddSemanticWarning(
+					fmt.Sprintf("call index %d exceeds expected number of calls", index),
+					call.Pos.Line,
+					call.Pos.Column,
+					"spend_call_mismatch",
+					"ensure call indices match target element count",
+				)
+			}
 		}
 	}
 }
@@ -266,10 +304,208 @@ func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
 	sa.scope--
 }
 
+// analyzePrefixCallExpression 分析前缀调用表达式
+// 检测变量遮蔽等潜在问题
+func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpression) {
+	// 获取前缀函数定义
+	funcDecl := sa.findFunctionDeclaration(expr.Name)
+	if funcDecl == nil {
+		return
+	}
+
+	// 检查是否是前缀函数
+	annotation := funcDecl.GetAnnotation()
+	if annotation != ast.TreeAnnotationPrefix &&
+		annotation != ast.TreeAnnotationPrefixTree {
+		return
+	}
+
+	// 收集前缀函数的参数列表
+	prefixParams := make(map[string]bool)
+	for _, param := range funcDecl.Params {
+		prefixParams[param] = true
+	}
+
+	// 分析调用体内的语句，检测变量遮蔽
+	for _, bodyStmt := range expr.Body {
+		sa.checkPrefixVariableShadowing(bodyStmt, prefixParams)
+	}
+}
+
+// checkPrefixVariableShadowing 检查前缀调用体内的变量遮蔽
+func (sa *SemanticAnalyzer) checkPrefixVariableShadowing(stmt ast.Statement, prefixParams map[string]bool) {
+	if stmt == nil {
+		return
+	}
+
+	switch s := stmt.(type) {
+	case *ast.VariableDeclaration:
+		// 检查变量名是否与前缀参数相同
+		if prefixParams[s.Name] {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("variable '%s' shadows prefix parameter with same name - use explicit $%s to disambiguate if intended", s.Name, s.Name),
+				s.Pos.Line,
+				s.Pos.Column,
+				"prefix_shadowing",
+				"prefix variable with same name",
+			)
+		}
+
+		// 递归检查初始化表达式
+		if s.Value != nil {
+			sa.checkExpressionForShadowing(s.Value, prefixParams)
+		}
+
+	case *ast.ExpressionStatement:
+		if s.Expression != nil {
+			sa.checkExpressionForShadowing(s.Expression, prefixParams)
+		}
+	}
+}
+
+// checkExpressionForShadowing 检查表达式中的变量引用
+func (sa *SemanticAnalyzer) checkExpressionForShadowing(expr ast.Expression, prefixParams map[string]bool) {
+	if expr == nil {
+		return
+	}
+
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		// 检查是否使用了 $ 前缀但没有 $
+		if prefixParams[e.Name] && !e.IsPrefixVar {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("identifier '%s' matches prefix parameter but not using $ prefix - did you mean $%s?", e.Name, e.Name),
+				e.Pos.Line,
+				e.Pos.Column,
+				"missing_prefix_var",
+				"use $ prefix to access prefix variable",
+			)
+		}
+
+	case *ast.CallExpression:
+		for _, arg := range e.Args {
+			sa.checkExpressionForShadowing(arg, prefixParams)
+		}
+
+	case *ast.BinaryExpression:
+		sa.checkExpressionForShadowing(e.Left, prefixParams)
+		sa.checkExpressionForShadowing(e.Right, prefixParams)
+	}
+}
+
+// findFunctionDeclaration 查找函数声明
+func (sa *SemanticAnalyzer) findFunctionDeclaration(name string) *ast.FunctionStatement {
+	if sa.program == nil {
+		return nil
+	}
+	for _, stmt := range sa.program.Statements {
+		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
+			if fnStmt.Name == name {
+				return fnStmt
+			}
+		}
+	}
+	return nil
+}
+
 // analyzeTreeStatement 分析 tree 语句
 func (sa *SemanticAnalyzer) analyzeTreeStatement(stmt *ast.TreeStatement) {
+	annotation := stmt.GetAnnotation()
+
+	if annotation == ast.TreeAnnotationRoot || annotation == ast.TreeAnnotationRootTree {
+		sa.analyzeRootTree(stmt)
+	} else if annotation == ast.TreeAnnotationPrefix || annotation == ast.TreeAnnotationPrefixTree {
+		sa.analyzePrefixTree(stmt)
+	} else if annotation == ast.TreeAnnotationTree {
+		sa.analyzeOrphanTree(stmt)
+	}
+
 	if stmt.Root != nil {
 		sa.analyzeExpression(stmt.Root)
+	}
+
+	for _, bodyStmt := range stmt.Body {
+		sa.analyzeStatement(bodyStmt)
+	}
+}
+
+func (sa *SemanticAnalyzer) analyzeRootTree(stmt *ast.TreeStatement) {
+	if sa.rootTreeFound {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("root tree 已经存在，只能定义一个 root tree"),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"删除多余的 root tree 定义，或将其改为普通 tree",
+		)
+		return
+	}
+
+	tree := core.NewTreeWithName("root")
+	tree.SetAnnotation(core.AnnotationRootTree)
+	if err := sa.treeManager.RegisterTree(tree); err != nil {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("注册 root tree 失败: %v", err),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"",
+		)
+	}
+	sa.rootTreeFound = true
+}
+
+func (sa *SemanticAnalyzer) analyzePrefixTree(stmt *ast.TreeStatement) {
+	var prefixName string
+	if ident, ok := stmt.Root.(*ast.Identifier); ok {
+		prefixName = ident.Name
+	}
+
+	tree := core.NewTreeWithName(prefixName)
+	tree.SetAnnotation(core.AnnotationPrefixTree)
+	if err := sa.treeManager.RegisterTree(tree); err != nil {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("注册 prefix tree '%s' 失败: %v", prefixName, err),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"",
+		)
+	}
+
+	if prefixName != "" {
+		sa.prefixManager.CreatePrefix(prefixName, core.PrefixAnnotationPrefixTree)
+	}
+}
+
+func (sa *SemanticAnalyzer) analyzeOrphanTree(stmt *ast.TreeStatement) {
+	var treeName string
+	if ident, ok := stmt.Root.(*ast.Identifier); ok {
+		treeName = ident.Name
+	}
+
+	tree := core.NewTreeWithName(treeName)
+	tree.SetAnnotation(core.AnnotationTree)
+
+	if !sa.rootTreeFound {
+		tree.MarkOrphan()
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("孤儿 tree '%s' - 没有定义 root tree，所有 tree 必须匹配 root tree 结构", treeName),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"定义 #[root,tree] 来指定全局 root tree，或将 tree 包裹在 prefix 或 class 中",
+		)
+	} else {
+		if err := sa.treeManager.RegisterTree(tree); err != nil {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("注册 tree '%s' 失败: %v", treeName, err),
+				stmt.Pos.Line,
+				stmt.Pos.Column,
+				"",
+				"",
+			)
+		}
 	}
 }
 
@@ -489,4 +725,20 @@ func (sa *SemanticAnalyzer) validateGenericInstantiation(funcName string, typeAr
 	}
 	
 	return true
+}
+
+func (sa *SemanticAnalyzer) ErrorCollector() *errors.ErrorCollector {
+	return sa.errorCollector
+}
+
+func (sa *SemanticAnalyzer) GetStdlibConfig() *stdlib.StdlibConfig {
+	return sa.stdlibConfig
+}
+
+func (sa *SemanticAnalyzer) SetStdlibConfig(cfg *stdlib.StdlibConfig) {
+	sa.stdlibConfig = cfg
+}
+
+func (sa *SemanticAnalyzer) HasErrors() bool {
+	return sa.errorCollector.HasErrors()
 }

@@ -111,20 +111,56 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 
 	// 将原始数据转换为 Module 结构
 	for moduleName, rawData := range rawModules {
-		// 尝试先解析为新的 Module 结构（带 header 字段）
-		var module Module
-		if err := json.Unmarshal(rawData, &module); err == nil && len(module.Functions) > 0 {
-			// 新格式成功解析
-			config.Modules[moduleName] = module
-		} else {
-			// 回退到旧格式（直接是 map[string]Function）
-			var functions map[string]Function
-			if err := json.Unmarshal(rawData, &functions); err != nil {
-				return nil, fmt.Errorf("failed to parse module %s: %w", moduleName, err)
-			}
+		// 先尝试解析为 Module 结构（带 header 和 functions 嵌套）
+		var moduleWithHeader struct {
+			Header    string                `json:"header"`
+			Functions map[string]Function `json:"functions"`
+		}
+		if err := json.Unmarshal(rawData, &moduleWithHeader); err == nil && len(moduleWithHeader.Functions) > 0 {
+			// 新格式（嵌套在 functions 下）
 			config.Modules[moduleName] = Module{
-				Functions: functions,
+				Header:    moduleWithHeader.Header,
+				Functions: moduleWithHeader.Functions,
 			}
+			continue
+		}
+
+	// 回退到旧格式：扁平结构，header 在顶层，函数也在顶层
+		var header string
+		var rawMap map[string]interface{}
+		if err := json.Unmarshal(rawData, &rawMap); err == nil {
+			if h, ok := rawMap["header"]; ok {
+				if hstr, ok := h.(string); ok {
+					header = hstr
+				}
+			}
+		}
+		
+		// 解析函数 - 跳过 header 字段
+		flatFunctions := make(map[string]Function)
+		if rawMap != nil {
+			for key, value := range rawMap {
+				if key == "header" {
+					continue // 跳过 header
+				}
+				// 将 value 重新序列化为 JSON 再解析为 Function
+				valueJSON, err := json.Marshal(value)
+				if err != nil {
+					continue
+				}
+				var fn Function
+				if err := json.Unmarshal(valueJSON, &fn); err != nil {
+					// 如果解析失败，创建一个空的 Function
+					flatFunctions[key] = Function{}
+				} else {
+					flatFunctions[key] = fn
+				}
+			}
+		}
+		
+		config.Modules[moduleName] = Module{
+			Header:    header,
+			Functions: flatFunctions,
 		}
 	}
 

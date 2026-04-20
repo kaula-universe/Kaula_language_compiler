@@ -68,10 +68,21 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 	if e.Name == "null" {
 		return "NULL"
 	}
-	
+
+	// 检查是否是前缀变量（以 $ 开头）
+	if e.IsPrefixVar || strings.HasPrefix(e.Name, "$") {
+		// 前缀变量：$device -> device（去掉 $ 前缀）
+		// 在 generatePrefixCallBody 中已经通过参数设置了 device = 0
+		varName := e.Name
+		if strings.HasPrefix(varName, "$") {
+			varName = varName[1:] // 去掉 $ 前缀
+		}
+		return varName
+	}
+
 	// 检查当前作用域是否是构造函数或方法
-	if strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "constructor") || 
-	   strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "method_") {
+	if strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "constructor") ||
+		strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "method_") {
 		// 检查是否是 self 关键字
 		if e.Name == "self" {
 			return e.Name
@@ -83,7 +94,7 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		// 否则，假设是成员变量
 		return "self->" + e.Name
 	}
-	
+
 	return e.Name
 }
 
@@ -344,44 +355,183 @@ func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName strin
 }
 
 // generatePrintlnCall 生成 println 调用代码
+// 支持类型推导自动判断格式化参数
 func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string {
+	if len(args) == 0 {
+		return "printf(\"\\n\")"
+	}
+
+	// 检查第一个参数是否是字符串字面量
+	if strLit, ok := args[0].(*ast.StringLiteral); ok {
+		str := strLit.Value
+
+		// 如果只有字符串参数且以 \n 结尾且没有格式符，使用 puts
+		if len(args) == 1 && strings.HasSuffix(str, "\\n") && !strings.Contains(str, "%") {
+			strClean := strings.TrimSuffix(str, "\\n")
+			return fmt.Sprintf("puts(\"%s\")", strClean)
+		}
+
+		// 有多个参数或有格式符
+		if len(args) == 1 {
+			// 只有字符串，直接输出
+			strClean := strings.TrimSuffix(str, "\\n")
+			return fmt.Sprintf("printf(\"%s\\n\")", strClean)
+		} else {
+			// 类型推导：自动判断格式化参数
+			return eg.generateTypeInferredPrintf(args)
+		}
+	}
+
+	// 第一个参数不是字符串字面量，按普通方式处理
 	if len(args) == 1 {
-		arg := eg.GenerateExpression(args[0])
-		if strings.HasPrefix(arg, "printf(") {
-			return arg + ";\nprintf(\"\\n\")"
-		} else if strings.HasPrefix(arg, "string_object_create(") {
-			start := strings.Index(arg, "(") + 1
-			end := strings.LastIndex(arg, ")")
-			if start > 0 && end > start {
-				strContent := arg[start:end]
-				code := "printf(" + strContent[:len(strContent)-1] + "\\n\")"
-				return code
+		argCode := eg.GenerateExpression(args[0])
+		argType := eg.inferType(args[0])
+		return fmt.Sprintf("printf(\"%%%s\\n\", %s)", argType, argCode)
+	} else {
+		// 类型推导处理多参数
+		return eg.generateTypeInferredPrintf(args)
+	}
+}
+
+// inferType 推导表达式的类型
+func (eg *ExpressionGenerator) inferType(expr ast.Expression) string {
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral:
+		return "d"
+	case *ast.FloatLiteral:
+		return "f"
+	case *ast.StringLiteral:
+		return "s"
+	case *ast.Identifier:
+		// 尝试从符号表获取类型
+		sym := eg.codegen.symbolTable.GetSymbol(e.Name)
+		if sym != nil {
+			switch sym.Type {
+			case "int", "int64", "int32":
+				return "d"
+			case "float", "float64", "float32":
+				return "f"
+			case "string":
+				return "s"
+			}
+		}
+		return "d" // 默认整数
+	case *ast.BinaryExpression:
+		// 二元表达式根据操作符推断类型
+		if e.Operator == "+" || e.Operator == "-" || e.Operator == "*" || e.Operator == "/" {
+			return "d"
+		}
+		return "d"
+	default:
+		return "d" // 默认整数
+	}
+}
+
+// generateTypeInferredPrintf 生成带类型推导的 printf 调用
+func (eg *ExpressionGenerator) generateTypeInferredPrintf(args []ast.Expression) string {
+	if len(args) == 0 {
+		return "printf(\"\\n\")"
+	}
+
+	strLit, isStrLit := args[0].(*ast.StringLiteral)
+	var formatStr string
+	var argStartIdx int
+
+	if isStrLit {
+		formatStr = strLit.Value
+		argStartIdx = 1
+	} else {
+		// 第一个参数不是字符串，需要生成格式字符串
+		formatStr = ""
+		argStartIdx = 0
+	}
+
+	// 解析格式字符串中的格式说明符
+	specifiers := eg.parseFormatSpecifiers(formatStr)
+	expectedCount := len(specifiers)
+	actualCount := len(args) - argStartIdx
+
+	// 如果格式说明符数量与参数数量不匹配，或者没有格式说明符，自动推断
+	if expectedCount != actualCount || expectedCount == 0 {
+		// 自动生成格式字符串
+		newFormat := ""
+		for i := argStartIdx; i < len(args); i++ {
+			if i > argStartIdx {
+				newFormat += " "
+			}
+			argType := eg.inferType(args[i])
+			newFormat += "%" + argType
+		}
+		if !strings.HasSuffix(newFormat, "\\n") {
+			newFormat += "\\n"
+		}
+		formatStr = newFormat
+		argStartIdx = 0 // 所有参数都作为格式化参数
+	}
+
+	// 生成 printf 调用
+	code := "printf(\""
+	if !isStrLit {
+		// 需要先输出格式字符串
+		code += formatStr + "\\n\", "
+	} else {
+		// 清理格式字符串并添加换行
+		formatStr = strings.TrimSuffix(formatStr, "\\n")
+		code += formatStr + "\\n\", "
+	}
+
+	for i := argStartIdx; i < len(args); i++ {
+		if i > argStartIdx {
+			code += ", "
+		}
+		code += eg.GenerateExpression(args[i])
+	}
+	code += ")"
+	return code
+}
+
+// parseFormatSpecifiers 解析格式字符串中的说明符
+func (eg *ExpressionGenerator) parseFormatSpecifiers(formatStr string) []string {
+	specifiers := make([]string, 0)
+	i := 0
+	for i < len(formatStr) {
+		if formatStr[i] == '%' {
+			if i+1 < len(formatStr) {
+				nextChar := formatStr[i+1]
+				// 检查是否是转义字符 %%
+				if nextChar == '%' {
+					i += 2
+					continue
+				}
+				// 收集格式说明符
+				spec := "%"
+				j := i + 1
+				for j < len(formatStr) && !eg.isFormatSpecifierChar(formatStr[j]) {
+					spec += string(formatStr[j])
+					j++
+				}
+				if j < len(formatStr) {
+					spec += string(formatStr[j])
+					specifiers = append(specifiers, spec)
+					i = j + 1
+				} else {
+					i++
+				}
+			} else {
+				i++
 			}
 		} else {
-			// 检查参数类型，选择正确的格式
-			// 如果是整数字面量、变量或看起来像整数的表达式，使用 %d
-			if isIntegerLiteral(arg) || isIdentifier(arg) {
-				code := "printf(\"%d\\n\", " + arg + ")"
-				return code
-			}
-			// 默认使用 %s
-			code := "printf(\"%s\\n\", " + arg + ")"
-			return code
+			i++
 		}
-	} else {
-		code := ""
-		for i, arg := range args {
-			argExpr := eg.GenerateExpression(arg)
-			if i > 0 {
-				code += "printf(\" \");\n"
-			}
-			code += argExpr + ";\n"
-		}
-		code += "printf(\"\\n\")"
-		return code
 	}
-	
-	return ""
+	return specifiers
+}
+
+// isFormatSpecifierChar 判断是否是格式说明符字符
+func (eg *ExpressionGenerator) isFormatSpecifierChar(c byte) bool {
+	return c == 'd' || c == 'i' || c == 'u' || c == 'o' || c == 'x' || c == 'X' ||
+		c == 'f' || c == 'F' || c == 'e' || c == 'E' || c == 'g' || c == 'G' ||
+		c == 'c' || c == 's' || c == 'p' || c == 'n' || c == 'l' || c == 'h'
 }
 
 // isIdentifier 检查是否是标识符（变量）
@@ -391,15 +541,11 @@ func isIdentifier(code string) bool {
 	return matched
 }
 
-// generatePrefixCallExpression 生成前缀调用表达式代码
+// generatePrefixCallExpression 生成前缀调用表达式代码（作为表达式返回空）
+// 注意：PrefixCallExpression 应该作为语句处理，在 stmtgen.go 中处理
 func (eg *ExpressionGenerator) generatePrefixCallExpression(e *ast.PrefixCallExpression) string {
-	code := "// Prefix call: " + e.Name + "\n"
-	code += "prefix_enter(\"" + e.Name + "\");\n"
-	for _, bodyStmt := range e.Body {
-		code += eg.codegen.generateStatement(bodyStmt)
-	}
-	code += "prefix_leave();\n"
-	return code
+	// 这个方法不应该被调用，因为 PrefixCallExpression 应该在语句层面处理
+	return "// ERROR: PrefixCallExpression should be handled as a statement\n"
 }
 
 // generateMemberAccessExpression 生成成员访问表达式代码

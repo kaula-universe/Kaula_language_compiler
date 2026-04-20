@@ -40,10 +40,11 @@ ErrorType error_get_type(Error* error) {
 }
 
 int error_get_code(Error* error) {
+    // 检查错误对象是否有效
     if (error) {
-        return error->code;
+        return error->code;  // 返回错误码
     }
-    return -1;
+    return -1;  // 无效对象返回默认值
 }
 
 void error_set_message(Error* error, const char* message) {

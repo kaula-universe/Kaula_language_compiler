@@ -25,22 +25,24 @@ type GenericInstanceCache struct {
 type CodeGenerator struct {
 	output          string
 	indent          int
+	program         *ast.Program
 	templateManager *TemplateManager
 	config          *config.Config
 	pluginManager   *PluginManager
 	stdlibConfig    *stdlib.StdlibConfig
-	treeManager     *core.Tree
+	treeManager     *core.TreeManager
 	prefixManager   *core.PrefixManager
 	symbolTable     *symbol.SymbolTable
 	currentScope    *symbol.SymbolTable
 	errors          []string
-	
+	usedModules     []string
+
 	// 模块化生成器
 	typeGenerator       *TypeGenerator
 	functionGenerator   *FunctionGenerator
 	expressionGenerator *ExpressionGenerator
 	statementGenerator  *StatementGenerator
-	
+
 	// 追踪使用的第三方库
 	usedThirdPartyLibs map[string]bool
 	
@@ -62,6 +64,21 @@ func (cg *CodeGenerator) Errors() []string {
 // HasErrors 检查是否有错误
 func (cg *CodeGenerator) HasErrors() bool {
 	return len(cg.errors) > 0
+}
+
+// SetStdlibConfig 设置 stdlib 配置
+func (cg *CodeGenerator) SetStdlibConfig(cfg *stdlib.StdlibConfig) {
+	cg.stdlibConfig = cfg
+}
+
+// GetStdlibConfig 获取 stdlib 配置（用于调试）
+func (cg *CodeGenerator) GetStdlibConfig() *stdlib.StdlibConfig {
+	return cg.stdlibConfig
+}
+
+// GetUsedModules 获取已使用的模块列表
+func (cg *CodeGenerator) GetUsedModules() []string {
+	return cg.usedModules
 }
 
 // NewCodeGenerator 创建一个新的代码生成器
@@ -92,7 +109,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	}
 
 	// 初始化 Tree 和 Prefix 管理器
-	treeManager := core.NewTree()
+	treeManager := core.NewTreeManager()
 	prefixManager := core.NewPrefixManager()
 
 	// 初始化符号表
@@ -126,6 +143,8 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 
 // Generate 生成代码
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
+	// 保存 program 引用以便后续查找
+	cg.program = program
 	// 重置第三方库使用追踪
 	cg.usedThirdPartyLibs = make(map[string]bool)
 	
@@ -169,31 +188,21 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			importedModules[importStmt.Module] = true
 		}
 	}
-	
-	// 调试：输出导入信息到文件
-	debugInfo := fmt.Sprintf("Imported modules count: %d\nModules: %v\n", len(importedModules), importedModules)
-	ioutil.WriteFile("cache/import_debug.txt", []byte(debugInfo), 0644)
-	
-	// 辅助函数：获取 map 的 keys
-	getMapKeys := func(m map[string]stdlib.Module) []string {
-		keys := make([]string, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
-		}
-		return keys
+
+	// 存储使用的模块列表
+	cg.usedModules = make([]string, 0, len(importedModules))
+	for moduleName := range importedModules {
+		cg.usedModules = append(cg.usedModules, moduleName)
 	}
-	
+
 	// 只添加实际使用的第三方库头文件
 	thirdPartyIncludes := ""
 	if cg.stdlibConfig != nil {
-		// 调试：输出 stdlibConfig 信息
-		debugInfo2 := fmt.Sprintf("stdlibConfig.Modules count: %d\nModules keys: %v\nThirdParty count: %d\n", len(cg.stdlibConfig.Modules), getMapKeys(cg.stdlibConfig.Modules), len(cg.stdlibConfig.ThirdParty))
-		ioutil.WriteFile("cache/stdlib_debug.txt", []byte(debugInfo2), 0644)
-		
 		// 遍历所有导入的模块
 		for moduleName := range importedModules {
 			// 检查是否是标准库模块
-			if module, ok := cg.stdlibConfig.Modules[moduleName]; ok {
+			module, ok := cg.stdlibConfig.Modules[moduleName]
+			if ok {
 				// 添加模块对应的头文件
 				if module.Header != "" {
 					thirdPartyIncludes += "#include \"" + module.Header + "\"\n"
@@ -379,7 +388,21 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 
 // getProgram 获取程序 AST（简化实现，实际需要从编译器获取）
 func (cg *CodeGenerator) getProgram() *ast.Program {
-	// 这是一个简化实现，实际应该从编译器获取
+	return cg.program
+}
+
+// findFunctionByName 在程序中查找函数声明
+func (cg *CodeGenerator) findFunctionByName(name string) *ast.FunctionStatement {
+	if cg.program == nil {
+		return nil
+	}
+	for _, stmt := range cg.program.Statements {
+		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
+			if fnStmt.Name == name {
+				return fnStmt
+			}
+		}
+	}
 	return nil
 }
 

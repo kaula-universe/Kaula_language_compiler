@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"kaula-compiler/internal/core"
 	"strings"
 )
 
@@ -31,8 +32,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	switch s := stmt.(type) {
 	case *ast.VOStatement:
 		return sg.generateVOStatement(s)
-	case *ast.SpendCallStatement:
-		return sg.generateSpendCallStatement(s)
+	case *ast.SpendStatement:
+		return sg.generateSpendStatement(s)
 	case *ast.TaskStatement:
 		return sg.generateTaskStatement(s)
 	case *ast.PrefixStatement:
@@ -71,6 +72,10 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		if s == nil || s.Expression == nil {
 			return ""
 		}
+		// 检查是否是 PrefixCallExpression
+		if prefixCall, ok := s.Expression.(*ast.PrefixCallExpression); ok {
+			return sg.generatePrefixCallBody(prefixCall)
+		}
 		// 安全地进行类型断言
 		callExpr, isCall := interface{}(s.Expression).(*ast.CallExpression)
 		if isCall && callExpr != nil && callExpr.Function != nil {
@@ -90,9 +95,6 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 
 // generateVariableDeclaration 生成变量声明代码
 func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDeclaration) string {
-	// 调试输出
-	fmt.Printf("DEBUG: VariableDeclaration - Type='%s', Name='%s', Value=%v\n", stmt.Type, stmt.Name, stmt.Value)
-	
 	// 将变量添加到当前作用域的符号表
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 	
@@ -162,31 +164,93 @@ func (sg *StatementGenerator) generateVOStatement(stmt *ast.VOStatement) string 
 	return code
 }
 
-// generateSpendCallStatement 生成 spend/call 语句代码
-func (sg *StatementGenerator) generateSpendCallStatement(stmt *ast.SpendCallStatement) string {
-	code := fmt.Sprintf("Spendable* sp = spendable_create(%d);\n", sg.codegen.config.SpendableSize)
-	if stmt.Spend != nil {
-		code += "// Add components\n"
-		code += "spendable_add(sp, "
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Spend)
-		code += ");\n"
+// generateSpendStatement 生成 spend 语句代码
+// spend 锁定对象，call 必须被调用与元素数量对应的次数
+// 语法：
+// spend(obj1){
+//     call(1){
+//         // 处理第 1 个元素
+//     }
+//     call(2){
+//         // 处理第 2 个元素
+//     }
+// }
+func (sg *StatementGenerator) generateSpendStatement(stmt *ast.SpendStatement) string {
+	code := ""
+
+	if stmt.Target == nil {
+		return "// Error: spend statement missing target\n"
 	}
-	for i, callStmt := range stmt.Calls {
-		code += fmt.Sprintf("// Call component %d\n", i+1)
-		code += "void* component = spendable_call(sp);\n"
-		code += "// Process component\n"
-		// 处理 call 语句的 body
-		if len(callStmt.Body) > 0 {
-			code += sg.codegen.indentString() + "{\n"
+
+	// 生成目标表达式
+	targetCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Target)
+
+	// 生成 spendable 创建和锁定
+	code += "// Spend: 锁定并开启消费流程\n"
+	code += fmt.Sprintf("{\n")
+	sg.codegen.indent++
+
+	// 创建 Spendable 并添加元素
+	code += sg.codegen.indentString()
+	code += fmt.Sprintf("Spendable* sp = spendable_create(16);  // capacity=16\n")
+
+	// 假设目标是数组，需要遍历添加元素
+	// 这里简化处理，实际需要根据目标类型生成不同的添加逻辑
+	code += sg.codegen.indentString()
+	code += fmt.Sprintf("// 添加目标元素到 spendable\n")
+	code += sg.codegen.indentString()
+	code += fmt.Sprintf("spendable_add(sp, %s);\n", targetCode)
+
+	code += sg.codegen.indentString()
+	code += "spend_lock(sp);  // 锁定目标\n"
+
+	// 生成 call 子句
+	code += "\n"
+	code += sg.codegen.indentString()
+	code += "// Call: 消费元素（次数必须与元素数量匹配）\n"
+
+	for i, callClause := range stmt.Calls {
+		indexCode := sg.codegen.expressionGenerator.GenerateExpression(callClause.Index)
+		code += "\n"
+		code += sg.codegen.indentString()
+		code += fmt.Sprintf("// Call %d: 消费索引 %s\n", i+1, indexCode)
+
+		// 调用消费指定索引的元素
+		code += sg.codegen.indentString()
+		code += fmt.Sprintf("void* element_%d = spend_call(sp, %s);\n", i+1, indexCode)
+
+		// 生成处理逻辑
+		if len(callClause.Body) > 0 {
+			code += sg.codegen.indentString()
+			code += "{\n"
 			sg.codegen.indent++
-			for _, bodyStmt := range callStmt.Body {
+
+			// 将 element 变量添加到当前作用域
+			code += sg.codegen.indentString()
+			code += fmt.Sprintf("void* element = element_%d;\n", i+1)
+
+			for _, bodyStmt := range callClause.Body {
 				code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
 			}
+
 			sg.codegen.indent--
-			code += sg.codegen.indentString() + "}\n"
+			code += sg.codegen.indentString()
+			code += "}\n"
 		}
 	}
-	code += "// Spendable cleanup handled by KMM\n"
+
+	code += "\n"
+	code += sg.codegen.indentString()
+	code += "spend_unlock(sp);  // 解除锁定\n"
+
+	// 清理 Spendable
+	code += sg.codegen.indentString()
+	code += "spendable_destroy(sp);\n"
+
+	sg.codegen.indent--
+	code += sg.codegen.indentString()
+	code += "}\n"
+
 	return code
 }
 
@@ -218,24 +282,183 @@ func (sg *StatementGenerator) generateTaskStatement(stmt *ast.TaskStatement) str
 // generatePrefixStatement 生成 prefix 语句代码
 func (sg *StatementGenerator) generatePrefixStatement(stmt *ast.PrefixStatement) string {
 	// 在 PrefixManager 中创建前缀上下文
-	sg.codegen.prefixManager.CreatePrefix(stmt.Name)
-	
+	sg.codegen.prefixManager.CreatePrefix(stmt.Name, core.PrefixAnnotationPrefix)
+
 	// 生成 C 代码，使用标准库中的前缀系统实现
 	code := "PrefixSystem* prefix_system = prefix_system_create();\n"
 	code += fmt.Sprintf("prefix_enter(\"%s\");\n", stmt.Name)
-	
+
 	// 生成前缀体内的代码
 	for _, bodyStmt := range stmt.Body {
 		code += sg.codegen.generateStatement(bodyStmt)
 	}
-	
+
 	code += "prefix_leave();\n"
 	code += "// Prefix cleanup handled by KMM\n"
 	return code
 }
 
+// generatePrefixCallBody 生成前缀调用体的代码 - AST 直接插入
+func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression) string {
+	code := ""
+
+	// 查找前缀函数的声明
+	funcDecl := sg.findFunctionDeclaration(e.Name)
+	if funcDecl == nil {
+		// 如果找不到函数声明，说明还没有解析到前缀定义，跳过
+		// 或者前缀来自导入
+		return ""
+	}
+
+	// 检查是否是前缀函数
+	annotation := funcDecl.GetAnnotation()
+	if annotation != ast.TreeAnnotationPrefix &&
+		annotation != ast.TreeAnnotationPrefixTree &&
+		annotation != ast.TreeAnnotationTree {
+		// 不是前缀函数，只处理调用体内的语句
+		sg.codegen.indent++
+		for _, bodyStmt := range e.Body {
+			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		sg.codegen.indent--
+		return code
+	}
+
+	// 参数替换：将前缀函数体中的参数引用替换为实际值
+	paramMap := make(map[string]string)
+	for paramName, paramValue := range e.Params {
+		valueCode := sg.codegen.expressionGenerator.GenerateExpression(paramValue)
+		paramMap[paramName] = valueCode
+	}
+
+	// 直接展开前缀函数的函数体
+	sg.codegen.indent++
+	for _, bodyStmt := range funcDecl.Body {
+		generated := sg.codegen.generateStatement(bodyStmt)
+		// 参数替换：$device -> 实际值
+		for paramName, paramValue := range paramMap {
+			generated = strings.ReplaceAll(generated, "$"+paramName, paramValue)
+		}
+		code += sg.codegen.indentString() + generated
+	}
+	sg.codegen.indent--
+
+	// 追加调用体内的语句
+	for _, bodyStmt := range e.Body {
+		generated := sg.codegen.generateStatement(bodyStmt)
+		// 参数替换
+		for paramName, paramValue := range paramMap {
+			generated = strings.ReplaceAll(generated, "$"+paramName, paramValue)
+		}
+		code += sg.codegen.indentString() + generated
+	}
+
+	return code
+}
+
+// findFunctionDeclaration 查找前缀函数的声明
+func (sg *StatementGenerator) findFunctionDeclaration(name string) *ast.FunctionStatement {
+	// 从当前程序中查找前缀函数定义
+	// 这里需要访问 AST，可以通过 codegen 的 program 字段
+	return sg.codegen.findFunctionByName(name)
+}
+
 // generateTreeStatement 生成 tree 语句代码
 func (sg *StatementGenerator) generateTreeStatement(stmt *ast.TreeStatement) string {
+	code := ""
+
+	annotation := stmt.GetAnnotation()
+
+	if annotation == ast.TreeAnnotationRoot || annotation == ast.TreeAnnotationRootTree {
+		code += "// Root tree definition (global matching priority)\n"
+		code += sg.generateRootTreeDefinition(stmt)
+	} else if annotation == ast.TreeAnnotationPrefix || annotation == ast.TreeAnnotationPrefixTree {
+		code += "// Prefix tree definition\n"
+		code += sg.generatePrefixTreeDefinition(stmt)
+	} else if annotation == ast.TreeAnnotationTree {
+		if sg.codegen.treeManager != nil {
+			rootTree := sg.codegen.treeManager.GetRootTree()
+			if rootTree == nil {
+				code += "// ERROR: Orphan tree - no root tree defined\n"
+				code += sg.generateOrphanTreeError(stmt)
+			} else {
+				code += "// Tree structure (validated against root)\n"
+				code += sg.generateValidatedTree(stmt, rootTree)
+			}
+		} else {
+			code += "// Tree structure implementation\n"
+			code += sg.generateTreeImplementation(stmt)
+		}
+	} else {
+		code += "// Tree structure implementation\n"
+		code += sg.generateTreeImplementation(stmt)
+	}
+
+	return code
+}
+
+func (sg *StatementGenerator) generateRootTreeDefinition(stmt *ast.TreeStatement) string {
+	code := "// Root tree: defines global structure for all trees\n"
+	code += "TreeDefinition* root_tree = tree_define_root();\n"
+
+	if stmt.Root != nil {
+		code += "// Root value\n"
+		code += "tree_set_root_value(root_tree, "
+		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Root)
+		code += ");\n"
+	}
+
+	for _, bodyStmt := range stmt.Body {
+		code += sg.codegen.generateStatement(bodyStmt)
+	}
+
+	return code
+}
+
+func (sg *StatementGenerator) generatePrefixTreeDefinition(stmt *ast.TreeStatement) string {
+	code := "// Prefix tree: function-level reuse without import\n"
+
+	if stmt.Root != nil {
+		if ident, ok := stmt.Root.(*ast.Identifier); ok {
+			prefixName := ident.Name
+			code += fmt.Sprintf("PrefixTree* %s_tree = tree_define_prefix(\"%s\");\n", prefixName, prefixName)
+		}
+	}
+
+	for _, bodyStmt := range stmt.Body {
+		code += sg.codegen.generateStatement(bodyStmt)
+	}
+
+	return code
+}
+
+func (sg *StatementGenerator) generateValidatedTree(stmt *ast.TreeStatement, rootTree *core.Tree) string {
+	code := "// Tree structure (validated against root)\n"
+	code += "Tree* tree = tree_create();\n"
+
+	if stmt.Root != nil {
+		code += "// Set root value\n"
+		code += "tree_set_root(tree, "
+		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Root)
+		code += ");\n"
+	}
+
+	for _, bodyStmt := range stmt.Body {
+		code += sg.codegen.generateStatement(bodyStmt)
+	}
+
+	code += "// Tree validated against root tree structure\n"
+	return code
+}
+
+func (sg *StatementGenerator) generateOrphanTreeError(stmt *ast.TreeStatement) string {
+	code := fmt.Sprintf("// ERROR: Tree at line %d is orphan - no root tree defined\n", stmt.Pos.Line)
+	code += "// Consider wrapping this tree in a prefix or class, or marking it with #[root,tree]\n"
+	code += "// Example: #[prefix,tree] fn wrap() { ... tree code ... }\n"
+	return code
+}
+
+func (sg *StatementGenerator) generateTreeImplementation(stmt *ast.TreeStatement) string {
 	code := "// Tree structure implementation\n"
 	code += "Tree* tree = tree_create();\n"
 	if stmt.Root != nil {
@@ -244,6 +467,11 @@ func (sg *StatementGenerator) generateTreeStatement(stmt *ast.TreeStatement) str
 		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Root)
 		code += ");\n"
 	}
+
+	for _, bodyStmt := range stmt.Body {
+		code += sg.codegen.generateStatement(bodyStmt)
+	}
+
 	code += "// Tree cleanup handled by KMM\n"
 	return code
 }
@@ -265,7 +493,8 @@ func (sg *StatementGenerator) generateObjectStatement(stmt *ast.ObjectStatement)
 // generateIfStatement 生成 if 语句代码
 func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string {
 	code := "if ("
-	code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
+	condCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
+	code += condCode
 	code += ") {\n"
 	sg.codegen.indent++
 	for _, bodyStmt := range stmt.Body {

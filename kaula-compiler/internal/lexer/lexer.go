@@ -2,7 +2,6 @@ package lexer
 
 import (
 	"fmt"
-	"strings"
 	"unicode"
 
 	"kaula-compiler/internal/errors"
@@ -18,6 +17,7 @@ const (
 	TOKEN_CALL
 	TOKEN_SPEND_CALL
 	TOKEN_TASK
+	TOKEN_ASYNC
 	TOKEN_PREFIX
 	TOKEN_TREE
 	TOKEN_OBJECT
@@ -77,7 +77,8 @@ const (
 	TOKEN_GE
 	TOKEN_PREFIX_REF
 	TOKEN_QUESTION
-	
+	TOKEN_AT // @ 符号用于前缀调用
+
 	// 特殊值
 	TOKEN_NULL
 
@@ -186,6 +187,9 @@ func (l *Lexer) Next() Token {
 		case char == '$':
 			l.next()
 			return Token{Type: TOKEN_PREFIX_REF, Value: "$", Line: l.line, Column: l.column}
+		case char == '@':
+			l.next()
+			return Token{Type: TOKEN_AT, Value: "@", Line: l.line, Column: l.column}
 		case char == '/':
 			l.next()
 			return Token{Type: TOKEN_DIVIDE, Value: "/", Line: l.line, Column: l.column}
@@ -341,6 +345,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_CALL
 	case "task":
 		tokenType = TOKEN_TASK
+	case "async":
+		tokenType = TOKEN_ASYNC
 	case "prefix":
 		tokenType = TOKEN_PREFIX
 	case "tree":
@@ -449,11 +455,8 @@ func (l *Lexer) scanString() Token {
 		return Token{Type: TOKEN_STRING, Value: "", Line: l.line, Column: l.column}
 	}
 	value := l.input[start:l.pos]
-	// 处理转义字符
-	value = strings.ReplaceAll(value, "\\n", "\n")
-	value = strings.ReplaceAll(value, "\\t", "\t")
-	value = strings.ReplaceAll(value, "\\\"", "\"")
-	value = strings.ReplaceAll(value, "\\\\", "\\")
+	// 不处理转义字符，保持原始字符串内容
+	// 让代码生成器决定如何处理换行符
 	l.next() // 跳过结尾的 "
 	l.column += l.pos - start + 2 // +2 for the quotes
 	return Token{Type: TOKEN_STRING, Value: value, Line: l.line, Column: l.column}
@@ -524,6 +527,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "CALL"
 	case TOKEN_TASK:
 		return "TASK"
+	case TOKEN_ASYNC:
+		return "ASYNC"
 	case TOKEN_PREFIX:
 		return "PREFIX"
 	case TOKEN_TREE:
@@ -624,6 +629,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "OR"
 	case TOKEN_PREFIX_REF:
 		return "PREFIX_REF"
+	case TOKEN_AT:
+		return "AT"
 	case TOKEN_QUESTION:
 		return "QUESTION"
 	case TOKEN_NULL:

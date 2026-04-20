@@ -3,30 +3,46 @@
 
 #include "../base/types.h"
 #include "../../src/kaula.h"
+#include <stdatomic.h>
 
-// 任务类型 - 使用src目录中的高性能实现
+// 轻量级任务节点 - 仅包含必要信息
+typedef struct TaskNode TaskNode;
 
-// 任务队列结构 - 使用src目录中的高性能实现
-typedef struct SimpleQueue TaskQueue;
-typedef struct PriorityQueue PriorityTaskQueue;
+// 轻量级任务队列 - 无锁设计，使用原子操作
+typedef struct LightTaskQueue LightTaskQueue;
 
-// 任务函数
-extern Task task_create(void* (*func)(void*), void* arg, int priority);
-extern TaskQueue* task_queue_create(int capacity);
-extern void task_queue_destroy(TaskQueue* queue);
-extern void task_queue_enqueue(TaskQueue* queue, Task task);
-extern Task* task_queue_dequeue(TaskQueue* queue);
-extern bool task_queue_is_empty(TaskQueue* queue);
-extern bool task_queue_is_full(TaskQueue* queue);
-extern int task_queue_size(TaskQueue* queue);
+// TaskParam 结构体 - 用于 task(优先级) 语法
+typedef struct TaskParam {
+    int priority;    // 优先级
+    void* data;      // 任务数据
+} TaskParam;
 
-extern PriorityTaskQueue* priority_task_queue_create(int capacity_per_queue);
-extern void priority_task_queue_destroy(PriorityTaskQueue* pq);
-extern void priority_task_queue_add(PriorityTaskQueue* pq, Task task);
-extern Task* priority_task_queue_execute_next(PriorityTaskQueue* pq);
-extern int priority_task_queue_batch_add(PriorityTaskQueue* pq, Task* tasks, int count);
-extern int priority_task_queue_batch_execute(PriorityTaskQueue* pq, int max_tasks);
-extern bool priority_task_queue_is_empty(PriorityTaskQueue* pq);
-extern int priority_task_queue_size(PriorityTaskQueue* pq);
+// 轻量级任务队列 API
+LightTaskQueue* light_task_queue_create(int capacity);
+void light_task_queue_destroy(LightTaskQueue* q);
+int light_task_queue_add(LightTaskQueue* q, void* (*func)(void*), void* arg, int priority);
+int light_task_queue_is_empty(LightTaskQueue* q);
+int light_task_queue_size(LightTaskQueue* q);
+void* light_task_queue_execute_next(LightTaskQueue* q);
+int light_task_queue_batch_execute(LightTaskQueue* q, int max_tasks);
+
+// 优先级任务队列 API
+PriorityTaskQueue* priority_task_queue_create(int capacity_per_queue);
+void priority_task_queue_destroy(PriorityTaskQueue* pq);
+void priority_task_queue_add(PriorityTaskQueue* pq, void* (*func)(void*), void* arg, int priority);
+int priority_task_queue_batch_add(PriorityTaskQueue* pq, void* (*func)(void*), void** args, int count, int priority);
+void* priority_task_queue_execute_next(PriorityTaskQueue* pq);
+int priority_task_queue_batch_execute(PriorityTaskQueue* pq, int max_tasks);
+int priority_task_queue_is_empty(PriorityTaskQueue* pq);
+int priority_task_queue_size(PriorityTaskQueue* pq);
+
+// 兼容性别名
+typedef LightTaskQueue TaskQueue;
+TaskQueue* task_queue_create(int capacity);
+void task_queue_destroy(TaskQueue* queue);
+void task_queue_enqueue(TaskQueue* queue, void* (*func)(void*), void* arg);
+void* task_queue_dequeue(TaskQueue* queue);
+int task_queue_is_empty(TaskQueue* queue);
+int task_queue_size(TaskQueue* queue);
 
 #endif // STD_TASK_TASK_H

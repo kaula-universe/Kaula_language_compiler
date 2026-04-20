@@ -192,6 +192,8 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 			return p.parsePrefixCallStatementIterative()
 		}
 		return p.parseExpressionStatementIterative()
+	case lexer.TOKEN_AT:
+		return p.parsePrefixCallStatementIterative()
 	case lexer.TOKEN_CONSTRUCTOR:
 		return nil
 	case lexer.TOKEN_SEMICOLON:
@@ -426,44 +428,154 @@ func (p *Parser) parseVOStatementIterative() ast.Statement {
 }
 
 // parseSpendCallStatementIterative 迭代解析 spend/call 语句
-func (p *Parser) parseSpendCallStatementIterative() *ast.SpendCallStatement {
-	p.log("开始解析 spend/call 语句")
-	stmt := &ast.SpendCallStatement{
-		Calls: []ast.CallStatement{},
+// 新语法：
+// spend(obj1){
+//     call(1){
+//         return 1
+//     }
+//     call(2){
+//         return 2
+//     }
+// }
+func (p *Parser) parseSpendCallStatementIterative() *ast.SpendStatement {
+	p.log("开始解析 spend 语句")
+	stmt := &ast.SpendStatement{
+		Calls: []*ast.CallClause{},
 	}
-	p.nextToken()
+
+	// 解析 spend 目标
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
-		stmt.Spend = p.parseExpressionIterative()
-		p.log("解析 spend 表达式")
+		stmt.Target = p.parseExpressionIterative()
+		p.log("解析 spend 目标表达式")
 		if p.curTok.Type == lexer.TOKEN_RPAREN {
 			p.nextToken()
 		}
 	}
+
+	// 解析花括号内的 call 子句
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		p.log("开始解析 call 语句")
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		p.log("开始解析 call 子句")
+
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			// 检查是否是 call 关键字
 			if p.curTok.Type == lexer.TOKEN_CALL {
-				callStmt := p.parseCallStatementIterative()
-				stmt.Calls = append(stmt.Calls, *callStmt)
-				p.log("添加 call 语句")
-			} else {
-				bodyStmt := p.parseStatementIterative()
-				if bodyStmt != nil {
+				callClause := p.parseCallClause()
+				if callClause != nil {
+					stmt.Calls = append(stmt.Calls, callClause)
+					p.log("添加 call 子句，索引=%s", callClause.Index)
 				}
-			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
+			} else {
+				// 跳过其他 token
 				p.nextToken()
 			}
 		}
-		p.log("call 语句解析完成，共 %d 个 call", len(stmt.Calls))
+
 		if p.curTok.Type == lexer.TOKEN_RBRACE {
 			p.nextToken()
 		}
 	}
-	p.log("spend/call 语句解析完成")
+
+	p.log("spend 语句解析完成，共 %d 个 call 子句", len(stmt.Calls))
 	return stmt
+}
+
+// parseCallClause 解析 call 子句
+// 语法：call(index){ body }
+func (p *Parser) parseCallClause() *ast.CallClause {
+	if p.curTok.Type != lexer.TOKEN_CALL {
+		return nil
+	}
+
+	p.nextToken() // 跳过 CALL token
+
+	clause := &ast.CallClause{
+		Body: []ast.Statement{},
+	}
+
+	// 解析索引
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken()
+		clause.Index = p.parseExpressionIterative()
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken()
+		}
+	}
+
+	// 解析处理逻辑
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			bodyStmt := p.parseStatementIterative()
+			if bodyStmt != nil {
+				clause.Body = append(clause.Body, bodyStmt)
+			}
+		}
+
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+
+	return clause
+}
+
+// parseTaskParam 解析任务参数
+// 语法：task(优先级)
+func (p *Parser) parseTaskParam() *ast.TaskParam {
+	if p.curTok.Type != lexer.TOKEN_TASK {
+		return nil
+	}
+
+	p.nextToken() // 跳过 TASK token
+
+	param := &ast.TaskParam{
+		Priority: nil,
+	}
+
+	// 解析优先级
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken()
+
+		// 解析优先级表达式
+		param.Priority = p.parseExpressionIterative()
+
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken()
+		}
+	}
+
+	return param
+}
+
+// parseAsyncParam 解析异步参数
+// 语法：async(值)
+func (p *Parser) parseAsyncParam() *ast.AsyncParam {
+	if p.curTok.Type != lexer.TOKEN_ASYNC {
+		return nil
+	}
+
+	p.nextToken() // 跳过 ASYNC token
+
+	param := &ast.AsyncParam{
+		Value: nil,
+	}
+
+	// 解析值
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken()
+
+		// 解析值表达式
+		param.Value = p.parseExpressionIterative()
+
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken()
+		}
+	}
+
+	return param
 }
 
 // parseTaskStatementIterative 迭代解析 task 语句
@@ -539,8 +651,25 @@ func (p *Parser) parsePrefixStatementIterative() *ast.PrefixStatement {
 
 // parseTreeStatementIterative 迭代解析 tree 语句
 func (p *Parser) parseTreeStatementIterative() *ast.TreeStatement {
-	stmt := &ast.TreeStatement{}
+	stmt := &ast.TreeStatement{
+		Body: []ast.Statement{},
+	}
+
+	// 检查是否有注解
+	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
+		annotationValue := p.curTok.Value
+		annotationContent := strings.TrimPrefix(annotationValue, "#[")
+		annotationContent = strings.TrimSuffix(annotationContent, "]")
+
+		stmt.Annotation = ast.ParseTreeAnnotation(annotationContent)
+
+		p.log("解析 tree 注解：%s -> annotation=%v", annotationContent, stmt.Annotation)
+		p.nextToken()
+	}
+
 	p.nextToken()
+
+	// 解析树名称（可选）
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
 		stmt.Root = p.parseExpressionIterative()
@@ -548,6 +677,24 @@ func (p *Parser) parseTreeStatementIterative() *ast.TreeStatement {
 			p.nextToken()
 		}
 	}
+
+	// 解析 tree body（如果有花括号）
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			bodyStmt := p.parseStatementIterative()
+			if bodyStmt != nil {
+				stmt.Body = append(stmt.Body, bodyStmt)
+			}
+			if p.curTok.Type != lexer.TOKEN_RBRACE {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+
 	return stmt
 }
 
@@ -629,32 +776,42 @@ func (p *Parser) parseObjectStatementIterative() *ast.ObjectStatement {
 
 // parseFunctionAnnotations 解析函数注解
 func (p *Parser) parseFunctionAnnotations(stmt *ast.FunctionStatement) *ast.FunctionStatement {
-	// 检查当前 token 是否是注解标记 #[
 	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
-		// 从 token 值中提取注解内容 #[no_kmm,inline] -> no_kmm,inline
 		annotationValue := p.curTok.Value
-		// 去掉 #[ 和 ]
 		annotationContent := strings.TrimPrefix(annotationValue, "#[")
 		annotationContent = strings.TrimSuffix(annotationContent, "]")
-		
-		// 解析注解内容
-		// 支持格式：no_kmm,inline
+
 		annotations := strings.Split(annotationContent, ",")
 		for _, ann := range annotations {
 			ann = strings.TrimSpace(ann)
-			if ann == "no_kmm" {
+			switch ann {
+			case "no_kmm":
 				stmt.NoKMM = true
-			} else if ann == "inline" {
+			case "inline":
 				stmt.Inline = true
+			case "prefix":
+				stmt.Annotation = ast.TreeAnnotationPrefix
+			case "tree":
+				if stmt.Annotation == ast.TreeAnnotationPrefix {
+					stmt.Annotation = ast.TreeAnnotationPrefixTree
+				} else {
+					stmt.Annotation = ast.TreeAnnotationTree
+				}
+			case "root":
+				stmt.Annotation = ast.TreeAnnotationRoot
+			default:
+				parsed := ast.ParseTreeAnnotation(ann)
+				if parsed != ast.TreeAnnotationNone {
+					stmt.Annotation = parsed
+				}
 			}
 		}
-		
-		p.log("解析函数注解：%s -> no_kmm=%v, inline=%v", annotationContent, stmt.NoKMM, stmt.Inline)
-		
-		// 跳过注解 token
+
+		p.log("解析函数注解：%s -> annotation=%v, no_kmm=%v, inline=%v", annotationContent, stmt.Annotation, stmt.NoKMM, stmt.Inline)
+
 		p.nextToken()
 	}
-	
+
 	return stmt
 }
 
@@ -703,7 +860,29 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		p.log("开始解析函数参数")
 		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
 			prevTok := p.curTok
-			
+
+			// 检查是否是 task(优先级) 语法
+			if p.curTok.Type == lexer.TOKEN_TASK {
+				// 解析 task(优先级) 任务参数
+				taskParam := p.parseTaskParam()
+				if taskParam != nil {
+					stmt.TaskParams = append(stmt.TaskParams, taskParam)
+					p.log("解析任务参数：优先级=%s", taskParam.Priority)
+				}
+				continue
+			}
+
+			// 检查是否是 async(值) 语法
+			if p.curTok.Type == lexer.TOKEN_ASYNC {
+				// 解析 async(值) 异步参数
+				asyncParam := p.parseAsyncParam()
+				if asyncParam != nil {
+					stmt.AsyncParams = append(stmt.AsyncParams, asyncParam)
+					p.log("解析异步参数：值=%s", asyncParam.Value)
+				}
+				continue
+			}
+
 			if p.curTok.Type == lexer.TOKEN_IDENT {
 				// 第一个 IDENT 是类型，第二个是参数名
 				typeOrName := p.curTok.Value
@@ -720,18 +899,18 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 					p.log("解析参数：%s (无类型)", typeOrName)
 				}
 			}
-			
+
 			// 如果解析失败，跳过当前 token 避免死循环
 			if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
 				p.log("跳过无法解析的参数 token: %s=%q", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 				p.nextToken()
 			}
-			
+
 			if p.curTok.Type == lexer.TOKEN_COMMA {
 				p.nextToken()
 			}
 		}
-		p.log("函数参数解析完成，共 %d 个参数", len(stmt.Params))
+		p.log("函数参数解析完成，共 %d 个参数，%d 个任务参数", len(stmt.Params), len(stmt.TaskParams))
 		if p.curTok.Type == lexer.TOKEN_RPAREN {
 			p.nextToken()
 		}
@@ -778,12 +957,13 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 		Pos:  pos,
 	}
 	p.nextToken()
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
+	// 解析 if 条件表达式：需要解析到 LBRACE 之前的所有表达式
+	// 尝试解析完整表达式（可能包含括号和后续运算符）
+	stmt.Condition = p.parseExpressionIterative()
+	
+	// 如果解析后遇到 RPAREN，说明有括号，需要跳过
+	if p.curTok.Type == lexer.TOKEN_RPAREN {
 		p.nextToken()
-		stmt.Condition = p.parseExpressionIterative()
-		if p.curTok.Type == lexer.TOKEN_RPAREN {
-			p.nextToken()
-		}
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
@@ -849,12 +1029,16 @@ func (p *Parser) parseWhileStatementIterative() *ast.WhileStatement {
 		Pos:  pos,
 	}
 	p.nextToken()
+	// 检查是否有括号
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
 		stmt.Condition = p.parseExpressionIterative()
 		if p.curTok.Type == lexer.TOKEN_RPAREN {
 			p.nextToken()
 		}
+	} else {
+		// 没有括号，直接解析条件表达式
+		stmt.Condition = p.parseExpressionIterative()
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
@@ -1754,7 +1938,8 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		p.nextToken()
 		if p.curTok.Type == lexer.TOKEN_IDENT {
 			ident := &ast.Identifier{
-				Name: p.curTok.Value,
+				Name: "$" + p.curTok.Value,
+				IsPrefixVar: true,
 			}
 			p.nextToken()
 			return ident
@@ -2016,37 +2201,77 @@ func (p *Parser) parseIndexExpressionIterative() ast.Expression {
 }
 
 // parsePrefixCallStatementIterative 迭代解析前缀调用语句
+// 语法: @PrefixName(param1=value1, param2=value2) { body }
 func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
-	ident := &ast.Identifier{
-		Name: p.curTok.Value,
-	}
-	p.nextToken()
-	if p.peekTok.Type == lexer.TOKEN_LBRACE {
-		p.nextToken()
-		if p.curTok.Type == lexer.TOKEN_LBRACE {
+	var prefixName string
+	params := make(map[string]ast.Expression)
+
+	// 检查是否是 @ 前缀调用
+	if p.curTok.Type == lexer.TOKEN_AT {
+		p.nextToken() // consume @
+		if p.curTok.Type != lexer.TOKEN_IDENT {
+			p.error("expected identifier after @")
+			return nil
+		}
+		prefixName = p.curTok.Value
+		p.nextToken() // consume identifier
+
+		// 解析参数（如果有）
+		if p.curTok.Type == lexer.TOKEN_LPAREN {
 			p.nextToken()
-			blockBody := []ast.Statement{}
-			for p.curTok.Type != lexer.TOKEN_RBRACE {
-				bodyStmt := p.parseStatementIterative()
-				if bodyStmt != nil {
-					blockBody = append(blockBody, bodyStmt)
+			for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+				if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
+					paramName := p.curTok.Value
+					p.nextToken() // skip IDENT
+					p.nextToken() // skip ASSIGN
+					paramValue := p.parseExpressionIterative()
+					params[paramName] = paramValue
 				}
-				if p.curTok.Type != lexer.TOKEN_RBRACE {
+				if p.curTok.Type == lexer.TOKEN_COMMA {
 					p.nextToken()
 				}
 			}
-			if p.curTok.Type == lexer.TOKEN_RBRACE {
+			if p.curTok.Type == lexer.TOKEN_RPAREN {
 				p.nextToken()
 			}
-			prefixCall := &ast.PrefixCallExpression{
-				Name: ident.Name,
-				Body: blockBody,
+		}
+	} else if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_LBRACE {
+		// 处理没有 @ 的情况
+		prefixName = p.curTok.Value
+		p.nextToken()
+	} else {
+		return nil
+	}
+
+	// 解析花括号
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		blockBody := []ast.Statement{}
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			bodyStmt := p.parseStatementIterative()
+			if bodyStmt != nil {
+				blockBody = append(blockBody, bodyStmt)
 			}
-			return &ast.ExpressionStatement{
-				Expression: prefixCall,
+			// 如果 parseStatementIterative 没有前进 token（返回 nil 且 token 没变），需要手动前进
+			// 避免死循环
+			if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+				// parseStatementIterative 应该已经前进了 token
+				// 如果它失败了，我们也需要前进以避免死循环
 			}
 		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+		prefixCall := &ast.PrefixCallExpression{
+			Name:   prefixName,
+			Params: params,
+			Body:   blockBody,
+		}
+		return &ast.ExpressionStatement{
+			Expression: prefixCall,
+		}
 	}
+
 	return nil
 }
 
@@ -2091,13 +2316,11 @@ func (p *Parser) Parse() *ast.Program {
 	p.log("parseProgram returned, %d statements", len(program.Statements))
 	if p.HasErrors() {
 		p.log("解析完成，发现错误")
-		p.ReportErrors()
+		// 不立即报告错误，等待所有阶段完成后统一报告
 	} else {
 		p.log("解析完成，未发现错误")
 		p.Validate(program)
-		if p.HasErrors() {
-			p.ReportErrors()
-		}
+		// 验证阶段的错误也不立即报告
 	}
 	return program
 }
@@ -2128,21 +2351,21 @@ func (p *Parser) Validate(program *ast.Program) {
 	}
 	
 	for _, stmt := range program.Statements {
-		if spendStmt, ok := stmt.(*ast.SpendCallStatement); ok {
-			if spendStmt.Spend == nil {
-				p.error("spend 语句缺少表达式")
+		if spendStmt, ok := stmt.(*ast.SpendStatement); ok {
+			if spendStmt.Target == nil {
+				p.error("spend 语句缺少目标表达式")
 			}
 			if len(spendStmt.Calls) == 0 {
-				p.error("spend 语句缺少 call 语句")
+				p.error("spend 语句缺少 call 子句")
 			}
 			for i, call := range spendStmt.Calls {
-				if call.Target == nil {
-					p.error(fmt.Sprintf("call 语句 %d 缺少目标", i+1))
+				if call.Index == nil {
+					p.error(fmt.Sprintf("spend 语句的第 %d 个 call 子句缺少索引", i+1))
 				}
 			}
 		}
 	}
-	
+
 	prefixNames := make(map[string]bool)
 	for _, stmt := range program.Statements {
 		if prefixStmt, ok := stmt.(*ast.PrefixStatement); ok {
