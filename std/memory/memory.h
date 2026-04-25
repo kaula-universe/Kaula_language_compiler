@@ -3,7 +3,6 @@
 
 #include "../base/types.h"
 #include "../../src/kmm_scoped_allocator_v4.h"
-#include "../../src/kmm_scoped_allocator.c"
 
 /**
  * @file memory.h
@@ -17,10 +16,12 @@
 
 // ==================== KMM 作用域分配器 ====================
 
-#ifdef _WIN32
+#if defined(__clang__) || defined(__GNUC__)
+__thread extern kmm_context_t* g_kaula_scope;
+#elif defined(_WIN32)
 __declspec(thread) extern kmm_context_t* g_kaula_scope;
 #else
-__thread extern kmm_context_t* g_kaula_scope;
+extern kmm_context_t* g_kaula_scope;
 #endif
 
 extern void kaula_scope_enter(void);
@@ -39,39 +40,60 @@ extern void fast_free(void* ptr);
 extern void* std_malloc(size_t size);
 extern void std_free(void* ptr);
 
-// ==================== 联合域分配器（KMM V3 特色） ====================
+// ==================== 联合域分配器（KMM V3 特色 - 全自动） ====================
+// 自动管理：无需手动 enter/exit，使用宏即可
+// 使用方式：
+//   KMEM_UNION_SCOPE_START();
+//       MyType* obj = KMEM_UNION_ELECT(MyType);
+//       obj->field = value;
+//   KMEM_UNION_SCOPE_END();  // 自动结束
 
-extern void kaula_union_enter(void);
-extern void kaula_union_exit(void);
-extern void* kaula_union_alloc(size_t size);
-extern void* kaula_union_elect(size_t size);
-extern void kaula_union_set_deps(void* obj, void** deps, size_t count);
-extern void kaula_union_auto_detect(void* obj);
+#if KMM_ENABLE_UNION_DOMAIN
+// 内部函数包装（由 kmm_scoped_allocator.c 实现，使用全局 scope 存储）
+extern void kmm_union_auto_enter_fn(void);
+extern void kmm_union_auto_exit_fn(void);
+extern void* kmm_union_auto_alloc_fn(size_t size);
+
+// 自动作用域宏（用户直接使用，基于全局 scope 存储）
+// 使用 for 循环 RAII 模式：作用域结束时自动清理
+#define KMEM_UNION_SCOPE_START() \
+    for (int _kmm_u_done = 0; \
+         !_kmm_u_done; \
+         _kmm_u_done = 1, kmm_union_auto_exit_fn()) \
+    if ((kmm_union_auto_enter_fn(), 1))
+
+// 自动分配（类型安全 + 零初始化）
+#define KMEM_UNION_ALLOC(type) \
+    ((type*)kmm_union_auto_alloc_fn(sizeof(type)))
+
+#define KMEM_UNION_ALLOC_ZERO(type) \
+    ({ type* p = KMEM_UNION_ALLOC(type); \
+       if(p) kmm_v4_zero_auto(p, sizeof(type)); \
+       p; })
+
+#define KMEM_UNION_ALLOC_ARRAY(type, count) \
+    ((type*)kmm_union_auto_alloc_fn(sizeof(type) * (count)))
+
+#define KMEM_UNION_ELECT(type) KMEM_UNION_ALLOC(type)
+#define KMEM_UNION_SCOPE_END()   // for 循环自动结束
+#else
+// 联合域未启用时，退化为普通分配
+#define KMEM_UNION_SCOPE_START()
+#define KMEM_UNION_SCOPE_END()
+#define KMEM_UNION_ALLOC(type) KMEM_ALLOC(type)
+#define KMEM_UNION_ALLOC_ZERO(type) KMEM_ALLOC(type)
+#define KMEM_UNION_ALLOC_ARRAY(type, count) KMEM_ALLOC_ARRAY(type, count)
+#define KMEM_UNION_ELECT(type) KMEM_ALLOC(type)
+#endif
 
 // ==================== 便捷宏（KMM V4 风格） ====================
-
 #define KMEM_ALLOC(size) kaula_scope_alloc(size)
 #define KMEM_FREE(ptr) kaula_scope_free(ptr)
 #define KMEM_ALLOC_TYPE(type) ((type*)kaula_scope_alloc(sizeof(type)))
 #define KMEM_ALLOC_ARRAY(type, count) ((type*)kaula_scope_alloc(sizeof(type) * (count)))
 
-// ==================== 联合域便捷宏 ====================
-
-#define KMEM_UNION_ENTER() kaula_union_enter()
-#define KMEM_UNION_EXIT() kaula_union_exit()
-#define KMEM_UNION_ALLOC(size) kaula_union_alloc(size)
-#define KMEM_UNION_ALLOC_TYPE(type) ((type*)kaula_union_alloc(sizeof(type)))
-#define KMEM_UNION_ALLOC_ARRAY(type, count) ((type*)kaula_union_alloc(sizeof(type) * (count)))
-#define KMEM_UNION_ELECT(type) ((type*)kaula_union_elect(sizeof(type)))
-#define KMEM_UNION_SET_DEPS(obj, deps, count) kaula_union_set_deps(obj, deps, count)
-#define KMEM_UNION_AUTO_DETECT(obj) kaula_union_auto_detect(obj)
-
 // ==================== 作用域管理宏 ====================
-
 #define KMEM_SCOPE_START() kaula_scope_enter()
 #define KMEM_SCOPE_END() kaula_scope_exit()
-
-#define KMEM_UNION_SCOPE_START() kaula_union_enter()
-#define KMEM_UNION_SCOPE_END() kaula_union_exit()
 
 #endif // STD_MEMORY_MEMORY_H

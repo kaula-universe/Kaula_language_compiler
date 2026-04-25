@@ -9,11 +9,11 @@ typedef struct AsyncNode {
     void* arg;               // 参数
     void* result;            // 结果
     atomic_int status;       // 状态：0=pending, 1=running, 2=completed, 3=cancelled
-    struct AsyncNode* next;  // 下一个节点
+    _Atomic(struct AsyncNode*) next;  // 下一个节点（原子）
 } AsyncNode;
 
 // 轻量级异步事件循环 - 无锁设计
-typedef struct {
+typedef struct LightAsyncLoop {
     _Atomic(AsyncNode*) head;     // 任务队列头
     _Atomic(AsyncNode*) tail;     // 任务队列尾
     _Atomic int count;           // 任务计数
@@ -54,7 +54,7 @@ void light_async_loop_destroy(LightAsyncLoop* loop) {
     // 释放所有节点
     AsyncNode* current = atomic_load_explicit(&loop->head, memory_order_relaxed);
     while (current) {
-        AsyncNode* next = current->next;
+        AsyncNode* next = atomic_load_explicit(&current->next, memory_order_relaxed);
         free(current);
         current = next;
     }
@@ -172,9 +172,9 @@ typedef struct TimerNode {
 } TimerNode;
 
 // 轻量级定时器管理器
-typedef struct {
-    _Atomic(TimerNode*) head;   // 定时器队列
-    _Atomic uint64_t current_time;  // 当前时间
+typedef struct LightTimerManager {
+    TimerNode* head;   // 定时器队列（非原子，简化实现）
+    uint64_t current_time;  // 当前时间
 } LightTimerManager;
 
 // 创建轻量级定时器管理器
@@ -182,8 +182,8 @@ LightTimerManager* light_timer_manager_create() {
     LightTimerManager* mgr = (LightTimerManager*)malloc(sizeof(LightTimerManager));
     if (!mgr) return NULL;
 
-    atomic_store_explicit(&mgr->head, NULL, memory_order_relaxed);
-    atomic_store_explicit(&mgr->current_time, 0, memory_order_relaxed);
+    mgr->head = NULL;
+    mgr->current_time = 0;
 
     return mgr;
 }
@@ -192,7 +192,7 @@ LightTimerManager* light_timer_manager_create() {
 void light_timer_manager_destroy(LightTimerManager* mgr) {
     if (!mgr) return;
 
-    TimerNode* current = atomic_load_explicit(&mgr->head, memory_order_relaxed);
+    TimerNode* current = mgr->head;
     while (current) {
         TimerNode* next = current->next;
         free(current);
@@ -215,9 +215,8 @@ int light_timer_manager_add(LightTimerManager* mgr, uint64_t timeout_ms, void (*
     node->next = NULL;
 
     // 简单的头插法
-    TimerNode* old_head = atomic_load_explicit(&mgr->head, memory_order_relaxed);
-    node->next = old_head;
-    atomic_store_explicit(&mgr->head, node, memory_order_relaxed);
+    node->next = mgr->head;
+    mgr->head = node;
 
     return 1;
 }
@@ -226,10 +225,10 @@ int light_timer_manager_add(LightTimerManager* mgr, uint64_t timeout_ms, void (*
 int light_timer_manager_poll(LightTimerManager* mgr, uint64_t current_time) {
     if (!mgr) return 0;
 
-    atomic_store_explicit(&mgr->current_time, current_time, memory_order_relaxed);
+    mgr->current_time = current_time;
 
     int triggered = 0;
-    TimerNode* current = atomic_load_explicit(&mgr->head, memory_order_relaxed);
+    TimerNode* current = mgr->head;
     TimerNode* prev = NULL;
 
     while (current) {
@@ -244,7 +243,7 @@ int light_timer_manager_poll(LightTimerManager* mgr, uint64_t current_time) {
             if (prev) {
                 prev->next = current->next;
             } else {
-                atomic_store_explicit(&mgr->head, current->next, memory_order_relaxed);
+                mgr->head = current->next;
             }
 
             TimerNode* to_free = current;

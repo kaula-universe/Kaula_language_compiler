@@ -1,7 +1,28 @@
-#ifndef KMM_SCOPED_ALLOCATOR_H
-#define KMM_SCOPED_ALLOCATOR_H
+#ifndef KMM_SCOPED_ALLOCATOR_IMPL_H
+#define KMM_SCOPED_ALLOCATOR_IMPL_H
 
-#include "kmm_scoped_allocator_v4.h"
+// 定义全局内存池（所有翻译单元共享）
+// 线程安全：使用原子偏移量实现无锁分配（轻量实时）
+#ifdef KMM_V4_DEFINE_GLOBALS
+    #define KMM_V4_GLOBALS
+    #include "kmm_scoped_allocator_v4.h"
+    
+    __attribute__((aligned(KMM_V4_ALIGNMENT)))
+    uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE];
+    
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    KMM_ATOMIC_TYPE g_kmm_v4_offset = 0;  // 原子操作，无锁CAS
+#else
+    size_t g_kmm_v4_offset = 0;
+#endif
+    
+    #ifdef KMM_V4_DEBUG
+    size_t g_kmm_v4_peak = 0;
+    size_t g_kmm_v4_alloc_count = 0;
+    #endif
+#else
+    #include "kmm_scoped_allocator_v4.h"
+#endif
 #include <stdio.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -36,6 +57,7 @@ static inline int clock_gettime(int clk_id, struct timespec* ts) {
     (void)clk_id;
     return 0;
 }
+#pragma warning(suppress: 4996)
 #endif
 #endif
 
@@ -68,6 +90,10 @@ static inline int clock_gettime(int clk_id, struct timespec* ts) {
 
 #ifndef KMM_MAX_DEPENDENCIES
 #define KMM_MAX_DEPENDENCIES 32
+#endif
+
+#ifndef KMM_MAX_UNION_NODES
+#define KMM_MAX_UNION_NODES 128
 #endif
 
 // 智能配置参数（根据平台自动调整）
@@ -121,18 +147,23 @@ typedef struct {
 // 全局上下文（用于统计）
 kmm_context_t g_kmm_ctx = {0};
 
-// ==================== 联合域全局变量（V3 特色） ====================
+// ==================== 联合域全局变量（V3 特色，线程安全优化） ====================
+// 轻量实时模式：联合域使用TLS隔离，每个线程独立管理
 #if KMM_ENABLE_UNION_DOMAIN
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+KMM_TLS kmm_union_domain_t g_union_domain = {0};
+KMM_TLS kmm_union_node_t g_union_node_pool[KMM_MAX_UNION_NODES];
+KMM_TLS size_t g_union_node_free_list = 0;
+KMM_TLS bool g_union_pool_initialized = false;
+#else
 static kmm_union_domain_t g_union_domain = {0};
-
-// 联合节点池（预分配，避免动态分配）
-#define KMM_MAX_UNION_NODES 128
 static kmm_union_node_t g_union_node_pool[KMM_MAX_UNION_NODES];
 static size_t g_union_node_free_list = 0;
 static bool g_union_pool_initialized = false;
+#endif
 
-// 拓扑排序缓冲区
-static kmm_union_node_t* g_union_sort_buffer[1024];
+// 拓扑排序缓冲区（TLS隔离）
+KMM_TLS kmm_union_node_t* g_union_sort_buffer[1024];
 
 // 前向声明
 static inline kmm_union_node_t* kmm_union_node_alloc(void);
@@ -157,7 +188,7 @@ void* kmm_union_elect(kmm_context_t* ctx, size_t size, const char* file, int lin
 void kmm_union_set_dependencies(void* obj, void** deps, size_t count);
 #endif
 
-// ==================== 线程缓存实现（v4 自动化风格） ====================
+// ==================== 线程缓存实现（v4 自动化风格，完全TLS隔离） ====================
 #if KMM_ENABLE_THREAD_CACHE
 KMM_TLS kmm_thread_cache_t tls_kmm_thread_cache;
 
@@ -169,6 +200,7 @@ static inline void kmm_thread_cache_init(void) {
 
 static inline void* kmm_thread_cache_alloc(size_t size) {
     (void)size;
+    // TLS完全隔离，无锁访问
     if (KMM_V4_LIKELY(tls_kmm_thread_cache.cache_size > 0)) {
         return tls_kmm_thread_cache.cache[--tls_kmm_thread_cache.cache_size];
     }
@@ -176,6 +208,7 @@ static inline void* kmm_thread_cache_alloc(size_t size) {
 }
 
 static inline void kmm_thread_cache_free(void* ptr) {
+    // TLS完全隔离，无锁访问
     if (KMM_V4_LIKELY(tls_kmm_thread_cache.cache_size < KMM_THREAD_CACHE_SIZE)) {
         tls_kmm_thread_cache.cache[tls_kmm_thread_cache.cache_size++] = ptr;
     }
@@ -381,13 +414,14 @@ static inline void kmm_safe_free(void* user_ptr) {
 
 #endif
 
-// ==================== 清理栈管理（v3 特色，v4 风格） ====================
+// ==================== 清理栈管理（v3 特色，v4 风格，TLS隔离） ====================
 #if KMM_ENABLE_CLEANUP_STACK
 
 #define KMM_MAX_CLEANUP_NODES 256
-static kmm_cleanup_node_t g_cleanup_node_pool[KMM_MAX_CLEANUP_NODES];
-static size_t g_cleanup_node_free_list = 0;
-static bool g_cleanup_initialized = false;
+// TLS隔离：每个线程独立清理栈
+KMM_TLS kmm_cleanup_node_t g_cleanup_node_pool[KMM_MAX_CLEANUP_NODES];
+KMM_TLS size_t g_cleanup_node_free_list = 0;
+KMM_TLS bool g_cleanup_initialized = false;
 
 static inline void kmm_init_cleanup_pool(void) {
     if (!g_cleanup_initialized) {
@@ -416,8 +450,7 @@ static inline void kmm_free_cleanup_node(kmm_cleanup_node_t* node) {
     if (node >= g_cleanup_node_pool && 
         node < g_cleanup_node_pool + KMM_MAX_CLEANUP_NODES) {
         size_t index = node - g_cleanup_node_pool;
-        g_cleanup_node_pool[index].next = 
-            (g_cleanup_node_free_list > 0) ? &g_cleanup_node_pool[g_cleanup_node_free_list - 1] : NULL;
+        node->next = (g_cleanup_node_free_list > 0) ? &g_cleanup_node_pool[g_cleanup_node_free_list - 1] : NULL;
         g_cleanup_node_free_list = index + 1;
     } else {
         kmm_v4_free(node);
@@ -451,15 +484,138 @@ static inline void kmm_execute_cleanup(kmm_context_t* ctx) {
 
 #endif
 
-// ==================== 联合域实现（V3 特色，V4 风格） ====================
+// ==================== 联合域实现（V3 特色，V4 风格 - 完全自动化） ====================
 #if KMM_ENABLE_UNION_DOMAIN
+
+// 自动化联合域管理器（零运行时开销）
+typedef struct {
+    size_t saved_scope_depth;
+    size_t saved_node_count;
+    kmm_union_node_t* saved_current;
+} kmm_union_auto_scope_t;
+
+// 外部作用域指针（定义在 memory.c 中）
+extern __thread kmm_context_t* g_kaula_scope;
+
+// 前向声明
+static inline void kmm_init_union_pool(void);
+static inline void kmm_union_topological_sort(kmm_union_node_t** nodes, size_t count);
+
+// 自动进入：保存现场 + 设置 TLS
+static inline void kmm_union_auto_enter(kmm_union_auto_scope_t* scope) {
+    kmm_init_union_pool();
+    scope->saved_scope_depth = g_union_domain.scope_depth;
+    scope->saved_node_count = g_union_domain.node_count;
+    scope->saved_current = g_union_domain.current;
+    g_union_domain.scope_depth++;
+    g_union_domain.max_depth = (g_union_domain.scope_depth > g_union_domain.max_depth) ? 
+                                g_union_domain.scope_depth : g_union_domain.max_depth;
+}
+
+// 自动退出：恢复现场 + 清理
+static inline void kmm_union_auto_exit(kmm_union_auto_scope_t* scope) {
+    (void)scope;
+    if (g_union_domain.scope_depth > 0) {
+        g_union_domain.scope_depth--;
+        
+        if (g_union_domain.scope_depth == 0) {
+            kmm_union_destroy(&g_union_domain);
+        }
+    }
+}
+
+// 自动化分配 + 依赖检测（直接传递 scope 指针）
+static inline void* kmm_union_auto_alloc_with_scope(kmm_union_auto_scope_t* scope, size_t size) {
+    (void)scope;
+    if (!g_kaula_scope || !g_kaula_scope->is_initialized) {
+        return NULL;
+    }
+    
+    void* obj = kmm_alloc(g_kaula_scope, size, "<union_auto>", 0);
+    if (!obj) return NULL;
+    
+    kmm_union_node_t* node = kmm_union_node_alloc();
+    if (!node) return obj;
+    
+    node->object = obj;
+    node->object_size = size;
+    node->status = KMM_DOMAIN_UNION;
+    node->scope_depth = g_union_domain.scope_depth;
+    node->parent = g_union_domain.current;
+    node->next = NULL;
+    node->dependencies = NULL;
+    node->dependency_count = 0;
+    node->is_root = (g_union_domain.scope_depth == 0);
+    node->is_elected = true;
+    
+    if (g_union_domain.root == NULL) {
+        g_union_domain.root = node;
+    }
+    
+    g_union_domain.current = node;
+    g_union_domain.node_count++;
+    
+    g_kaula_scope->union_rep = node;
+    g_kaula_scope->domain = &g_union_domain;
+    
+    kmm_union_auto_detect_dependencies(node);
+    return obj;
+}
+
+// 旧版本（使用 TLS，已废弃）
+
+// ==================== 联合域自动化宏（零成本，用户无需手动管理） ====================
+// 简化宏：用户声明一个 scope 变量，宏自动管理生命周期
+// 用法：
+//   kmm_union_auto_scope_t _union_scope;
+//   KMM_UNION_SCOPE_START(&_union_scope);
+//       Node* n = KMM_UNION_ALLOC(Node, &_union_scope);
+//   KMM_UNION_SCOPE_END();
+
+#define KMM_UNION_SCOPE_START(scope_ptr) \
+    for (int _kmm_u_done = 0; \
+         !_kmm_u_done; \
+         _kmm_u_done = 1, kmm_union_auto_exit(scope_ptr)) \
+    if ((kmm_union_auto_enter(scope_ptr), 1))
+
+#define KMM_UNION_SCOPE_END() // for 循环自动结束
+
+// 自动分配（需传递 scope 指针）
+#define KMM_UNION_ALLOC(type, scope_ptr) \
+    ((type*)kmm_union_auto_alloc_with_scope(scope_ptr, sizeof(type)))
+
+#define KMM_UNION_ALLOC_ARRAY(type, count, scope_ptr) \
+    ((type*)kmm_union_auto_alloc_with_scope(scope_ptr, sizeof(type) * (count)))
+
+#define KMM_UNION_ALLOC_ZERO(type, scope_ptr) \
+    ({ type* p = KMM_UNION_ALLOC(type, scope_ptr); \
+       if(p) kmm_v4_zero_auto(p, sizeof(type)); \
+       p; })
+
+// ==================== 导出给 memory.h 使用的自动化函数 ====================
+// 使用 TLS 存储 scope，供宏使用
+// 注意：Windows/Clang 上 TLS 有限，使用全局变量
+
+static kmm_union_auto_scope_t g_union_scope_storage;
+
+void kmm_union_auto_enter_fn(void) {
+    kmm_union_auto_enter(&g_union_scope_storage);
+}
+
+void kmm_union_auto_exit_fn(void) {
+    kmm_union_auto_exit(&g_union_scope_storage);
+}
+
+void* kmm_union_auto_alloc_fn(size_t size) {
+    return kmm_union_auto_alloc_with_scope(&g_union_scope_storage, size);
+}
 
 static inline void kmm_init_union_pool(void) {
     if (!g_union_pool_initialized) {
         for (size_t i = 0; i < KMM_MAX_UNION_NODES - 1; i++) {
-            g_union_node_pool[i].temp_in_degree = i + 1;
+            g_union_node_pool[i].next = &g_union_node_pool[i + 1];
         }
-        g_union_node_pool[KMM_MAX_UNION_NODES - 1].temp_in_degree = 0;
+        g_union_node_pool[KMM_MAX_UNION_NODES - 1].next = NULL;
         g_union_node_free_list = 0;
         g_union_pool_initialized = true;
     }
@@ -468,20 +624,21 @@ static inline void kmm_init_union_pool(void) {
 static inline kmm_union_node_t* kmm_union_node_alloc(void) {
     kmm_init_union_pool();
     
-    if (g_union_node_free_list == 0) {
+    if (g_union_node_free_list >= KMM_MAX_UNION_NODES) {
         return (kmm_union_node_t*)kmm_v4_malloc(sizeof(kmm_union_node_t));
     }
     
     kmm_union_node_t* node = &g_union_node_pool[g_union_node_free_list];
-    g_union_node_free_list = node->temp_in_degree;
+    g_union_node_free_list = (node->next) ? (size_t)(node->next - g_union_node_pool) : KMM_MAX_UNION_NODES;
     return node;
 }
 
 static inline void kmm_union_node_free(kmm_union_node_t* node) {
     if (node >= g_union_node_pool && 
         node < g_union_node_pool + KMM_MAX_UNION_NODES) {
-        node->temp_in_degree = g_union_node_free_list;
-        g_union_node_free_list = node - g_union_node_pool;
+        size_t index = (size_t)(node - g_union_node_pool);
+        node->next = (g_union_node_free_list < KMM_MAX_UNION_NODES) ? &g_union_node_pool[g_union_node_free_list] : NULL;
+        g_union_node_free_list = index;
     } else {
         kmm_v4_free(node);
     }
@@ -508,18 +665,20 @@ static inline kmm_union_node_t* kmm_find_node_by_pointer(void* ptr) {
 }
 
 static inline void kmm_union_auto_detect_dependencies(kmm_union_node_t* node) {
-    if (!node->dependencies) {
-        return;
-    }
+    if (!node || !node->object) return;
     
     void** ptr = (void**)node->object;
     size_t word_count = node->object_size / sizeof(void*);
     
     for (size_t i = 0; i < word_count; i++) {
         void* potential_ptr = ptr[i];
-        if (potential_ptr) {
+        if (potential_ptr && (uintptr_t)potential_ptr > 0x1000) {
             kmm_union_node_t* target = kmm_find_node_by_pointer(potential_ptr);
             if (target && target != node && !kmm_union_has_dependency(node, target)) {
+                if (!node->dependencies) {
+                    node->dependencies = (kmm_union_node_t**)kmm_v4_malloc(sizeof(kmm_union_node_t*) * KMM_MAX_DEPENDENCIES);
+                    if (!node->dependencies) return;
+                }
                 if (node->dependency_count < KMM_MAX_DEPENDENCIES) {
                     node->dependencies[node->dependency_count++] = target;
                 }
@@ -875,7 +1034,10 @@ void** kmm_alloc_batch(kmm_context_t* ctx, size_t size, size_t count, const char
     if (KMM_V4_UNLIKELY(!ptrs)) return NULL;
     
     uint8_t* base = (uint8_t*)kmm_alloc(ctx, size * count, file, line);
-    if (KMM_V4_UNLIKELY(!base)) return NULL;
+    if (KMM_V4_UNLIKELY(!base)) {
+        kmm_free(ptrs);
+        return NULL;
+    }
     
     for (size_t i = 0; i < count; i++) {
         ptrs[i] = base + i * size;
@@ -980,4 +1142,4 @@ void kmm_print_pool_stats(void) {
        if(p) kmm_v4_zero_auto(p, sizeof(type)); \
        p; })
 
-#endif // KMM_SCOPED_ALLOCATOR_H
+#endif // KMM_SCOPED_ALLOCATOR_IMPL_H

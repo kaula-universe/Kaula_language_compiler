@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/core"
+	"regexp"
 	"strings"
 )
 
@@ -30,6 +31,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	}
 	
 	switch s := stmt.(type) {
+	case *ast.GenericInstance:
+		return sg.generateGenericInstantiation(s)
 	case *ast.VOStatement:
 		return sg.generateVOStatement(s)
 	case *ast.SpendStatement:
@@ -98,42 +101,115 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	// 将变量添加到当前作用域的符号表
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 	
-	var code string
+	var builder strings.Builder
+	builder.Grow(64)
 	
 	// 生成 C 风格的变量声明
 	switch stmt.Type {
 	case "int":
-		code = "int " + stmt.Name
+		builder.WriteString("int ")
 	case "float":
-		code = "float " + stmt.Name
+		builder.WriteString("float ")
 	case "double":
-		code = "double " + stmt.Name
+		builder.WriteString("double ")
 	case "bool":
-		code = "bool " + stmt.Name
+		builder.WriteString("bool ")
 	case "char":
-		code = "char " + stmt.Name
+		builder.WriteString("char ")
 	case "string":
-		code = "char* " + stmt.Name
+		builder.WriteString("char* ")
 	default:
 		// 自定义类型
-		code = stmt.Type + " " + stmt.Name
+		builder.WriteString(stmt.Type)
+		builder.WriteByte(' ')
 	}
+	
+	builder.WriteString(stmt.Name)
 	
 	if stmt.Value != nil {
 		// 检查是否是结构体字面量的简写（如 Box box = Box）
 		if ident, ok := stmt.Value.(*ast.Identifier); ok && ident != nil {
 			// 检查标识符是否是类型名（结构体名）
 			// 如果是，则生成零初始化
-			code += " = {0}"
+			builder.WriteString(" = {0}")
 		} else {
-			code += " = " + sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			builder.WriteString(" = ")
+			builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 		}
 	} else if stmt.Nullable {
 		// 对于可空类型，如果没有初始化值，初始化为 NULL
-		code += " = NULL"
+		builder.WriteString(" = NULL")
 	}
-	code += ";\n"
+	builder.WriteString(";\n")
+	return builder.String()
+}
+
+// generateGenericInstantiation 生成泛型实例化代码（编译期特化，零成本）
+func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInstance) string {
+	var code string
+	
+	// 1. 查找原始泛型函数定义
+	origFunc := sg.codegen.findFunctionByName(inst.OriginalName)
+	if origFunc == nil {
+		return fmt.Sprintf("// Error: Generic function '%s' not found for instantiation\n", inst.OriginalName)
+	}
+	
+	// 2. 将 TypeArguments 转换为字符串数组
+	typeArgStrings := make([]string, len(inst.TypeArguments))
+	for i, ta := range inst.TypeArguments {
+		typeArgStrings[i] = ta.Type
+	}
+	
+	// 3. 生成特化后的函数名
+	specializedName := inst.OriginalName + "_" + strings.Join(typeArgStrings, "_")
+	
+	// 4. 检查是否已实例化过（避免重复生成）
+	if sg.codegen.IsGenericInstantiated(specializedName) {
+		return ""
+	}
+	sg.codegen.MarkGenericInstantiated(specializedName)
+	
+	// 5. 生成特化函数
+	code += fmt.Sprintf("// 泛型特化实例: %s<%s>\n", inst.OriginalName, strings.Join(typeArgStrings, ", "))
+	code += fmt.Sprintf("static inline %s %s(", 
+		sg.resolveSpecializedType(origFunc.ReturnType, typeArgStrings),
+		specializedName)
+	
+	// 6. 生成特化后的参数列表
+	for i, param := range origFunc.Params {
+		if i > 0 { code += ", " }
+		specializedType := sg.resolveSpecializedType(param, typeArgStrings)
+		code += fmt.Sprintf("%s %s", specializedType, param)
+	}
+	code += ") {\n"
+	
+	// 7. 替换函数体内的泛型类型
+	sg.codegen.indent++
+	for _, bodyStmt := range origFunc.Body {
+		generated := sg.codegen.generateStatement(bodyStmt)
+		// 替换泛型参数（如 $T -> 实际类型）
+		for j, typeArg := range typeArgStrings {
+			origParam := origFunc.TypeParams[j].Name
+			generated = strings.ReplaceAll(generated, origParam, typeArg)
+		}
+		code += sg.codegen.indentString() + generated
+	}
+	sg.codegen.indent--
+	
+	code += "}\n\n"
 	return code
+}
+
+// resolveSpecializedType 解析特化后的类型
+func (sg *StatementGenerator) resolveSpecializedType(typeName string, typeArgs []string) string {
+	for i, tp := range sg.codegen.currentFuncTypeParams {
+		if typeName == tp.Name {
+			if i < len(typeArgs) {
+				return typeArgs[i]
+			}
+		}
+	}
+	return typeName
 }
 
 // generateVOStatement 生成 VO 语句代码
@@ -257,6 +333,7 @@ func (sg *StatementGenerator) generateSpendStatement(stmt *ast.SpendStatement) s
 // generateTaskStatement 生成 task 语句代码
 func (sg *StatementGenerator) generateTaskStatement(stmt *ast.TaskStatement) string {
 	code := fmt.Sprintf("PriorityQueue* pq = priority_queue_create(%d);\n", sg.codegen.config.QueueSize)
+	code += "if (pq == NULL) { return -1; }\n"
 	code += "// Add task to priority queue\n"
 	code += "priority_queue_add(pq, "
 	code += fmt.Sprintf("%d", stmt.Priority)
@@ -275,7 +352,8 @@ func (sg *StatementGenerator) generateTaskStatement(stmt *ast.TaskStatement) str
 	code += ");\n"
 	code += "// Execute task\n"
 	code += "void* result = priority_queue_execute_next(pq);\n"
-	code += "// Task cleanup handled by KMM\n"
+	code += "// Task cleanup\n"
+	code += "priority_queue_destroy(pq);\n"
 	return code
 }
 
@@ -284,9 +362,12 @@ func (sg *StatementGenerator) generatePrefixStatement(stmt *ast.PrefixStatement)
 	// 在 PrefixManager 中创建前缀上下文
 	sg.codegen.prefixManager.CreatePrefix(stmt.Name, core.PrefixAnnotationPrefix)
 
+	// 转义名称，防止 C 字符串注入
+	safeName := escapeCString(stmt.Name)
+
 	// 生成 C 代码，使用标准库中的前缀系统实现
 	code := "PrefixSystem* prefix_system = prefix_system_create();\n"
-	code += fmt.Sprintf("prefix_enter(\"%s\");\n", stmt.Name)
+	code += fmt.Sprintf("prefix_enter(\"%s\");\n", safeName)
 
 	// 生成前缀体内的代码
 	for _, bodyStmt := range stmt.Body {
@@ -294,7 +375,7 @@ func (sg *StatementGenerator) generatePrefixStatement(stmt *ast.PrefixStatement)
 	}
 
 	code += "prefix_leave();\n"
-	code += "// Prefix cleanup handled by KMM\n"
+	code += "prefix_system_destroy(prefix_system);\n"
 	return code
 }
 
@@ -325,10 +406,27 @@ func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression
 	}
 
 	// 参数替换：将前缀函数体中的参数引用替换为实际值
+	// 使用正则表达式进行精确匹配，避免意外替换子字符串
+	paramRegex := make(map[string]*regexp.Regexp)
+	for paramName := range e.Params {
+		// 匹配 $paramName 后面不是字母数字或下划线的情况
+		paramRegex[paramName] = regexp.MustCompile(`\$` + regexp.QuoteMeta(paramName) + `([^a-zA-Z0-9_]|$)`)
+	}
+	
 	paramMap := make(map[string]string)
 	for paramName, paramValue := range e.Params {
 		valueCode := sg.codegen.expressionGenerator.GenerateExpression(paramValue)
 		paramMap[paramName] = valueCode
+	}
+
+	// 辅助函数：执行参数替换
+	replaceParams := func(code string) string {
+		for paramName, paramValue := range paramMap {
+			regex := paramRegex[paramName]
+			// 使用 ReplaceAllStringFunc 保留匹配的分隔符
+			code = regex.ReplaceAllString(code, paramValue+"$1")
+		}
+		return code
 	}
 
 	// 直接展开前缀函数的函数体
@@ -336,9 +434,7 @@ func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression
 	for _, bodyStmt := range funcDecl.Body {
 		generated := sg.codegen.generateStatement(bodyStmt)
 		// 参数替换：$device -> 实际值
-		for paramName, paramValue := range paramMap {
-			generated = strings.ReplaceAll(generated, "$"+paramName, paramValue)
-		}
+		generated = replaceParams(generated)
 		code += sg.codegen.indentString() + generated
 	}
 	sg.codegen.indent--
@@ -347,9 +443,7 @@ func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression
 	for _, bodyStmt := range e.Body {
 		generated := sg.codegen.generateStatement(bodyStmt)
 		// 参数替换
-		for paramName, paramValue := range paramMap {
-			generated = strings.ReplaceAll(generated, "$"+paramName, paramValue)
-		}
+		generated = replaceParams(generated)
 		code += sg.codegen.indentString() + generated
 	}
 
@@ -681,10 +775,8 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	code += sg.codegen.indentString() + "// Free allocated memory\n"
 	for name, symbol := range sg.codegen.currentScope.GetAllSymbols() {
 		if symbol.Nullable {
-			code += sg.codegen.indentString()
 			if symbol.Type == "string" {
-				code += "if (" + name + " != NULL) { free(" + name + "); }\n"
-			} else if symbol.Type == "int" || symbol.Type == "float" || symbol.Type == "bool" {
+				code += sg.codegen.indentString()
 				code += "if (" + name + " != NULL) { free(" + name + "); }\n"
 			}
 		}

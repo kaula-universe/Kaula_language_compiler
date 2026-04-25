@@ -34,6 +34,7 @@ extern i64 time_now_ns(void);  // 纳秒级时间戳
 extern void time_sleep(i32 milliseconds);
 extern void time_sleep_us(i32 microseconds);  // 微秒级睡眠
 extern void time_sleep_ns(i64 nanoseconds);   // 纳秒级睡眠
+extern void time_sleep_seconds(f64 seconds);  // 秒级睡眠
 extern TimeSpec time_get_spec(void);
 extern i64 time_diff_ms(TimeSpec start, TimeSpec end);
 extern f64 time_diff_seconds(TimeSpec start, TimeSpec end);

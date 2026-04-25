@@ -6,10 +6,54 @@
 #include <stdbool.h>
 #include <string.h>
 
+// 原子操作支持（轻量实时线程安全）
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+#ifdef __STDC_NO_ATOMICS__
+// C11 不支持原子操作，使用 GCC/Clang 内置函数
+#define KMM_USE_ATOMICS 1
+#define KMM_ATOMIC_TYPE unsigned long
+#define KMM_ATOMIC_LOAD(var) __atomic_load_n(&(var), __ATOMIC_RELAXED)
+#define KMM_ATOMIC_STORE(var, val) __atomic_store_n(&(var), (val), __ATOMIC_RELAXED)
+#define KMM_ATOMIC_CAS(var, expected, desired) \
+    __atomic_compare_exchange_n(&(var), &(expected), (desired), 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
+#define KMM_ATOMIC_FETCH_ADD(var, val) \
+    __atomic_fetch_add(&(var), (val), __ATOMIC_RELAXED)
+#else
+// 使用 C11 标准原子操作
+#define KMM_USE_ATOMICS 1
+#include <stdatomic.h>
+#define KMM_ATOMIC_TYPE size_t
+#define KMM_ATOMIC_LOAD(var) atomic_load(&(var))
+#define KMM_ATOMIC_STORE(var, val) atomic_store(&(var), (val))
+#define KMM_ATOMIC_CAS(var, expected, desired) \
+    atomic_compare_exchange_weak(&(var), &(expected), (desired))
+#define KMM_ATOMIC_FETCH_ADD(var, val) \
+    atomic_fetch_add(&(var), (val))
+#endif
+#else
+// 单线程模式，无原子操作
+#define KMM_USE_ATOMICS 0
+#define KMM_ATOMIC_TYPE size_t
+#define KMM_ATOMIC_LOAD(var) (var)
+#define KMM_ATOMIC_STORE(var, val) ((var) = (val))
+// CAS操作返回bool（0或1）
+#define KMM_ATOMIC_CAS(var, expected, desired) \
+    (((var) == (expected)) ? ((var) = (desired), 1) : ((expected) = (var), 0))
+#define KMM_ATOMIC_FETCH_ADD(var, val) \
+    (((var) += (val)) - (val))
+#endif
+
 // ==================== KMM 功能配置 ====================
-// 启用所有高级功能
+// 线程安全级别控制
+// 0 = 单线程(零开销,默认)
+// 1 = 轻量实时(原子操作+TLS隔离,推荐)
+// 2 = 完全线程安全(额外锁保护共享资源)
+#ifndef KMM_THREAD_SAFETY_LEVEL
+#define KMM_THREAD_SAFETY_LEVEL 1
+#endif
+
 #define KMM_ENABLE_ARENA 1
-#define KMM_ENABLE_THREAD_CACHE 1
+#define KMM_ENABLE_THREAD_CACHE (KMM_THREAD_SAFETY_LEVEL >= 1)
 #define KMM_ENABLE_CLEANUP_STACK 1
 #define KMM_ENABLE_UNION_DOMAIN 1
 
@@ -39,6 +83,19 @@ typedef enum {
 #define KMM_THREAD_CACHE_SIZE 1024
 #endif
 
+// 联合域配置
+#ifndef KMM_MAX_UNION_NODES
+#define KMM_MAX_UNION_NODES 128
+#endif
+
+#ifndef KMM_MAX_UNION_DEPTH
+#define KMM_MAX_UNION_DEPTH 64
+#endif
+
+#ifndef KMM_MAX_DEPENDENCIES
+#define KMM_MAX_DEPENDENCIES 32
+#endif
+
 // ==================== 结构体定义 ====================
 // Arena 结构（用于分级内存管理）
 struct kmm_arena {
@@ -61,7 +118,7 @@ struct kmm_cleanup_node {
 
 // 线程缓存
 struct kmm_thread_cache {
-    void* cache[1024];  // KMM_THREAD_CACHE_SIZE 默认为 1024
+    void* cache[KMM_THREAD_CACHE_SIZE];
     size_t cache_size;
 };
 
@@ -102,7 +159,11 @@ struct kmm_union_domain {
 
 #ifdef _WIN32
     #define KMM_V4_WINDOWS 1
-    #define KMM_TLS __declspec(thread)
+    #if defined(__clang__) || defined(__GNUC__)
+        #define KMM_TLS __thread
+    #else
+        #define KMM_TLS __declspec(thread)
+    #endif
 #else
     #define KMM_V4_WINDOWS 0
     #define KMM_TLS __thread
@@ -148,7 +209,7 @@ struct kmm_union_domain {
 
 // ==================== 编译期计算和类型推导 ====================
 // 编译期常量检查
-#define KMM_V4_CONSTEXPR _Static_init
+#define KMM_V4_CONSTEXPR static const
 
 // 类型自动推导（C11 _Generic）
 #define KMM_V4_TYPE_SIZE(x) _Generic((x), \
@@ -166,20 +227,13 @@ struct kmm_union_domain {
     _Static_assert(((uintptr_t)(ptr) % (align)) == 0, "Alignment check failed")
 
 // ==================== 智能内存池（自动化管理） ====================
-#ifdef KMM_V4_GCC_LIKE
-static uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE] 
-    __attribute__((aligned(KMM_V4_ALIGNMENT)));
-#else
-__declspec(align(KMM_V4_ALIGNMENT))
-static uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE];
-#endif
+// 内存池声明（实际定义在 .c 文件中）
+extern uint8_t g_kmm_v4_pool[];
+extern size_t g_kmm_v4_offset;
 
-static size_t g_kmm_v4_offset = 0;
-
-// 自动检查池溢出（调试模式）
 #ifdef KMM_V4_DEBUG
-static size_t g_kmm_v4_peak = 0;
-static size_t g_kmm_v4_alloc_count = 0;
+extern size_t g_kmm_v4_peak;
+extern size_t g_kmm_v4_alloc_count;
 #endif
 
 // 自动预取（根据硬件能力）
@@ -194,12 +248,40 @@ static size_t g_kmm_v4_alloc_count = 0;
 #define KMM_V4_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
 // ==================== 自动化分配策略 ====================
-// 智能选择分配路径
+// 智能选择分配路径（轻量实时：无锁CAS原子操作）
 static inline void* kmm_v4_alloc_auto(size_t size) {
     const size_t mask = KMM_V4_ALIGNMENT - 1;
     size_t aligned_size = (size + mask) & ~mask;
     
-    // 快速路径：单线程 bump allocator
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    // 无锁CAS实现（轻量实时，保证实时性）
+    size_t offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+    size_t new_offset;
+    do {
+        new_offset = offset + aligned_size;
+        if (KMM_V4_UNLIKELY(new_offset > KMM_V4_POOL_SIZE)) {
+            #if KMM_V4_ENABLE_FALLBACK
+                return malloc(size);
+            #else
+                return NULL;
+            #endif
+        }
+    } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS(g_kmm_v4_offset, offset, new_offset)));
+    
+    #ifdef KMM_V4_DEBUG
+    KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
+    // 更新峰值（非严格原子，允许轻微误差）
+    size_t peak = KMM_ATOMIC_LOAD(g_kmm_v4_peak);
+    while (new_offset > peak) {
+        if (KMM_ATOMIC_CAS(g_kmm_v4_peak, peak, new_offset)) break;
+        peak = KMM_ATOMIC_LOAD(g_kmm_v4_peak);
+    }
+    #endif
+    
+    KMM_V4_PREFETCH(g_kmm_v4_pool + new_offset);
+    return g_kmm_v4_pool + offset;
+#else
+    // 单线程快速路径（零开销）
     size_t offset = g_kmm_v4_offset;
     size_t new_offset = offset + aligned_size;
     
@@ -221,6 +303,7 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
     #else
         return NULL;
     #endif
+#endif
 }
 
 // ==================== 自动化 SIMD 清零 ====================
@@ -371,21 +454,36 @@ static inline void kmm_v4_free(void* ptr) {
 }
 
 static inline void kmm_v4_reset(void) {
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    KMM_ATOMIC_STORE(g_kmm_v4_offset, 0);
+    #ifdef KMM_V4_STATS
+    memset(&g_kmm_v4_stats, 0, sizeof(g_kmm_v4_stats));
+    #endif
+#else
     g_kmm_v4_offset = 0;
     #ifdef KMM_V4_STATS
-    g_kmm_v4_stats = {0};
+    memset(&g_kmm_v4_stats, 0, sizeof(g_kmm_v4_stats));
     #endif
+#endif
 }
 
 static inline size_t kmm_v4_usage(void) {
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    return KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+#else
     return g_kmm_v4_offset;
+#endif
 }
 
 static inline size_t kmm_v4_available(void) {
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    return KMM_V4_POOL_SIZE - KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+#else
     return KMM_V4_POOL_SIZE - g_kmm_v4_offset;
+#endif
 }
 
-#define KMM_ALLOC_ARRAY(type, count) ((type*)kmm_alloc(g_kaula_scope, sizeof(type) * (count), __FILE__, __LINE__))
+#define KMM_V4_ALLOC_ARRAY(type, count) ((type*)kmm_v4_alloc_auto(sizeof(type) * (count)))
 
 // ==================== 编译期检查 ====================
 _Static_assert(KMM_V4_POOL_SIZE > 0, "Pool size must be positive");

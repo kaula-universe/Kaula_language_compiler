@@ -26,16 +26,6 @@ int light_task_queue_size(LightTaskQueue* q);
 void* light_task_queue_execute_next(LightTaskQueue* q);
 int light_task_queue_batch_execute(LightTaskQueue* q, int max_tasks);
 
-// 优先级任务队列 API
-PriorityTaskQueue* priority_task_queue_create(int capacity_per_queue);
-void priority_task_queue_destroy(PriorityTaskQueue* pq);
-void priority_task_queue_add(PriorityTaskQueue* pq, void* (*func)(void*), void* arg, int priority);
-int priority_task_queue_batch_add(PriorityTaskQueue* pq, void* (*func)(void*), void** args, int count, int priority);
-void* priority_task_queue_execute_next(PriorityTaskQueue* pq);
-int priority_task_queue_batch_execute(PriorityTaskQueue* pq, int max_tasks);
-int priority_task_queue_is_empty(PriorityTaskQueue* pq);
-int priority_task_queue_size(PriorityTaskQueue* pq);
-
 // 兼容性别名
 typedef LightTaskQueue TaskQueue;
 TaskQueue* task_queue_create(int capacity);

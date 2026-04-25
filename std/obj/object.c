@@ -1,6 +1,5 @@
 #include "object.h"
 #include "../memory/memory.h"
-#include "../memory/fast_alloc.h"
 #include <string.h>
 #include <stdlib.h>
 

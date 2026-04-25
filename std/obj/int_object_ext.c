@@ -1,6 +1,7 @@
 #include "int_object.h"
 #include "int_object_ext.h"
 #include <stdbool.h>
+#include <stddef.h>
 
 // 整数比较函数
 bool int_object_less(IntObject* self, IntObject* other) {

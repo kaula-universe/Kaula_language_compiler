@@ -11,7 +11,31 @@
  * - macOS (Intel/ARM)
  */
 
-#include "kaula.h"
+// Platform detection macros (defined in kaula.h)
+// This header should be included AFTER kaula.h has defined the platform macros
+#ifndef KAULA_PLATFORM_WINDOWS
+#if defined(_WIN32) || defined(_WIN64)
+    #define KAULA_PLATFORM_WINDOWS 1
+    #define KAULA_PLATFORM_UNIX 0
+    #define KAULA_PLATFORM_LINUX 0
+    #define KAULA_PLATFORM_MACOS 0
+#elif defined(__linux__)
+    #define KAULA_PLATFORM_WINDOWS 0
+    #define KAULA_PLATFORM_UNIX 1
+    #define KAULA_PLATFORM_LINUX 1
+    #define KAULA_PLATFORM_MACOS 0
+#elif defined(__APPLE__) && defined(__MACH__)
+    #define KAULA_PLATFORM_WINDOWS 0
+    #define KAULA_PLATFORM_UNIX 1
+    #define KAULA_PLATFORM_LINUX 0
+    #define KAULA_PLATFORM_MACOS 1
+#else
+    #define KAULA_PLATFORM_WINDOWS 0
+    #define KAULA_PLATFORM_UNIX 1
+    #define KAULA_PLATFORM_LINUX 0
+    #define KAULA_PLATFORM_MACOS 0
+#endif
+#endif
 
 // ==================== 平台特定头文件 ====================
 #if KAULA_PLATFORM_WINDOWS || defined(_WIN32) || defined(_WIN64) || defined(__MINGW32__)

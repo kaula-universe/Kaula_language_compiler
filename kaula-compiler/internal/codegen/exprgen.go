@@ -7,11 +7,49 @@ import (
 	"strings"
 )
 
-// isIntegerLiteral 检查是否是整数常量
-func isIntegerLiteral(code string) bool {
-	// 匹配整数常量（包括负数）
-	matched, _ := regexp.MatchString(`^-?\d+$`, code)
-	return matched
+// escapeCString 转义字符串中的特殊字符，防止 C 字符串注入
+func escapeCString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	s = strings.ReplaceAll(s, "\t", "\\t")
+	s = strings.ReplaceAll(s, "\x00", "\\0")
+	return s
+}
+
+// escapeCIdentifier 转义 C 标识符中的特殊字符，防止代码注入
+func escapeCIdentifier(s string) string {
+	var builder strings.Builder
+	for _, ch := range s {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
+			builder.WriteRune(ch)
+		}
+	}
+	result := builder.String()
+	if len(result) > 0 && result[0] >= '0' && result[0] <= '9' {
+		result = "_" + result
+	}
+	if result == "" {
+		result = "_invalid"
+	}
+	return result
+}
+
+// isIntegerLiteral 检查字符串是否是整数常量
+func isIntegerLiteral(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i, ch := range s {
+		if i == 0 && (ch == '-' || ch == '+') {
+			continue
+		}
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ExpressionGenerator 负责表达式相关的代码生成
@@ -50,6 +88,7 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	case *ast.BinaryExpression:
 		return eg.generateBinaryExpression(e)
 	case *ast.CallExpression:
+		// 通用泛型适配方案：处理泛型参数解析与类型实例化逻辑
 		return eg.generateCallExpression(e)
 	case *ast.IndexExpression:
 		return eg.GenerateExpression(e.Object) + "[" + eg.GenerateExpression(e.Index) + "]"
@@ -105,82 +144,127 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		if ident.Name == "int" {
 			// 这是一个变量声明
 			if binaryExpr, ok := e.Right.(*ast.BinaryExpression); ok && binaryExpr.Operator == "ASSIGN" {
-				return "int " + eg.GenerateExpression(binaryExpr.Left) + " = " + eg.GenerateExpression(binaryExpr.Right)
+				leftCode := eg.GenerateExpression(binaryExpr.Left)
+				rightCode := eg.GenerateExpression(binaryExpr.Right)
+				return "int " + leftCode + " = " + rightCode
 			}
 			// 处理只有类型的情况，如 int i
 			return "int " + eg.GenerateExpression(e.Right)
 		}
 	}
 	
+	// 预先计算左右表达式，减少重复调用
+	left := eg.GenerateExpression(e.Left)
+	right := eg.GenerateExpression(e.Right)
+	
+	// 常量折叠：如果左右都是整数常量，直接在编译期计算
+	if isIntegerLiteral(left) && isIntegerLiteral(right) {
+		var leftVal, rightVal int64
+		fmt.Sscanf(left, "%d", &leftVal)
+		fmt.Sscanf(right, "%d", &rightVal)
+		
+		var result int64
+		var hasResult bool
+		
+		switch e.Operator {
+		case "PLUS":
+			result = leftVal + rightVal
+			hasResult = true
+		case "MINUS":
+			result = leftVal - rightVal
+			hasResult = true
+		case "MULTIPLY":
+			result = leftVal * rightVal
+			hasResult = true
+		case "DIVIDE":
+			if rightVal != 0 {
+				result = leftVal / rightVal
+				hasResult = true
+			}
+		case "MOD":
+			if rightVal != 0 {
+				result = leftVal % rightVal
+				hasResult = true
+			}
+		case "EQ", "==":
+			result = 1
+			if leftVal != rightVal {
+				result = 0
+			}
+			hasResult = true
+		case "NE", "!=":
+			result = 0
+			if leftVal != rightVal {
+				result = 1
+			}
+			hasResult = true
+		case "LT", "<":
+			result = 0
+			if leftVal < rightVal {
+				result = 1
+			}
+			hasResult = true
+		case "GT", ">":
+			result = 0
+			if leftVal > rightVal {
+				result = 1
+			}
+			hasResult = true
+		case "LE", "<=":
+			result = 0
+			if leftVal <= rightVal {
+				result = 1
+			}
+			hasResult = true
+		case "GE", ">=":
+			result = 0
+			if leftVal >= rightVal {
+				result = 1
+			}
+			hasResult = true
+		}
+		
+		if hasResult {
+			return fmt.Sprintf("%d", result)
+		}
+	}
+	
 	// 处理对象操作
-	operator := e.Operator
-	switch operator {
+	switch e.Operator {
 	case "ASSIGN":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " = " + right
 	case "PLUS":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " + " + right
 	case "MINUS":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " - " + right
 	case "MULTIPLY":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " * " + right
 	case "DIVIDE":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " / " + right
 	case "MOD":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " % " + right
 	case "EQ", "==":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " == " + right
 	case "NE", "!=":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " != " + right
 	case "LT", "<":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " < " + right
 	case "GT", ">":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " > " + right
 	case "LE", "<=":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " <= " + right
 	case "GE", ">=":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " >= " + right
 	case "SHIFT_LEFT", "<<":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " << " + right
 	case "SHIFT_RIGHT", ">>":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return left + " >> " + right
 	case "AND":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return "bool_object_and(" + left + ", " + right + ")"
 	case "OR":
-		left := eg.GenerateExpression(e.Left)
-		right := eg.GenerateExpression(e.Right)
 		return "bool_object_or(" + left + ", " + right + ")"
 	default:
-		return eg.GenerateExpression(e.Left) + " " + operator + " " + eg.GenerateExpression(e.Right)
+		return left + " " + e.Operator + " " + right
 	}
 }
 
@@ -222,7 +306,7 @@ func (eg *ExpressionGenerator) generateStringConcat(strLiteral, other string) st
 	}
 }
 
-// generateCallExpression 生成函数调用表达式代码
+// generateCallExpression 生成函数调用表达式代码（支持泛型调用）
 func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) string {
 	// 检查是否是方法调用，如 obj.method() 或 module.function()
 	if memberAccess, ok := e.Function.(*ast.MemberAccessExpression); ok {
@@ -230,6 +314,11 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	}
 	
 	funcName := eg.GenerateExpression(e.Function)
+	
+	// 通用泛型适配：如果存在类型参数，则生成特化调用
+	if len(e.TypeArgs) > 0 {
+		funcName = funcName + "_" + strings.Join(e.TypeArgs, "_")
+	}
 	
 	// 追踪第三方库的使用
 	if eg.codegen.stdlibConfig != nil {
@@ -274,7 +363,13 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	}
 	
 	if moduleName != "" && eg.codegen.stdlibConfig != nil {
-		if module, exists := eg.codegen.stdlibConfig.Modules[moduleName]; exists {
+		// 支持两种键格式: "io" 和 "std.io"
+		stdlibKey := moduleName
+		if !strings.HasPrefix(stdlibKey, "std.") {
+			stdlibKey = "std." + moduleName
+		}
+		
+		if module, exists := eg.codegen.stdlibConfig.Modules[stdlibKey]; exists {
 			// 生成标准库函数调用
 			funcName := methodName
 			
@@ -299,33 +394,27 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	}
 	
 	// 处理基本类型的方法调用
+	if len(args) == 1 {
+		argCode := eg.GenerateExpression(args[0])
+		switch methodName {
+		case "add":
+			return "int_object_add(" + object + ", " + argCode + ")"
+		case "subtract":
+			return "int_object_subtract(" + object + ", " + argCode + ")"
+		case "multiply":
+			return "int_object_multiply(" + object + ", " + argCode + ")"
+		case "divide":
+			return "int_object_divide(" + object + ", " + argCode + ")"
+		case "concat":
+			return "string_object_concat(" + object + ", " + argCode + ")"
+		case "equals":
+			return "object_equals((Object*)" + object + ", (Object*)" + argCode + ")"
+		}
+	}
+	
 	switch methodName {
-	case "add":
-		if len(args) == 1 {
-			return "int_object_add(" + object + ", " + eg.GenerateExpression(args[0]) + ")"
-		}
-	case "subtract":
-		if len(args) == 1 {
-			return "int_object_subtract(" + object + ", " + eg.GenerateExpression(args[0]) + ")"
-		}
-	case "multiply":
-		if len(args) == 1 {
-			return "int_object_multiply(" + object + ", " + eg.GenerateExpression(args[0]) + ")"
-		}
-	case "divide":
-		if len(args) == 1 {
-			return "int_object_divide(" + object + ", " + eg.GenerateExpression(args[0]) + ")"
-		}
-	case "concat":
-		if len(args) == 1 {
-			return "string_object_concat(" + object + ", " + eg.GenerateExpression(args[0]) + ")"
-		}
 	case "length":
 		return "string_object_length(" + object + ")"
-	case "equals":
-		if len(args) == 1 {
-			return "object_equals((Object*)" + object + ", (Object*)" + eg.GenerateExpression(args[0]) + ")"
-		}
 	case "toString":
 		return "object_to_string((Object*)" + object + ")"
 	default:
@@ -358,24 +447,25 @@ func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName strin
 // 支持类型推导自动判断格式化参数
 func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string {
 	if len(args) == 0 {
-		return "printf(\"\\n\")"
+		return "putchar('\\n')"
 	}
 
 	// 检查第一个参数是否是字符串字面量
 	if strLit, ok := args[0].(*ast.StringLiteral); ok {
 		str := strLit.Value
 
-		// 如果只有字符串参数且以 \n 结尾且没有格式符，使用 puts
-		if len(args) == 1 && strings.HasSuffix(str, "\\n") && !strings.Contains(str, "%") {
-			strClean := strings.TrimSuffix(str, "\\n")
-			return fmt.Sprintf("puts(\"%s\")", strClean)
+		// 转义字符串中的特殊字符，防止 C 字符串注入
+		strEscaped := escapeCString(strings.TrimSuffix(str, "\\n"))
+
+		// 如果只有字符串参数且没有格式符，使用 puts (比 printf 更快)
+		if len(args) == 1 && !strings.Contains(str, "%") {
+			return fmt.Sprintf("puts(\"%s\")", strEscaped)
 		}
 
 		// 有多个参数或有格式符
 		if len(args) == 1 {
-			// 只有字符串，直接输出
-			strClean := strings.TrimSuffix(str, "\\n")
-			return fmt.Sprintf("printf(\"%s\\n\")", strClean)
+			// 只有字符串，直接输出 (使用 puts 自动添加换行)
+			return fmt.Sprintf("puts(\"%s\")", strEscaped)
 		} else {
 			// 类型推导：自动判断格式化参数
 			return eg.generateTypeInferredPrintf(args)
@@ -386,6 +476,14 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 	if len(args) == 1 {
 		argCode := eg.GenerateExpression(args[0])
 		argType := eg.inferType(args[0])
+		
+		// 对于整数类型，使用更高效的 putchar/puts 组合
+		if argType == "d" {
+			// 检查是否是常量，如果是则直接输出
+			if isIntegerLiteral(argCode) {
+				return fmt.Sprintf("printf(\"%s\\n\")", argCode)
+			}
+		}
 		return fmt.Sprintf("printf(\"%%%s\\n\", %s)", argType, argCode)
 	} else {
 		// 类型推导处理多参数

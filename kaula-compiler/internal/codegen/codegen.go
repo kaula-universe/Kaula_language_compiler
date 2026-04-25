@@ -2,7 +2,6 @@ package codegen
 
 import (
 	"fmt"
-	"io/ioutil"
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/config"
 	"kaula-compiler/internal/core"
@@ -49,6 +48,11 @@ type CodeGenerator struct {
 	// 泛型实例缓存
 	genericCache       map[string]*GenericInstanceCache
 	genericInstantiated map[string]bool // 已实例化的泛型
+	currentFuncTypeParams []*ast.TypeParameter // 当前函数的泛型参数
+
+	// Task/Async 闭环检测
+	currentFunctionName string
+	callStack           map[string]bool
 }
 
 // error 报告错误
@@ -74,6 +78,19 @@ func (cg *CodeGenerator) SetStdlibConfig(cfg *stdlib.StdlibConfig) {
 // GetStdlibConfig 获取 stdlib 配置（用于调试）
 func (cg *CodeGenerator) GetStdlibConfig() *stdlib.StdlibConfig {
 	return cg.stdlibConfig
+}
+
+// IsGenericInstantiated 检查泛型是否已实例化
+func (cg *CodeGenerator) IsGenericInstantiated(name string) bool {
+	return cg.genericInstantiated[name]
+}
+
+// MarkGenericInstantiated 标记泛型已实例化
+func (cg *CodeGenerator) MarkGenericInstantiated(name string) {
+	if cg.genericInstantiated == nil {
+		cg.genericInstantiated = make(map[string]bool)
+	}
+	cg.genericInstantiated[name] = true
 }
 
 // GetUsedModules 获取已使用的模块列表
@@ -235,8 +252,11 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	
 	allIncludes := baseIncludes + thirdPartyIncludes
 	
-	// 写入调试信息
-	ioutil.WriteFile("cache/all_includes.txt", []byte(allIncludes), 0644)
+	// 写入调试信息（仅在目录存在或可创建时）
+	cacheDir := "cache"
+	if err := os.MkdirAll(cacheDir, 0755); err == nil {
+		os.WriteFile(filepath.Join(cacheDir, "all_includes.txt"), []byte(allIncludes), 0644)
+	}
 	
 	if !hasMain {
 		template, ok := cg.templateManager.GetTemplate("main")
@@ -267,8 +287,25 @@ func (cg *CodeGenerator) generateExpression(expr ast.Expression) string {
 	return cg.expressionGenerator.GenerateExpression(expr)
 }
 
-// indentString 生成缩进字符串
+// indentString 生成缩进字符串（使用缓存优化性能）
+var indentCache = []string{
+	"",
+	"    ",
+	"        ",
+	"            ",
+	"                ",
+	"                    ",
+	"                        ",
+	"                            ",
+	"                                ",
+	"                                    ",
+}
+
 func (cg *CodeGenerator) indentString() string {
+	if cg.indent < len(indentCache) {
+		return indentCache[cg.indent]
+	}
+	// 超出缓存范围，动态生成
 	indent := ""
 	for i := 0; i < cg.indent; i++ {
 		indent += "    "
@@ -342,10 +379,21 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	}
 	
 	// 检查是否已经实例化
-	instName := funcName + "_"
-	for _, arg := range typeArgs {
-		instName += arg + "_"
+	instName := funcName + "__"
+	for i, arg := range typeArgs {
+		if i > 0 {
+			instName += "_"
+		}
+		// 替换类型参数中的特殊字符，避免冲突
+		for _, ch := range arg {
+			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+				instName += string(ch)
+			} else {
+				instName += fmt.Sprintf("_%d_", ch)
+			}
+		}
 	}
+	instName += "__"
 	
 	if cg.genericInstantiated[instName] {
 		return "", nil // 已经实例化过

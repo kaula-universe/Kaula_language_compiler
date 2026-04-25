@@ -693,6 +693,9 @@ func (gi *GenericInstance) String() string {
 	return "GenericInstance(" + gi.OriginalName + ")"
 }
 
+// statementNode 实现 Statement 接口
+func (gi *GenericInstance) statementNode() {}
+
 // FunctionStatement 表示函数语句
 type FunctionStatement struct {
 	Name          string

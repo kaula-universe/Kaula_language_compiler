@@ -8,7 +8,7 @@ typedef struct TaskNode {
     void* (*func)(void*);  // 任务函数
     void* arg;             // 参数
     int priority;           // 优先级
-    struct TaskNode* next; // 下一个节点
+    _Atomic(struct TaskNode*) next; // 下一个节点（原子）
 } TaskNode;
 
 // 轻量级任务队列 - 无锁设计，使用原子操作
@@ -51,7 +51,7 @@ void light_task_queue_destroy(LightTaskQueue* q) {
     // 释放所有节点
     TaskNode* current = atomic_load_explicit(&q->head, memory_order_relaxed);
     while (current) {
-        TaskNode* next = current->next;
+        TaskNode* next = atomic_load_explicit(&current->next, memory_order_relaxed);
         free(current);
         current = next;
     }

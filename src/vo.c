@@ -1,10 +1,11 @@
 #include "kaula.h"
+#include <stdio.h>
 
 VOModule* vo_create(int cache_max) {
     VOModule* vo = (VOModule*)fast_alloc(sizeof(VOModule));
     vo->cache_max = cache_max;
     vo->data_cache = (VOData*)fast_calloc(cache_max + 1, sizeof(VOData));
-    vo->code_cache = (void* (*)[VO_CACHE_SIZE + 1])fast_calloc(cache_max + 1, sizeof(void*));
+    vo->code_cache = (void* (*)(void*))fast_calloc(cache_max + 1, sizeof(void*));
     // 初始化访问时间
     for (int i = 0; i <= cache_max; i++) {
         vo->data_cache[i].last_access = 0;
@@ -55,12 +56,12 @@ void vo_code_load(VOModule* vo, int index, void* (*func)(void*)) {
         return;
     }
     
-    if (index >= 0 || index < -VO_CACHE_SIZE) {
+    if (index < -VO_CACHE_SIZE || index >= 0) {
         fprintf(stderr, "Error: Invalid code cache index %d\n", index);
         return;
     }
     
-    (*vo->code_cache)[-index] = func;
+    vo->code_cache[-index] = func;
 }
 
 void vo_associate(VOModule* vo, int data_index, int code_index) {
@@ -73,12 +74,12 @@ void vo_associate(VOModule* vo, int data_index, int code_index) {
         return;
     }
     
-    if (code_index >= 0 || code_index < -VO_CACHE_SIZE) {
+    if (code_index < -VO_CACHE_SIZE || code_index >= 0) {
         fprintf(stderr, "Error: Invalid code index %d\n", code_index);
         return;
     }
     
-    vo->data_cache[data_index].code = (*vo->code_cache)[-code_index];
+    vo->data_cache[data_index].code = vo->code_cache[-code_index];
     vo->data_cache[data_index].has_code = 1;
     vo->data_cache[data_index].code_index = code_index;
 }
@@ -96,7 +97,7 @@ void* vo_access(VOModule* vo, int index) {
         }
         return data->value;
     } else if (index < 0 && index >= -VO_CACHE_SIZE) {
-        return (void*)(*vo->code_cache)[-index];
+        return (void*)vo->code_cache[-index];
     } else {
         fprintf(stderr, "Error: Invalid VO access index %d\n", index);
         return NULL;

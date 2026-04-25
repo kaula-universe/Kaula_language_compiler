@@ -198,15 +198,22 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 
 	if sa.stdlibConfig != nil {
 		// 检查是否是标准库模块
-		if _, ok := sa.stdlibConfig.Modules[moduleName]; ok {
-			module := sa.stdlibConfig.Modules[moduleName]
-			for funcName := range module.Functions {
-				sa.symbolTable.AddSymbol(funcName, "any", false, "global", 0, 0)
+		// 支持两种导入格式: `io` 和 `std.io`
+		stdlibKey := moduleName
+		if !strings.HasPrefix(stdlibKey, "std.") {
+			stdlibKey = "std." + moduleName
+		}
+		
+		if mod, ok := sa.stdlibConfig.Modules[stdlibKey]; ok {
+			for funcName := range mod.Functions {
+				qualifiedName := fmt.Sprintf("%s.%s", stdlibKey, funcName)
+				sa.symbolTable.AddSymbol(qualifiedName, "stdlib_function", false, "global", 0, 0)
 			}
 		} else if lib := sa.stdlibConfig.GetThirdPartyLibrary(moduleName); lib != nil {
 			// 检查是否是第三方库
 			for funcName := range lib.Functions {
-				sa.symbolTable.AddSymbol(funcName, "any", false, "global", 0, 0)
+				qualifiedName := fmt.Sprintf("%s.%s", moduleName, funcName)
+				sa.symbolTable.AddSymbol(qualifiedName, "third_party_function", false, "global", 0, 0)
 			}
 		}
 	}

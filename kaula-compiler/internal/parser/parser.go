@@ -323,13 +323,13 @@ func (p *Parser) parseCallStatementIterative() *ast.CallStatement {
 		}
 		if p.curTok.Type == lexer.TOKEN_LBRACE {
 			p.nextToken()
-			for p.curTok.Type != lexer.TOKEN_RBRACE {
+			for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				bodyStmt := p.parseStatementIterative()
 				if bodyStmt != nil {
 					callBody = append(callBody, bodyStmt)
 					p.log("call 语句体添加语句")
 				}
-				if p.curTok.Type != lexer.TOKEN_RBRACE {
+				if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 					p.nextToken()
 				}
 			}
@@ -411,11 +411,18 @@ func (p *Parser) parseVOStatementIterative() ast.Statement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
+				// VOStatement 使用 Value/Code/Access 字段存储表达式
+				// 将解析的语句转换为表达式（如果是表达式语句）
+				if exprStmt, ok := bodyStmt.(*ast.ExpressionStatement); ok && stmt.Value == nil {
+					stmt.Value = exprStmt.Expression
+				} else if exprStmt, ok := bodyStmt.(*ast.ExpressionStatement); ok && stmt.Code == nil {
+					stmt.Code = exprStmt.Expression
+				}
 			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
+			if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				p.nextToken()
 			}
 		}
@@ -729,16 +736,13 @@ func (p *Parser) parseObjectStatementIterative() *ast.ObjectStatement {
 		}
 		if p.curTok.Type == lexer.TOKEN_LBRACE {
 			p.nextToken()
-			for p.curTok.Type != lexer.TOKEN_RBRACE {
+			for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				if p.curTok.Type == lexer.TOKEN_IDENT {
 					p.nextToken()
 					if p.curTok.Type == lexer.TOKEN_COLON {
 						p.nextToken()
-						if p.curTok.Type == lexer.TOKEN_STRING || p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_LITERAL_FLOAT {
-							p.parsePrimaryExpressionIterative()
-						} else {
-							p.parseExpressionIterative()
-						}
+						fieldValue := p.parseExpressionIterative()
+						stmt.Fields = append(stmt.Fields, fieldValue)
 						if p.curTok.Type == lexer.TOKEN_COMMA {
 							p.nextToken()
 						}
@@ -760,9 +764,11 @@ func (p *Parser) parseObjectStatementIterative() *ast.ObjectStatement {
 		p.nextToken()
 		if p.curTok.Type == lexer.TOKEN_LBRACKET {
 			p.nextToken()
-			for p.curTok.Type != lexer.TOKEN_RBRACKET {
-				p.parseExpressionIterative()
-				if p.curTok.Type != lexer.TOKEN_RBRACKET {
+			for p.curTok.Type != lexer.TOKEN_RBRACKET && p.curTok.Type != lexer.TOKEN_EOF {
+				stmt.Fields = append(stmt.Fields, p.parseExpressionIterative())
+				if p.curTok.Type == lexer.TOKEN_COMMA {
+					p.nextToken()
+				} else if p.curTok.Type != lexer.TOKEN_RBRACKET {
 					p.nextToken()
 				}
 			}
@@ -869,6 +875,10 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 					stmt.TaskParams = append(stmt.TaskParams, taskParam)
 					p.log("解析任务参数：优先级=%s", taskParam.Priority)
 				}
+				// 如果解析失败且 token 没有前进，手动跳过当前 token 避免死循环
+				if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+					p.nextToken()
+				}
 				continue
 			}
 
@@ -879,6 +889,10 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 				if asyncParam != nil {
 					stmt.AsyncParams = append(stmt.AsyncParams, asyncParam)
 					p.log("解析异步参数：值=%s", asyncParam.Value)
+				}
+				// 如果解析失败且 token 没有前进，手动跳过当前 token 避免死循环
+				if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+					p.nextToken()
 				}
 				continue
 			}
@@ -967,15 +981,15 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
 			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
+			if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				// 检查当前 token 是否是语句开头（IDENT、类型关键字、WHILE 等）
 				// 如果是，说明这是下一个语句的开始，不要调用 nextToken()
-				isStmtStart := p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN ||
+				isStmtStart := (p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN) ||
 					p.curTok.Type == lexer.TOKEN_TYPE_INT ||
 					p.curTok.Type == lexer.TOKEN_TYPE_FLOAT ||
 					p.curTok.Type == lexer.TOKEN_TYPE_DOUBLE ||
@@ -1000,12 +1014,12 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 		p.nextToken()
 		if p.curTok.Type == lexer.TOKEN_LBRACE {
 			p.nextToken()
-			for p.curTok.Type != lexer.TOKEN_RBRACE {
+			for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				bodyStmt := p.parseStatementIterative()
 				if bodyStmt != nil {
 					stmt.Else = append(stmt.Else, bodyStmt)
 				}
-				if p.curTok.Type != lexer.TOKEN_RBRACE {
+				if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 					p.nextToken()
 				}
 			}
@@ -1042,15 +1056,15 @@ func (p *Parser) parseWhileStatementIterative() *ast.WhileStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
 			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
+			if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				// 检查当前 token 是否是语句开头（IDENT、类型关键字、WHILE 等）
 				// 如果是，说明这是下一个语句的开始，不要调用 nextToken()
-				isStmtStart := p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN ||
+				isStmtStart := (p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN) ||
 					p.curTok.Type == lexer.TOKEN_TYPE_INT ||
 					p.curTok.Type == lexer.TOKEN_TYPE_FLOAT ||
 					p.curTok.Type == lexer.TOKEN_TYPE_DOUBLE ||
@@ -1103,12 +1117,12 @@ func (p *Parser) parseForStatementIterative() *ast.ForStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
 			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
+			if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				p.nextToken()
 			}
 		}
@@ -1440,7 +1454,7 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			if p.curTok.Type == lexer.TOKEN_IDENT {
 				if method := p.parseMethodStatementIterative(); method != nil {
 					stmt.Methods = append(stmt.Methods, method)
@@ -1450,6 +1464,9 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 			} else {
 				p.nextToken()
 			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
 		}
 	}
 	return stmt
@@ -2125,6 +2142,8 @@ func (p *Parser) parseGroupedExpressionIterative() ast.Expression {
 	expr := p.parseExpressionIterative()
 	if p.curTok.Type == lexer.TOKEN_RPAREN {
 		p.nextToken()
+	} else {
+		p.error(fmt.Sprintf("expected ')', got %s", lexer.TokenTypeToString(p.curTok.Type)))
 	}
 	return expr
 }
@@ -2191,11 +2210,28 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 
 // parseIndexExpressionIterative 迭代解析索引表达式
 func (p *Parser) parseIndexExpressionIterative() ast.Expression {
-	index := &ast.IndexExpression{}
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	index := &ast.IndexExpression{
+		Pos: pos,
+	}
 	p.nextToken()
 	index.Object = p.parseExpressionIterative()
+	if p.curTok.Type == lexer.TOKEN_COLON {
+		// 切片语法: object[start:end]
+		p.nextToken()
+		index.Index = p.parseExpressionIterative()
+	} else {
+		// 普通索引: object[index]
+		index.Index = p.parseExpressionIterative()
+	}
 	if p.curTok.Type == lexer.TOKEN_RBRACKET {
 		p.nextToken()
+	} else {
+		p.error(fmt.Sprintf("expected ']', got %s", lexer.TokenTypeToString(p.curTok.Type)))
 	}
 	return index
 }

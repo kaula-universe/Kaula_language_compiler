@@ -66,6 +66,10 @@ extern void kaula_atomic_store(volatile int* ptr, int value);
 extern int kaula_atomic_load(volatile int* ptr);
 
 // 任务调度
+typedef struct Task {
+    void (*func)(void*);
+    void* arg;
+} Task;
 
 typedef void* ThreadPool;
 

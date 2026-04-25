@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 // ==================== 跨平台支持 ====================
-#include "platform.h"
+// platform.h will be included after configuration constants to avoid circular dependency
 
 // 平台检测
 #if defined(_WIN32) || defined(_WIN64)
@@ -94,17 +94,34 @@
 #include "kmm_scoped_allocator_v4.h"
 
 // ==================== VO 模块 ====================
-typedef struct VOModule VOModule;
+typedef struct VOData {
+    void* value;
+    void* (*code)(void*);
+    int has_code;
+    int code_index;
+    uint64_t last_access;
+} VOData;
 
-VOModule* vo_create(size_t cache_size);
+typedef struct VOModule {
+    int cache_max;
+    VOData* data_cache;
+    void* (*code_cache)[VO_CACHE_SIZE + 1];
+} VOModule;
+
+VOModule* vo_create(int cache_max);
 void vo_destroy(VOModule* vo);
-void vo_data_load(VOModule* vo, int index, void* data);
-void vo_code_load(VOModule* vo, int index, void (*code)(void*));
+void vo_data_load(VOModule* vo, int index, void* value);
+void vo_code_load(VOModule* vo, int index, void* (*func)(void*));
 void vo_associate(VOModule* vo, int data_index, int code_index);
-void* vo_access(VOModule* vo, void* key);
+void* vo_access(VOModule* vo, int index);
 
 // ==================== Spend/Call 模块 ====================
-typedef struct Spendable Spendable;
+typedef struct Spendable {
+    void** components;
+    size_t count;
+    size_t call_counter;
+    bool is_locked;
+} Spendable;
 
 Spendable* spendable_create(size_t size);
 void spendable_destroy(Spendable* sp);
