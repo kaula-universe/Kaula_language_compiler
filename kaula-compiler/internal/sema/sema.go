@@ -173,6 +173,9 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 	case *ast.NonLocalStatement:
 		sa.analyzeNonLocalStatement(s)
 	case *ast.VariableDeclaration:
+		if s == nil || s.Type == "" {
+			return
+		}
 		sa.analyzeVariableDeclaration(s)
 	case *ast.ImportStatement:
 		sa.analyzeImportStatement(s)

@@ -229,7 +229,12 @@ struct kmm_union_domain {
 // ==================== 智能内存池（自动化管理） ====================
 // 内存池声明（实际定义在 .c 文件中）
 extern uint8_t g_kmm_v4_pool[];
+
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+extern KMM_ATOMIC_TYPE g_kmm_v4_offset;
+#else
 extern size_t g_kmm_v4_offset;
+#endif
 
 #ifdef KMM_V4_DEBUG
 extern size_t g_kmm_v4_peak;

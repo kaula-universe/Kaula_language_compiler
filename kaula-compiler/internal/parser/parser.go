@@ -934,7 +934,7 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		maxStatements := 10000 // 限制最大语句数量
+		maxStatements := 10000
 		statementCount := 0
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
@@ -942,15 +942,12 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 				stmt.Body = append(stmt.Body, bodyStmt)
 				statementCount++
 				if statementCount > maxStatements {
-					// 超过最大语句数，跳出循环避免内存爆炸
 					break
 				}
 			} else {
-				// 如果无法解析，跳过当前 token 避免死循环
 				p.nextToken()
 			}
 		}
-		// 消费 RBRACE
 		if p.curTok.Type == lexer.TOKEN_RBRACE {
 			p.nextToken()
 		}

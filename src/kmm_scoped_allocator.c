@@ -3,6 +3,8 @@
 
 // 定义全局内存池（所有翻译单元共享）
 // 线程安全：使用原子偏移量实现无锁分配（轻量实时）
+// 确保 KMM_V4_DEFINE_GLOBALS 被定义，以便定义全局变量
+#define KMM_V4_DEFINE_GLOBALS
 #ifdef KMM_V4_DEFINE_GLOBALS
     #define KMM_V4_GLOBALS
     #include "kmm_scoped_allocator_v4.h"
@@ -20,8 +22,18 @@
     size_t g_kmm_v4_peak = 0;
     size_t g_kmm_v4_alloc_count = 0;
     #endif
+    
+    // Kaula scope pointer (required by kmm_union_auto_alloc_fn)
+    __thread kmm_context_t* g_kaula_scope = NULL;
+    
 #else
     #include "kmm_scoped_allocator_v4.h"
+    
+    // Kaula scope pointer (required by kmm_union_auto_alloc_fn)
+    // Define if not already defined by the header
+    #ifndef KMM_V4_GLOBALS
+    __thread kmm_context_t* g_kaula_scope = NULL;
+    #endif
 #endif
 #include <stdio.h>
 #include <stdbool.h>

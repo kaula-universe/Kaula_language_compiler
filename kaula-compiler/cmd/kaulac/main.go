@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -338,11 +339,39 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string) error
 	if _, err := os.Stat(runtimeFile); err == nil {
 		clangArgs = append(clangArgs, runtimeFile)
 	}
+	// 也检查相对路径（相对于工作目录的父目录）
+	relRuntimeFile := filepath.Join(workDir, "..", "src", "kmm_scoped_allocator.c")
+	if _, err := os.Stat(relRuntimeFile); err == nil {
+		// 检查是否已经添加了
+		alreadyAdded := false
+		for _, arg := range clangArgs {
+			if arg == runtimeFile {
+				alreadyAdded = true
+				break
+			}
+		}
+		if !alreadyAdded {
+			clangArgs = append(clangArgs, relRuntimeFile)
+		}
+	}
 
-	// 只编译使用过的 std 模块源文件
+	// 只编译使用过的 std 模块源文件（跳过 memory，因为 kmm_scoped_allocator.c 已包含）
 	for _, moduleName := range usedModules {
 		for _, stdPath := range validStdPaths {
-			moduleDir := filepath.Join(stdPath, moduleName)
+			// 支持多种模块名格式：
+			// "io" -> stdPath/io/
+			// "std/io" -> stdPath/io/ (去掉 std/ 前缀)
+			// "std.io" -> stdPath/io/ (替换 . 为 /)
+			moduleDirName := moduleName
+			if len(moduleDirName) > 4 && moduleDirName[:4] == "std/" {
+				moduleDirName = moduleDirName[4:]
+			}
+			if len(moduleDirName) > 4 && moduleDirName[:4] == "std." {
+				moduleDirName = moduleDirName[4:]
+			}
+			moduleDirName = strings.ReplaceAll(moduleDirName, ".", "/")
+			
+			moduleDir := filepath.Join(stdPath, moduleDirName)
 			if _, err := os.Stat(moduleDir); err == nil {
 				entries, _ := os.ReadDir(moduleDir)
 				for _, entry := range entries {
@@ -355,6 +384,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string) error
 	}
 
 	cmd := exec.Command(clangPath, clangArgs...)
+	fmt.Printf("[Compile] Clang command args:\n")
+	for _, arg := range clangArgs {
+		fmt.Printf("  %s\n", arg)
+	}
+	fmt.Printf("[Compile] Used modules: %v\n", usedModules)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))

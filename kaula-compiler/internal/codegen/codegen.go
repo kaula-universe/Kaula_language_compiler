@@ -196,7 +196,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	
 	// 生成基础包含语句
 	// 硬编码 src/kaula.h 路径，确保生成的代码能正确找到头文件
-	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"src/kaula.h\"\n"
+	// 使用相对于编译器位置的绝对路径或正确的相对路径
+	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"../src/kaula.h\"\n"
 	
 	// 收集所有导入的模块
 	importedModules := make(map[string]bool)
@@ -222,7 +223,16 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if ok {
 				// 添加模块对应的头文件
 				if module.Header != "" {
-					thirdPartyIncludes += "#include \"" + module.Header + "\"\n"
+					// 修正路径，使其相对于生成的C文件位置
+					header := module.Header
+					// 处理相对路径
+					if len(header) >= 3 && header[0] == '.' && header[1] == '.' && header[2] == '/' {
+						header = header[3:]
+					} else if len(header) >= 4 && header[0] == 's' && header[1] == 't' && header[2] == 'd' && header[3] == '/' {
+						// 已经是 std/ 开头，添加 ../ 前缀
+						header = "../" + header
+					}
+					thirdPartyIncludes += "#include \"" + header + "\"\n"
 				}
 			} else {
 				// 检查是否是第三方库
