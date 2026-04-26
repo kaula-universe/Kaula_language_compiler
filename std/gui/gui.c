@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
 
 // Windows 后端实现
 static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {

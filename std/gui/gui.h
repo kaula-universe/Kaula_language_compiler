@@ -24,4 +24,7 @@ extern void gui_input_text(GUIContext* ctx, char* buffer, size_t max_length);
 // 布局
 extern void gui_layout_row_dynamic(GUIContext* ctx, float height, int columns);
 
+// 消息处理
+extern bool gui_process_messages();
+
 #endif // STD_GUI_GUI_H
