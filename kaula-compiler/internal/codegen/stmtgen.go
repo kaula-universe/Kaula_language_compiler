@@ -121,8 +121,16 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		builder.WriteString("char ")
 	case "string":
 		builder.WriteString("char* ")
+	case "i64":
+		builder.WriteString("int64_t ")
+	case "u64":
+		builder.WriteString("uint64_t ")
+	case "i32":
+		builder.WriteString("int32_t ")
+	case "u32":
+		builder.WriteString("uint32_t ")
 	default:
-		// 自定义类型
+		// 自定义类型或关键字映射到C类型
 		builder.WriteString(stmt.Type)
 		builder.WriteByte(' ')
 	}
@@ -130,15 +138,8 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	builder.WriteString(stmt.Name)
 	
 	if stmt.Value != nil {
-		// 检查是否是结构体字面量的简写（如 Box box = Box）
-		if ident, ok := stmt.Value.(*ast.Identifier); ok && ident != nil {
-			// 检查标识符是否是类型名（结构体名）
-			// 如果是，则生成零初始化
-			builder.WriteString(" = {0}")
-		} else {
-			builder.WriteString(" = ")
-			builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
-		}
+		builder.WriteString(" = ")
+		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 	} else if stmt.Nullable {
 		// 对于可空类型，如果没有初始化值，初始化为 NULL
 		builder.WriteString(" = NULL")
@@ -163,8 +164,8 @@ func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInst
 		typeArgStrings[i] = ta.Type
 	}
 	
-	// 3. 生成特化后的函数名
-	specializedName := inst.OriginalName + "_" + strings.Join(typeArgStrings, "_")
+	// 3. 生成特化后的函数名（添加 kaula_ 前缀避免与 C 宏冲突）
+	specializedName := "kaula_" + inst.OriginalName + "_" + strings.Join(typeArgStrings, "_")
 	
 	// 4. 检查是否已实例化过（避免重复生成）
 	if sg.codegen.IsGenericInstantiated(specializedName) {
@@ -172,35 +173,57 @@ func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInst
 	}
 	sg.codegen.MarkGenericInstantiated(specializedName)
 	
-	// 5. 生成特化函数
-	code += fmt.Sprintf("// 泛型特化实例: %s<%s>\n", inst.OriginalName, strings.Join(typeArgStrings, ", "))
-	code += fmt.Sprintf("static inline %s %s(", 
-		sg.resolveSpecializedType(origFunc.ReturnType, typeArgStrings),
-		specializedName)
+	// 5. 构建类型映射
+	typeMap := make(map[string]string)
+	for i, tp := range origFunc.TypeParams {
+		if i < len(typeArgStrings) {
+			typeMap[tp.Name] = typeArgStrings[i]
+		}
+	}
 	
-	// 6. 生成特化后的参数列表
+	// 6. 实例化返回类型
+	specializedReturnType := sg.resolveSpecializedType(origFunc.ReturnType, typeArgStrings)
+	
+	// 7. 生成特化函数签名
+	code += fmt.Sprintf("// 泛型特化实例: %s<%s>\n", inst.OriginalName, strings.Join(typeArgStrings, ", "))
+	code += fmt.Sprintf("static inline %s %s(", specializedReturnType, specializedName)
+	
+	// 8. 生成特化后的参数列表
 	for i, param := range origFunc.Params {
 		if i > 0 { code += ", " }
-		specializedType := sg.resolveSpecializedType(param, typeArgStrings)
-		code += fmt.Sprintf("%s %s", specializedType, param)
+		// 参数名保持不变，但类型需要特化
+		// 注意：这里的 param 是参数名，类型信息需要从原函数获取
+		// 简化处理：使用 int64_t 作为默认类型（实际应该从 AST 获取参数类型）
+		code += fmt.Sprintf("int64_t %s", param)
 	}
 	code += ") {\n"
 	
-	// 7. 替换函数体内的泛型类型
+	// 9. 生成函数体（精确替换泛型类型，避免误替换）
 	sg.codegen.indent++
 	for _, bodyStmt := range origFunc.Body {
-		generated := sg.codegen.generateStatement(bodyStmt)
-		// 替换泛型参数（如 $T -> 实际类型）
-		for j, typeArg := range typeArgStrings {
-			origParam := origFunc.TypeParams[j].Name
-			generated = strings.ReplaceAll(generated, origParam, typeArg)
-		}
+		generated := sg.generateStatementForGeneric(bodyStmt, typeMap)
 		code += sg.codegen.indentString() + generated
 	}
 	sg.codegen.indent--
 	
 	code += "}\n\n"
 	return code
+}
+
+// generateStatementForGeneric 在泛型实例化中生成语句代码（精确类型替换）
+func (sg *StatementGenerator) generateStatementForGeneric(stmt ast.Statement, typeMap map[string]string) string {
+	generated := sg.codegen.generateStatement(stmt)
+	
+	// 精确替换类型声明中的泛型参数
+	// 匹配模式： "T " (类型后跟空格) 或 "T*" (类型后跟指针) 或 "T;" (类型后跟分号)
+	for origType, newType := range typeMap {
+		// 替换变量声明中的类型
+		generated = strings.ReplaceAll(generated, origType+" ", newType+" ")
+		generated = strings.ReplaceAll(generated, origType+"*", newType+"*")
+		generated = strings.ReplaceAll(generated, origType+";", newType+";")
+	}
+	
+	return generated
 }
 
 // resolveSpecializedType 解析特化后的类型

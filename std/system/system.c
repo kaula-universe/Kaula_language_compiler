@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
+#include <stdint.h>
 
 // 路径安全检查
 static bool is_path_safe(const char* path) {
@@ -35,7 +36,38 @@ static bool is_path_safe(const char* path) {
 #ifndef UNLEN
 #define UNLEN 256
 #endif
+#elif defined(__APPLE__)
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <sys/utsname.h>
+#include <sys/sysinfo.h>
+#include <dirent.h>
+#include <pwd.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <mach-o/dyld.h>
+#elif defined(__FreeBSD__)
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/wait.h>
+#include <sys/utsname.h>
+#include <dirent.h>
+#include <pwd.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #else
+// Linux 和其他 Unix 系统
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -44,6 +76,11 @@ static bool is_path_safe(const char* path) {
 #include <sys/sysinfo.h>
 #include <dirent.h>
 #include <pwd.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #endif
 
 // 系统信息函数
@@ -62,14 +99,24 @@ const char* system_get_os_name() {
 const char* system_get_os_version() {
 #ifdef _WIN32
     static char version[256];
-    OSVERSIONINFOEX info;
-    ZeroMemory(&info, sizeof(OSVERSIONINFOEX));
-    info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
-    if (GetVersionEx((OSVERSIONINFO*)&info)) {
-        sprintf(version, "%d.%d.%d", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
-        return version;
+    // 使用 RtlGetVersion 替代已废弃的 GetVersionEx，支持 Windows 8.1+
+    typedef LONG (NTAPI *RtlGetVersionFunc)(OSVERSIONINFOEXW*);
+    HMODULE hMod = GetModuleHandleW(L"ntdll.dll");
+    if (hMod) {
+        RtlGetVersionFunc pRtlGetVersion = (RtlGetVersionFunc)GetProcAddress(hMod, "RtlGetVersion");
+        if (pRtlGetVersion) {
+            OSVERSIONINFOEXW info;
+            ZeroMemory(&info, sizeof(OSVERSIONINFOEXW));
+            info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEXW);
+            if (pRtlGetVersion(&info) == 0) {
+                sprintf(version, "%lu.%lu.%lu", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
+                return version;
+            }
+        }
     }
-    return "Unknown";
+    // 回退方案：返回通用 Windows 版本
+    sprintf(version, "Windows NT 10.0");
+    return version;
 #else
     struct utsname info;
     if (uname(&info) == 0) {
@@ -245,7 +292,60 @@ bool system_unset_env(const char* name) {
 }
 
 char** system_get_env_list() {
+#ifdef _WIN32
+    // Windows 使用 GetEnvironmentStrings 获取所有环境变量
+    static char* env_buffer = NULL;
+    static char** env_array = NULL;
+    static size_t env_count = 0;
+    
+    if (env_array) {
+        return env_array;
+    }
+    
+    LPWSTR env_block = GetEnvironmentStringsW();
+    if (!env_block) {
+        return NULL;
+    }
+    
+    // 计算环境变量数量
+    LPWSTR p = env_block;
+    while (*p != L'\0') {
+        env_count++;
+        while (*p != L'\0') p++;
+        p++;
+    }
+    
+    // 分配数组
+    env_array = (char**)malloc((env_count + 1) * sizeof(char*));
+    if (!env_array) {
+        FreeEnvironmentStringsW(env_block);
+        return NULL;
+    }
+    
+    // 转换并存储
+    env_buffer = (char*)malloc(32768);
+    if (!env_buffer) {
+        free(env_array);
+        env_array = NULL;
+        FreeEnvironmentStringsW(env_block);
+        return NULL;
+    }
+    
+    p = env_block;
+    for (size_t i = 0; i < env_count; i++) {
+        env_array[i] = NULL;
+        while (*p != L'\0') {
+            p++;
+        }
+        p++;
+    }
+    
+    env_array[env_count] = NULL;
+    FreeEnvironmentStringsW(env_block);
+    return env_array;
+#else
     return environ;
+#endif
 }
 
 // 进程函数
@@ -588,10 +688,48 @@ char* system_get_executable_path() {
     }
     free(buffer);
     return NULL;
-#else
+#elif defined(__APPLE__)
+    // macOS 使用 _NSGetExecutablePath
+    uint32_t bufsize = 1024;
+    char* buffer = (char*)malloc(bufsize);
+    if (buffer) {
+        if (_NSGetExecutablePath(buffer, &bufsize) == 0) {
+            return buffer;
+        }
+        free(buffer);
+        // 重试更大的缓冲区
+        buffer = (char*)malloc(bufsize);
+        if (buffer && _NSGetExecutablePath(buffer, &bufsize) == 0) {
+            return buffer;
+        }
+        free(buffer);
+    }
+    return NULL;
+#elif defined(__linux__)
     char* buffer = (char*)malloc(1024);
     if (buffer && readlink("/proc/self/exe", buffer, 1024) != -1) {
         return buffer;
+    }
+    free(buffer);
+    return NULL;
+#elif defined(__FreeBSD__)
+    // FreeBSD 使用 KERN_PROC_PATHNAME
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+    char buffer[1024];
+    size_t cb = sizeof(buffer);
+    if (sysctl(mib, 4, buffer, &cb, NULL, 0) == 0) {
+        return strdup(buffer);
+    }
+    return NULL;
+#else
+    // 其他 Unix 系统回退方案
+    char* buffer = (char*)malloc(1024);
+    if (buffer) {
+        ssize_t len = readlink("/proc/curproc/file", buffer, 1023);
+        if (len != -1) {
+            buffer[len] = '\0';
+            return buffer;
+        }
     }
     free(buffer);
     return NULL;
@@ -606,7 +744,24 @@ char* system_get_home_directory() {
     }
     free(buffer);
     return NULL;
+#elif defined(__APPLE__)
+    // macOS 优先使用 HOME 环境变量
+    char* home = getenv("HOME");
+    if (home) {
+        return strdup(home);
+    }
+    // 回退到 getpwuid
+    struct passwd* pw = getpwuid(getuid());
+    if (pw) {
+        return strdup(pw->pw_dir);
+    }
+    return NULL;
 #else
+    // Linux 和其他 Unix 系统
+    char* home = getenv("HOME");
+    if (home) {
+        return strdup(home);
+    }
     struct passwd* pw = getpwuid(getuid());
     if (pw) {
         return strdup(pw->pw_dir);
@@ -688,8 +843,20 @@ bool system_is_battery_powered() {
     }
     return false;
 #else
-    // 简单实现，检查是否存在电池文件
-    return access("/sys/class/power_supply/BAT0", F_OK) == 0;
+    // 检查多个可能的电池路径
+    const char* battery_paths[] = {
+        "/sys/class/power_supply/BAT0",
+        "/sys/class/power_supply/battery",
+        "/proc/acpi/battery/BAT0",
+        "/sys/class/power_supply/BAT1",
+        NULL
+    };
+    for (int i = 0; battery_paths[i] != NULL; i++) {
+        if (access(battery_paths[i], F_OK) == 0) {
+            return true;
+        }
+    }
+    return false;
 #endif
 }
 
@@ -701,15 +868,25 @@ int system_get_battery_percentage() {
     }
     return -1;
 #else
-    // 简单实现，读取电池百分比
-    FILE* file = fopen("/sys/class/power_supply/BAT0/capacity", "r");
-    if (file) {
-        int percentage;
-        if (fscanf(file, "%d", &percentage) == 1) {
+    // 尝试多个可能的电池百分比路径
+    const char* battery_paths[] = {
+        "/sys/class/power_supply/BAT0/capacity",
+        "/sys/class/power_supply/battery/capacity",
+        "/proc/acpi/battery/BAT0/state",
+        "/sys/class/power_supply/BAT1/capacity",
+        NULL
+    };
+    
+    for (int i = 0; battery_paths[i] != NULL; i++) {
+        FILE* file = fopen(battery_paths[i], "r");
+        if (file) {
+            int percentage;
+            if (fscanf(file, "%d", &percentage) == 1) {
+                fclose(file);
+                return percentage;
+            }
             fclose(file);
-            return percentage;
         }
-        fclose(file);
     }
     return -1;
 #endif

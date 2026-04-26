@@ -55,8 +55,8 @@
 #include "prefix/prefix.h"
 #include "task/task.h"
 
-// 对象系统
-#include "obj/obj.h"
-#include "obj/int_object_ext.h"
+// 对象系统 (需要单独编译)
+// #include "obj/obj.h"
+// #include "obj/int_object_ext.h"
 
 #endif // STD_H

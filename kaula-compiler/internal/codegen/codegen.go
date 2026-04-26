@@ -17,10 +17,9 @@ type GenericInstanceCache struct {
 	OriginalName   string
 	TypeArguments  []string
 	GeneratedCode  string
-	InstantiatedAt int // 实例化位置
+	InstantiatedAt int
 }
 
-// CodeGenerator 表示代码生成器
 type CodeGenerator struct {
 	output          string
 	indent          int
@@ -36,56 +35,45 @@ type CodeGenerator struct {
 	errors          []string
 	usedModules     []string
 
-	// 模块化生成器
 	typeGenerator       *TypeGenerator
 	functionGenerator   *FunctionGenerator
 	expressionGenerator *ExpressionGenerator
 	statementGenerator  *StatementGenerator
 
-	// 追踪使用的第三方库
 	usedThirdPartyLibs map[string]bool
 	
-	// 泛型实例缓存
 	genericCache       map[string]*GenericInstanceCache
-	genericInstantiated map[string]bool // 已实例化的泛型
-	currentFuncTypeParams []*ast.TypeParameter // 当前函数的泛型参数
+	genericInstantiated map[string]bool
+	currentFuncTypeParams []*ast.TypeParameter
 
-	// Task/Async 闭环检测
 	currentFunctionName string
 	callStack           map[string]bool
 }
 
-// error 报告错误
 func (cg *CodeGenerator) error(message string) {
 	cg.errors = append(cg.errors, message)
 }
 
-// Errors 返回错误列表
 func (cg *CodeGenerator) Errors() []string {
 	return cg.errors
 }
 
-// HasErrors 检查是否有错误
 func (cg *CodeGenerator) HasErrors() bool {
 	return len(cg.errors) > 0
 }
 
-// SetStdlibConfig 设置 stdlib 配置
 func (cg *CodeGenerator) SetStdlibConfig(cfg *stdlib.StdlibConfig) {
 	cg.stdlibConfig = cfg
 }
 
-// GetStdlibConfig 获取 stdlib 配置（用于调试）
 func (cg *CodeGenerator) GetStdlibConfig() *stdlib.StdlibConfig {
 	return cg.stdlibConfig
 }
 
-// IsGenericInstantiated 检查泛型是否已实例化
 func (cg *CodeGenerator) IsGenericInstantiated(name string) bool {
 	return cg.genericInstantiated[name]
 }
 
-// MarkGenericInstantiated 标记泛型已实例化
 func (cg *CodeGenerator) MarkGenericInstantiated(name string) {
 	if cg.genericInstantiated == nil {
 		cg.genericInstantiated = make(map[string]bool)
@@ -93,12 +81,10 @@ func (cg *CodeGenerator) MarkGenericInstantiated(name string) {
 	cg.genericInstantiated[name] = true
 }
 
-// GetUsedModules 获取已使用的模块列表
 func (cg *CodeGenerator) GetUsedModules() []string {
 	return cg.usedModules
 }
 
-// NewCodeGenerator 创建一个新的代码生成器
 func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	tm := NewTemplateManager()
 	templatePath := filepath.Join(cfg.TemplatePath, "main.c.tmpl")
@@ -106,10 +92,8 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 
 	pm := NewPluginManager()
 
-	// 使用配置中的 stdlibPath（与语义分析器保持一致）
 	stdlibPath := cfg.StdlibPath
 	if stdlibPath == "" {
-		// 回退到默认路径
 		stdlibPath = "stdlib.json"
 		if _, err := os.Stat(stdlibPath); os.IsNotExist(err) {
 			stdlibPath = "kaula-compiler/stdlib.json"
@@ -125,11 +109,9 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		fmt.Printf("Loaded stdlib.json from %s, modules: %d\n", stdlibPath, len(stdlibConfig.Modules))
 	}
 
-	// 初始化 Tree 和 Prefix 管理器
 	treeManager := core.NewTreeManager()
 	prefixManager := core.NewPrefixManager()
 
-	// 初始化符号表
 	symbolTable := symbol.NewSymbolTable(nil, "global")
 
 	cg := &CodeGenerator{
@@ -149,7 +131,6 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		genericInstantiated: make(map[string]bool),
 	}
 	
-	// 初始化模块化生成器
 	cg.typeGenerator = NewTypeGenerator(cg)
 	cg.functionGenerator = NewFunctionGenerator(cg)
 	cg.expressionGenerator = NewExpressionGenerator(cg)
@@ -158,11 +139,8 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	return cg
 }
 
-// Generate 生成代码
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
-	// 保存 program 引用以便后续查找
 	cg.program = program
-	// 重置第三方库使用追踪
 	cg.usedThirdPartyLibs = make(map[string]bool)
 	
 	typeCode := ""
@@ -171,7 +149,6 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	mainCode := ""
 	
 	for _, stmt := range program.Statements {
-		// 跳过 import 语句，不生成 C 代码
 		if _, ok := stmt.(*ast.ImportStatement); ok {
 			continue
 		}
@@ -194,12 +171,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		}
 	}
 	
-	// 生成基础包含语句
-	// 硬编码 src/kaula.h 路径，确保生成的代码能正确找到头文件
-	// 使用相对于编译器位置的绝对路径或正确的相对路径
 	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"../src/kaula.h\"\n"
 	
-	// 收集所有导入的模块
 	importedModules := make(map[string]bool)
 	for _, stmt := range program.Statements {
 		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
@@ -207,43 +180,31 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		}
 	}
 
-	// 存储使用的模块列表
 	cg.usedModules = make([]string, 0, len(importedModules))
 	for moduleName := range importedModules {
 		cg.usedModules = append(cg.usedModules, moduleName)
 	}
 
-	// 只添加实际使用的第三方库头文件
 	thirdPartyIncludes := ""
 	if cg.stdlibConfig != nil {
-		// 遍历所有导入的模块
 		for moduleName := range importedModules {
-			// 检查是否是标准库模块
 			module, ok := cg.stdlibConfig.Modules[moduleName]
 			if ok {
-				// 添加模块对应的头文件
 				if module.Header != "" {
-					// 修正路径，使其相对于生成的 C 文件位置
 					header := module.Header
-					// 处理相对路径
 					if len(header) >= 3 && header[0] == '.' && header[1] == '.' && header[2] == '/' {
 						header = header[3:]
 					} else if len(header) >= 4 && header[0] == 's' && header[1] == 't' && header[2] == 'd' && header[3] == '/' {
-						// 已经是 std/ 开头，添加 ../ 前缀
 						header = "../" + header
 					}
 					thirdPartyIncludes += "#include \"" + header + "\"\n"
 				}
 			} else {
-				// 检查是否是第三方库
 				found := false
 				for _, lib := range cg.stdlibConfig.ThirdParty {
 					if lib.Name == moduleName {
 						found = true
-						// 添加库的头文件
 						for _, header := range lib.Headers {
-							// 头文件已经包含 <> 或""，直接使用
-							// 如果路径以 ../ 开头，去掉它（因为生成的 C 文件和源文件在同一目录）
 							cleanHeader := header
 							if len(header) > 3 && header[0] == '"' && header[1] == '.' && header[2] == '.' && header[3] == '/' {
 								cleanHeader = "\"" + header[4:]
@@ -254,7 +215,6 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 					}
 				}
 				if !found {
-					// 未找到模块或库
 				}
 			}
 		}
@@ -262,7 +222,6 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	
 	allIncludes := baseIncludes + thirdPartyIncludes
 	
-	// 写入调试信息（仅在目录存在或可创建时）
 	cacheDir := "cache"
 	if err := os.MkdirAll(cacheDir, 0755); err == nil {
 		os.WriteFile(filepath.Join(cacheDir, "all_includes.txt"), []byte(allIncludes), 0644)
@@ -287,17 +246,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	}
 }
 
-// generateStatement 生成语句代码（委托给 statementGenerator）
 func (cg *CodeGenerator) generateStatement(stmt ast.Statement) string {
 	return cg.statementGenerator.GenerateStatement(stmt)
 }
 
-// generateExpression 生成表达式代码（委托给 expressionGenerator）
 func (cg *CodeGenerator) generateExpression(expr ast.Expression) string {
 	return cg.expressionGenerator.GenerateExpression(expr)
 }
 
-// indentString 生成缩进字符串（使用缓存优化性能）
 var indentCache = []string{
 	"",
 	"    ",
@@ -388,8 +344,8 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 		return cached.GeneratedCode, nil
 	}
 	
-	// 检查是否已经实例化
-	instName := funcName + "__"
+	// 生成实例化后的函数名: kaula_max_int64 (添加 kaula_ 前缀避免与 C 宏冲突)
+	instName := "kaula_" + funcName + "_"
 	for i, arg := range typeArgs {
 		if i > 0 {
 			instName += "_"
@@ -403,14 +359,13 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 			}
 		}
 	}
-	instName += "__"
 	
 	if cg.genericInstantiated[instName] {
 		return "", nil // 已经实例化过
 	}
 	
 	// 获取原始函数
-	program := cg.getProgram() // 需要从某个地方获取 program
+	program := cg.getProgram()
 	if program == nil {
 		return "", fmt.Errorf("cannot find program for generic instantiation")
 	}
@@ -420,14 +375,8 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 		return "", fmt.Errorf("function %s is not generic", funcName)
 	}
 	
-	// 创建实例化后的函数
-	instFunc := &ast.FunctionStatement{
-		Name:       instName,
-		Params:     fnStmt.Params,
-		Body:       fnStmt.Body,
-		ReturnType: fnStmt.ReturnType,
-		Generic:    false,
-	}
+	// 创建实例化后的函数（复制并替换类型参数）
+	instFunc := cg.instantiateGenericFunction(fnStmt, typeArgs, instName)
 	
 	// 生成代码
 	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
@@ -442,6 +391,40 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	cg.genericInstantiated[instName] = true
 	
 	return code, nil
+}
+
+// instantiateGenericFunction 创建泛型函数的实例化版本
+func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatement, typeArgs []string, instName string) *ast.FunctionStatement {
+	// 创建类型参数映射：T -> int64_t
+	typeMap := make(map[string]string)
+	for i, tp := range fnStmt.TypeParams {
+		if i < len(typeArgs) {
+			typeMap[tp.Name] = typeArgs[i]
+		}
+	}
+	
+	// 实例化返回类型
+	returnType := fnStmt.ReturnType
+	if mappedType, ok := typeMap[returnType]; ok {
+		returnType = mappedType
+	}
+	
+	// 创建新的函数语句
+	instFunc := &ast.FunctionStatement{
+		Name:       instName,
+		Params:     make([]string, len(fnStmt.Params)),
+		Body:       fnStmt.Body,
+		ReturnType: returnType,
+		Generic:    false,
+		NoKMM:      fnStmt.NoKMM,
+		Inline:     fnStmt.Inline,
+		Annotation: fnStmt.Annotation,
+	}
+	
+	// 复制参数（不需要替换，因为参数名不变，只是类型在返回类型中体现）
+	copy(instFunc.Params, fnStmt.Params)
+	
+	return instFunc
 }
 
 // getProgram 获取程序 AST（简化实现，实际需要从编译器获取）

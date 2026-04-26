@@ -10,6 +10,8 @@
     #define CLOSE_SOCKET closesocket
 #else
     #include <errno.h>
+    #include <unistd.h>
+    #include <fcntl.h>
     #define CLOSE_SOCKET close
     #define SOCKET_LAST_ERROR errno
     #define SOCKET_EWOULDBLOCK EWOULDBLOCK

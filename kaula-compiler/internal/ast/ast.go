@@ -290,6 +290,10 @@ func traverseNode(node Node, visitor func(Node)) {
 		if n.Index != nil {
 			traverseNode(n.Index, visitor)
 		}
+	case *TypeCastExpression:
+		if n.Expression != nil {
+			traverseNode(n.Expression, visitor)
+		}
 	case *PrefixCallExpression:
 		for _, stmt := range n.Body {
 			traverseNode(stmt, visitor)
@@ -1690,6 +1694,32 @@ type MemberAccessExpression struct {
 	Object Expression
 	Member string
 	Pos    Position
+}
+
+// TypeCastExpression 表示类型转换表达式
+// 语法: (type)(expr) 例如 (i64)(result)
+type TypeCastExpression struct {
+	TargetType string     // 目标类型，如 "i64", "f64" 等
+	Expression Expression // 被转换的表达式
+	Pos        Position
+}
+
+// 让 TypeCastExpression 实现 expressionNode 方法
+func (t *TypeCastExpression) expressionNode() {}
+
+// GetPosition 实现Node接口
+func (t *TypeCastExpression) GetPosition() Position {
+	return t.Pos
+}
+
+// SetPosition 实现Node接口
+func (t *TypeCastExpression) SetPosition(pos Position) {
+	t.Pos = pos
+}
+
+// String 实现Node接口
+func (t *TypeCastExpression) String() string {
+	return fmt.Sprintf("(%s)(%s)", t.TargetType, t.Expression.String())
 }
 
 // expressionNode 实现Expression接口

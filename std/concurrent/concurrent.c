@@ -8,6 +8,9 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <semaphore.h>
+#include <sys/sysinfo.h>
+#include <time.h>
 #endif
 
 // 线程实现
@@ -375,53 +378,51 @@ bool rwlock_try_write_lock(ReadWriteLock rwlock) {
 }
 
 // 原子操作实现
-int atomic_add(volatile int* ptr, int value) {
+int kaula_atomic_add(volatile int* ptr, int value) {
 #ifdef _WIN32
     return InterlockedAdd((LONG*)ptr, value);
 #else
-    return __sync_fetch_and_add(ptr, value);
+    return __atomic_fetch_add(ptr, value, __ATOMIC_SEQ_CST);
 #endif
 }
 
-int atomic_sub(volatile int* ptr, int value) {
+int kaula_atomic_sub(volatile int* ptr, int value) {
 #ifdef _WIN32
     return InterlockedAdd((LONG*)ptr, -value);
 #else
-    return __sync_fetch_and_sub(ptr, value);
+    return __atomic_fetch_sub(ptr, value, __ATOMIC_SEQ_CST);
 #endif
 }
 
-int atomic_exchange(volatile int* ptr, int value) {
+int kaula_atomic_exchange(volatile int* ptr, int value) {
 #ifdef _WIN32
     return InterlockedExchange((LONG*)ptr, value);
 #else
-    return __sync_lock_test_and_set(ptr, value);
+    return __atomic_exchange_n(ptr, value, __ATOMIC_SEQ_CST);
 #endif
 }
 
-bool atomic_compare_exchange(volatile int* ptr, int expected, int desired) {
+bool kaula_atomic_compare_exchange(volatile int* ptr, int expected, int desired) {
 #ifdef _WIN32
     return InterlockedCompareExchange((LONG*)ptr, desired, expected) == expected;
 #else
-    return __sync_bool_compare_and_swap(ptr, expected, desired);
+    return __atomic_compare_exchange_n(ptr, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 #endif
 }
 
-void atomic_store(volatile int* ptr, int value) {
+void kaula_atomic_store(volatile int* ptr, int value) {
 #ifdef _WIN32
     InterlockedExchange((LONG*)ptr, value);
 #else
-    *ptr = value;
-    __sync_synchronize();
+    __atomic_store_n(ptr, value, __ATOMIC_SEQ_CST);
 #endif
 }
 
-int atomic_load(volatile int* ptr) {
+int kaula_atomic_load(volatile int* ptr) {
 #ifdef _WIN32
     return InterlockedCompareExchange((LONG*)ptr, 0, 0);
 #else
-    __sync_synchronize();
-    return *ptr;
+    return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 #endif
 }
 
@@ -439,12 +440,12 @@ typedef struct ThreadPoolImpl {
 
 static void* thread_pool_worker(void* arg) {
     ThreadPoolImpl* pool = (ThreadPoolImpl*)arg;
-    while (atomic_load((volatile int*)&pool->running)) {
+    while (kaula_atomic_load((volatile int*)&pool->running)) {
         mutex_lock(pool->mutex);
-        while (pool->task_count == 0 && atomic_load((volatile int*)&pool->running)) {
+        while (pool->task_count == 0 && kaula_atomic_load((volatile int*)&pool->running)) {
             condition_wait(pool->condition, pool->mutex);
         }
-        if (!atomic_load((volatile int*)&pool->running)) {
+        if (!kaula_atomic_load((volatile int*)&pool->running)) {
             mutex_unlock(pool->mutex);
             break;
         }
@@ -478,7 +479,7 @@ ThreadPool thread_pool_create(size_t thread_count) {
 void thread_pool_destroy(ThreadPool pool) {
     ThreadPoolImpl* impl = (ThreadPoolImpl*)pool;
     if (impl) {
-        atomic_store((volatile int*)&impl->running, 0);
+        kaula_atomic_store((volatile int*)&impl->running, 0);
         condition_broadcast(impl->condition);
         for (size_t i = 0; i < impl->thread_count; i++) {
             thread_join(impl->threads[i]);
@@ -525,7 +526,10 @@ void concurrent_sleep(uint32_t milliseconds) {
 #ifdef _WIN32
     Sleep(milliseconds);
 #else
-    usleep(milliseconds * 1000);
+    struct timespec ts;
+    ts.tv_sec = milliseconds / 1000;
+    ts.tv_nsec = (milliseconds % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 #endif
 }
 

@@ -96,6 +96,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.generatePrefixCallExpression(e)
 	case *ast.MemberAccessExpression:
 		return eg.generateMemberAccessExpression(e)
+	case *ast.TypeCastExpression:
+		return eg.generateTypeCastExpression(e)
 	default:
 		return "0"
 	}
@@ -141,17 +143,23 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression) string {
 	// 特殊处理变量声明，如 int x = 10
 	if ident, ok := e.Left.(*ast.Identifier); ok {
-		if ident.Name == "int" {
+		if ident.Name == "int" || ident.Name == "i64" || ident.Name == "f64" || 
+		   ident.Name == "double" || ident.Name == "float" || ident.Name == "bool" ||
+		   ident.Name == "char" || ident.Name == "void" {
 			// 这是一个变量声明
+			// 检查右边是否是赋值表达式
 			if binaryExpr, ok := e.Right.(*ast.BinaryExpression); ok && binaryExpr.Operator == "ASSIGN" {
-				leftCode := eg.GenerateExpression(binaryExpr.Left)
-				rightCode := eg.GenerateExpression(binaryExpr.Right)
-				return "int " + leftCode + " = " + rightCode
+				// int x = 10 被解析为: Binary(int, ?, Binary(x, ASSIGN, 10))
+				varName := eg.GenerateExpression(binaryExpr.Left)
+				value := eg.GenerateExpression(binaryExpr.Right)
+				return eg.mapTypeToC(ident.Name) + " " + varName + " = " + value
 			}
 			// 处理只有类型的情况，如 int i
-			return "int " + eg.GenerateExpression(e.Right)
+			return eg.mapTypeToC(ident.Name) + " " + eg.GenerateExpression(e.Right)
 		}
 	}
+	
+	// 处理赋值操作（已经处理，不应该再次进入这里）
 	
 	// 预先计算左右表达式，减少重复调用
 	left := eg.GenerateExpression(e.Left)
@@ -222,6 +230,18 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 				result = 1
 			}
 			hasResult = true
+		case "AND", "&&":
+			result = 0
+			if leftVal != 0 && rightVal != 0 {
+				result = 1
+			}
+			hasResult = true
+		case "OR", "||":
+			result = 0
+			if leftVal != 0 || rightVal != 0 {
+				result = 1
+			}
+			hasResult = true
 		}
 		
 		if hasResult {
@@ -229,19 +249,19 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		}
 	}
 	
-	// 处理对象操作
+	// 生成正常的二元表达式
 	switch e.Operator {
 	case "ASSIGN":
 		return left + " = " + right
-	case "PLUS":
+	case "PLUS", "+":
 		return left + " + " + right
-	case "MINUS":
+	case "MINUS", "-":
 		return left + " - " + right
-	case "MULTIPLY":
+	case "MULTIPLY", "*":
 		return left + " * " + right
-	case "DIVIDE":
+	case "DIVIDE", "/":
 		return left + " / " + right
-	case "MOD":
+	case "MOD", "%":
 		return left + " % " + right
 	case "EQ", "==":
 		return left + " == " + right
@@ -259,11 +279,12 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		return left + " << " + right
 	case "SHIFT_RIGHT", ">>":
 		return left + " >> " + right
-	case "AND":
-		return "bool_object_and(" + left + ", " + right + ")"
-	case "OR":
-		return "bool_object_or(" + left + ", " + right + ")"
+	case "AND", "&&":
+		return left + " && " + right
+	case "OR", "||":
+		return left + " || " + right
 	default:
+		// 对于未知的操作符，尝试使用原始符号
 		return left + " " + e.Operator + " " + right
 	}
 }
@@ -315,9 +336,26 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	
 	funcName := eg.GenerateExpression(e.Function)
 	
-	// 通用泛型适配：如果存在类型参数，则生成特化调用
+	// 通用泛型适配：如果存在类型参数，则触发实例化
 	if len(e.TypeArgs) > 0 {
-		funcName = funcName + "_" + strings.Join(e.TypeArgs, "_")
+		// 触发泛型实例化
+		code, err := eg.codegen.InstantiateGeneric(funcName, e.TypeArgs, e.Pos.Line)
+		if err != nil {
+			// 如果实例化失败，回退到简单拼接
+			funcName = "kaula_" + funcName + "_" + strings.Join(e.TypeArgs, "_")
+		} else if code != "" {
+			// 实例化成功，在代码生成早期阶段注入实例化代码
+			// 这里我们只返回实例化后的函数名
+			funcName = "kaula_" + funcName + "_" + strings.Join(e.TypeArgs, "_")
+		} else {
+			// 已经实例化过，直接使用
+			funcName = "kaula_" + funcName + "_" + strings.Join(e.TypeArgs, "_")
+		}
+	}
+	
+	// 避免与C标准库宏冲突（如 max, min）
+	if funcName == "max" || funcName == "min" || funcName == "abs" {
+		funcName = "kaula_" + funcName
 	}
 	
 	// 追踪第三方库的使用
@@ -332,18 +370,28 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		return eg.generatePrintlnCall(e.Args)
 	}
 	
-	// 其他函数调用
-	code := funcName + "("
-	// 生成所有参数
-	for i, arg := range e.Args {
-		if i > 0 {
-			code += ", "
+	// 根据参数数量选择不同的调用方式
+	if len(e.Args) == 0 {
+		// 无参数调用
+		return funcName + "()"
+	} else if len(e.Args) == 1 {
+		// 单个参数调用，直接传递参数
+		argCode := eg.GenerateExpression(e.Args[0])
+		return funcName + "(" + argCode + ")"
+	} else {
+		// 多个参数调用，使用 C99 复合字面量 (compound literal) 传递数组
+		// 语法: funcName((int64_t[]){arg1, arg2, ...}, arg_count)
+		argsList := "(int64_t[]){"
+		for i, arg := range e.Args {
+			if i > 0 {
+				argsList += ", "
+			}
+			argsList += eg.GenerateExpression(arg)
 		}
-		argCode := eg.GenerateExpression(arg)
-		code += argCode
+		argsList += "}"
+		
+		return funcName + "(" + argsList + ", " + fmt.Sprintf("%d", len(e.Args)) + ")"
 	}
-	code += ")"
-	return code
 }
 
 // generateMethodCall 生成方法调用代码
@@ -659,4 +707,65 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 	}
 	
 	return object + "." + e.Member
+}
+
+// generateTypeCastExpression 生成类型转换表达式代码
+func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpression) string {
+	exprCode := eg.GenerateExpression(e.Expression)
+	
+	// 将 Kaula 类型映射到 C 类型
+	cType := eg.mapTypeToC(e.TargetType)
+	
+	// 生成 C 风格的类型转换: (cType)(expr)
+	return fmt.Sprintf("(%s)(%s)", cType, exprCode)
+}
+
+// mapTypeToC 将 Kaula 类型映射到 C 类型
+func (eg *ExpressionGenerator) mapTypeToC(kaulaType string) string {
+	// 标准化类型名称（转小写）
+	typeLower := strings.ToLower(kaulaType)
+	
+	// 类型映射表
+	typeMap := map[string]string{
+		// 整数类型
+		"i8":   "int8_t",
+		"i16":  "int16_t",
+		"i32":  "int32_t",
+		"int8":   "int8_t",
+		"int16":  "int16_t",
+		"int32":  "int32_t",
+		"int64":  "int64_t",
+		"int":    "int64_t",
+		"i64":    "int64_t",
+		"long":   "int64_t",
+		
+		// 无符号整数类型
+		"u8":   "uint8_t",
+		"u16":  "uint16_t",
+		"u32":  "uint32_t",
+		"uint8":  "uint8_t",
+		"uint16": "uint16_t",
+		"uint32": "uint32_t",
+		"uint64": "uint64_t",
+		"uint":   "uint64_t",
+		"u64":    "uint64_t",
+		
+		// 浮点类型
+		"float":  "float",
+		"f32":    "float",
+		"double": "double",
+		"f64":    "double",
+		
+		// 其他类型
+		"bool":   "int",
+		"char":   "char",
+		"void":   "void",
+	}
+	
+	if cType, ok := typeMap[typeLower]; ok {
+		return cType
+	}
+	
+	// 默认返回 int64_t
+	return "int64_t"
 }

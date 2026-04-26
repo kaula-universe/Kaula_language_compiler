@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"kaula-compiler/internal/cache"
 	"kaula-compiler/internal/codegen"
 	"kaula-compiler/internal/config"
 	errors "kaula-compiler/internal/errors"
@@ -40,22 +41,112 @@ func main() {
 		}
 	}()
 
+	// 在加载配置之前先解析我们自己的参数（避免 flag.Parse() 冲突）
+	inputFile := ""
+	cleanCache := false
+	purgeCache := false
+	showCacheStats := false
+	noCache := false
+
+	// 先处理我们的参数，过滤掉后再传递给 flag.Parse()
+	customArgs := []string{}
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--clean-cache":
+			cleanCache = true
+		case "--purge-cache":
+			purgeCache = true
+		case "--cache-stats":
+			showCacheStats = true
+		case "--no-cache":
+			noCache = true
+		default:
+			// 非 flag 参数保留
+			if len(arg) > 0 && arg[0] != '-' {
+				inputFile = arg
+			}
+			customArgs = append(customArgs, arg)
+		}
+	}
+
+	// 处理命令行参数（允许仅使用缓存管理命令而不需要输入文件）
+	if len(os.Args) < 2 {
+		fmt.Printf("Usage: %s [options] <input file>\n", os.Args[0])
+		fmt.Printf("Options:\n")
+		fmt.Printf("  --clean-cache    Clean cache directory\n")
+		fmt.Printf("  --purge-cache    Purge all cache entries\n")
+		fmt.Printf("  --cache-stats    Show cache statistics\n")
+		fmt.Printf("  --no-cache       Disable incremental compilation\n")
+		os.Exit(1)
+	}
+
+	// 临时修改 os.Args 以避免 flag.Parse() 报错
+	os.Args = append([]string{os.Args[0]}, customArgs...)
+
+	// 加载配置（会调用 flag.Parse()）
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		fmt.Printf("Warning: Failed to load config: %v, using default\n", err)
 	}
 
-	if len(os.Args) < 2 {
-		fmt.Printf("Usage: %s <input file>\n", os.Args[0])
+	// 如果没有输入文件但有缓存管理命令，也允许执行
+	if inputFile == "" && !cleanCache && !purgeCache && !showCacheStats {
+		fmt.Printf("Error: No input file specified\n")
 		os.Exit(1)
 	}
 
-	inputFile := os.Args[len(os.Args)-1]
-	if len(inputFile) < 4 || inputFile[len(inputFile)-3:] != ".kl" {
+	if inputFile != "" && (len(inputFile) < 4 || inputFile[len(inputFile)-3:] != ".kl") {
 		fmt.Printf("Error: Input file must have .kl extension\n")
 		os.Exit(1)
 	}
 
+	// 初始化缓存管理器
+	cwd, _ := os.Getwd()
+	cacheDir := filepath.Join(cwd, "cache")
+	cacheManager, err := cache.NewCacheManager(cacheDir, "0.1.0-alpha")
+	if err != nil {
+		fmt.Printf("Warning: Failed to initialize cache manager: %v\n", err)
+	}
+
+	// 处理缓存管理命令
+	if cleanCache && cacheManager != nil {
+		if err := cacheManager.Clean(7*24*time.Hour, 1024*1024*1024); err != nil {
+			fmt.Printf("Error cleaning cache: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Cache cleaned successfully")
+	}
+
+	if purgeCache && cacheManager != nil {
+		if err := cacheManager.Purge(); err != nil {
+			fmt.Printf("Error purging cache: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Cache purged successfully")
+	}
+
+	if showCacheStats && cacheManager != nil {
+		totalEntries, totalSize, oldest, newest := cacheManager.GetStats()
+		fmt.Println("=== Cache Statistics ===")
+		fmt.Printf("Total entries: %d\n", totalEntries)
+		fmt.Printf("Total size: %d bytes (%.2f MB)\n", totalSize, float64(totalSize)/1024/1024)
+		if !oldest.IsZero() {
+			fmt.Printf("Oldest entry: %v\n", oldest.Format("2006-01-02 15:04:05"))
+		}
+		if !newest.IsZero() {
+			fmt.Printf("Newest entry: %v\n", newest.Format("2006-01-02 15:04:05"))
+		}
+		if totalEntries == 0 && !cleanCache && !purgeCache && inputFile == "" {
+			os.Exit(0)
+		}
+	}
+
+	// 如果没有输入文件，退出
+	if inputFile == "" {
+		os.Exit(0)
+	}
+
+	// 读取源文件
 	data, err := os.ReadFile(inputFile)
 	if err != nil {
 		fmt.Printf("Error reading file: %v\n", err)
@@ -66,13 +157,6 @@ func main() {
 	inputDir := filepath.Dir(inputFile)
 	inputBase := filepath.Base(inputFile)
 	inputName := inputBase[:len(inputBase)-3]
-
-	cwd, _ := os.Getwd()
-	cacheDir := filepath.Join(cwd, "cache")
-	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
-		os.MkdirAll(cacheDir, 0755)
-	}
-	cacheFile := filepath.Join(cacheDir, inputName+".c")
 
 	fmt.Println("=== Concurrent Compilation Pipeline ===")
 	fmt.Printf("Starting at %v\n\n", totalStart.Format("15:04:05.000"))
@@ -121,6 +205,7 @@ func main() {
 		cg.SetStdlibConfig(stdlibConfig)
 	}
 	output := cg.Generate(program)
+	usedModules := cg.GetUsedModules()
 
 	// 检查所有阶段的错误并统一输出
 	totalErrors := stage1ErrorCount + stage2ErrorCount + len(cg.Errors())
@@ -156,9 +241,40 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 增量编译：检查缓存
+	var cacheFile string
+	var cacheHit bool
+	
+	if cacheManager != nil && !noCache {
+		cacheKey := cacheManager.GetCacheKey(inputFile)
+		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
+		
+		// 检查缓存是否命中
+		cacheResult := cacheManager.Check(inputFile, data)
+		if cacheResult.Hit {
+			cacheHit = true
+			fmt.Printf("[Cache] Using cached C code: %s\n", cacheResult.CCodePath)
+		} else {
+			// 缓存未命中，存储新生成的代码
+			if err := cacheManager.Store(inputFile, data, output, usedModules); err != nil {
+				fmt.Printf("[Cache] Warning: Failed to store cache: %v\n", err)
+			}
+			cacheHit = false
+			cacheFile = cacheResult.CCodePath
+		}
+	} else {
+		// 无缓存模式，直接使用原来的路径
+		cacheFile = filepath.Join(cacheDir, inputName+".c")
+		cacheHit = false
+		
+		// 保存 C 代码到缓存文件
+		if err := os.WriteFile(cacheFile, []byte(output), 0644); err != nil {
+			fmt.Printf("Warning: Failed to save C code: %v\n", err)
+		}
+	}
+
 	// Concurrent C compilation
-	usedModules := cg.GetUsedModules()
-	compileResult := concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules)
+	compileResult := concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit)
 	stage3Time := time.Since(stage3Start)
 	fmt.Printf("[Stage 3] Code Gen + Compilation completed in %v\n", stage3Time)
 
@@ -195,18 +311,26 @@ type compileResult_t struct {
 }
 
 // concurrentCompile 并发保存缓存并编译 C 代码
-func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string) *compileResult_t {
+func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool) *compileResult_t {
 	result := &compileResult_t{}
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	startTime := time.Now()
 
-	// 保存缓存
-	go func() {
-		defer wg.Done()
-		os.WriteFile(cacheFile, []byte(cCode), 0644)
-	}()
+	// 如果是缓存命中，不需要保存 C 代码
+	if !cacheHit {
+		// 保存缓存
+		go func() {
+			defer wg.Done()
+			os.WriteFile(cacheFile, []byte(cCode), 0644)
+		}()
+	} else {
+		// 缓存命中，直接完成
+		go func() {
+			defer wg.Done()
+		}()
+	}
 
 	// 编译
 	go func() {
@@ -228,7 +352,11 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 	wg.Wait()
 
 	if result.Error == nil {
-		fmt.Printf("[Compile] Completed in %v\n", time.Since(startTime))
+		if cacheHit {
+			fmt.Printf("[Compile] Completed in %v (cache hit)\n", time.Since(startTime))
+		} else {
+			fmt.Printf("[Compile] Completed in %v\n", time.Since(startTime))
+		}
 	}
 
 	return result
