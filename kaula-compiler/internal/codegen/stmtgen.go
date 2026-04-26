@@ -70,6 +70,9 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	case *ast.NonLocalStatement:
 		return sg.generateNonLocalStatement(s)
 	case *ast.VariableDeclaration:
+		if s == nil {
+			return ""
+		}
 		return sg.generateVariableDeclaration(s)
 	case *ast.ExpressionStatement:
 		if s == nil || s.Expression == nil {

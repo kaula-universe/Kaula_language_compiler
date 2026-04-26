@@ -223,7 +223,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if ok {
 				// 添加模块对应的头文件
 				if module.Header != "" {
-					// 修正路径，使其相对于生成的C文件位置
+					// 修正路径，使其相对于生成的 C 文件位置
 					header := module.Header
 					// 处理相对路径
 					if len(header) >= 3 && header[0] == '.' && header[1] == '.' && header[2] == '/' {

@@ -22,6 +22,9 @@
 // 字符串处理
 #include "string/string.h"
 
+// 国际化和多语言支持
+#include "i18n/i18n.h"
+
 // 格式化库
 #include "format/format.h"
 

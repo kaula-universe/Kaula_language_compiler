@@ -929,6 +929,16 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 			p.nextToken()
 		}
 	}
+	// 解析返回类型（如果存在）
+	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT {
+		if p.isTypeToken(p.curTok.Type) {
+			stmt.ReturnType = strings.ToLower(lexer.TokenTypeToString(p.curTok.Type))
+			stmt.ReturnType = strings.TrimPrefix(stmt.ReturnType, "type_")
+		} else {
+			stmt.ReturnType = p.curTok.Value
+		}
+		p.nextToken()
+	}
 	if p.curTok.Type == lexer.TOKEN_COLON {
 		p.nextToken()
 	}
@@ -1242,12 +1252,12 @@ func (p *Parser) parseImportStatementIterative() *ast.ImportStatement {
 		Pos: pos,
 	}
 	p.nextToken()
-	if p.curTok.Type == lexer.TOKEN_IDENT {
+	if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
 		stmt.Module = p.curTok.Value
 		p.nextToken()
 		for p.curTok.Type == lexer.TOKEN_DOT {
 			p.nextToken()
-			if p.curTok.Type == lexer.TOKEN_IDENT {
+			if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
 				stmt.Module += "." + p.curTok.Value
 				p.nextToken()
 			} else {
