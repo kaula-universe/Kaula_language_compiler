@@ -545,6 +545,19 @@
       "i18n_fix_console_output": {"args": []}
     }
   },
+  "std.gui": {
+    "header": "std/gui/gui.h",
+    "gui_create": {"args": [], "return": "GUIContext*"},
+    "gui_destroy": {"args": ["GUIContext*"]},
+    "gui_begin": {"args": ["GUIContext*", "const char*", "float", "float", "float", "float"]},
+    "gui_end": {"args": ["GUIContext*"]},
+    "gui_label": {"args": ["GUIContext*", "const char*"]},
+    "gui_button": {"args": ["GUIContext*", "const char*"], "return": "bool"},
+    "gui_slider_int": {"args": ["GUIContext*", "int", "int*", "int", "int"]},
+    "gui_input_text": {"args": ["GUIContext*", "char*", "size_t"]},
+    "gui_layout_row_dynamic": {"args": ["GUIContext*", "float", "int"]},
+    "gui_process_messages": {"args": [], "return": "bool"}
+  },
   "std.web": {
     "header": "std/web/web.h",
     "http_server_create": {"args": ["i32"], "return": "HttpServer*"},
