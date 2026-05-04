@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "entries": {
+    "test_type": {
+      "source_path": "test_type.kl",
+      "source_hash": "f2823fa088e4e47233823fb1fcdb441dbdc4bffbd5aeaf5a16b55f39ac907d80",
+      "source_size": 235,
+      "source_mod_time": "2026-05-04T21:25:29.9250346+08:00",
+      "ccode_hash": "7d4099202aeb84aa31f854e81f7c250c98562b2ae93b4765e2e9181eb805d267",
+      "ccode_size": 812,
+      "created_at": "2026-05-04T21:25:29.9250346+08:00",
+      "last_accessed": "2026-05-04T21:25:29.9250346+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    }
+  },
+  "last_cleanup": "2026-05-04T21:25:29.8828001+08:00",
+  "total_size": 1047
+}

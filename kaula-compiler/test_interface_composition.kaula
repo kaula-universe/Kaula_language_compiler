@@ -1,0 +1,62 @@
+// 测试接口组合分组功能
+
+// 定义 Stringer 接口
+interface Stringer {
+    fn toString() string;
+}
+
+// Person 类实现 Stringer 接口
+class Person implements Stringer {
+    name: string;
+    age: int;
+    
+    constructor Person(n: string, a: int) {
+        self.name = n;
+        self.age = a;
+    }
+    
+    fn toString() string {
+        return self.name;
+    }
+}
+
+// 定义 Printable 接口
+interface Printable {
+    fn print() void;
+}
+
+// Logger 类实现 Printable 接口
+class Logger implements Printable {
+    level: int;
+    
+    constructor Logger(l: int) {
+        self.level = l;
+    }
+    
+    fn print() void {
+    }
+}
+
+// 类实现多个接口
+class Animal implements Stringer, Printable {
+    name: string;
+    sound: string;
+    
+    constructor Animal(n: string, s: string) {
+        self.name = n;
+        self.sound = s;
+    }
+    
+    fn toString() string {
+        return self.name;
+    }
+    
+    fn print() void {
+    }
+}
+
+fn main() {
+    Person p = Person_new("Alice", 30);
+    Logger log = Logger_new(1);
+    Animal dog = Animal_new("Dog", "Woof");
+}
