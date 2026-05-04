@@ -5,8 +5,16 @@ import (
 	"kaula-compiler/internal/lexer"
 	"kaula-compiler/internal/parser"
 	"kaula-compiler/internal/sema"
+	"kaula-compiler/internal/config"
 	"kaula-compiler/internal/stdlib"
 )
+
+func testBenchConfig() *config.Config {
+	return &config.Config{
+		TemplatePath: ".",
+		StdlibPath:   "../stdlib.json",
+	}
+}
 
 // BenchmarkGenerateSimpleFunction 基准测试：生成简单函数代码
 func BenchmarkGenerateSimpleFunction(b *testing.B) {
@@ -26,7 +34,7 @@ func BenchmarkGenerateSimpleFunction(b *testing.B) {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -50,7 +58,7 @@ func BenchmarkGenerateVariableDeclarations(b *testing.B) {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -85,7 +93,7 @@ fn main() {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -120,7 +128,7 @@ func BenchmarkGenerateControlFlow(b *testing.B) {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -160,7 +168,7 @@ fn main() {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -229,11 +237,11 @@ fn main() {
 		
 		analyzer := sema.NewSemanticAnalyzer()
 		config, _ := stdlib.LoadStdlibConfig("stdlib.json")
-		analyzer.stdlibConfig = config
+		analyzer.SetStdlibConfig(config)
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
-		cg.stdlibConfig = config
+		cg := NewCodeGenerator(testBenchConfig())
+		cg.SetStdlibConfig(config)
 		cg.Generate(program)
 	}
 }
@@ -258,7 +266,7 @@ func BenchmarkGenerateExpressions(b *testing.B) {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -296,7 +304,7 @@ fn main() {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -321,11 +329,11 @@ fn main() {
 		
 		analyzer := sema.NewSemanticAnalyzer()
 		config, _ := stdlib.LoadStdlibConfig("stdlib.json")
-		analyzer.stdlibConfig = config
+		analyzer.SetStdlibConfig(config)
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
-		cg.stdlibConfig = config
+		cg := NewCodeGenerator(testBenchConfig())
+		cg.SetStdlibConfig(config)
 		cg.Generate(program)
 	}
 }
@@ -352,11 +360,11 @@ fn main() {
 		
 		analyzer := sema.NewSemanticAnalyzer()
 		config, _ := stdlib.LoadStdlibConfig("stdlib.json")
-		analyzer.stdlibConfig = config
+		analyzer.SetStdlibConfig(config)
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
-		cg.stdlibConfig = config
+		cg := NewCodeGenerator(testBenchConfig())
+		cg.SetStdlibConfig(config)
 		cg.Generate(program)
 	}
 }
@@ -390,7 +398,7 @@ func BenchmarkGenerateSwitchStatement(b *testing.B) {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }
@@ -436,7 +444,7 @@ fn main() {
 		analyzer := sema.NewSemanticAnalyzer()
 		analyzer.Analyze(program)
 		
-		cg := NewCodeGenerator()
+		cg := NewCodeGenerator(testBenchConfig())
 		cg.Generate(program)
 	}
 }

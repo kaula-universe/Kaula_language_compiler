@@ -1790,3 +1790,45 @@ func (s *StructStatement) GetPosition() Position {
 func (s *StructStatement) SetPosition(pos Position) {
 	s.Pos = pos
 }
+
+// TypeParam 表示函数类型参数
+type TypeFuncParam struct {
+	Type     string
+	Nullable bool
+	Pos      Position
+}
+
+// TypeAliasStatement 表示 type 关键字自定义类型定义
+type TypeAliasStatement struct {
+	Name           string           // 新类型名称
+	UnderlyingType string           // 底层类型（基本类型、指针、数组等）
+	TypeParams     []*TypeParameter // 泛型类型参数
+	Generic        bool             // 是否是泛型类型别名
+	IsFuncType     bool             // 是否是函数类型
+	FuncReturnType string           // 函数返回类型（仅用于函数类型）
+	FuncParams     []*TypeFuncParam // 函数参数列表（仅用于函数类型）
+	Pos            Position
+}
+
+// statementNode 实现 Statement 接口
+func (ta *TypeAliasStatement) statementNode() {}
+
+// String 实现 Node 接口
+func (ta *TypeAliasStatement) String() string {
+	return "TypeAliasStatement(" + ta.Name + " = " + ta.UnderlyingType + ")"
+}
+
+// GetPosition 实现 Node 接口
+func (ta *TypeAliasStatement) GetPosition() Position {
+	return ta.Pos
+}
+
+// SetPosition 实现 Node 接口
+func (ta *TypeAliasStatement) SetPosition(pos Position) {
+	ta.Pos = pos
+}
+
+// IsGeneric 检查是否是泛型类型别名
+func (ta *TypeAliasStatement) IsGeneric() bool {
+	return ta.Generic || len(ta.TypeParams) > 0
+}

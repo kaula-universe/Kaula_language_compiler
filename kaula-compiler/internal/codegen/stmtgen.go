@@ -53,6 +53,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.codegen.typeGenerator.GenerateInterfaceStatement(s)
 	case *ast.StructStatement:
 		return sg.codegen.typeGenerator.GenerateStructStatement(s)
+	case *ast.TypeAliasStatement:
+		return sg.codegen.typeGenerator.GenerateTypeAliasStatement(s)
 	case *ast.IfStatement:
 		return sg.generateIfStatement(s)
 	case *ast.WhileStatement:

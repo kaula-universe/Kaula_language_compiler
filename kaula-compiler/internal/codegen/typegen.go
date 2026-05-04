@@ -115,28 +115,316 @@ func (tg *TypeGenerator) substituteType(typeName string, typeMap map[string]stri
 }
 
 func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string {
-	code := fmt.Sprintf("// Class: %s\n", stmt.Name)
-	
+	code := fmt.Sprintf("// Class: %s (Implements: %v)\n", stmt.Name, stmt.Implements)
+
 	if stmt.Generic {
 		return tg.GenerateGenericClassStatement(stmt)
 	}
-	
+
 	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
+
+	for _, ifaceName := range stmt.Implements {
+		code += fmt.Sprintf("    %s_MethodGroup %s;\n", ifaceName, ifaceName)
+	}
+
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
 		code += fmt.Sprintf("    %s %s;\n", fieldType, field.Name)
 	}
 	code += fmt.Sprintf("} %s;\n\n", stmt.Name)
-	
-	for _, constructor := range stmt.Constructors {
-		code += tg.GenerateConstructorStatement(stmt.Name, constructor)
+
+	// Generate method forward declarations
+	for _, method := range stmt.Methods {
+		returnType := tg.convertType(method.ReturnType, false)
+		code += fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, stmt.Name)
+		for _, param := range method.Params {
+			paramType := tg.convertType(param.Type, false)
+			code += fmt.Sprintf(", %s %s", paramType, param.Name)
+		}
+		code += ");\n"
 	}
-	
+	code += "\n"
+
+	for _, constructor := range stmt.Constructors {
+		code += tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor)
+	}
+
 	for _, method := range stmt.Methods {
 		code += tg.GenerateMethodStatement(stmt.Name, method)
 	}
-	
+
 	return code
+}
+
+func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className string, interfaces []string, methods []*ast.MethodStatement, constructor *ast.ConstructorStatement) string {
+	code := fmt.Sprintf("%s* %s_new(", className, className)
+	for i, param := range constructor.Params {
+		paramType := tg.convertType(param.Type, param.Nullable)
+		if i > 0 {
+			code += ", "
+		}
+		code += fmt.Sprintf("%s %s", paramType, param.Name)
+	}
+	code += ") {\n"
+
+	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className)
+	code += tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n"
+
+	if len(interfaces) > 0 && len(methods) > 0 {
+		code += tg.codegen.indentString() + "// Initialize interface method groups (composition grouping)\n"
+		
+		ifaceMethodsMap := make(map[string]map[string]bool)
+		for _, ifaceName := range interfaces {
+			ifaceMethodsMap[ifaceName] = make(map[string]bool)
+			ifaceMethods := tg.getInterfaceMethods(ifaceName)
+			if ifaceMethods != nil {
+				for _, m := range ifaceMethods {
+					ifaceMethodsMap[ifaceName][m.Name] = true
+				}
+			}
+		}
+		
+		for _, classMethod := range methods {
+			for _, ifaceName := range interfaces {
+				if ifaceMethodsMap[ifaceName] != nil {
+					if ifaceMethodsMap[ifaceName][classMethod.Name] {
+						code += tg.codegen.indentString() + fmt.Sprintf("self->%s.%s = (%s(*)(void*))%s_%s;\n", ifaceName, classMethod.Name, tg.convertType(classMethod.ReturnType, false), className, classMethod.Name)
+					}
+				}
+			}
+		}
+		code += "\n"
+	}
+
+	for _, bodyStmt := range constructor.Body {
+		code += tg.codegen.indentString() + tg.generateStatementWithSelfPrefix(className, bodyStmt)
+	}
+
+	code += tg.codegen.indentString() + "return self;\n"
+	code += "}\n\n"
+
+	return code
+}
+
+func (tg *TypeGenerator) getInterfaceMethods(ifaceName string) []*ast.MethodStatement {
+	if tg.codegen.program == nil {
+		return nil
+	}
+	iface := tg.codegen.program.FindInterface(ifaceName)
+	if iface == nil {
+		return nil
+	}
+	return iface.Methods
+}
+
+func (tg *TypeGenerator) generateStatementWithSelfPrefix(className string, stmt ast.Statement) string {
+	generated := tg.codegen.generateStatement(stmt)
+	if generated == "" {
+		return generated
+	}
+	
+	lines := []string{}
+	currentLine := ""
+	for i := 0; i < len(generated); i++ {
+		if generated[i] == '\n' {
+			if currentLine != "" {
+				lines = append(lines, currentLine)
+				currentLine = ""
+			} else {
+				lines = append(lines, "")
+			}
+		} else {
+			currentLine += string(generated[i])
+		}
+	}
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+	
+	result := ""
+	for _, line := range lines {
+		trimmed := line
+		for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t') {
+			trimmed = trimmed[1:]
+		}
+		
+		if trimmed == "" || trimmed == ";" || trimmed == "}" || trimmed == "{" {
+			result += line + "\n"
+			continue
+		}
+		
+		needsSelfPrefix := false
+		assignPos := -1
+		for i := 0; i < len(trimmed); i++ {
+			if i+1 < len(trimmed) && trimmed[i] == '=' && trimmed[i+1] == '=' {
+				i++
+				continue
+			}
+			if trimmed[i] == '=' {
+				assignPos = i
+				break
+			}
+		}
+		
+		if assignPos > 0 {
+			lhs := trimmed[:assignPos]
+			lhsTrimmed := lhs
+			for len(lhsTrimmed) > 0 && lhsTrimmed[len(lhsTrimmed)-1] == ' ' {
+				lhsTrimmed = lhsTrimmed[:len(lhsTrimmed)-1]
+			}
+			
+			isFieldRef := false
+			for _, field := range tg.getClassFields(className) {
+				if lhsTrimmed == field.Name {
+					isFieldRef = true
+					break
+				}
+			}
+			
+			if isFieldRef {
+				needsSelfPrefix = true
+			}
+		}
+		
+		if assignPos > 0 {
+			lhs := trimmed[:assignPos]
+			lhsTrimmed := lhs
+			for len(lhsTrimmed) > 0 && lhsTrimmed[len(lhsTrimmed)-1] == ' ' {
+				lhsTrimmed = lhsTrimmed[:len(lhsTrimmed)-1]
+			}
+			
+			isFieldRef := false
+			for _, field := range tg.getClassFields(className) {
+				if lhsTrimmed == field.Name {
+					isFieldRef = true
+					break
+				}
+			}
+			
+			if isFieldRef {
+				needsSelfPrefix = true
+			}
+		}
+		
+		if needsSelfPrefix {
+			if assignPos > 0 {
+				lhs := trimmed[:assignPos]
+				lhsTrimmed := lhs
+				for len(lhsTrimmed) > 0 && lhsTrimmed[len(lhsTrimmed)-1] == ' ' {
+					lhsTrimmed = lhsTrimmed[:len(lhsTrimmed)-1]
+				}
+				rhs := trimmed[assignPos:]
+				prefix := ""
+				for i := 0; i < len(line); i++ {
+					if line[i] != ' ' && line[i] != '\t' {
+						break
+					}
+					prefix += string(line[i])
+				}
+				result += prefix + "self->" + lhsTrimmed + rhs + "\n"
+			} else {
+				result += line + "\n"
+			}
+		} else {
+			result += line + "\n"
+		}
+	}
+	
+	return result
+}
+
+func (tg *TypeGenerator) getMethodBodyWithSelfPrefix(className string, method *ast.MethodStatement) string {
+	code := ""
+	for _, bodyStmt := range method.Body {
+		generated := tg.codegen.generateStatement(bodyStmt)
+		if generated == "" {
+			continue
+		}
+		
+		lines := []string{}
+		currentLine := ""
+		for i := 0; i < len(generated); i++ {
+			if generated[i] == '\n' {
+				if currentLine != "" {
+					lines = append(lines, currentLine)
+					currentLine = ""
+				} else {
+					lines = append(lines, "")
+				}
+			} else {
+				currentLine += string(generated[i])
+			}
+		}
+		if currentLine != "" {
+			lines = append(lines, currentLine)
+		}
+		
+		for _, line := range lines {
+			trimmed := line
+			for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t') {
+				trimmed = trimmed[1:]
+			}
+			
+			if trimmed == "" || trimmed == ";" || trimmed == "}" || trimmed == "{" {
+				code += line + "\n"
+				continue
+			}
+			
+			if len(trimmed) >= 6 && trimmed[:6] == "return" {
+				returnExpr := trimmed[6:]
+				// Remove trailing semicolon if present
+				if len(returnExpr) > 0 && returnExpr[len(returnExpr)-1] == ';' {
+					returnExpr = returnExpr[:len(returnExpr)-1]
+				}
+				returnExprTrimmed := returnExpr
+				for len(returnExprTrimmed) > 0 && returnExprTrimmed[len(returnExprTrimmed)-1] == ' ' {
+					returnExprTrimmed = returnExprTrimmed[:len(returnExprTrimmed)-1]
+				}
+				for len(returnExprTrimmed) > 0 && returnExprTrimmed[0] == ' ' {
+					returnExprTrimmed = returnExprTrimmed[1:]
+				}
+				
+				isFieldRef := false
+				for _, field := range tg.getClassFields(className) {
+					if returnExprTrimmed == field.Name {
+						isFieldRef = true
+						break
+					}
+				}
+				
+				prefix := ""
+				for i := 0; i < len(line); i++ {
+					if line[i] != ' ' && line[i] != '\t' {
+						break
+					}
+					prefix += string(line[i])
+				}
+				
+				if isFieldRef {
+					code += prefix + "return self->" + returnExprTrimmed + ";\n"
+				} else {
+					code += prefix + "return " + returnExprTrimmed + ";\n"
+				}
+			} else {
+				code += line + "\n"
+			}
+		}
+	}
+	return code
+}
+
+func (tg *TypeGenerator) getClassFields(className string) []*ast.FieldDeclaration {
+	if tg.codegen.program == nil {
+		return nil
+	}
+	for _, stmt := range tg.codegen.program.Statements {
+		if classStmt, ok := stmt.(*ast.ClassStatement); ok {
+			if classStmt.Name == className {
+				return classStmt.Fields
+			}
+		}
+	}
+	return nil
 }
 
 func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement) string {
@@ -173,9 +461,9 @@ func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement)
 }
 
 func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement) string {
-	code := fmt.Sprintf("// Interface: %s\n", stmt.Name)
+	code := fmt.Sprintf("// Interface: %s (Composition Grouping - Zero Overhead)\n", stmt.Name)
 	
-	code += fmt.Sprintf("typedef struct %s_VTable {\n", stmt.Name)
+	code += fmt.Sprintf("typedef struct %s_MethodGroup {\n", stmt.Name)
 	for _, method := range stmt.Methods {
 		returnType := tg.convertType(method.ReturnType, false)
 		code += fmt.Sprintf("    %s (*%s)(void* self", returnType, method.Name)
@@ -185,7 +473,7 @@ func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement
 		}
 		code += ");\n"
 	}
-	code += fmt.Sprintf("} %s_VTable;\n\n", stmt.Name)
+	code += fmt.Sprintf("} %s_MethodGroup;\n\n", stmt.Name)
 	
 	return code
 }
@@ -250,6 +538,8 @@ func (tg *TypeGenerator) GenerateConstructorStatement(className string, construc
 	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className)
 	code += tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n"
 	
+	code += tg.codegen.indentString() + fmt.Sprintf("// Initialize interface method groups\n")
+	
 	for _, bodyStmt := range constructor.Body {
 		code += tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt)
 	}
@@ -297,9 +587,8 @@ func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.M
 	}
 	code += ") {\n"
 	
-	for _, bodyStmt := range method.Body {
-		code += tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt)
-	}
+	bodyCode := tg.getMethodBodyWithSelfPrefix(className, method)
+	code += bodyCode
 	
 	if returnType != "void" && !methodHasReturn(method.Body) {
 		code += tg.codegen.indentString() + "return NULL;\n"
@@ -372,4 +661,116 @@ func (tg *TypeGenerator) convertType(kaulaType string, nullable bool) string {
 	}
 	
 	return cType
+}
+
+func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
+	if stmt == nil {
+		return ""
+	}
+	
+	if stmt.Generic {
+		return tg.GenerateGenericTypeAliasStatement(stmt)
+	}
+	
+	if stmt.IsFuncType {
+		return tg.GenerateFuncTypeAliasStatement(stmt)
+	}
+	
+	cType := tg.convertTypeAliasToCType(stmt.UnderlyingType)
+	code := fmt.Sprintf("// Type alias: %s = %s\n", stmt.Name, stmt.UnderlyingType)
+	code += fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name)
+	
+	return code
+}
+
+func (tg *TypeGenerator) GenerateFuncTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
+	returnType := tg.convertTypeAliasToCType(stmt.FuncReturnType)
+	if returnType == "" {
+		returnType = "void"
+	}
+	
+	code := fmt.Sprintf("// Function type alias: %s func(", stmt.Name)
+	
+	var params []string
+	for i, param := range stmt.FuncParams {
+		paramType := tg.convertTypeAliasToCType(param.Type)
+		if param.Nullable {
+			paramType += "*"
+		}
+		params = append(params, fmt.Sprintf("%s arg%d", paramType, i))
+	}
+	code += strings.Join(params, ", ")
+	code += fmt.Sprintf(") %s\n", returnType)
+	
+	code += fmt.Sprintf("typedef %s (*%s)(", returnType, stmt.Name)
+	
+	var cParams []string
+	for i, param := range stmt.FuncParams {
+		paramType := tg.convertTypeAliasToCType(param.Type)
+		if param.Nullable {
+			paramType += "*"
+		}
+		cParams = append(cParams, fmt.Sprintf("%s arg%d", paramType, i))
+	}
+	if len(cParams) > 0 {
+		code += strings.Join(cParams, ", ")
+	}
+	code += ");\n\n"
+	
+	return code
+}
+
+func (tg *TypeGenerator) convertTypeAliasToCType(kaulaType string) string {
+	cType := kaulaType
+	
+	cType = strings.ReplaceAll(cType, "*void", "void*")
+	cType = strings.ReplaceAll(cType, "*int", "int*")
+	cType = strings.ReplaceAll(cType, "*float", "float*")
+	cType = strings.ReplaceAll(cType, "*double", "double*")
+	cType = strings.ReplaceAll(cType, "*bool", "bool*")
+	cType = strings.ReplaceAll(cType, "*char", "char*")
+	cType = strings.ReplaceAll(cType, "*string", "char**")
+	
+	if strings.HasPrefix(cType, "[]") {
+		innerType := cType[2:]
+		if innerType == "string" {
+			cType = "char**"
+		} else {
+			cType = innerType + "*"
+		}
+	}
+	
+	if cType == "string" {
+		cType = "char*"
+	}
+	
+	return cType
+}
+
+func (tg *TypeGenerator) GenerateGenericTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
+	code := fmt.Sprintf("// Generic Type alias: %s", stmt.Name)
+	
+	if len(stmt.TypeParams) > 0 {
+		code += fmt.Sprintf("<")
+		for i, tp := range stmt.TypeParams {
+			if i > 0 {
+				code += ", "
+			}
+			code += tp.Name
+		}
+		code += fmt.Sprintf(">\n")
+	} else {
+		code += "\n"
+	}
+	
+	underlyingType := stmt.UnderlyingType
+	for _, tp := range stmt.TypeParams {
+		underlyingType = strings.ReplaceAll(underlyingType, tp.Name, "void")
+	}
+	
+	cType := tg.convertTypeAliasToCType(underlyingType)
+	
+	code += fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name)
+	
+	return code
 }

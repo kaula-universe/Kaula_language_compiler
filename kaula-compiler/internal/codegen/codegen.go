@@ -149,6 +149,9 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	mainCode := ""
 	
 	for _, stmt := range program.Statements {
+		if stmt == nil {
+			continue
+		}
 		if _, ok := stmt.(*ast.ImportStatement); ok {
 			continue
 		}
@@ -165,6 +168,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		} else if _, ok := stmt.(*ast.InterfaceStatement); ok {
 			typeCode += cg.generateStatement(stmt) + "\n"
 		} else if _, ok := stmt.(*ast.StructStatement); ok {
+			typeCode += cg.generateStatement(stmt) + "\n"
+		} else if _, ok := stmt.(*ast.TypeAliasStatement); ok {
 			typeCode += cg.generateStatement(stmt) + "\n"
 		} else {
 			mainCode += cg.indentString() + cg.generateStatement(stmt)
