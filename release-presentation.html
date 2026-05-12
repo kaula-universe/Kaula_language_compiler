@@ -723,15 +723,13 @@
         <div class="code-label">泛型函数定义</div>
         <div class="code-block">
 <span class="comment">// &lt;T&gt; 声明类型参数</span>
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">max</span>&lt;<span class="highlight-orange">T</span>&gt;(<span class="highlight-orange">T</span> <span class="highlight-orange">a</span>, <span class="highlight-orange">T</span> <span class="highlight-orange">b</span>) <span class="highlight-orange">T</span> {
-    <span class="highlight-purple">if</span> a > b { <span class="highlight-purple">return</span> a }
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">max</span>&lt;<span class="highlight-orange">T</span>&gt;(<span class="highlight-orange">T</span> <span class="highlight-orange">a</span>, <span class="highlight-orange">T</span> <span class="highlight-orange">b</span>) <span class="highlight-orange">T</span>:
+    <span class="highlight-purple">if</span> a &gt; b: <span class="highlight-purple">return</span> a
     <span class="highlight-purple">return</span> b
-}
 
 <span class="comment">// 多类型参数</span>
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">pair</span>&lt;<span class="highlight-orange">K</span>, <span class="highlight-orange">V</span>&gt;(<span class="highlight-orange">K</span> key, <span class="highlight-orange">V</span> value) <span class="highlight-blue">Map</span>&lt;<span class="highlight-orange">K</span>, <span class="highlight-orange">V</span>&gt; {
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">pair</span>&lt;<span class="highlight-orange">K</span>, <span class="highlight-orange">V</span>&gt;(<span class="highlight-orange">K</span> key, <span class="highlight-orange">V</span> value) <span class="highlight-blue">Map</span>&lt;<span class="highlight-orange">K</span>, <span class="highlight-orange">V</span>&gt;:
     <span class="highlight-purple">return</span> <span class="highlight-yellow">newMap</span>(key, value)
-}
         </div>
         <div class="code-label">泛型实例化机制</div>
         <div class="code-block">
@@ -751,14 +749,12 @@ result = <span class="highlight-yellow">max</span>&lt;<span class="highlight-blu
         <div class="code-label">函数注解 — 控制编译行为</div>
         <div class="code-block">
 <span class="highlight-purple">#[inline]</span>
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">inlineFunction</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">x</span>) <span class="highlight-blue">int</span> {
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">inlineFunction</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">x</span>) <span class="highlight-blue">int</span>:
     <span class="highlight-purple">return</span> x * <span class="highlight-green">2</span>
-}
 
 <span class="highlight-purple">#[no_kmm]</span>
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">noKMMFunction</span>(<span class="highlight-blue">string</span> <span class="highlight-orange">msg</span>) {
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">noKMMFunction</span>(<span class="highlight-blue">string</span> <span class="highlight-orange">msg</span>):
     <span class="highlight-yellow">std.io.println</span>(msg)
-}
         </div>
         <div class="code-label">$ 前缀引用 — 访问前缀变量</div>
         <div class="code-block">
@@ -786,10 +782,9 @@ result = <span class="highlight-yellow">max</span>&lt;<span class="highlight-blu
         <p class="subtitle">KMM V4 ScopedAllocator — 零成本作用域内存管理</p>
         <div class="code-label">Kaula 源码</div>
         <div class="code-block">
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">process</span>(<span class="highlight-blue">string</span> <span class="highlight-orange">data</span>) {
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">process</span>(<span class="highlight-blue">string</span> <span class="highlight-orange">data</span>):
     <span class="highlight-blue">string</span> result = <span class="highlight-yellow">transform</span>(data)
     <span class="highlight-yellow">save</span>(result)
-}
         </div>
         <div class="code-label">生成的 C 代码</div>
         <div class="code-block">
