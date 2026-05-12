@@ -684,42 +684,35 @@
         <p class="subtitle">简洁、直观、强大</p>
         <div class="code-label">函数定义</div>
         <div class="code-block">
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">add</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">a</span>, <span class="highlight-blue">int</span> <span class="highlight-orange">b</span>) <span class="highlight-blue">int</span> {
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">add</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">a</span>, <span class="highlight-blue">int</span> <span class="highlight-orange">b</span>) <span class="highlight-blue">int</span>:
     <span class="highlight-purple">return</span> a + b
-}
         </div>
         <div class="code-label">泛型函数</div>
         <div class="code-block">
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">max</span>&lt;<span class="highlight-orange">T</span>&gt;(<span class="highlight-orange">T</span> <span class="highlight-orange">a</span>, <span class="highlight-orange">T</span> <span class="highlight-orange">b</span>) <span class="highlight-orange">T</span> {
-    <span class="highlight-purple">if</span> a > b { <span class="highlight-purple">return</span> a }
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">max</span>&lt;<span class="highlight-orange">T</span>&gt;(<span class="highlight-orange">T</span> <span class="highlight-orange">a</span>, <span class="highlight-orange">T</span> <span class="highlight-orange">b</span>) <span class="highlight-orange">T</span>:
+    <span class="highlight-purple">if</span> a &gt; b: <span class="highlight-purple">return</span> a
     <span class="highlight-purple">return</span> b
-}
         </div>
         <div class="code-label">结构体与类</div>
         <div class="code-block">
-<span class="highlight-purple">struct</span> <span class="highlight-yellow">Point</span> {
+<span class="highlight-purple">struct</span> <span class="highlight-yellow">Point</span>:
     <span class="highlight-blue">float</span> x;
     <span class="highlight-blue">float</span> y;
-}
 
-<span class="highlight-purple">class</span> <span class="highlight-yellow">Container</span>&lt;<span class="highlight-orange">T</span>&gt; {
+<span class="highlight-purple">class</span> <span class="highlight-yellow">Container</span>&lt;<span class="highlight-orange">T</span>&gt; <span class="highlight-purple">implements</span> <span class="highlight-blue">IContainer</span>:
     <span class="highlight-blue">T</span> value;
-    <span class="highlight-purple">constructor</span> <span class="highlight-yellow">Container</span>(<span class="highlight-blue">T</span> <span class="highlight-orange">initialValue</span>) {
+    <span class="highlight-purple">constructor</span> <span class="highlight-yellow">Container</span>(<span class="highlight-blue">T</span> <span class="highlight-orange">initialValue</span>):
         <span class="highlight-orange">this</span>.value = initialValue
-    }
-}
         </div>
         <div class="code-label">注解修饰</div>
         <div class="code-block">
 <span class="highlight-purple">#[inline]</span>
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">fastFunc</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">x</span>) <span class="highlight-blue">int</span> {
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">fastFunc</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">x</span>) <span class="highlight-blue">int</span>:
     <span class="highlight-purple">return</span> x * <span class="highlight-green">2</span>
-}
 
 <span class="highlight-purple">#[no_kmm]</span>
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">noMemory</span>(<span class="highlight-blue">string</span> <span class="highlight-orange">msg</span>) {
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">noMemory</span>(<span class="highlight-blue">string</span> <span class="highlight-orange">msg</span>):
     <span class="highlight-yellow">std.io.println</span>(msg)
-}
         </div>
     </div>
 
@@ -921,26 +914,22 @@ result = <span class="highlight-yellow">std_vo_access</span>(vo, <span class="hi
         <p class="subtitle">接口 · 可空类型 · 类型别名</p>
         <div class="code-label">接口与实现</div>
         <div class="code-block">
-<span class="highlight-purple">interface</span> <span class="highlight-yellow">Shape</span> {
+<span class="highlight-purple">interface</span> <span class="highlight-yellow">Shape</span>:
     <span class="highlight-purple">fn</span> <span class="highlight-yellow">area</span>() <span class="highlight-blue">float</span>;
     <span class="highlight-purple">fn</span> <span class="highlight-yellow">perimeter</span>() <span class="highlight-blue">float</span>;
-}
 
-<span class="highlight-purple">class</span> <span class="highlight-yellow">Circle</span> <span class="highlight-purple">implements</span> <span class="highlight-blue">Shape</span> {
+<span class="highlight-purple">class</span> <span class="highlight-yellow">Circle</span> <span class="highlight-purple">implements</span> <span class="highlight-blue">Shape</span>:
     <span class="highlight-blue">float</span> radius;
-    <span class="highlight-purple">fn</span> <span class="highlight-yellow">area</span>() <span class="highlight-blue">float</span> {
+    <span class="highlight-purple">fn</span> <span class="highlight-yellow">area</span>() <span class="highlight-blue">float</span>:
         <span class="highlight-purple">return</span> <span class="highlight-green">3.14159</span> * radius * radius
-    }
-}
         </div>
         <div class="code-label">可空类型</div>
         <div class="code-block">
 <span class="highlight-blue">string</span>? <span class="highlight-orange">name</span> = <span class="highlight-orange">null</span>
 
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">find</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">id</span>) <span class="highlight-blue">string</span>? {
-    <span class="highlight-purple">if</span> id == <span class="highlight-green">0</span> { <span class="highlight-purple">return</span> <span class="highlight-orange">null</span> }
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">find</span>(<span class="highlight-blue">int</span> <span class="highlight-orange">id</span>) <span class="highlight-blue">string</span>?:
+    <span class="highlight-purple">if</span> id == <span class="highlight-green">0</span>: <span class="highlight-purple">return</span> <span class="highlight-orange">null</span>
     <span class="highlight-purple">return</span> <span class="highlight-green">"found"</span>
-}
         </div>
         <div class="code-label">类型别名</div>
         <div class="code-block">
@@ -1068,40 +1057,55 @@ kaulac.exe -vo-cache 2048 -queue 100
     <!-- Slide 17: IDE 支持 -->
     <div class="slide" data-slide="17">
         <h2>IDE 支持 — VS Code 插件</h2>
-        <p class="subtitle">开发中 • 即将上线</p>
+        <p class="subtitle">Kaula Language Support v1.1.0</p>
         <div class="ide-features">
             <div class="ide-card">
                 <div class="feature-icon">🎨</div>
                 <div class="feature-title">语法高亮</div>
                 <div class="feature-desc">
-                    <span class="highlight-green">关键字</span>、
-                    <span class="highlight-blue">类型</span>、
+                    TextMate 语法定义，支持：<br/>
+                    <span class="highlight-purple">注解</span>(#[inline])、
+                    <span class="highlight-green">关键字</span>(fn/class/if)、
+                    <span class="highlight-blue">类型</span>(i64/f64/string)、
                     <span class="highlight-yellow">函数</span>、
-                    <span class="highlight-purple">注解</span>、
-                    <span class="highlight-orange">字符串</span>
-                    分类着色
+                    <span class="highlight-orange">字符串/数字</span>
                 </div>
             </div>
             <div class="ide-card">
                 <div class="feature-icon">⚡</div>
-                <div class="feature-title">代码片段</div>
-                <div class="feature-desc">28+ 内置 Snippet：fn/class/struct/task/prefix/vo/spend 一键生成</div>
+                <div class="feature-title">47 个代码片段</div>
+                <div class="feature-desc">fn/main/class/struct/interface/task/spend/vo/prefix/tree/generic/annotation 等一键生成</div>
             </div>
             <div class="ide-card">
                 <div class="feature-icon">📁</div>
-                <div class="feature-title">文件识别</div>
-                <div class="feature-desc">.kl 后缀自动识别，TextMate 语法文件</div>
+                <div class="feature-title">语言支持</div>
+                <div class="feature-desc">.kl / .kaula 文件识别、自动缩进、括号匹配、代码折叠</div>
             </div>
+        </div>
+        <div class="code-label">语法高亮规则</div>
+        <div class="code-block">
+<span class="highlight-green">// 关键字</span>    <span class="highlight-purple">fn</span> <span class="highlight-purple">class</span> <span class="highlight-purple">struct</span> <span class="highlight-purple">interface</span> <span class="highlight-purple">if</span> <span class="highlight-purple">else</span> <span class="highlight-purple">while</span> <span class="highlight-purple">for</span> <span class="highlight-purple">return</span>
+<span class="highlight-green">// 特殊关键字</span> <span class="highlight-purple">vo</span> <span class="highlight-purple">spend</span> <span class="highlight-purple">call</span> <span class="highlight-purple">task</span> <span class="highlight-purple">prefix</span> <span class="highlight-purple">tree</span> <span class="highlight-purple">object</span> <span class="highlight-purple">nonlocal</span>
+<span class="highlight-green">// 类型</span>      <span class="highlight-blue">int</span> <span class="highlight-blue">float</span> <span class="highlight-blue">string</span> <span class="highlight-blue">i64</span> <span class="highlight-blue">f64</span> <span class="highlight-blue">File</span> <span class="highlight-blue">Vector</span> <span class="highlight-blue">HashMap</span>
+<span class="highlight-green">// 注解</span>      <span class="highlight-purple">#[inline]</span> <span class="highlight-purple">#[no_kmm]</span> <span class="highlight-purple">#[prefix]</span> <span class="highlight-purple">#[tree]</span> <span class="highlight-purple">#[root]</span>
+<span class="highlight-green">// 操作符</span>    <span class="highlight-orange">$</span> 前缀引用  <span class="highlight-orange">@</span> 前缀调用  <span class="highlight-orange">?</span> 可空类型
         </div>
         <div class="code-label">代码片段示例</div>
         <div class="code-block">
-<span class="comment">// 输入 "fn" + Tab 自动生成:</span>
-<span class="highlight-purple">fn</span> <span class="highlight-yellow">functionName</span>(<span class="highlight-blue">parameters</span>) <span class="highlight-blue">returnType</span> {
+<span class="comment">// 输入 "fn" + Tab →</span>
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">functionName</span>(<span class="highlight-blue">parameters</span>) <span class="highlight-blue">returnType</span>:
     <span class="comment">// ...</span>
-}
 
-<span class="comment">// 输入 "task" + Tab 自动生成:</span>
-<span class="highlight-yellow">task</span>(<span class="highlight-orange">priority</span>, <span class="highlight-yellow">function</span>, <span class="highlight-orange">arg</span>)
+<span class="comment">// 输入 "spend" + Tab →</span>
+<span class="highlight-purple">spend</span>(<span class="highlight-orange">component1</span>, <span class="highlight-orange">component2</span>):
+    <span class="highlight-orange">call</span> target1:
+        <span class="comment">// ...</span>
+    <span class="highlight-orange">call</span> target2:
+        <span class="comment">// ...</span>
+
+<span class="comment">// 输入 "fn<>" + Tab →</span>
+<span class="highlight-purple">fn</span> <span class="highlight-yellow">functionName</span>&lt;<span class="highlight-orange">T</span>&gt;(<span class="highlight-blue">parameters</span>) <span class="highlight-blue">returnType</span>:
+    <span class="comment">// ...</span>
         </div>
     </div>
 
