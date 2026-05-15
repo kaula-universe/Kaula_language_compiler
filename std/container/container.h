@@ -110,9 +110,88 @@ extern size_t hash_string(void* key);
 extern size_t hash_int(void* key);
 extern size_t hash_float(void* key);
 
-// 通用比较函数
 extern int equal_string(void* key1, void* key2);
 extern int equal_int(void* key1, void* key2);
 extern int equal_float(void* key1, void* key2);
+
+// 集合（Set）
+typedef struct SetNode {
+    void* data;
+    struct SetNode* next;
+} SetNode;
+
+typedef struct Set {
+    SetNode** buckets;
+    size_t size;
+    size_t capacity;
+    size_t (*hash_func)(void* key);
+    int (*equal_func)(void* key1, void* key2);
+} Set;
+
+extern Set* set_create(size_t initial_capacity, size_t (*hash_func)(void* key), int (*equal_func)(void* key1, void* key2));
+extern void set_destroy(Set* set);
+extern void set_add(Set* set, void* element);
+extern void set_remove(Set* set, void* element);
+extern bool set_contains(Set* set, void* element);
+extern size_t set_size(Set* set);
+extern bool set_is_empty(Set* set);
+extern void set_clear(Set* set);
+extern Set* set_union(Set* set1, Set* set2);
+extern Set* set_intersection(Set* set1, Set* set2);
+extern Set* set_difference(Set* set1, Set* set2);
+
+// 红黑树节点（TreeMap 使用）
+typedef enum { TREE_NODE_RED, TREE_NODE_BLACK } TreeNodeColor;
+
+typedef struct TreeMapNode {
+    void* key;
+    void* value;
+    struct TreeMapNode* left;
+    struct TreeMapNode* right;
+    struct TreeMapNode* parent;
+    TreeNodeColor color;
+} TreeMapNode;
+
+typedef struct TreeMap {
+    TreeMapNode* root;
+    size_t size;
+    int (*compare_func)(void* key1, void* key2);
+} TreeMap;
+
+extern TreeMap* tree_map_create(int (*compare_func)(void* key1, void* key2));
+extern void tree_map_destroy(TreeMap* map);
+extern void tree_map_put(TreeMap* map, void* key, void* value);
+extern void* tree_map_get(TreeMap* map, void* key);
+extern void tree_map_remove(TreeMap* map, void* key);
+extern bool tree_map_contains(TreeMap* map, void* key);
+extern size_t tree_map_size(TreeMap* map);
+extern bool tree_map_is_empty(TreeMap* map);
+extern void tree_map_clear(TreeMap* map);
+extern void* tree_map_first_key(TreeMap* map);
+extern void* tree_map_last_key(TreeMap* map);
+extern void* tree_map_lower_bound(TreeMap* map, void* key);
+extern void* tree_map_upper_bound(TreeMap* map, void* key);
+
+// 优先级队列（PriorityQueue）
+typedef struct PriorityQueueNode {
+    void* data;
+    int priority;
+} PriorityQueueNode;
+
+typedef struct PriorityQueue {
+    PriorityQueueNode* data;
+    size_t size;
+    size_t capacity;
+} PriorityQueue;
+
+extern PriorityQueue* priority_queue_create(size_t initial_capacity);
+extern void priority_queue_destroy(PriorityQueue* pq);
+extern void priority_queue_push(PriorityQueue* pq, void* element, int priority);
+extern void* priority_queue_pop(PriorityQueue* pq);
+extern void* priority_queue_peek(PriorityQueue* pq);
+extern size_t priority_queue_size(PriorityQueue* pq);
+extern bool priority_queue_is_empty(PriorityQueue* pq);
+extern void priority_queue_clear(PriorityQueue* pq);
+extern void priority_queue_change_priority(PriorityQueue* pq, void* element, int new_priority);
 
 #endif // STD_CONTAINER_CONTAINER_H

@@ -109,10 +109,16 @@ int format_int(char* buffer, size_t size, i64 value, int base) {
     
     if (value < 0) {
         negative = true;
-        value = -value;
     }
     
-    u64 uvalue = (u64)value;
+    // Convert to unsigned directly - this handles INT64_MIN correctly
+    // without undefined behavior from negating INT64_MIN
+    u64 uvalue;
+    if (negative) {
+        uvalue = (u64)(-(value + 1)) + 1;
+    } else {
+        uvalue = (u64)value;
+    }
     
     // 转换数字
     do {

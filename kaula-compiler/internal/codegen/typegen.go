@@ -21,16 +21,74 @@ func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 	}
 }
 
+var globalTypeMap = map[string]string{
+	"i8":     "int8_t",
+	"i16":    "int16_t",
+	"i32":    "int32_t",
+	"i64":    "int64_t",
+	"int8":   "int8_t",
+	"int16":  "int16_t",
+	"int32":  "int32_t",
+	"int64":  "int64_t",
+	"int":    "int64_t",
+	"long":   "int64_t",
+	"u8":     "uint8_t",
+	"u16":    "uint16_t",
+	"u32":    "uint32_t",
+	"u64":    "uint64_t",
+	"uint8":  "uint8_t",
+	"uint16": "uint16_t",
+	"uint32": "uint32_t",
+	"uint64": "uint64_t",
+	"uint":   "uint64_t",
+	"float":  "float",
+	"f32":    "float",
+	"double": "double",
+	"f64":    "double",
+	"bool":   "int",
+	"char":   "char",
+	"void":   "void",
+	"string": "char*",
+}
+
+func MapKaulaTypeToC(kaulaType string) string {
+	typeLower := strings.ToLower(kaulaType)
+	if cType, ok := globalTypeMap[typeLower]; ok {
+		return cType
+	}
+	if strings.HasPrefix(typeLower, "[]") {
+		innerType := typeLower[2:]
+		if innerType == "string" {
+			return "char**"
+		}
+		if cType, ok := globalTypeMap[innerType]; ok {
+			return cType + "*"
+		}
+		return innerType + "*"
+	}
+	if strings.HasPrefix(typeLower, "*") {
+		innerType := typeLower[1:]
+		if innerType == "string" {
+			return "char**"
+		}
+		if cType, ok := globalTypeMap[innerType]; ok {
+			return cType + "*"
+		}
+		return innerType + "*"
+	}
+	return "int64_t"
+}
+
 func (tg *TypeGenerator) RegisterClibType(kaulaType string, cType string) {
 	tg.clibTypeMap[kaulaType] = cType
 }
 
 func (tg *TypeGenerator) GenerateCLibHeaders(headers []string) string {
-	var code string
+	var code strings.Builder
 	for _, h := range headers {
-		code += fmt.Sprintf("#include %s\n", h)
+		code.WriteString(fmt.Sprintf("#include %s\n", h))
 	}
-	return code
+	return code.String()
 }
 
 // CLibFuncSignature C 库函数签名配置
@@ -115,63 +173,64 @@ func (tg *TypeGenerator) substituteType(typeName string, typeMap map[string]stri
 }
 
 func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string {
-	code := fmt.Sprintf("// Class: %s (Implements: %v)\n", stmt.Name, stmt.Implements)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Class: %s (Implements: %v)\n", stmt.Name, stmt.Implements))
 
 	if stmt.Generic {
 		return tg.GenerateGenericClassStatement(stmt)
 	}
 
-	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
 
 	for _, ifaceName := range stmt.Implements {
-		code += fmt.Sprintf("    %s_MethodGroup %s;\n", ifaceName, ifaceName)
+		code.WriteString(fmt.Sprintf("    %s_MethodGroup %s;\n", ifaceName, ifaceName))
 	}
 
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
-		code += fmt.Sprintf("    %s %s;\n", fieldType, field.Name)
+		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
-	code += fmt.Sprintf("} %s;\n\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
 
-	// Generate method forward declarations
 	for _, method := range stmt.Methods {
 		returnType := tg.convertType(method.ReturnType, false)
-		code += fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, stmt.Name)
+		code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, stmt.Name))
 		for _, param := range method.Params {
 			paramType := tg.convertType(param.Type, false)
-			code += fmt.Sprintf(", %s %s", paramType, param.Name)
+			code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
 		}
-		code += ");\n"
+		code.WriteString(");\n")
 	}
-	code += "\n"
+	code.WriteString("\n")
 
 	for _, constructor := range stmt.Constructors {
-		code += tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor)
+		code.WriteString(tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor))
 	}
 
 	for _, method := range stmt.Methods {
-		code += tg.GenerateMethodStatement(stmt.Name, method)
+		code.WriteString(tg.GenerateMethodStatement(stmt.Name, method))
 	}
 
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className string, interfaces []string, methods []*ast.MethodStatement, constructor *ast.ConstructorStatement) string {
-	code := fmt.Sprintf("%s* %s_new(", className, className)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("%s* %s_new(", className, className))
 	for i, param := range constructor.Params {
 		paramType := tg.convertType(param.Type, param.Nullable)
 		if i > 0 {
-			code += ", "
+			code.WriteString(", ")
 		}
-		code += fmt.Sprintf("%s %s", paramType, param.Name)
+		code.WriteString(fmt.Sprintf("%s %s", paramType, param.Name))
 	}
-	code += ") {\n"
+	code.WriteString(") {\n")
 
-	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className)
-	code += tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n"
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className))
+	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
 
 	if len(interfaces) > 0 && len(methods) > 0 {
-		code += tg.codegen.indentString() + "// Initialize interface method groups (composition grouping)\n"
+		code.WriteString(tg.codegen.indentString() + "// Initialize interface method groups (composition grouping)\n")
 		
 		ifaceMethodsMap := make(map[string]map[string]bool)
 		for _, ifaceName := range interfaces {
@@ -188,22 +247,22 @@ func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className
 			for _, ifaceName := range interfaces {
 				if ifaceMethodsMap[ifaceName] != nil {
 					if ifaceMethodsMap[ifaceName][classMethod.Name] {
-						code += tg.codegen.indentString() + fmt.Sprintf("self->%s.%s = (%s(*)(void*))%s_%s;\n", ifaceName, classMethod.Name, tg.convertType(classMethod.ReturnType, false), className, classMethod.Name)
+						code.WriteString(tg.codegen.indentString() + fmt.Sprintf("self->%s.%s = (%s(*)(void*))%s_%s;\n", ifaceName, classMethod.Name, tg.convertType(classMethod.ReturnType, false), className, classMethod.Name))
 					}
 				}
 			}
 		}
-		code += "\n"
+		code.WriteString("\n")
 	}
 
 	for _, bodyStmt := range constructor.Body {
-		code += tg.codegen.indentString() + tg.generateStatementWithSelfPrefix(className, bodyStmt)
+		code.WriteString(tg.codegen.indentString() + tg.generateStatementWithSelfPrefix(className, bodyStmt))
 	}
 
-	code += tg.codegen.indentString() + "return self;\n"
-	code += "}\n\n"
+	code.WriteString(tg.codegen.indentString() + "return self;\n")
+	code.WriteString("}\n\n")
 
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) getInterfaceMethods(ifaceName string) []*ast.MethodStatement {
@@ -428,196 +487,204 @@ func (tg *TypeGenerator) getClassFields(className string) []*ast.FieldDeclaratio
 }
 
 func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement) string {
-	code := fmt.Sprintf("// Generic Class: %s", stmt.Name)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Class: %s", stmt.Name))
 	
 	if len(stmt.TypeParams) > 0 {
-		code += fmt.Sprintf("<")
+		code.WriteString("<")
 		for i, tp := range stmt.TypeParams {
 			if i > 0 {
-				code += ", "
+				code.WriteString(", ")
 			}
-			code += tp.Name
+			code.WriteString(tp.Name)
 		}
-		code += fmt.Sprintf(">\n")
+		code.WriteString(">\n")
 	} else {
-		code += "\n"
+		code.WriteString("\n")
 	}
 	
-	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
 	for _, field := range stmt.Fields {
 		fieldType := tg.eraseGenericType(field.Type)
 		if field.Nullable {
 			fieldType += "*"
 		}
-		code += fmt.Sprintf("    %s %s;\n", fieldType, field.Name)
+		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
-	code += fmt.Sprintf("} %s;\n\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
 	
 	for _, constructor := range stmt.Constructors {
-		code += tg.GenerateGenericConstructorStatement(stmt.Name, constructor)
+		code.WriteString(tg.GenerateGenericConstructorStatement(stmt.Name, constructor))
 	}
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement) string {
-	code := fmt.Sprintf("// Interface: %s (Composition Grouping - Zero Overhead)\n", stmt.Name)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Interface: %s (Composition Grouping - Zero Overhead)\n", stmt.Name))
 	
-	code += fmt.Sprintf("typedef struct %s_MethodGroup {\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("typedef struct %s_MethodGroup {\n", stmt.Name))
 	for _, method := range stmt.Methods {
 		returnType := tg.convertType(method.ReturnType, false)
-		code += fmt.Sprintf("    %s (*%s)(void* self", returnType, method.Name)
+		code.WriteString(fmt.Sprintf("    %s (*%s)(void* self", returnType, method.Name))
 		for _, param := range method.Params {
 			paramType := tg.convertType(param.Type, false)
-			code += fmt.Sprintf(", %s %s", paramType, param.Name)
+			code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
 		}
-		code += ");\n"
+		code.WriteString(");\n")
 	}
-	code += fmt.Sprintf("} %s_MethodGroup;\n\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("} %s_MethodGroup;\n\n", stmt.Name))
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) string {
-	code := fmt.Sprintf("// Struct: %s (Generic=%v, TypeParams=%d)\n", stmt.Name, stmt.Generic, len(stmt.TypeParams))
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Struct: %s (Generic=%v, TypeParams=%d)\n", stmt.Name, stmt.Generic, len(stmt.TypeParams)))
 	
 	if stmt.Generic {
 		return tg.GenerateGenericStructStatement(stmt)
 	}
 	
-	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
-		code += fmt.Sprintf("    %s %s;\n", fieldType, field.Name)
+		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
-	code += fmt.Sprintf("} %s;\n\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateGenericStructStatement(stmt *ast.StructStatement) string {
-	code := fmt.Sprintf("// Generic Struct: %s", stmt.Name)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Struct: %s", stmt.Name))
 	
 	if len(stmt.TypeParams) > 0 {
-		code += fmt.Sprintf("<")
+		code.WriteString("<")
 		for i, tp := range stmt.TypeParams {
 			if i > 0 {
-				code += ", "
+				code.WriteString(", ")
 			}
-			code += tp.Name
+			code.WriteString(tp.Name)
 		}
-		code += fmt.Sprintf(">\n")
+		code.WriteString(">\n")
 	} else {
-		code += "\n"
+		code.WriteString("\n")
 	}
 	
-	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
 	for _, field := range stmt.Fields {
 		fieldType := tg.eraseGenericType(field.Type)
 		if field.Nullable {
 			fieldType += "*"
 		}
-		code += fmt.Sprintf("    %s %s;\n", fieldType, field.Name)
+		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
-	code += fmt.Sprintf("} %s;\n\n", stmt.Name)
+	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateConstructorStatement(className string, constructor *ast.ConstructorStatement) string {
-	code := fmt.Sprintf("%s* %s_new(", className, className)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("%s* %s_new(", className, className))
 	for i, param := range constructor.Params {
 		paramType := tg.convertType(param.Type, param.Nullable)
 		if i > 0 {
-			code += ", "
+			code.WriteString(", ")
 		}
-		code += fmt.Sprintf("%s %s", paramType, param.Name)
+		code.WriteString(fmt.Sprintf("%s %s", paramType, param.Name))
 	}
-	code += ") {\n"
+	code.WriteString(") {\n")
 	
-	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className)
-	code += tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n"
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className))
+	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
 	
-	code += tg.codegen.indentString() + fmt.Sprintf("// Initialize interface method groups\n")
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("// Initialize interface method groups\n"))
 	
 	for _, bodyStmt := range constructor.Body {
-		code += tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt)
+		code.WriteString(tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt))
 	}
 	
-	code += tg.codegen.indentString() + "return self;\n"
-	code += "}\n\n"
+	code.WriteString(tg.codegen.indentString() + "return self;\n")
+	code.WriteString("}\n\n")
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateGenericConstructorStatement(className string, constructor *ast.ConstructorStatement) string {
-	code := fmt.Sprintf("%s* %s_new(", className, className)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("%s* %s_new(", className, className))
 	for i, param := range constructor.Params {
 		paramType := tg.eraseGenericType(param.Type)
 		if param.Nullable {
 			paramType += "*"
 		}
 		if i > 0 {
-			code += ", "
+			code.WriteString(", ")
 		}
-		code += fmt.Sprintf("%s %s", paramType, param.Name)
+		code.WriteString(fmt.Sprintf("%s %s", paramType, param.Name))
 	}
-	code += ") {\n"
+	code.WriteString(") {\n")
 	
-	code += tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className)
-	code += tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n"
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className))
+	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
 	
 	for _, bodyStmt := range constructor.Body {
-		code += tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt)
+		code.WriteString(tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt))
 	}
 	
-	code += tg.codegen.indentString() + "return self;\n"
-	code += "}\n\n"
+	code.WriteString(tg.codegen.indentString() + "return self;\n")
+	code.WriteString("}\n\n")
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.MethodStatement) string {
 	returnType := tg.convertType(method.ReturnType, false)
 	
-	code := fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, className)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, className))
 	for _, param := range method.Params {
 		paramType := tg.convertType(param.Type, false)
-		code += fmt.Sprintf(", %s %s", paramType, param.Name)
+		code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
 	}
-	code += ") {\n"
+	code.WriteString(") {\n")
 	
 	bodyCode := tg.getMethodBodyWithSelfPrefix(className, method)
-	code += bodyCode
+	code.WriteString(bodyCode)
 	
 	if returnType != "void" && !methodHasReturn(method.Body) {
-		code += tg.codegen.indentString() + "return NULL;\n"
+		code.WriteString(tg.codegen.indentString() + "return NULL;\n")
 	}
-	code += "}\n\n"
+	code.WriteString("}\n\n")
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateGenericMethodStatement(className string, method *ast.MethodStatement) string {
 	returnType := tg.eraseGenericType(method.ReturnType)
 	
-	code := fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, className)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, className))
 	for _, param := range method.Params {
 		paramType := tg.eraseGenericType(param.Type)
-		code += fmt.Sprintf(", %s %s", paramType, param.Name)
+		code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
 	}
-	code += ") {\n"
+	code.WriteString(") {\n")
 	
 	for _, bodyStmt := range method.Body {
-		code += tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt)
+		code.WriteString(tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt))
 	}
 	
 	if returnType != "void" && !methodHasReturn(method.Body) {
-		code += tg.codegen.indentString() + "return NULL;\n"
+		code.WriteString(tg.codegen.indentString() + "return NULL;\n")
 	}
-	code += "}\n\n"
+	code.WriteString("}\n\n")
 	
-	return code
+	return code.String()
 }
 
 func methodHasReturn(stmts []ast.Statement) bool {
@@ -647,16 +714,9 @@ func (tg *TypeGenerator) convertType(kaulaType string, nullable bool) string {
 		return cType
 	}
 	
-	var cType string
+	cType := MapKaulaTypeToC(kaulaType)
 	
-	switch kaulaType {
-	case "string":
-		cType = "char*"
-	default:
-		cType = kaulaType
-	}
-	
-	if nullable && cType != "char*" {
+	if nullable && !strings.HasSuffix(cType, "*") {
 		cType += "*"
 	}
 	
@@ -677,10 +737,11 @@ func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement
 	}
 	
 	cType := tg.convertTypeAliasToCType(stmt.UnderlyingType)
-	code := fmt.Sprintf("// Type alias: %s = %s\n", stmt.Name, stmt.UnderlyingType)
-	code += fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Type alias: %s = %s\n", stmt.Name, stmt.UnderlyingType))
+	code.WriteString(fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name))
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateFuncTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
@@ -689,7 +750,8 @@ func (tg *TypeGenerator) GenerateFuncTypeAliasStatement(stmt *ast.TypeAliasState
 		returnType = "void"
 	}
 	
-	code := fmt.Sprintf("// Function type alias: %s func(", stmt.Name)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Function type alias: %s func(", stmt.Name))
 	
 	var params []string
 	for i, param := range stmt.FuncParams {
@@ -699,10 +761,10 @@ func (tg *TypeGenerator) GenerateFuncTypeAliasStatement(stmt *ast.TypeAliasState
 		}
 		params = append(params, fmt.Sprintf("%s arg%d", paramType, i))
 	}
-	code += strings.Join(params, ", ")
-	code += fmt.Sprintf(") %s\n", returnType)
+	code.WriteString(strings.Join(params, ", "))
+	code.WriteString(fmt.Sprintf(") %s\n", returnType))
 	
-	code += fmt.Sprintf("typedef %s (*%s)(", returnType, stmt.Name)
+	code.WriteString(fmt.Sprintf("typedef %s (*%s)(", returnType, stmt.Name))
 	
 	var cParams []string
 	for i, param := range stmt.FuncParams {
@@ -713,11 +775,11 @@ func (tg *TypeGenerator) GenerateFuncTypeAliasStatement(stmt *ast.TypeAliasState
 		cParams = append(cParams, fmt.Sprintf("%s arg%d", paramType, i))
 	}
 	if len(cParams) > 0 {
-		code += strings.Join(cParams, ", ")
+		code.WriteString(strings.Join(cParams, ", "))
 	}
-	code += ");\n\n"
+	code.WriteString(");\n\n")
 	
-	return code
+	return code.String()
 }
 
 func (tg *TypeGenerator) convertTypeAliasToCType(kaulaType string) string {
@@ -748,19 +810,20 @@ func (tg *TypeGenerator) convertTypeAliasToCType(kaulaType string) string {
 }
 
 func (tg *TypeGenerator) GenerateGenericTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
-	code := fmt.Sprintf("// Generic Type alias: %s", stmt.Name)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Type alias: %s", stmt.Name))
 	
 	if len(stmt.TypeParams) > 0 {
-		code += fmt.Sprintf("<")
+		code.WriteString("<")
 		for i, tp := range stmt.TypeParams {
 			if i > 0 {
-				code += ", "
+				code.WriteString(", ")
 			}
-			code += tp.Name
+			code.WriteString(tp.Name)
 		}
-		code += fmt.Sprintf(">\n")
+		code.WriteString(">\n")
 	} else {
-		code += "\n"
+		code.WriteString("\n")
 	}
 	
 	underlyingType := stmt.UnderlyingType
@@ -770,7 +833,7 @@ func (tg *TypeGenerator) GenerateGenericTypeAliasStatement(stmt *ast.TypeAliasSt
 	
 	cType := tg.convertTypeAliasToCType(underlyingType)
 	
-	code += fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name)
+	code.WriteString(fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name))
 	
-	return code
+	return code.String()
 }

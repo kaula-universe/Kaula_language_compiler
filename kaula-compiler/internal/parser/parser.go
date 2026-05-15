@@ -94,6 +94,7 @@ func (p *Parser) parseProgram() *ast.Program {
 	program := &ast.Program{
 		Statements: make([]ast.Statement, 0, 256), // 预分配容量，避免频繁扩容
 		Pos:        pos,
+		Source:     p.lexer.GetSource(),
 	}
 
 	maxStatements := 10000 // 限制最大语句数量
@@ -1288,9 +1289,9 @@ func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
 		if lookahead.Type == lexer.TOKEN_IDENT || lookahead.Type == lexer.TOKEN_LPAREN {
 			// 可能是导出函数：export fn name()
 			switch p.curTok.Value {
-			case "fn", "func", "function":
-				stmt.Type = "function"
-				p.nextToken()
+		case "fn":
+			stmt.Type = "function"
+			p.nextToken()
 			case "class":
 				stmt.Type = "class"
 				p.nextToken()
@@ -2679,7 +2680,19 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 // error 报告错误
 func (p *Parser) error(message string) {
 	suggestion := errors.GenerateSuggestion(message)
-	p.errorCollector.AddSyntaxError(message, p.curTok.Line, p.curTok.Column, p.file, suggestion)
+	context, sourceLine, lineNumStr := errors.ExtractSourceContext(p.lexer.GetSource(), p.curTok.Line, p.curTok.Column)
+	err := &errors.Error{
+		Type:       errors.ErrorSyntax,
+		Message:    message,
+		Line:       p.curTok.Line,
+		Column:     p.curTok.Column,
+		File:       p.file,
+		Suggestion: suggestion,
+		SourceContext: context,
+		SourceLine: sourceLine,
+		LineNumberStr: lineNumStr,
+	}
+	p.errorCollector.AddErrorInstance(err)
 }
 
 // SetFile 设置文件名

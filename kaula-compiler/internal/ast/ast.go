@@ -23,6 +23,7 @@ type Position struct {
 type Program struct {
 	Statements []Statement
 	Pos        Position
+	Source     string // 完整源码
 }
 
 // String 实现Node接口

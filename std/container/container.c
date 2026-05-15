@@ -270,8 +270,37 @@ void hash_map_destroy(HashMap* map) {
     }
 }
 
+static void hash_map_resize(HashMap* map, size_t new_capacity) {
+    HashNode** old_buckets = map->buckets;
+    size_t old_capacity = map->capacity;
+    
+    map->buckets = (HashNode**)calloc(new_capacity, sizeof(HashNode*));
+    if (!map->buckets) {
+        map->buckets = old_buckets;
+        return;
+    }
+    map->capacity = new_capacity;
+    
+    for (size_t i = 0; i < old_capacity; i++) {
+        HashNode* current = old_buckets[i];
+        while (current) {
+            HashNode* next = current->next;
+            size_t new_hash = map->hash_func(current->key) % new_capacity;
+            current->next = map->buckets[new_hash];
+            map->buckets[new_hash] = current;
+            current = next;
+        }
+    }
+    
+    free(old_buckets);
+}
+
 void hash_map_put(HashMap* map, void* key, void* value) {
     if (map) {
+        if (map->size >= map->capacity * 3 / 4) {
+            hash_map_resize(map, map->capacity * 2);
+        }
+        
         size_t hash = map->hash_func(key) % map->capacity;
         HashNode* current = map->buckets[hash];
         while (current) {
@@ -532,4 +561,524 @@ int equal_int(void* key1, void* key2) {
 
 int equal_float(void* key1, void* key2) {
     return *(float*)key1 == *(float*)key2;
+}
+
+// 集合（Set）实现
+Set* set_create(size_t initial_capacity, size_t (*hash_func)(void* key), int (*equal_func)(void* key1, void* key2)) {
+    Set* set = (Set*)malloc(sizeof(Set));
+    if (set) {
+        set->capacity = initial_capacity > 0 ? initial_capacity : 16;
+        set->size = 0;
+        set->hash_func = hash_func;
+        set->equal_func = equal_func;
+        set->buckets = (SetNode**)calloc(set->capacity, sizeof(SetNode*));
+    }
+    return set;
+}
+
+void set_destroy(Set* set) {
+    if (set) {
+        for (size_t i = 0; i < set->capacity; i++) {
+            SetNode* current = set->buckets[i];
+            while (current) {
+                SetNode* next = current->next;
+                free(current);
+                current = next;
+            }
+        }
+        free(set->buckets);
+        free(set);
+    }
+}
+
+void set_add(Set* set, void* element) {
+    if (set && element) {
+        if (set_contains(set, element)) return;
+        size_t hash = set->hash_func(element) % set->capacity;
+        SetNode* node = (SetNode*)malloc(sizeof(SetNode));
+        if (node) {
+            node->data = element;
+            node->next = set->buckets[hash];
+            set->buckets[hash] = node;
+            set->size++;
+        }
+    }
+}
+
+void set_remove(Set* set, void* element) {
+    if (set && element) {
+        size_t hash = set->hash_func(element) % set->capacity;
+        SetNode* current = set->buckets[hash];
+        SetNode* prev = NULL;
+        while (current) {
+            if (set->equal_func(current->data, element)) {
+                if (prev) {
+                    prev->next = current->next;
+                } else {
+                    set->buckets[hash] = current->next;
+                }
+                free(current);
+                set->size--;
+                return;
+            }
+            prev = current;
+            current = current->next;
+        }
+    }
+}
+
+bool set_contains(Set* set, void* element) {
+    if (!set || !element) return false;
+    size_t hash = set->hash_func(element) % set->capacity;
+    SetNode* current = set->buckets[hash];
+    while (current) {
+        if (set->equal_func(current->data, element)) return true;
+        current = current->next;
+    }
+    return false;
+}
+
+size_t set_size(Set* set) {
+    return set ? set->size : 0;
+}
+
+bool set_is_empty(Set* set) {
+    return set_size(set) == 0;
+}
+
+void set_clear(Set* set) {
+    if (set) {
+        for (size_t i = 0; i < set->capacity; i++) {
+            SetNode* current = set->buckets[i];
+            while (current) {
+                SetNode* next = current->next;
+                free(current);
+                current = next;
+            }
+            set->buckets[i] = NULL;
+        }
+        set->size = 0;
+    }
+}
+
+Set* set_union(Set* set1, Set* set2) {
+    if (!set1 || !set2) return NULL;
+    Set* result = set_create(set1->capacity + set2->capacity, set1->hash_func, set1->equal_func);
+    if (!result) return NULL;
+    for (size_t i = 0; i < set1->capacity; i++) {
+        SetNode* current = set1->buckets[i];
+        while (current) {
+            set_add(result, current->data);
+            current = current->next;
+        }
+    }
+    for (size_t i = 0; i < set2->capacity; i++) {
+        SetNode* current = set2->buckets[i];
+        while (current) {
+            set_add(result, current->data);
+            current = current->next;
+        }
+    }
+    return result;
+}
+
+Set* set_intersection(Set* set1, Set* set2) {
+    if (!set1 || !set2) return NULL;
+    Set* result = set_create(set1->capacity, set1->hash_func, set1->equal_func);
+    if (!result) return NULL;
+    for (size_t i = 0; i < set1->capacity; i++) {
+        SetNode* current = set1->buckets[i];
+        while (current) {
+            if (set_contains(set2, current->data)) {
+                set_add(result, current->data);
+            }
+            current = current->next;
+        }
+    }
+    return result;
+}
+
+Set* set_difference(Set* set1, Set* set2) {
+    if (!set1 || !set2) return NULL;
+    Set* result = set_create(set1->capacity, set1->hash_func, set1->equal_func);
+    if (!result) return NULL;
+    for (size_t i = 0; i < set1->capacity; i++) {
+        SetNode* current = set1->buckets[i];
+        while (current) {
+            if (!set_contains(set2, current->data)) {
+                set_add(result, current->data);
+            }
+            current = current->next;
+        }
+    }
+    return result;
+}
+
+// TreeMap 实现（红黑树）
+static TreeMapNode* tree_map_create_node(void* key, void* value) {
+    TreeMapNode* node = (TreeMapNode*)malloc(sizeof(TreeMapNode));
+    if (node) {
+        node->key = key;
+        node->value = value;
+        node->left = NULL;
+        node->right = NULL;
+        node->parent = NULL;
+        node->color = TREE_NODE_RED;
+    }
+    return node;
+}
+
+static void tree_map_rotate_left(TreeMap* map, TreeMapNode* x) {
+    TreeMapNode* y = x->right;
+    x->right = y->left;
+    if (y->left) y->left->parent = x;
+    y->parent = x->parent;
+    if (!x->parent) map->root = y;
+    else if (x == x->parent->left) x->parent->left = y;
+    else x->parent->right = y;
+    y->left = x;
+    x->parent = y;
+}
+
+static void tree_map_rotate_right(TreeMap* map, TreeMapNode* x) {
+    TreeMapNode* y = x->left;
+    x->left = y->right;
+    if (y->right) y->right->parent = x;
+    y->parent = x->parent;
+    if (!x->parent) map->root = y;
+    else if (x == x->parent->right) x->parent->right = y;
+    else x->parent->left = y;
+    y->right = x;
+    x->parent = y;
+}
+
+static void tree_map_fix_insert_violation(TreeMap* map, TreeMapNode* z) {
+    while (z->parent && z->parent->color == TREE_NODE_RED) {
+        if (z->parent == z->parent->parent->left) {
+            TreeMapNode* y = z->parent->parent->right;
+            if (y && y->color == TREE_NODE_RED) {
+                z->parent->color = TREE_NODE_BLACK;
+                y->color = TREE_NODE_BLACK;
+                z->parent->parent->color = TREE_NODE_RED;
+                z = z->parent->parent;
+            } else {
+                if (z == z->parent->right) {
+                    z = z->parent;
+                    tree_map_rotate_left(map, z);
+                }
+                z->parent->color = TREE_NODE_BLACK;
+                z->parent->parent->color = TREE_NODE_RED;
+                tree_map_rotate_right(map, z->parent->parent);
+            }
+        } else {
+            TreeMapNode* y = z->parent->parent->left;
+            if (y && y->color == TREE_NODE_RED) {
+                z->parent->color = TREE_NODE_BLACK;
+                y->color = TREE_NODE_BLACK;
+                z->parent->parent->color = TREE_NODE_RED;
+                z = z->parent->parent;
+            } else {
+                if (z == z->parent->left) {
+                    z = z->parent;
+                    tree_map_rotate_right(map, z);
+                }
+                z->parent->color = TREE_NODE_BLACK;
+                z->parent->parent->color = TREE_NODE_RED;
+                tree_map_rotate_left(map, z->parent->parent);
+            }
+        }
+    }
+    map->root->color = TREE_NODE_BLACK;
+}
+
+TreeMap* tree_map_create(int (*compare_func)(void* key1, void* key2)) {
+    TreeMap* map = (TreeMap*)malloc(sizeof(TreeMap));
+    if (map) {
+        map->root = NULL;
+        map->size = 0;
+        map->compare_func = compare_func;
+    }
+    return map;
+}
+
+static void tree_map_destroy_nodes(TreeMapNode* node) {
+    if (node) {
+        tree_map_destroy_nodes(node->left);
+        tree_map_destroy_nodes(node->right);
+        free(node);
+    }
+}
+
+void tree_map_destroy(TreeMap* map) {
+    if (map) {
+        tree_map_destroy_nodes(map->root);
+        free(map);
+    }
+}
+
+void tree_map_put(TreeMap* map, void* key, void* value) {
+    if (!map) return;
+    if (!map->root) {
+        map->root = tree_map_create_node(key, value);
+        map->root->color = TREE_NODE_BLACK;
+        map->size++;
+        return;
+    }
+    TreeMapNode* current = map->root;
+    TreeMapNode* parent = NULL;
+    while (current) {
+        parent = current;
+        int cmp = map->compare_func(key, current->key);
+        if (cmp == 0) {
+            current->value = value;
+            return;
+        }
+        current = cmp < 0 ? current->left : current->right;
+    }
+    TreeMapNode* node = tree_map_create_node(key, value);
+    node->parent = parent;
+    int cmp = map->compare_func(key, parent->key);
+    if (cmp < 0) parent->left = node;
+    else parent->right = node;
+    tree_map_fix_insert_violation(map, node);
+    map->size++;
+}
+
+static TreeMapNode* tree_map_search(TreeMap* map, void* key) {
+    TreeMapNode* current = map->root;
+    while (current) {
+        int cmp = map->compare_func(key, current->key);
+        if (cmp == 0) return current;
+        current = cmp < 0 ? current->left : current->right;
+    }
+    return NULL;
+}
+
+void* tree_map_get(TreeMap* map, void* key) {
+    if (!map) return NULL;
+    TreeMapNode* node = tree_map_search(map, key);
+    return node ? node->value : NULL;
+}
+
+bool tree_map_contains(TreeMap* map, void* key) {
+    return tree_map_search(map, key) != NULL;
+}
+
+static TreeMapNode* tree_map_minimum(TreeMapNode* node) {
+    while (node && node->left) node = node->left;
+    return node;
+}
+
+static TreeMapNode* tree_map_maximum(TreeMapNode* node) {
+    while (node && node->right) node = node->right;
+    return node;
+}
+
+void* tree_map_first_key(TreeMap* map) {
+    if (!map) return NULL;
+    TreeMapNode* node = tree_map_minimum(map->root);
+    return node ? node->key : NULL;
+}
+
+void* tree_map_last_key(TreeMap* map) {
+    if (!map) return NULL;
+    TreeMapNode* node = tree_map_maximum(map->root);
+    return node ? node->key : NULL;
+}
+
+void* tree_map_lower_bound(TreeMap* map, void* key) {
+    if (!map) return NULL;
+    TreeMapNode* result = NULL;
+    TreeMapNode* current = map->root;
+    while (current) {
+        int cmp = map->compare_func(key, current->key);
+        if (cmp <= 0) {
+            result = current;
+            current = current->left;
+        } else {
+            current = current->right;
+        }
+    }
+    return result ? result->key : NULL;
+}
+
+void* tree_map_upper_bound(TreeMap* map, void* key) {
+    if (!map) return NULL;
+    TreeMapNode* result = NULL;
+    TreeMapNode* current = map->root;
+    while (current) {
+        int cmp = map->compare_func(key, current->key);
+        if (cmp < 0) {
+            result = current;
+            current = current->left;
+        } else {
+            current = current->right;
+        }
+    }
+    return result ? result->key : NULL;
+}
+
+size_t tree_map_size(TreeMap* map) {
+    return map ? map->size : 0;
+}
+
+bool tree_map_is_empty(TreeMap* map) {
+    return tree_map_size(map) == 0;
+}
+
+void tree_map_clear(TreeMap* map) {
+    if (map) {
+        tree_map_destroy_nodes(map->root);
+        map->root = NULL;
+        map->size = 0;
+    }
+}
+
+void tree_map_remove(TreeMap* map, void* key) {
+    if (!map || !map->root) return;
+    TreeMapNode* z = tree_map_search(map, key);
+    if (!z) return;
+    TreeMapNode* y = z;
+    TreeMapNode* x;
+    TreeNodeColor y_original_color = y->color;
+    if (!z->left) {
+        x = z->right;
+        TreeMapNode* parent = z->parent;
+        if (!parent) map->root = x;
+        else if (z == parent->left) parent->left = x;
+        else parent->right = x;
+        if (x) x->parent = parent;
+    } else if (!z->right) {
+        x = z->left;
+        TreeMapNode* parent = z->parent;
+        if (!parent) map->root = x;
+        else if (z == parent->left) parent->left = x;
+        else parent->right = x;
+        if (x) x->parent = parent;
+    } else {
+        y = tree_map_minimum(z->right);
+        y_original_color = y->color;
+        x = y->right;
+        if (y->parent == z) {
+            if (x) x->parent = y;
+        } else {
+            TreeMapNode* parent = y->parent;
+            parent->left = x;
+            if (x) x->parent = parent;
+            y->right = z->right;
+            y->right->parent = y;
+        }
+        y->left = z->left;
+        y->left->parent = y;
+        y->color = z->color;
+        TreeMapNode* parent = z->parent;
+        if (!parent) map->root = y;
+        else if (z == parent->left) parent->left = y;
+        else parent->right = y;
+        y->parent = parent;
+    }
+    free(z);
+    map->size--;
+}
+
+// PriorityQueue 实现
+PriorityQueue* priority_queue_create(size_t initial_capacity) {
+    PriorityQueue* pq = (PriorityQueue*)malloc(sizeof(PriorityQueue));
+    if (pq) {
+        pq->capacity = initial_capacity > 0 ? initial_capacity : 16;
+        pq->size = 0;
+        pq->data = (PriorityQueueNode*)malloc(pq->capacity * sizeof(PriorityQueueNode));
+    }
+    return pq;
+}
+
+void priority_queue_destroy(PriorityQueue* pq) {
+    if (pq) {
+        free(pq->data);
+        free(pq);
+    }
+}
+
+static void priority_queue_sift_up(PriorityQueue* pq, size_t index) {
+    while (index > 0) {
+        size_t parent = (index - 1) / 2;
+        if (pq->data[index].priority > pq->data[parent].priority) {
+            PriorityQueueNode temp = pq->data[index];
+            pq->data[index] = pq->data[parent];
+            pq->data[parent] = temp;
+            index = parent;
+        } else {
+            break;
+        }
+    }
+}
+
+static void priority_queue_sift_down(PriorityQueue* pq, size_t index) {
+    while (2 * index + 1 < pq->size) {
+        size_t largest = 2 * index + 1;
+        if (largest + 1 < pq->size && pq->data[largest + 1].priority > pq->data[largest].priority) {
+            largest++;
+        }
+        if (pq->data[index].priority >= pq->data[largest].priority) break;
+        PriorityQueueNode temp = pq->data[index];
+        pq->data[index] = pq->data[largest];
+        pq->data[largest] = temp;
+        index = largest;
+    }
+}
+
+void priority_queue_push(PriorityQueue* pq, void* element, int priority) {
+    if (!pq) return;
+    if (pq->size >= pq->capacity) {
+        pq->capacity *= 2;
+        pq->data = (PriorityQueueNode*)realloc(pq->data, pq->capacity * sizeof(PriorityQueueNode));
+    }
+    pq->data[pq->size].data = element;
+    pq->data[pq->size].priority = priority;
+    pq->size++;
+    priority_queue_sift_up(pq, pq->size - 1);
+}
+
+void* priority_queue_pop(PriorityQueue* pq) {
+    if (!pq || pq->size == 0) return NULL;
+    void* result = pq->data[0].data;
+    pq->size--;
+    if (pq->size > 0) {
+        pq->data[0] = pq->data[pq->size];
+        priority_queue_sift_down(pq, 0);
+    }
+    return result;
+}
+
+void* priority_queue_peek(PriorityQueue* pq) {
+    if (!pq || pq->size == 0) return NULL;
+    return pq->data[0].data;
+}
+
+size_t priority_queue_size(PriorityQueue* pq) {
+    return pq ? pq->size : 0;
+}
+
+bool priority_queue_is_empty(PriorityQueue* pq) {
+    return priority_queue_size(pq) == 0;
+}
+
+void priority_queue_clear(PriorityQueue* pq) {
+    if (pq) pq->size = 0;
+}
+
+void priority_queue_change_priority(PriorityQueue* pq, void* element, int new_priority) {
+    if (!pq) return;
+    for (size_t i = 0; i < pq->size; i++) {
+        if (pq->data[i].data == element) {
+            int old_priority = pq->data[i].priority;
+            pq->data[i].priority = new_priority;
+            if (new_priority > old_priority) {
+                priority_queue_sift_up(pq, i);
+            } else {
+                priority_queue_sift_down(pq, i);
+            }
+            break;
+        }
+    }
 }

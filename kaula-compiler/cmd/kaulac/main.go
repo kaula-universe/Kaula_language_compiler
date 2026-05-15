@@ -216,7 +216,8 @@ func main() {
 		if stage1ErrorCount > 0 {
 			fmt.Printf("\n[Lexing & Parsing Errors] (%d errors)\n", stage1ErrorCount)
 			for i := 0; i < stage1ErrorCount; i++ {
-				fmt.Printf("  %d. %s\n", i+1, errorCollector.Errors()[i].String())
+				err := errorCollector.Errors()[i]
+				fmt.Println(errors.FormatErrorWithContext(err))
 			}
 		}
 		
@@ -225,7 +226,8 @@ func main() {
 			fmt.Printf("\n[Semantic Analysis Errors] (%d errors)\n", stage2ErrorCount)
 			for i := 0; i < stage2ErrorCount; i++ {
 				idx := stage1ErrorCount + i
-				fmt.Printf("  %d. %s\n", i+1, errorCollector.Errors()[idx].String())
+				err := errorCollector.Errors()[idx]
+				fmt.Println(errors.FormatErrorWithContext(err))
 			}
 		}
 		

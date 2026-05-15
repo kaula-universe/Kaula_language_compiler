@@ -83,4 +83,44 @@ extern void concurrent_sleep(uint32_t milliseconds);
 extern uint64_t concurrent_get_thread_id();
 extern size_t concurrent_get_processor_count();
 
+// 通道（Channel）
+typedef struct Channel Channel;
+
+extern Channel* channel_create(size_t capacity);
+extern void channel_destroy(Channel* ch);
+extern bool_t channel_send(Channel* ch, void* data);
+extern bool_t channel_send_timeout(Channel* ch, void* data, uint64_t timeout_ms);
+extern void* channel_receive(Channel* ch);
+extern void* channel_receive_timeout(Channel* ch, uint64_t timeout_ms);
+extern bool_t channel_try_receive(Channel* ch, void** out_data);
+extern void channel_close(Channel* ch);
+extern bool_t channel_is_closed(Channel* ch);
+extern size_t channel_len(Channel* ch);
+
+// Future/Promise
+typedef struct Future Future;
+typedef struct Promise Promise;
+
+extern Promise* promise_create();
+extern void promise_destroy(Promise* promise);
+extern Future* promise_get_future(Promise* promise);
+
+extern void promise_set_result(Promise* promise, void* result);
+extern void promise_set_error(Promise* promise, int error_code);
+extern bool_t promise_is_done(Promise* promise);
+extern bool_t promise_is_error(Promise* promise);
+
+extern Future* future_create();
+extern void future_destroy(Future* future);
+extern void* future_get(Future* future);
+extern void* future_get_timeout(Future* future, uint64_t timeout_ms);
+extern bool_t future_is_done(Future* future);
+extern bool_t future_is_error(Future* future);
+extern int future_get_error(Future* future);
+
+// Future 组合函数
+extern Future* future_map(Future* input, void* (*func)(void*));
+extern Future* future_all(Future** futures, size_t count);
+extern Future* future_any(Future** futures, size_t count);
+
 #endif // STD_CONCURRENT_CONCURRENT_H

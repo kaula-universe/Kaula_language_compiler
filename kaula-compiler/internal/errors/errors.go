@@ -29,6 +29,9 @@ type Error struct {
 	Column   int
 	File     string
 	Suggestion string
+	SourceContext string // 源码上下文
+	SourceLine      string // 错误所在的源码行
+	LineNumberStr   string // 行号字符串（用于对齐）
 }
 
 // String 实现error接口
@@ -53,6 +56,9 @@ func (e *Error) String() string {
 	}
 	if e.Suggestion != "" {
 		result = fmt.Sprintf("%s\nSuggestion: %s", result, e.Suggestion)
+	}
+	if e.SourceLine != "" {
+		result = fmt.Sprintf("%s\n%s", result, e.SourceContext)
 	}
 	return result
 }
@@ -79,6 +85,11 @@ func (ec *ErrorCollector) AddError(errorType ErrorType, message string, line, co
 		File:       file,
 		Suggestion: suggestion,
 	}
+	ec.errors = append(ec.errors, error)
+}
+
+// AddErrorInstance 添加一个错误实例
+func (ec *ErrorCollector) AddErrorInstance(error *Error) {
 	ec.errors = append(ec.errors, error)
 }
 
@@ -242,4 +253,90 @@ func GenerateSuggestion(message string) string {
 	}
 
 	return "Check the syntax and try again"
+}
+
+// ExtractSourceContext 从源码中提取错误上下文
+func ExtractSourceContext(source string, line, column int) (string, string, string) {
+	lines := strings.Split(source, "\n")
+	if line < 1 || line > len(lines) {
+		return "", "", ""
+	}
+
+	sourceLine := lines[line-1]
+	lineNumberStr := fmt.Sprintf("%d", line)
+
+	startLine := line - 2
+	if startLine < 0 {
+		startLine = 0
+	}
+	endLine := line + 1
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+
+	context := ""
+	for i := startLine; i < endLine; i++ {
+		lineNum := fmt.Sprintf("%d", i+1)
+		lineNumPadded := fmt.Sprintf("%4s", lineNum)
+		if i+1 == line {
+			context += fmt.Sprintf("%s > | %s\n", lineNumPadded, lines[i])
+		} else {
+			context += fmt.Sprintf("%s   | %s\n", lineNumPadded, lines[i])
+		}
+	}
+
+	columnStr := ""
+	for i := 0; i < column-1 && i < len(sourceLine); i++ {
+		if sourceLine[i] == '\t' {
+			columnStr += "    "
+		} else {
+			columnStr += " "
+		}
+	}
+	columnStr += "^"
+
+	context += "     | " + columnStr
+
+	return context, sourceLine, lineNumberStr
+}
+
+// FormatErrorWithContext 格式化带上下文的错误信息
+func FormatErrorWithContext(err *Error) string {
+	var result strings.Builder
+
+	var errorType string
+	switch err.Type {
+	case ErrorSyntax:
+		errorType = "Syntax Error"
+	case ErrorSemantic:
+		errorType = "Semantic Error"
+	case ErrorTypeError:
+		errorType = "Type Error"
+	case ErrorRuntime:
+		errorType = "Runtime Error"
+	case ErrorWarning:
+		errorType = "Warning"
+	default:
+		errorType = "Unknown Error"
+	}
+
+	if err.File != "" {
+		result.WriteString(fmt.Sprintf("%s:%d:%d", err.File, err.Line, err.Column))
+	} else {
+		result.WriteString(fmt.Sprintf("%d:%d", err.Line, err.Column))
+	}
+	result.WriteString(fmt.Sprintf(": %s: %s", errorType, err.Message))
+	result.WriteString("\n")
+
+	if err.SourceLine != "" {
+		result.WriteString(err.SourceContext)
+		result.WriteString("\n")
+	}
+
+	if err.Suggestion != "" {
+		result.WriteString(fmt.Sprintf("  Suggestion: %s", err.Suggestion))
+		result.WriteString("\n")
+	}
+
+	return result.String()
 }

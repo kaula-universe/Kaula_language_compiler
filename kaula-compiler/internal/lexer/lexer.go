@@ -119,6 +119,7 @@ type Lexer struct {
 	inputLen int // 缓存输入长度，避免重复计算
 	errorCollector *errors.ErrorCollector
 	file string
+	source string // 保存完整源码用于错误上下文
 }
 
 // NewLexer 创建一个新的词法分析器
@@ -130,6 +131,7 @@ func NewLexer(input string) *Lexer {
 		column: 1,
 		inputLen: len(input),
 		errorCollector: errors.NewErrorCollector(),
+		source: input,
 	}
 }
 
@@ -489,7 +491,19 @@ func (l *Lexer) peek() byte {
 // error 报告错误
 func (l *Lexer) error(message string) {
 	suggestion := errors.GenerateSuggestion(message)
-	l.errorCollector.AddSyntaxError(message, l.line, l.column, l.file, suggestion)
+	context, sourceLine, lineNumStr := errors.ExtractSourceContext(l.source, l.line, l.column)
+	err := &errors.Error{
+		Type:       errors.ErrorSyntax,
+		Message:    message,
+		Line:       l.line,
+		Column:     l.column,
+		File:       l.file,
+		Suggestion: suggestion,
+		SourceContext: context,
+		SourceLine: sourceLine,
+		LineNumberStr: lineNumStr,
+	}
+	l.errorCollector.AddErrorInstance(err)
 	// 跳过当前字符，继续解析
 	l.next()
 }
@@ -517,6 +531,11 @@ func (l *Lexer) HasErrors() bool {
 // ReportErrors 报告错误
 func (l *Lexer) ReportErrors() {
 	l.errorCollector.ReportErrors()
+}
+
+// GetSource 获取源码
+func (l *Lexer) GetSource() string {
+	return l.source
 }
 
 // TokenTypeToString 将token类型转换为字符串

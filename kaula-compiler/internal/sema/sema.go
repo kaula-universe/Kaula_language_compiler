@@ -23,6 +23,7 @@ type SemanticAnalyzer struct {
 	treeManager     *core.TreeManager
 	prefixManager   *core.PrefixManager
 	rootTreeFound   bool
+	source          string // 源码用于错误上下文
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -71,6 +72,11 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 	// 保存 program 引用以便后续查找
 	sa.program = program
+	
+	// 从 AST 获取源码
+	if program != nil {
+		sa.source = program.Source
+	}
 
 	// 第一遍：将所有函数和变量添加到符号表（不分析函数体）
 	for _, stmt := range program.Statements {
@@ -669,13 +675,215 @@ func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 	}
 }
 
-// analyzeExpression 分析表达式（简化版本，只遍历不检查类型）
+// analyzeExpression 分析表达式（遍历所有表达式节点并检查）
 func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
-	// 简化处理，不进行遍历（避免递归过深）
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		sa.analyzeIdentifier(e)
+	case *ast.BinaryExpression:
+		sa.analyzeBinaryExpression(e)
+	case *ast.UnaryExpression:
+		sa.analyzeUnaryExpression(e)
+	case *ast.CallExpression:
+		sa.analyzeCallExpression(e)
+	case *ast.IndexExpression:
+		sa.analyzeIndexExpression(e)
+	case *ast.MemberExpression:
+		sa.analyzeMemberExpression(e)
+	case *ast.LiteralExpression:
+		// 字面量不需要额外分析
+	case *ast.ParenExpression:
+		sa.analyzeExpression(e.Inner)
+	case *ast.ConditionalExpression:
+		sa.analyzeExpression(e.Condition)
+		sa.analyzeExpression(e.TrueExpr)
+		sa.analyzeExpression(e.FalseExpr)
+	case *ast.ArrayLiteral:
+		for _, elem := range e.Elements {
+			sa.analyzeExpression(elem)
+		}
+	case *ast.PrefixCallExpression:
+		// 前缀调用表达式已在 analyzePrefixCallExpression 中处理
+	}
+}
+
+// analyzeIdentifier 分析标识符
+func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
+	if expr == nil {
+		return
+	}
+	if expr.Name == "null" || expr.Name == "true" || expr.Name == "false" {
+		return
+	}
+	symbol := sa.symbolTable.Lookup(expr.Name)
+	if symbol == nil {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("未定义的变量: '%s'", expr.Name),
+			expr.Pos.Line,
+			expr.Pos.Column,
+			"undefined_variable",
+			"请确保变量已声明后再使用",
+		)
+	}
+}
+
+// analyzeBinaryExpression 分析二元表达式
+func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) {
+	if expr == nil {
+		return
+	}
+	sa.analyzeExpression(expr.Left)
+	sa.analyzeExpression(expr.Right)
+	// 类型检查
+	if expr.Left != nil && expr.Right != nil {
+		leftType := sa.inferExpressionType(expr.Left)
+		rightType := sa.inferExpressionType(expr.Right)
+		if leftType != "" && rightType != "" && leftType != rightType {
+			switch expr.Op {
+			case "+", "-", "*", "/", "%":
+				if !isNumericType(leftType) || !isNumericType(rightType) {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Op, leftType, rightType),
+						expr.Pos.Line,
+						expr.Pos.Column,
+						"type_mismatch",
+						"确保运算符两侧的类型兼容",
+					)
+				}
+			case "==", "!=", "<", ">", "<=", ">=":
+				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Op, leftType, rightType),
+						expr.Pos.Line,
+						expr.Pos.Column,
+						"type_mismatch",
+						"比较运算符两侧的类型必须兼容",
+					)
+				}
+			}
+		}
+	}
+}
+
+// analyzeUnaryExpression 分析一元表达式
+func (sa *SemanticAnalyzer) analyzeUnaryExpression(expr *ast.UnaryExpression) {
+	if expr == nil {
+		return
+	}
+	sa.analyzeExpression(expr.Right)
+}
+
+// analyzeCallExpression 分析函数调用表达式
+func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
+	if expr == nil {
+		return
+	}
+	sa.analyzeExpression(expr.Function)
+	for _, arg := range expr.Args {
+		sa.analyzeExpression(arg)
+	}
+}
+
+// analyzeIndexExpression 分析索引表达式
+func (sa *SemanticAnalyzer) analyzeIndexExpression(expr *ast.IndexExpression) {
+	if expr == nil {
+		return
+	}
+	sa.analyzeExpression(expr.Object)
+	sa.analyzeExpression(expr.Index)
+}
+
+// analyzeMemberExpression 分析成员访问表达式
+func (sa *SemanticAnalyzer) analyzeMemberExpression(expr *ast.MemberExpression) {
+	if expr == nil {
+		return
+	}
+	sa.analyzeExpression(expr.Object)
+}
+
+// inferExpressionType 推断表达式的类型
+func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
+	if expr == nil {
+		return ""
+	}
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		symbol := sa.symbolTable.Lookup(e.Name)
+		if symbol != nil {
+			return symbol.Type
+		}
+		return ""
+	case *ast.LiteralExpression:
+		return sa.inferLiteralType(e)
+	case *ast.BinaryExpression:
+		leftType := sa.inferExpressionType(e.Left)
+		if leftType != "" {
+			return leftType
+		}
+		return sa.inferExpressionType(e.Right)
+	case *ast.CallExpression:
+		funcExpr := e.Function
+		if ident, ok := funcExpr.(*ast.Identifier); ok {
+			symbol := sa.symbolTable.Lookup(ident.Name)
+			if symbol != nil && symbol.Type == "function" {
+				return "int" // 默认返回类型
+			}
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// inferLiteralType 推断字面量的类型
+func (sa *SemanticAnalyzer) inferLiteralType(expr *ast.LiteralExpression) string {
+	if expr == nil {
+		return ""
+	}
+	switch expr.Kind {
+	case "int":
+		return "int"
+	case "float":
+		return "float"
+	case "string":
+		return "string"
+	case "bool":
+		return "bool"
+	case "char":
+		return "char"
+	case "null":
+		return "null"
+	default:
+		return ""
+	}
+}
+
+// isNumericType 检查类型是否为数值类型
+func isNumericType(typeName string) bool {
+	return typeName == "int" || typeName == "float" || typeName == "i64" ||
+		typeName == "i32" || typeName == "i16" || typeName == "i8" ||
+		typeName == "u64" || typeName == "u32" || typeName == "u16" ||
+		typeName == "u8" || typeName == "f64" || typeName == "f32"
 }
 
 func (sa *SemanticAnalyzer) error(msg string, line, column int) {
-	sa.errorCollector.AddSemanticError(msg, line, column, "", "")
+	suggestion := errors.GenerateSuggestion(msg)
+	context, sourceLine, lineNumStr := errors.ExtractSourceContext(sa.source, line, column)
+	err := &errors.Error{
+		Type:       errors.ErrorSemantic,
+		Message:    msg,
+		Line:       line,
+		Column:     column,
+		File:       "",
+		Suggestion: suggestion,
+		SourceContext: context,
+		SourceLine: sourceLine,
+		LineNumberStr: lineNumStr,
+	}
+	sa.errorCollector.AddErrorInstance(err)
 }
 
 // checkTypeConstraint 检查类型约束

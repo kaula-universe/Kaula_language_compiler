@@ -67,6 +67,90 @@ void print_bool(bool value) {
     printf("%s", value ? "true" : "false");
 }
 
+// ==================== 标准输入函数实现 ====================
+
+char read_char() {
+    int c = getchar();
+    return (char)c;
+}
+
+i64 read_int() {
+    i64 value;
+    if (scanf("%lld", &value) != 1) {
+        return 0;
+    }
+    return value;
+}
+
+f64 read_float() {
+    f64 value;
+    if (scanf("%lf", &value) != 1) {
+        return 0.0;
+    }
+    return value;
+}
+
+bool read_bool() {
+    char buffer[16];
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+        return false;
+    }
+    // Remove trailing newline
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') {
+        buffer[len - 1] = '\0';
+    }
+    return (strcmp(buffer, "true") == 0 || strcmp(buffer, "1") == 0 || strcmp(buffer, "yes") == 0);
+}
+
+char* read_line() {
+    char* buffer = NULL;
+    size_t capacity = 256;
+    size_t len = 0;
+    
+    buffer = (char*)malloc(capacity);
+    if (!buffer) {
+        return NULL;
+    }
+    
+    int c;
+    while ((c = getchar()) != EOF && c != '\n') {
+        if (len + 1 >= capacity) {
+            capacity *= 2;
+            char* new_buffer = (char*)realloc(buffer, capacity);
+            if (!new_buffer) {
+                free(buffer);
+                return NULL;
+            }
+            buffer = new_buffer;
+        }
+        buffer[len++] = (char)c;
+    }
+    
+    buffer[len] = '\0';
+    return buffer;
+}
+
+char* read_string(size_t max_length) {
+    if (max_length == 0) {
+        return NULL;
+    }
+    
+    char* buffer = (char*)malloc(max_length + 1);
+    if (!buffer) {
+        return NULL;
+    }
+    
+    int c;
+    size_t i = 0;
+    while (i < max_length && (c = getchar()) != EOF && c != '\n' && c != '\r') {
+        buffer[i++] = (char)c;
+    }
+    buffer[i] = '\0';
+    
+    return buffer;
+}
+
 // ==================== 跨平台路径操作实现 ====================
 
 char* path_join(const char* path1, const char* path2) {

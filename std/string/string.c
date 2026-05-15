@@ -434,3 +434,120 @@ size_t string_count_string(const String str, const String substr) {
     }
     return count;
 }
+
+// 正则表达式匹配实现
+#include <regex.h>
+
+bool string_match_regex(const String str, const String pattern) {
+    if (!str || !pattern) return false;
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED | REG_NOSUB);
+    if (ret != 0) return false;
+    ret = regexec(&regex, str, 0, NULL, 0);
+    regfree(&regex);
+    return ret == 0;
+}
+
+size_t string_match_regex_offset(const String str, const String pattern, size_t start_offset) {
+    if (!str || !pattern) return (size_t)-1;
+    size_t str_len = strlen(str);
+    if (start_offset >= str_len) return (size_t)-1;
+    regex_t regex;
+    regmatch_t match;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) return (size_t)-1;
+    ret = regexec(&regex, str + start_offset, 1, &match, 0);
+    regfree(&regex);
+    if (ret != 0) return (size_t)-1;
+    return start_offset + (size_t)match.rm_so;
+}
+
+String* string_find_all_regex(const String str, const String pattern, size_t* count) {
+    if (!str || !pattern) {
+        if (count) *count = 0;
+        return NULL;
+    }
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) {
+        if (count) *count = 0;
+        return NULL;
+    }
+    size_t max_matches = 64;
+    String* results = (String*)malloc(max_matches * sizeof(String));
+    if (!results) {
+        regfree(&regex);
+        if (count) *count = 0;
+        return NULL;
+    }
+    size_t match_count = 0;
+    const char* search_start = str;
+    regmatch_t match;
+    while (regexec(&regex, search_start, 1, &match, 0) == 0) {
+        if (match_count >= max_matches) {
+            max_matches *= 2;
+            String* new_results = (String*)realloc(results, max_matches * sizeof(String));
+            if (!new_results) break;
+            results = new_results;
+        }
+        size_t match_len = match.rm_eo - match.rm_so;
+        results[match_count] = (String)malloc(match_len + 1);
+        if (results[match_count]) {
+            strncpy(results[match_count], search_start + match.rm_so, match_len);
+            results[match_count][match_len] = '\0';
+        }
+        match_count++;
+        search_start += match.rm_eo;
+        if (*search_start == '\0') break;
+    }
+    regfree(&regex);
+    if (count) *count = match_count;
+    if (match_count == 0) {
+        free(results);
+        return NULL;
+    }
+    return results;
+}
+
+String string_replace_regex(const String str, const String pattern, const String replacement) {
+    if (!str || !pattern) return string_copy(str);
+    if (!replacement) return string_copy(str);
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) return string_copy(str);
+    String result = string_create("");
+    const char* search_start = str;
+    regmatch_t match;
+    while (regexec(&regex, search_start, 1, &match, 0) == 0) {
+        size_t prefix_len = match.rm_so;
+        String prefix = string_substring(search_start, 0, prefix_len);
+        String temp = string_concat(result, prefix);
+        string_free(result);
+        string_free(prefix);
+        result = string_concat(temp, replacement);
+        string_free(temp);
+        search_start += match.rm_eo;
+    }
+    String suffix = string_create(search_start);
+    String final_result = string_concat(result, suffix);
+    string_free(result);
+    string_free(suffix);
+    regfree(&regex);
+    return final_result;
+}
+
+bool string_validate_email(const String str) {
+    return string_match_regex(str, "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+}
+
+bool string_validate_url(const String str) {
+    return string_match_regex(str, "^(https?|ftp)://[a-zA-Z0-9.-]+(:[0-9]+)?(/[^ ]*)?$");
+}
+
+bool string_validate_ipv4(const String str) {
+    return string_match_regex(str, "^([0-9]{1,3}\\.){3}[0-9]{1,3}$");
+}
+
+bool string_validate_number(const String str) {
+    return string_match_regex(str, "^[+-]?[0-9]*\\.?[0-9]+([eE][+-]?[0-9]+)?$");
+}

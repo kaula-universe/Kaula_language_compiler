@@ -350,11 +350,56 @@ void http_request_destroy(HttpRequest* req) {
 
 const char* http_request_get_header(HttpRequest* req, const char* name) {
     if (!req || !name || !req->headers) return NULL;
+    char* headers_copy = req->headers;
+    char* line = headers_copy;
+    while (line && *line) {
+        char* colon = strchr(line, ':');
+        if (colon) {
+            size_t name_len = colon - line;
+            if (name_len == strlen(name) && strncmp(line, name, name_len) == 0) {
+                char* value = colon + 1;
+                while (*value == ' ' || *value == '\t') value++;
+                char* end = strchr(value, '\r');
+                if (!end) end = strchr(value, '\n');
+                if (end) {
+                    static char header_value[HTTP_HEADER_BUFFER_SIZE];
+                    size_t val_len = end - value;
+                    if (val_len >= HTTP_HEADER_BUFFER_SIZE) val_len = HTTP_HEADER_BUFFER_SIZE - 1;
+                    memcpy(header_value, value, val_len);
+                    header_value[val_len] = '\0';
+                    return header_value;
+                }
+            }
+        }
+        char* next = strchr(line, '\n');
+        if (!next) break;
+        line = next + 1;
+    }
     return NULL;
 }
 
 const char* http_request_get_query_param(HttpRequest* req, const char* name) {
     if (!req || !name || !req->query_string) return NULL;
+    char* query = req->query_string;
+    while (query && *query) {
+        char* eq = strchr(query, '=');
+        if (eq) {
+            size_t param_name_len = eq - query;
+            if (param_name_len == strlen(name) && strncmp(query, name, param_name_len) == 0) {
+                char* value = eq + 1;
+                static char param_value[HTTP_HEADER_BUFFER_SIZE];
+                char* amp = strchr(value, '&');
+                size_t val_len = amp ? (size_t)(amp - value) : strlen(value);
+                if (val_len >= HTTP_HEADER_BUFFER_SIZE) val_len = HTTP_HEADER_BUFFER_SIZE - 1;
+                memcpy(param_value, value, val_len);
+                param_value[val_len] = '\0';
+                return param_value;
+            }
+        }
+        char* amp = strchr(query, '&');
+        if (!amp) break;
+        query = amp + 1;
+    }
     return NULL;
 }
 
@@ -385,6 +430,7 @@ void http_response_set_status(HttpResponse* res, HttpStatusCode code) {
         case HTTP_OK: res->status_message = strdup("OK"); break;
         case HTTP_CREATED: res->status_message = strdup("Created"); break;
         case HTTP_NO_CONTENT: res->status_message = strdup("No Content"); break;
+        case HTTP_FOUND: res->status_message = strdup("Found"); break;
         case HTTP_BAD_REQUEST: res->status_message = strdup("Bad Request"); break;
         case HTTP_UNAUTHORIZED: res->status_message = strdup("Unauthorized"); break;
         case HTTP_FORBIDDEN: res->status_message = strdup("Forbidden"); break;
@@ -416,6 +462,28 @@ void http_response_set_content_type(HttpResponse* res, const char* content_type)
 
 void http_response_set_header(HttpResponse* res, const char* name, const char* value) {
     if (!res || !name || !value) return;
+
+    size_t name_len = strlen(name);
+    size_t value_len = strlen(value);
+    size_t entry_len = name_len + 2 + value_len + 2;
+
+    char* new_entry = (char*)malloc(entry_len);
+    if (!new_entry) return;
+
+    snprintf(new_entry, entry_len, "%s: %s\r\n", name, value);
+
+    if (res->headers) {
+        size_t old_len = strlen(res->headers);
+        size_t new_len = old_len + entry_len;
+        char* new_headers = (char*)realloc(res->headers, new_len + 1);
+        if (new_headers) {
+            strcat(new_headers, new_entry);
+            free(new_entry);
+            res->headers = new_headers;
+        }
+    } else {
+        res->headers = new_entry;
+    }
 }
 
 void http_response_set_json(HttpResponse* res, const char* json_string) {
@@ -432,7 +500,7 @@ void http_response_set_html(HttpResponse* res, const char* html) {
 
 void http_response_set_redirect(HttpResponse* res, const char* location) {
     if (!res || !location) return;
-    http_response_set_status(res, HTTP_OK);
+    http_response_set_status(res, HTTP_FOUND);
     http_response_set_header(res, "Location", location);
 }
 
@@ -445,15 +513,22 @@ char* http_response_to_string(HttpResponse* res) {
     int offset = snprintf(buffer, 1024, "HTTP/1.1 %d %s\r\n",
         res->status_code, res->status_message ? res->status_message : "OK");
 
+    if (res->headers && strlen(res->headers) > 0) {
+        int headers_offset = snprintf(buffer + offset, 1024 - offset, "%s", res->headers);
+        if (headers_offset > 0) {
+            offset += headers_offset;
+        }
+    }
+
     if (res->content_type) {
-        offset += snprintf(buffer + offset, 1024, "Content-Type: %s\r\n", res->content_type);
+        offset += snprintf(buffer + offset, 1024 - (offset > 0 ? offset : 0), "Content-Type: %s\r\n", res->content_type);
     }
 
     if (res->body && res->body_length > 0) {
-        offset += snprintf(buffer + offset, 1024, "Content-Length: %zu\r\n", res->body_length);
+        offset += snprintf(buffer + offset, 1024 - (offset > 0 ? offset : 0), "Content-Length: %zu\r\n", res->body_length);
     }
 
-    offset += snprintf(buffer + offset, 1024, "\r\n");
+    offset += snprintf(buffer + offset, 1024 - (offset > 0 ? offset : 0), "\r\n");
 
     if (res->body && res->body_length > 0 && offset < 16384) {
         memcpy(buffer + offset, res->body, res->body_length);

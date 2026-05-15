@@ -35,14 +35,14 @@ LightAsyncLoop* light_async_loop_create() {
     dummy->func = NULL;
     dummy->arg = NULL;
     dummy->result = NULL;
-    atomic_store_explicit(&dummy->status, 0, memory_order_relaxed);
+    atomic_store_explicit(&dummy->status, 0, memory_order_release);
     dummy->next = NULL;
 
-    atomic_store_explicit(&loop->head, dummy, memory_order_relaxed);
-    atomic_store_explicit(&loop->tail, dummy, memory_order_relaxed);
-    atomic_store_explicit(&loop->count, 0, memory_order_relaxed);
-    atomic_store_explicit(&loop->running, 0, memory_order_relaxed);
-    atomic_store_explicit(&loop->worker_active, 0, memory_order_relaxed);
+    atomic_store_explicit(&loop->head, dummy, memory_order_release);
+    atomic_store_explicit(&loop->tail, dummy, memory_order_release);
+    atomic_store_explicit(&loop->count, 0, memory_order_release);
+    atomic_store_explicit(&loop->running, 0, memory_order_release);
+    atomic_store_explicit(&loop->worker_active, 0, memory_order_release);
 
     return loop;
 }
@@ -52,16 +52,16 @@ void light_async_loop_destroy(LightAsyncLoop* loop) {
     if (!loop) return;
 
     // 释放所有节点
-    AsyncNode* current = atomic_load_explicit(&loop->head, memory_order_relaxed);
+    AsyncNode* current = atomic_load_explicit(&loop->head, memory_order_acquire);
     while (current) {
-        AsyncNode* next = atomic_load_explicit(&current->next, memory_order_relaxed);
+        AsyncNode* next = atomic_load_explicit(&current->next, memory_order_acquire);
         free(current);
         current = next;
     }
     free(loop);
 }
 
-// 添加异步任务到循环（无锁）
+// 添加异步任务到循环（无锁Michael-Scott队列）
 int light_async_loop_add(LightAsyncLoop* loop, void* (*func)(void*), void* arg) {
     if (!loop || !func) return 0;
 
@@ -71,44 +71,70 @@ int light_async_loop_add(LightAsyncLoop* loop, void* (*func)(void*), void* arg) 
     node->func = func;
     node->arg = arg;
     node->result = NULL;
-    atomic_store_explicit(&node->status, 0, memory_order_relaxed);  // pending
+    atomic_store_explicit(&node->status, 0, memory_order_release);
     node->next = NULL;
 
-    // 入队
-    AsyncNode* old_tail = atomic_load_explicit(&loop->tail, memory_order_relaxed);
-    atomic_store_explicit(&old_tail->next, node, memory_order_relaxed);
-    atomic_store_explicit(&loop->tail, node, memory_order_relaxed);
-    atomic_fetch_add_explicit(&loop->count, 1, memory_order_relaxed);
+    AsyncNode* old_tail;
+    while (1) {
+        old_tail = atomic_load_explicit(&loop->tail, memory_order_acquire);
+        AsyncNode* null_next = NULL;
+        if (atomic_compare_exchange_weak_explicit(&old_tail->next, &null_next, node,
+                                                  memory_order_release, memory_order_release)) {
+            break;
+        }
+        atomic_compare_exchange_weak_explicit(&loop->tail, &old_tail, old_tail,
+                                              memory_order_release, memory_order_release);
+    }
+    atomic_compare_exchange_weak_explicit(&loop->tail, &old_tail, node,
+                                          memory_order_release, memory_order_release);
+    atomic_fetch_add_explicit(&loop->count, 1, memory_order_acq_rel);
 
     return 1;
 }
 
-// 获取并执行下一个任务（无锁）
+// 获取并执行下一个任务（无锁Michael-Scott队列）
 // 返回 1 表示执行了任务，0 表示队列空
 int light_async_loop_poll(LightAsyncLoop* loop) {
     if (!loop) return 0;
 
-    AsyncNode* head = atomic_load_explicit(&loop->head, memory_order_relaxed);
-    AsyncNode* next = atomic_load_explicit(&head->next, memory_order_relaxed);
+    AsyncNode* head;
+    AsyncNode* tail;
+    AsyncNode* next;
 
-    if (next == NULL) {
-        return 0;  // 队列空
+    while (1) {
+        head = atomic_load_explicit(&loop->head, memory_order_acquire);
+        tail = atomic_load_explicit(&loop->tail, memory_order_acquire);
+        next = atomic_load_explicit(&head->next, memory_order_acquire);
+
+        AsyncNode* current_head = atomic_load_explicit(&loop->head, memory_order_acquire);
+        if (current_head != head) {
+            continue;
+        }
+
+        if (next == NULL) {
+            return 0;
+        }
+
+        if (head == tail) {
+            atomic_compare_exchange_weak_explicit(&loop->tail, &tail, next,
+                                                  memory_order_release, memory_order_release);
+            continue;
+        }
+
+        if (atomic_compare_exchange_weak_explicit(&loop->head, &head, next,
+                                                  memory_order_acquire, memory_order_acquire)) {
+            break;
+        }
     }
 
-    // 移动头指针
-    atomic_store_explicit(&loop->head, next, memory_order_relaxed);
-    atomic_fetch_sub_explicit(&loop->count, 1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&loop->count, 1, memory_order_acq_rel);
 
-    // 标记为运行中
-    atomic_store_explicit(&next->status, 1, memory_order_relaxed);  // running
+    atomic_store_explicit(&next->status, 1, memory_order_release);
 
-    // 执行任务
     next->result = next->func(next->arg);
 
-    // 标记为完成
-    atomic_store_explicit(&next->status, 2, memory_order_relaxed);  // completed
+    atomic_store_explicit(&next->status, 2, memory_order_release);
 
-    // 释放头节点
     free(head);
 
     return 1;
@@ -129,31 +155,31 @@ int light_async_loop_batch_poll(LightAsyncLoop* loop, int max_count) {
 // 检查循环是否运行中
 int light_async_loop_is_running(LightAsyncLoop* loop) {
     if (!loop) return 0;
-    return atomic_load_explicit(&loop->running, memory_order_relaxed);
+    return atomic_load_explicit(&loop->running, memory_order_acquire);
 }
 
 // 启动循环
 void light_async_loop_start(LightAsyncLoop* loop) {
     if (!loop) return;
-    atomic_store_explicit(&loop->running, 1, memory_order_relaxed);
+    atomic_store_explicit(&loop->running, 1, memory_order_release);
 }
 
 // 停止循环
 void light_async_loop_stop(LightAsyncLoop* loop) {
     if (!loop) return;
-    atomic_store_explicit(&loop->running, 0, memory_order_relaxed);
+    atomic_store_explicit(&loop->running, 0, memory_order_release);
 }
 
 // 获取队列大小
 int light_async_loop_size(LightAsyncLoop* loop) {
     if (!loop) return 0;
-    return atomic_load_explicit(&loop->count, memory_order_relaxed);
+    return atomic_load_explicit(&loop->count, memory_order_acquire);
 }
 
 // 检查任务状态
 int light_async_node_status(AsyncNode* node) {
     if (!node) return -1;
-    return atomic_load_explicit(&node->status, memory_order_relaxed);
+    return atomic_load_explicit(&node->status, memory_order_acquire);
 }
 
 // 获取任务结果

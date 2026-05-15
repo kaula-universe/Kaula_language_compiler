@@ -128,10 +128,33 @@ bool mutex_trylock(Mutex mutex) {
 }
 
 // 条件变量实现
+typedef struct {
+    // 等待该条件变量的线程计数
+    volatile int waiters_count;
+    // 用于保护 waiters_count 的临界区
+#ifdef _WIN32
+    CRITICAL_SECTION waiters_count_lock;
+    // 用于阻塞/唤醒线程的事件
+    HANDLE event;
+    // 保存等待中的互斥锁句柄
+    HANDLE* waiters_mutexes;
+    size_t waiters_mutexes_capacity;
+#else
+    pthread_cond_t cond;
+#endif
+} ConditionImpl;
+
 Condition condition_create() {
 #ifdef _WIN32
-    HANDLE event = CreateEvent(NULL, FALSE, FALSE, NULL);
-    return (Condition)event;
+    ConditionImpl* impl = (ConditionImpl*)malloc(sizeof(ConditionImpl));
+    if (impl) {
+        impl->waiters_count = 0;
+        InitializeCriticalSection(&impl->waiters_count_lock);
+        impl->event = CreateEvent(NULL, FALSE, FALSE, NULL);
+        impl->waiters_mutexes = NULL;
+        impl->waiters_mutexes_capacity = 0;
+    }
+    return (Condition)impl;
 #else
     pthread_cond_t* cond = (pthread_cond_t*)malloc(sizeof(pthread_cond_t));
     if (cond) {
@@ -143,7 +166,15 @@ Condition condition_create() {
 
 void condition_destroy(Condition condition) {
 #ifdef _WIN32
-    CloseHandle((HANDLE)condition);
+    if (condition) {
+        ConditionImpl* impl = (ConditionImpl*)condition;
+        CloseHandle(impl->event);
+        DeleteCriticalSection(&impl->waiters_count_lock);
+        if (impl->waiters_mutexes) {
+            free(impl->waiters_mutexes);
+        }
+        free(impl);
+    }
 #else
     if (condition) {
         pthread_cond_destroy((pthread_cond_t*)condition);
@@ -154,8 +185,21 @@ void condition_destroy(Condition condition) {
 
 void condition_wait(Condition condition, Mutex mutex) {
 #ifdef _WIN32
+    if (!condition || !mutex) return;
+    ConditionImpl* impl = (ConditionImpl*)condition;
+    
+    // 增加等待计数
+    EnterCriticalSection(&impl->waiters_count_lock);
+    impl->waiters_count++;
+    LeaveCriticalSection(&impl->waiters_count_lock);
+    
+    // 释放互斥锁
     mutex_unlock(mutex);
-    WaitForSingleObject((HANDLE)condition, INFINITE);
+    
+    // 等待信号
+    WaitForSingleObject(impl->event, INFINITE);
+    
+    // 重新获取互斥锁
     mutex_lock(mutex);
 #else
     if (condition && mutex) {
@@ -166,9 +210,23 @@ void condition_wait(Condition condition, Mutex mutex) {
 
 bool condition_timedwait(Condition condition, Mutex mutex, uint64_t timeout_ms) {
 #ifdef _WIN32
+    if (!condition || !mutex) return false;
+    ConditionImpl* impl = (ConditionImpl*)condition;
+    
+    // 增加等待计数
+    EnterCriticalSection(&impl->waiters_count_lock);
+    impl->waiters_count++;
+    LeaveCriticalSection(&impl->waiters_count_lock);
+    
+    // 释放互斥锁
     mutex_unlock(mutex);
-    DWORD result = WaitForSingleObject((HANDLE)condition, (DWORD)timeout_ms);
+    
+    // 等待信号或超时
+    DWORD result = WaitForSingleObject(impl->event, (DWORD)timeout_ms);
+    
+    // 重新获取互斥锁
     mutex_lock(mutex);
+    
     return result == WAIT_OBJECT_0;
 #else
     if (!condition || !mutex) return false;
@@ -186,7 +244,15 @@ bool condition_timedwait(Condition condition, Mutex mutex, uint64_t timeout_ms) 
 
 void condition_signal(Condition condition) {
 #ifdef _WIN32
-    SetEvent((HANDLE)condition);
+    if (!condition) return;
+    ConditionImpl* impl = (ConditionImpl*)condition;
+    
+    EnterCriticalSection(&impl->waiters_count_lock);
+    if (impl->waiters_count > 0) {
+        SetEvent(impl->event);
+        impl->waiters_count--;
+    }
+    LeaveCriticalSection(&impl->waiters_count_lock);
 #else
     if (condition) {
         pthread_cond_signal((pthread_cond_t*)condition);
@@ -196,7 +262,18 @@ void condition_signal(Condition condition) {
 
 void condition_broadcast(Condition condition) {
 #ifdef _WIN32
-    SetEvent((HANDLE)condition);
+    if (!condition) return;
+    ConditionImpl* impl = (ConditionImpl*)condition;
+    
+    EnterCriticalSection(&impl->waiters_count_lock);
+    if (impl->waiters_count > 0) {
+        // 唤醒所有等待线程
+        for (int i = 0; i < impl->waiters_count; i++) {
+            SetEvent(impl->event);
+        }
+        impl->waiters_count = 0;
+    }
+    LeaveCriticalSection(&impl->waiters_count_lock);
 #else
     if (condition) {
         pthread_cond_broadcast((pthread_cond_t*)condition);
@@ -549,4 +626,315 @@ size_t concurrent_get_processor_count() {
 #else
     return sysconf(_SC_NPROCESSORS_ONLN);
 #endif
+}
+
+// Channel 实现
+typedef struct Channel {
+    void** buffer;
+    size_t capacity;
+    size_t head;
+    size_t tail;
+    size_t count;
+    Mutex mutex;
+    Condition not_full;
+    Condition not_empty;
+    bool_t closed;
+} Channel;
+
+Channel* channel_create(size_t capacity) {
+    Channel* ch = (Channel*)calloc(1, sizeof(Channel));
+    if (ch) {
+        ch->capacity = capacity > 0 ? capacity : 16;
+        ch->buffer = (void**)calloc(ch->capacity, sizeof(void*));
+        ch->mutex = mutex_create();
+        ch->not_full = condition_create();
+        ch->not_empty = condition_create();
+    }
+    return ch;
+}
+
+void channel_destroy(Channel* ch) {
+    if (ch) {
+        mutex_destroy(ch->mutex);
+        condition_destroy(ch->not_full);
+        condition_destroy(ch->not_empty);
+        free(ch->buffer);
+        free(ch);
+    }
+}
+
+bool_t channel_send(Channel* ch, void* data) {
+    if (!ch) return false;
+    mutex_lock(ch->mutex);
+    while (ch->count >= ch->capacity && !ch->closed) {
+        condition_wait(ch->not_full, ch->mutex);
+    }
+    if (ch->closed) { mutex_unlock(ch->mutex); return false; }
+    ch->buffer[ch->tail] = data;
+    ch->tail = (ch->tail + 1) % ch->capacity;
+    ch->count++;
+    condition_signal(ch->not_empty);
+    mutex_unlock(ch->mutex);
+    return true;
+}
+
+bool_t channel_send_timeout(Channel* ch, void* data, uint64_t timeout_ms) {
+    if (!ch) return false;
+    mutex_lock(ch->mutex);
+    bool_t result = true;
+    while (ch->count >= ch->capacity && !ch->closed) {
+        if (!condition_timedwait(ch->not_full, ch->mutex, timeout_ms)) { result = false; break; }
+    }
+    if (result && !ch->closed) {
+        ch->buffer[ch->tail] = data;
+        ch->tail = (ch->tail + 1) % ch->capacity;
+        ch->count++;
+        condition_signal(ch->not_empty);
+    }
+    mutex_unlock(ch->mutex);
+    return result;
+}
+
+void* channel_receive(Channel* ch) {
+    if (!ch) return NULL;
+    mutex_lock(ch->mutex);
+    while (ch->count == 0 && !ch->closed) {
+        condition_wait(ch->not_empty, ch->mutex);
+    }
+    if (ch->count == 0) { mutex_unlock(ch->mutex); return NULL; }
+    void* data = ch->buffer[ch->head];
+    ch->head = (ch->head + 1) % ch->capacity;
+    ch->count--;
+    condition_signal(ch->not_full);
+    mutex_unlock(ch->mutex);
+    return data;
+}
+
+void* channel_receive_timeout(Channel* ch, uint64_t timeout_ms) {
+    if (!ch) return NULL;
+    mutex_lock(ch->mutex);
+    void* data = NULL;
+    while (ch->count == 0 && !ch->closed) {
+        if (!condition_timedwait(ch->not_empty, ch->mutex, timeout_ms)) break;
+    }
+    if (ch->count > 0) {
+        data = ch->buffer[ch->head];
+        ch->head = (ch->head + 1) % ch->capacity;
+        ch->count--;
+        condition_signal(ch->not_full);
+    }
+    mutex_unlock(ch->mutex);
+    return data;
+}
+
+bool_t channel_try_receive(Channel* ch, void** out_data) {
+    if (!ch || !out_data) return false;
+    if (!mutex_trylock(ch->mutex)) return false;
+    if (ch->count == 0) { mutex_unlock(ch->mutex); return false; }
+    *out_data = ch->buffer[ch->head];
+    ch->head = (ch->head + 1) % ch->capacity;
+    ch->count--;
+    condition_signal(ch->not_full);
+    mutex_unlock(ch->mutex);
+    return true;
+}
+
+void channel_close(Channel* ch) {
+    if (!ch) return;
+    mutex_lock(ch->mutex);
+    ch->closed = true;
+    condition_broadcast(ch->not_empty);
+    condition_broadcast(ch->not_full);
+    mutex_unlock(ch->mutex);
+}
+
+bool_t channel_is_closed(Channel* ch) { return ch && ch->closed; }
+size_t channel_len(Channel* ch) { return ch ? ch->count : 0; }
+
+// Future/Promise 实现
+struct Promise {
+    Mutex mutex;
+    Condition condition;
+    void* result;
+    int error_code;
+    bool_t done;
+    bool_t has_error;
+    Future* future;
+};
+
+struct Future {
+    Promise* promise;
+};
+
+Promise* promise_create() {
+    Promise* p = (Promise*)calloc(1, sizeof(Promise));
+    if (p) {
+        p->mutex = mutex_create();
+        p->condition = condition_create();
+        p->future = (Future*)calloc(1, sizeof(Future));
+        p->future->promise = p;
+    }
+    return p;
+}
+
+void promise_destroy(Promise* promise) {
+    if (promise) {
+        mutex_destroy(promise->mutex);
+        condition_destroy(promise->condition);
+        free(promise->future);
+        free(promise);
+    }
+}
+
+Future* promise_get_future(Promise* promise) { return promise ? promise->future : NULL; }
+
+void promise_set_result(Promise* promise, void* result) {
+    if (!promise) return;
+    mutex_lock(promise->mutex);
+    promise->result = result;
+    promise->done = true;
+    condition_broadcast(promise->condition);
+    mutex_unlock(promise->mutex);
+}
+
+void promise_set_error(Promise* promise, int error_code) {
+    if (!promise) return;
+    mutex_lock(promise->mutex);
+    promise->error_code = error_code;
+    promise->done = true;
+    promise->has_error = true;
+    condition_broadcast(promise->condition);
+    mutex_unlock(promise->mutex);
+}
+
+bool_t promise_is_done(Promise* promise) { return promise ? promise->done : false; }
+bool_t promise_is_error(Promise* promise) { return promise ? promise->has_error : false; }
+
+Future* future_create() { Promise* p = promise_create(); return p ? p->future : NULL; }
+
+void future_destroy(Future* future) {
+    if (future) {
+        if (future->promise) {
+            mutex_destroy(future->promise->mutex);
+            condition_destroy(future->promise->condition);
+            free(future->promise);
+        }
+        free(future);
+    }
+}
+
+void* future_get(Future* future) {
+    if (!future || !future->promise) return NULL;
+    mutex_lock(future->promise->mutex);
+    while (!future->promise->done) {
+        condition_wait(future->promise->condition, future->promise->mutex);
+    }
+    void* result = future->promise->result;
+    mutex_unlock(future->promise->mutex);
+    return result;
+}
+
+void* future_get_timeout(Future* future, uint64_t timeout_ms) {
+    if (!future || !future->promise) return NULL;
+    mutex_lock(future->promise->mutex);
+    while (!future->promise->done) {
+        if (!condition_timedwait(future->promise->condition, future->promise->mutex, timeout_ms)) break;
+    }
+    void* result = future->promise->done ? future->promise->result : NULL;
+    mutex_unlock(future->promise->mutex);
+    return result;
+}
+
+bool_t future_is_done(Future* future) { return future && future->promise ? future->promise->done : false; }
+bool_t future_is_error(Future* future) { return future && future->promise ? future->promise->has_error : false; }
+int future_get_error(Future* future) { return future && future->promise ? future->promise->error_code : 0; }
+
+typedef struct MapTaskArg {
+    Future* input;
+    void* (*func)(void*);
+    Promise* output;
+} MapTaskArg;
+
+static void* future_map_worker(void* arg) {
+    MapTaskArg* mta = (MapTaskArg*)arg;
+    void* input_result = future_get(mta->input);
+    if (input_result) {
+        void* output = mta->func(input_result);
+        promise_set_result(mta->output, output);
+    }
+    return NULL;
+}
+
+Future* future_map(Future* input, void* (*func)(void*)) {
+    if (!input || !func) return NULL;
+    Promise* output = promise_create();
+    MapTaskArg* mta = (MapTaskArg*)malloc(sizeof(MapTaskArg));
+    mta->input = input;
+    mta->func = func;
+    mta->output = output;
+    thread_detach(thread_create(future_map_worker, mta));
+    return output->future;
+}
+
+typedef struct AllTaskArg {
+    Future** futures;
+    size_t count;
+    Promise* output;
+    void** results;
+    volatile int completed;
+    Mutex mutex;
+} AllTaskArg;
+
+static void* all_worker(void* arg) {
+    AllTaskArg* ata = (AllTaskArg*)arg;
+    mutex_lock(ata->mutex);
+    int idx = ata->completed++;
+    mutex_unlock(ata->mutex);
+    if (idx < (int)ata->count) {
+        void* result = future_get(ata->futures[idx]);
+        mutex_lock(ata->mutex);
+        ata->results[idx] = result;
+        bool_t all_done = true;
+        for (size_t i = 0; i < ata->count; i++) { if (!future_is_done(ata->futures[i])) { all_done = false; break; } }
+        if (all_done) promise_set_result(ata->output, ata->results);
+        mutex_unlock(ata->mutex);
+    }
+    return NULL;
+}
+
+Future* future_all(Future** futures, size_t count) {
+    if (!futures || count == 0) return NULL;
+    Promise* output = promise_create();
+    AllTaskArg* ata = (AllTaskArg*)calloc(1, sizeof(AllTaskArg));
+    ata->futures = futures;
+    ata->count = count;
+    ata->output = output;
+    ata->results = (void**)calloc(count, sizeof(void*));
+    ata->mutex = mutex_create();
+    for (size_t i = 0; i < count; i++) {
+        thread_detach(thread_create(all_worker, ata));
+    }
+    return output->future;
+}
+
+Future* future_any(Future** futures, size_t count) {
+    if (!futures || count == 0) return NULL;
+    Promise* output = promise_create();
+    typedef struct { Future** futures; size_t count; Promise* output; Mutex mutex; bool_t done; } AnyArg;
+    AnyArg* aa = (AnyArg*)calloc(1, sizeof(AnyArg));
+    aa->futures = futures;
+    aa->count = count;
+    aa->output = output;
+    aa->mutex = mutex_create();
+    typedef struct { AnyArg* aa; size_t idx; } WorkerArg;
+    WorkerArg* args = (WorkerArg*)malloc(count * sizeof(WorkerArg));
+    for (size_t i = 0; i < count; i++) {
+        args[i].aa = aa;
+        args[i].idx = i;
+        typedef void* (*Func)(void*);
+        typedef struct { WorkerArg* arg; } Closure;
+        Closure* c = (Closure*)malloc(sizeof(Closure)); c->arg = &args[i];
+        thread_detach(thread_create((Func)future_map_worker, c));
+    }
+    return output->future;
 }

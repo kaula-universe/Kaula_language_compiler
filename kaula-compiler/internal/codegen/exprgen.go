@@ -91,7 +91,7 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		// 通用泛型适配方案：处理泛型参数解析与类型实例化逻辑
 		return eg.generateCallExpression(e)
 	case *ast.IndexExpression:
-		return eg.GenerateExpression(e.Object) + "[" + eg.GenerateExpression(e.Index) + "]"
+		return fmt.Sprintf("%s[%s]", eg.GenerateExpression(e.Object), eg.GenerateExpression(e.Index))
 	case *ast.PrefixCallExpression:
 		return eg.generatePrefixCallExpression(e)
 	case *ast.MemberAccessExpression:
@@ -252,40 +252,39 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	// 生成正常的二元表达式
 	switch e.Operator {
 	case "ASSIGN":
-		return left + " = " + right
+		return fmt.Sprintf("%s = %s", left, right)
 	case "PLUS", "+":
-		return left + " + " + right
+		return fmt.Sprintf("%s + %s", left, right)
 	case "MINUS", "-":
-		return left + " - " + right
+		return fmt.Sprintf("%s - %s", left, right)
 	case "MULTIPLY", "*":
-		return left + " * " + right
+		return fmt.Sprintf("%s * %s", left, right)
 	case "DIVIDE", "/":
-		return left + " / " + right
+		return fmt.Sprintf("%s / %s", left, right)
 	case "MOD", "%":
-		return left + " % " + right
+		return fmt.Sprintf("%s %% %s", left, right)
 	case "EQ", "==":
-		return left + " == " + right
+		return fmt.Sprintf("%s == %s", left, right)
 	case "NE", "!=":
-		return left + " != " + right
+		return fmt.Sprintf("%s != %s", left, right)
 	case "LT", "<":
-		return left + " < " + right
+		return fmt.Sprintf("%s < %s", left, right)
 	case "GT", ">":
-		return left + " > " + right
+		return fmt.Sprintf("%s > %s", left, right)
 	case "LE", "<=":
-		return left + " <= " + right
+		return fmt.Sprintf("%s <= %s", left, right)
 	case "GE", ">=":
-		return left + " >= " + right
+		return fmt.Sprintf("%s >= %s", left, right)
 	case "SHIFT_LEFT", "<<":
-		return left + " << " + right
+		return fmt.Sprintf("%s << %s", left, right)
 	case "SHIFT_RIGHT", ">>":
-		return left + " >> " + right
+		return fmt.Sprintf("%s >> %s", left, right)
 	case "AND", "&&":
-		return left + " && " + right
+		return fmt.Sprintf("%s && %s", left, right)
 	case "OR", "||":
-		return left + " || " + right
+		return fmt.Sprintf("%s || %s", left, right)
 	default:
-		// 对于未知的操作符，尝试使用原始符号
-		return left + " " + e.Operator + " " + right
+		return fmt.Sprintf("%s %s %s", left, e.Operator, right)
 	}
 }
 
@@ -722,50 +721,5 @@ func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpress
 
 // mapTypeToC 将 Kaula 类型映射到 C 类型
 func (eg *ExpressionGenerator) mapTypeToC(kaulaType string) string {
-	// 标准化类型名称（转小写）
-	typeLower := strings.ToLower(kaulaType)
-	
-	// 类型映射表
-	typeMap := map[string]string{
-		// 整数类型
-		"i8":   "int8_t",
-		"i16":  "int16_t",
-		"i32":  "int32_t",
-		"int8":   "int8_t",
-		"int16":  "int16_t",
-		"int32":  "int32_t",
-		"int64":  "int64_t",
-		"int":    "int64_t",
-		"i64":    "int64_t",
-		"long":   "int64_t",
-		
-		// 无符号整数类型
-		"u8":   "uint8_t",
-		"u16":  "uint16_t",
-		"u32":  "uint32_t",
-		"uint8":  "uint8_t",
-		"uint16": "uint16_t",
-		"uint32": "uint32_t",
-		"uint64": "uint64_t",
-		"uint":   "uint64_t",
-		"u64":    "uint64_t",
-		
-		// 浮点类型
-		"float":  "float",
-		"f32":    "float",
-		"double": "double",
-		"f64":    "double",
-		
-		// 其他类型
-		"bool":   "int",
-		"char":   "char",
-		"void":   "void",
-	}
-	
-	if cType, ok := typeMap[typeLower]; ok {
-		return cType
-	}
-	
-	// 默认返回 int64_t
-	return "int64_t"
+	return MapKaulaTypeToC(kaulaType)
 }

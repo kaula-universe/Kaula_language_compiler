@@ -73,4 +73,54 @@ extern int io_get_error();
 extern const char* io_get_error_message();
 extern void io_clear_error();
 
+// 异步 I/O
+typedef void* AsyncIO;
+typedef void (*AsyncIOCallback)(void* user_data, size_t bytes_transferred, int error_code);
+
+extern AsyncIO aio_create();
+extern void aio_destroy(AsyncIO aio);
+extern void aio_read_file(const String path, AsyncIOCallback callback, void* user_data);
+extern void aio_write_file(const String path, const void* data, size_t len, AsyncIOCallback callback, void* user_data);
+extern void aio_process_events(AsyncIO aio);
+extern bool_t aio_poll(AsyncIO aio, uint32_t timeout_ms);
+
+// 内存流
+typedef struct MemoryStream {
+    u8* data;
+    size_t size;
+    size_t capacity;
+    size_t position;
+} MemoryStream;
+
+extern MemoryStream* memstream_create(size_t initial_capacity);
+extern void memstream_destroy(MemoryStream* ms);
+extern size_t memstream_write(MemoryStream* ms, const void* data, size_t len);
+extern size_t memstream_read(MemoryStream* ms, void* buffer, size_t len);
+extern void memstream_seek(MemoryStream* ms, size_t position);
+extern size_t memstream_tell(MemoryStream* ms);
+extern size_t memstream_size(MemoryStream* ms);
+extern void* memstream_data(MemoryStream* ms);
+extern void memstream_reset(MemoryStream* ms);
+
+// 缓冲读写器
+typedef struct BufferedWriter {
+    MemoryStream* stream;
+    size_t buffer_size;
+} BufferedWriter;
+
+typedef struct BufferedReader {
+    MemoryStream* stream;
+    size_t buffer_size;
+} BufferedReader;
+
+extern BufferedWriter* buffered_writer_create(size_t buffer_size);
+extern void buffered_writer_destroy(BufferedWriter* bw);
+extern size_t buffered_writer_write(BufferedWriter* bw, const void* data, size_t len);
+extern void buffered_writer_flush(BufferedWriter* bw);
+
+extern BufferedReader* buffered_reader_create(size_t buffer_size);
+extern void buffered_reader_destroy(BufferedReader* br);
+extern void buffered_reader_set_source(BufferedReader* br, MemoryStream* source);
+extern size_t buffered_reader_read(BufferedReader* br, void* buffer, size_t len);
+
 #endif // STD_IO_IO_H

@@ -47,6 +47,9 @@
 // Web服务
 #include "web/web.h"
 
+// GUI
+#include "gui/gui.h"
+
 // 错误处理
 #include "error/error.h"
 
@@ -58,5 +61,28 @@
 // 对象系统 (需要单独编译)
 // #include "obj/obj.h"
 // #include "obj/int_object_ext.h"
+
+// JSON 解析和序列化
+#include "json/json.h"
+
+// 正则表达式 (使用 string 模块中的正则支持)
+
+// 加密算法
+#include "crypto/crypto.h"
+
+// 网络编程
+#include "net/net.h"
+
+// XML 解析
+#include "xml/xml.h"
+
+// TOML 配置解析
+#include "toml/toml.h"
+
+// 日志系统
+#include "logging/logging.h"
+
+// 单元测试框架
+#include "testing/testing.h"
 
 #endif // STD_H

@@ -68,4 +68,14 @@ extern bool string_ends_with(const String str, const String suffix);
 extern size_t string_count(const String str, char c);
 extern size_t string_count_string(const String str, const String substr);
 
+// 正则表达式匹配 (使用平台正则库)
+extern bool string_match_regex(const String str, const String pattern);
+extern size_t string_match_regex_offset(const String str, const String pattern, size_t start_offset);
+extern String* string_find_all_regex(const String str, const String pattern, size_t* count);
+extern String string_replace_regex(const String str, const String pattern, const String replacement);
+extern bool string_validate_email(const String str);
+extern bool string_validate_url(const String str);
+extern bool string_validate_ipv4(const String str);
+extern bool string_validate_number(const String str);
+
 #endif // STD_STRING_STRING_H
