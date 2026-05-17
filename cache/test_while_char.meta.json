@@ -1,0 +1,12 @@
+{
+  "source_path": "..\\kaula-projects\\llm_chat\\test_while_char.kl",
+  "source_hash": "993957f9b8f8fd3847e01d1a492372591b0bb606e211d7843be12bf039fe51f3",
+  "source_size": 414,
+  "source_mod_time": "2026-05-16T21:40:59.8656713+08:00",
+  "ccode_hash": "4963b1ff03061d3aa6484b34c228d7be28a47d867c80b53cf03fbcfa4689f99f",
+  "ccode_size": 912,
+  "created_at": "2026-05-16T21:40:59.8656713+08:00",
+  "last_accessed": "2026-05-16T21:40:59.8656713+08:00",
+  "used_modules": [],
+  "compiler_version": "0.1.0-alpha"
+}

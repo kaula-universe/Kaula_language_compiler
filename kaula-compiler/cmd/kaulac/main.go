@@ -410,7 +410,18 @@ func (s *semaResult_t) HasErrors() bool {
 }
 
 func findStdlib() string {
-	paths := []string{"stdlib.json", "kaula-compiler/stdlib.json", "../stdlib.json"}
+	// 首先尝试从可执行文件所在目录查找 stdlib.json
+	exePath, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exePath)
+		stdlibPath := filepath.Join(exeDir, "stdlib.json")
+		if _, err := os.Stat(stdlibPath); err == nil {
+			return stdlibPath
+		}
+	}
+	
+	// 尝试多个路径
+	paths := []string{"stdlib.json", "kaula-compiler/stdlib.json", "../stdlib.json", "../../kaula-compiler/stdlib.json"}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
 			return p
@@ -436,13 +447,35 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string) error
 		return fmt.Errorf("clang not found in PATH")
 	}
 
+	// 查找 kaula.h 所在的目录
+	kaulaSrcPaths := []string{
+		filepath.Join(workDir, "..", "..", "..", "kaula", "src"),  // glm_cli/src -> 新建文件夹/kaula/src
+		filepath.Join(workDir, "..", "..", "src"),                  // 上两级的 src
+		filepath.Join(workDir, "..", "src"),                        // 上一级的 src
+		filepath.Join(workDir, "src"),                              // 当前目录下的 src
+	}
+	
+	var kaulaSrcPath string
+	for _, p := range kaulaSrcPaths {
+		if _, err := os.Stat(filepath.Join(p, "kaula.h")); err == nil {
+			kaulaSrcPath = p
+			break
+		}
+	}
+
 	srcPaths := []string{
 		filepath.Join(workDir, "src"),
-		filepath.Join(workDir, "..", "src"),
 	}
+	if kaulaSrcPath != "" {
+		srcPaths = append(srcPaths, kaulaSrcPath)
+	}
+	srcPaths = append(srcPaths, filepath.Join(workDir, "..", "src"))
+	
 	stdPaths := []string{
-		filepath.Join(workDir, "std"),
-		filepath.Join(workDir, "..", "std"),
+		filepath.Join(workDir, "..", "..", "..", "kaula", "std"),  // glm_cli/src -> 新建文件夹/kaula/std
+		filepath.Join(workDir, "..", "..", "std"),                  // 上两级的 std
+		filepath.Join(workDir, "..", "std"),                        // 上一级的 std
+		filepath.Join(workDir, "std"),                              // 当前目录下的 std
 	}
 
 	var validSrcPaths, validStdPaths []string
@@ -465,27 +498,10 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string) error
 		clangArgs = append(clangArgs, "-I", p)
 	}
 
-	runtimeFile := filepath.Join(workDir, "src", "kmm_scoped_allocator.c")
-	if _, err := os.Stat(runtimeFile); err == nil {
-		clangArgs = append(clangArgs, runtimeFile)
-	}
-	// 也检查相对路径（相对于工作目录的父目录）
-	relRuntimeFile := filepath.Join(workDir, "..", "src", "kmm_scoped_allocator.c")
-	if _, err := os.Stat(relRuntimeFile); err == nil {
-		// 检查是否已经添加了
-		alreadyAdded := false
-		for _, arg := range clangArgs {
-			if arg == runtimeFile {
-				alreadyAdded = true
-				break
-			}
-		}
-		if !alreadyAdded {
-			clangArgs = append(clangArgs, relRuntimeFile)
-		}
-	}
+	// 不直接编译 kmm_scoped_allocator.c，因为 memory.c 已包含它
+	// 如果需要 memory 模块，编译 memory.c 即可
 
-	// 只编译使用过的 std 模块源文件（跳过 memory，因为 kmm_scoped_allocator.c 已包含）
+	// 只编译使用过的 std 模块源文件
 	for _, moduleName := range usedModules {
 		for _, stdPath := range validStdPaths {
 			// 支持多种模块名格式：
@@ -511,6 +527,14 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string) error
 				}
 			}
 		}
+	}
+
+	// 添加 Windows 系统库链接
+	if runtime.GOOS == "windows" {
+		clangArgs = append(clangArgs, "-lws2_32")
+		clangArgs = append(clangArgs, "-lwininet")
+		clangArgs = append(clangArgs, "-lgdi32")
+		clangArgs = append(clangArgs, "-luser32")
 	}
 
 	cmd := exec.Command(clangPath, clangArgs...)

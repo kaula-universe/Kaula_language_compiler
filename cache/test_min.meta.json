@@ -1,0 +1,12 @@
+{
+  "source_path": "..\\kaula-projects\\llm_chat\\test_min.kl",
+  "source_hash": "014446aa887cc7db41cd9d79f2dc72bc113d7fafa909fef946cf5e150da7063a",
+  "source_size": 191,
+  "source_mod_time": "2026-05-16T21:46:26.3625942+08:00",
+  "ccode_hash": "4e720679f3cc487b7575934ccae46ff57bb0c00aa556e5509b6f7a5358a1bc6e",
+  "ccode_size": 562,
+  "created_at": "2026-05-16T21:46:26.3625942+08:00",
+  "last_accessed": "2026-05-16T21:46:26.3625942+08:00",
+  "used_modules": [],
+  "compiler_version": "0.1.0-alpha"
+}

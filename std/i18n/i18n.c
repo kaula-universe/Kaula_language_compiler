@@ -1,4 +1,5 @@
 #include "i18n.h"
+#include "../memory/memory.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -92,11 +93,11 @@ const char* i18n_get_encoding_name(TextEncoding encoding) {
 // ==================== 初始化与清理 ====================
 void i18n_init(void) {
     if (!g_translation_table) {
-        g_translation_table = (TranslationTable*)malloc(sizeof(TranslationTable));
+        g_translation_table = (TranslationTable*)kmm_v4_malloc(sizeof(TranslationTable));
         if (g_translation_table) {
             g_translation_table->count = 0;
             g_translation_table->capacity = 256;
-            g_translation_table->entries = (TranslationEntry*)malloc(
+            g_translation_table->entries = (TranslationEntry*)kmm_v4_malloc(
                 sizeof(TranslationEntry) * g_translation_table->capacity);
         }
     }
@@ -141,25 +142,8 @@ void i18n_init(void) {
 }
 
 void i18n_cleanup(void) {
-    if (g_translation_table) {
-        for (size_t i = 0; i < g_translation_table->count; i++) {
-            TranslationEntry* entry = &g_translation_table->entries[i];
-            if (entry->translations) {
-                for (int j = 0; j < LANG_COUNT; j++) {
-                    if (entry->translations[j]) {
-                        free((void*)entry->translations[j]);
-                    }
-                }
-                free(entry->translations);
-            }
-            if (entry->key) {
-                free((void*)entry->key);
-            }
-        }
-        free(g_translation_table->entries);
-        free(g_translation_table);
-        g_translation_table = NULL;
-    }
+    // KMM 管理内存，无需手动释放
+    g_translation_table = NULL;
 }
 
 // ==================== 语言设置 ====================
@@ -266,7 +250,7 @@ static void ensure_translation_table_capacity(void) {
     
     if (g_translation_table->count >= g_translation_table->capacity) {
         size_t new_capacity = g_translation_table->capacity * 2;
-        TranslationEntry* new_entries = (TranslationEntry*)realloc(
+        TranslationEntry* new_entries = (TranslationEntry*)kmm_v4_realloc(
             g_translation_table->entries,
             sizeof(TranslationEntry) * new_capacity);
         if (new_entries) {
@@ -284,21 +268,21 @@ void i18n_register_translation(const char* key, Language lang, const char* value
         // 更新已有条目
         TranslationEntry* entry = &g_translation_table->entries[idx];
         if (!entry->translations) {
-            entry->translations = (const char**)calloc(LANG_COUNT, sizeof(char*));
+            entry->translations = (const char**)kmm_v4_calloc(LANG_COUNT, sizeof(char*));
         }
         if (entry->translations[lang]) {
-            free((void*)entry->translations[lang]);
+            // KMM 管理内存，无需手动释放
         }
-        entry->translations[lang] = strdup(value ? value : "");
+        entry->translations[lang] = kmm_v4_strdup(value ? value : "");
         return;
     }
     
     // 添加新条目
     ensure_translation_table_capacity();
     TranslationEntry* entry = &g_translation_table->entries[g_translation_table->count];
-    entry->key = strdup(key);
-    entry->translations = (const char**)calloc(LANG_COUNT, sizeof(char*));
-    entry->translations[lang] = strdup(value ? value : "");
+    entry->key = kmm_v4_strdup(key);
+    entry->translations = (const char**)kmm_v4_calloc(LANG_COUNT, sizeof(char*));
+    entry->translations[lang] = kmm_v4_strdup(value ? value : "");
     g_translation_table->count++;
 }
 
@@ -458,29 +442,14 @@ bool i18n_save_translation_file(const char* filepath) {
 }
 
 void i18n_clear_translations(void) {
+    // KMM 管理内存，无需手动释放
     if (!g_translation_table) return;
-    
-    for (size_t i = 0; i < g_translation_table->count; i++) {
-        TranslationEntry* entry = &g_translation_table->entries[i];
-        if (entry->translations) {
-            for (int j = 0; j < LANG_COUNT; j++) {
-                if (entry->translations[j]) {
-                    free((void*)entry->translations[j]);
-                }
-            }
-            free(entry->translations);
-            entry->translations = NULL;
-        }
-        if (entry->key) {
-            free((void*)entry->key);
-            entry->key = NULL;
-        }
-    }
     g_translation_table->count = 0;
 }
 
 // ==================== UTF-8 编码解码 ====================
-int i18n_utf8_encode(wchar_t codepoint, char* out_buffer) {
+// 使用 uint32_t 代替 wchar_t 以支持完整的 Unicode 码点 (Windows wchar_t 仅 16 位)
+int i18n_utf8_encode(uint32_t codepoint, char* out_buffer) {
     if (!out_buffer) return 0;
     
     if (codepoint < 0x80) {
@@ -505,7 +474,7 @@ int i18n_utf8_encode(wchar_t codepoint, char* out_buffer) {
     return 0;
 }
 
-int i18n_utf8_decode(const char* input, wchar_t* out_codepoint) {
+int i18n_utf8_decode(const char* input, uint32_t* out_codepoint) {
     if (!input || !out_codepoint) return 0;
     
     unsigned char c = (unsigned char)input[0];
@@ -515,21 +484,21 @@ int i18n_utf8_decode(const char* input, wchar_t* out_codepoint) {
         return 1;
     } else if ((c & 0xE0) == 0xC0) {
         if ((input[1] & 0xC0) != 0x80) return 0;
-        *out_codepoint = ((wchar_t)(c & 0x1F) << 6) | ((wchar_t)(input[1] & 0x3F));
+        *out_codepoint = ((uint32_t)(c & 0x1F) << 6) | ((uint32_t)(input[1] & 0x3F));
         return 2;
     } else if ((c & 0xF0) == 0xE0) {
         if ((input[1] & 0xC0) != 0x80 || (input[2] & 0xC0) != 0x80) return 0;
-        *out_codepoint = ((wchar_t)(c & 0x0F) << 12) | 
-                         ((wchar_t)(input[1] & 0x3F) << 6) | 
-                         ((wchar_t)(input[2] & 0x3F));
+        *out_codepoint = ((uint32_t)(c & 0x0F) << 12) | 
+                         ((uint32_t)(input[1] & 0x3F) << 6) | 
+                         ((uint32_t)(input[2] & 0x3F));
         return 3;
     } else if ((c & 0xF8) == 0xF0) {
         if ((input[1] & 0xC0) != 0x80 || (input[2] & 0xC0) != 0x80 || 
             (input[3] & 0xC0) != 0x80) return 0;
-        *out_codepoint = ((wchar_t)(c & 0x07) << 18) | 
-                         ((wchar_t)(input[1] & 0x3F) << 12) | 
-                         ((wchar_t)(input[2] & 0x3F) << 6) | 
-                         ((wchar_t)(input[3] & 0x3F));
+        *out_codepoint = ((uint32_t)(c & 0x07) << 18) | 
+                         ((uint32_t)(input[1] & 0x3F) << 12) | 
+                         ((uint32_t)(input[2] & 0x3F) << 6) | 
+                         ((uint32_t)(input[3] & 0x3F));
         return 4;
     }
     
@@ -603,7 +572,7 @@ char* i18n_utf8_substring(const char* str, size_t start, size_t count) {
         idx++;
     }
     
-    if (!*start_ptr) return strdup("");
+    if (!*start_ptr) return kmm_v4_strdup("");
     
     // 找到结束位置
     const char* end_ptr = start_ptr;
@@ -619,7 +588,7 @@ char* i18n_utf8_substring(const char* str, size_t start, size_t count) {
     }
     
     size_t byte_len = end_ptr - start_ptr;
-    char* result = (char*)malloc(byte_len + 1);
+    char* result = (char*)kmm_v4_malloc(byte_len + 1);
     if (result) {
         memcpy(result, start_ptr, byte_len);
         result[byte_len] = '\0';
@@ -666,12 +635,13 @@ bool i18n_detect_encoding(const char* input, TextEncoding* out_encoding) {
     while (*p) {
         unsigned char c = (unsigned char)*p;
         if (c > 0x80) {
+            unsigned char next = (unsigned char)p[1];
             // 简单启发式检测
-            if (c >= 0xA1 && c <= 0xF7 && p[1] && p[1] >= 0xA1) {
+            if (c >= 0xA1 && c <= 0xF7 && next && next >= 0xA1) {
                 *out_encoding = ENCODING_GB2312;
                 return true;
             }
-            if (c >= 0x81 && c <= 0xFE && p[1]) {
+            if (c >= 0x81 && c <= 0xFE && next) {
                 *out_encoding = ENCODING_GBK;
                 return true;
             }
@@ -687,7 +657,7 @@ bool i18n_detect_encoding(const char* input, TextEncoding* out_encoding) {
 // ==================== 编码转换 ====================
 char* i18n_convert_encoding(const char* input, TextEncoding from, TextEncoding to) {
     if (!input) return NULL;
-    if (from == to) return strdup(input);
+    if (from == to) return kmm_v4_strdup(input);
     
 #if STD_PLATFORM_WINDOWS
     // 使用 Windows API 进行编码转换
@@ -717,26 +687,26 @@ char* i18n_convert_encoding(const char* input, TextEncoding from, TextEncoding t
     
     // 先转换到 UTF-16
     int wide_len = MultiByteToWideChar(from_cp, 0, input, -1, NULL, 0);
-    if (wide_len <= 0) return strdup(input);
+    if (wide_len <= 0) return kmm_v4_strdup(input);
     
-    wchar_t* wide_str = (wchar_t*)malloc(sizeof(wchar_t) * wide_len);
+    wchar_t* wide_str = (wchar_t*)kmm_v4_malloc(sizeof(wchar_t) * wide_len);
     if (!wide_str) return NULL;
     
     MultiByteToWideChar(from_cp, 0, input, -1, wide_str, wide_len);
     
     // 再从 UTF-16 转换到目标编码
     int new_len = WideCharToMultiByte(to_cp, 0, wide_str, -1, NULL, 0, NULL, NULL);
-    char* result = (char*)malloc(new_len);
+    char* result = (char*)kmm_v4_malloc(new_len);
     if (result) {
         WideCharToMultiByte(to_cp, 0, wide_str, -1, result, new_len, NULL, NULL);
     }
     
-    free(wide_str);
+    // KMM 管理内存，无需手动释放
     return result;
 #else
     // POSIX 系统简化实现
-    if (to == ENCODING_UTF8) return strdup(input);
-    return strdup(input);
+    if (to == ENCODING_UTF8) return kmm_v4_strdup(input);
+    return kmm_v4_strdup(input);
 #endif
 }
 
@@ -753,7 +723,7 @@ char* i18n_utf8_normalize(const char* input) {
     
     // 简化实现：确保字符串是有效的 UTF-8
     // 完整的 Unicode 规范化需要 NFC/NFD 算法
-    return strdup(input);
+    return kmm_v4_strdup(input);
 }
 
 // ==================== 本地化数字格式 ====================
@@ -831,13 +801,13 @@ char* i18n_format_number(double value) {
         strncat(buffer, frac_str, sizeof(buffer) - strlen(buffer) - 1);
     }
     
-    return strdup(buffer);
+    return kmm_v4_strdup(buffer);
 }
 
 char* i18n_format_currency(double amount, Language lang) {
     static char buffer[128];
     char* num_str = i18n_format_number(amount);
-    if (!num_str) return strdup("");
+    if (!num_str) return kmm_v4_strdup("");
     
     switch (lang) {
         case LANG_ZH_CN: case LANG_ZH_TW:
@@ -870,12 +840,12 @@ char* i18n_format_currency(double amount, Language lang) {
             break;
     }
     
-    free(num_str);
-    return strdup(buffer);
+    // KMM 管理内存，无需手动释放
+    return kmm_v4_strdup(buffer);
 }
 
 char* i18n_format_date(time_t timestamp, const char* format) {
-    if (!format) return strdup("");
+    if (!format) return kmm_v4_strdup("");
     
     struct tm* tm_info = localtime(&timestamp);
     static char buffer[128];
@@ -914,11 +884,11 @@ char* i18n_format_date(time_t timestamp, const char* format) {
     
     fmt[sizeof(fmt) - 1] = '\0';
     strftime(buffer, sizeof(buffer), fmt, tm_info);
-    return strdup(buffer);
+    return kmm_v4_strdup(buffer);
 }
 
 char* i18n_format_date_time(time_t timestamp, const char* format) {
-    if (!format) return strdup("");
+    if (!format) return kmm_v4_strdup("");
     
     struct tm* tm_info = localtime(&timestamp);
     static char buffer[128];
@@ -951,7 +921,7 @@ char* i18n_format_date_time(time_t timestamp, const char* format) {
     
     fmt[sizeof(fmt) - 1] = '\0';
     strftime(buffer, sizeof(buffer), fmt, tm_info);
-    return strdup(buffer);
+    return kmm_v4_strdup(buffer);
 }
 
 // ==================== 平台适配 ====================

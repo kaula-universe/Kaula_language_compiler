@@ -705,7 +705,8 @@ func (gi *GenericInstance) statementNode() {}
 type FunctionStatement struct {
 	Name          string
 	TypeParams    []*TypeParameter // 泛型类型参数
-	Params        []string
+	Params        []string         // 参数名称列表
+	ParamTypes    []string         // 参数类型列表
 	Body          []Statement
 	ReturnType    string
 	Generic       bool      // 是否是泛型函数
@@ -1013,6 +1014,38 @@ func (r *ReturnStatement) SetPosition(pos Position) {
 	r.Pos = pos
 }
 
+// BreakStatement 表示 break 语句
+type BreakStatement struct {
+	Pos Position
+}
+
+func (b *BreakStatement) statementNode() {}
+func (b *BreakStatement) String() string {
+	return "BreakStatement"
+}
+func (b *BreakStatement) GetPosition() Position {
+	return b.Pos
+}
+func (b *BreakStatement) SetPosition(pos Position) {
+	b.Pos = pos
+}
+
+// ContinueStatement 表示 continue 语句
+type ContinueStatement struct {
+	Pos Position
+}
+
+func (c *ContinueStatement) statementNode() {}
+func (c *ContinueStatement) String() string {
+	return "ContinueStatement"
+}
+func (c *ContinueStatement) GetPosition() Position {
+	return c.Pos
+}
+func (c *ContinueStatement) SetPosition(pos Position) {
+	c.Pos = pos
+}
+
 // ImportStatement 表示import语句
 type ImportStatement struct {
 	Module string
@@ -1094,6 +1127,7 @@ type VariableDeclaration struct {
 	Name     string
 	Value    Expression
 	Nullable bool
+	IsAuto   bool
 	Pos      Position
 }
 
@@ -1288,6 +1322,23 @@ func (s *StringLiteral) GetPosition() Position {
 // SetPosition 实现 Node 接口
 func (s *StringLiteral) SetPosition(pos Position) {
 	s.Pos = pos
+}
+
+// CharLiteral 表示字符字面量
+type CharLiteral struct {
+	Value string
+	Pos   Position
+}
+
+func (c *CharLiteral) expressionNode() {}
+func (c *CharLiteral) String() string {
+	return "CharLiteral(" + c.Value + ")"
+}
+func (c *CharLiteral) GetPosition() Position {
+	return c.Pos
+}
+func (c *CharLiteral) SetPosition(pos Position) {
+	c.Pos = pos
 }
 
 // BooleanLiteral 表示布尔字面量
@@ -1827,6 +1878,155 @@ func (ta *TypeAliasStatement) GetPosition() Position {
 // SetPosition 实现 Node 接口
 func (ta *TypeAliasStatement) SetPosition(pos Position) {
 	ta.Pos = pos
+}
+
+// UnaryExpression 表示一元表达式
+type UnaryExpression struct {
+	Operator string
+	Right    Expression
+	Pos      Position
+}
+
+// expressionNode 实现Expression接口
+func (u *UnaryExpression) expressionNode() {}
+
+// String 实现Node接口
+func (u *UnaryExpression) String() string {
+	return "UnaryExpression(" + u.Operator + ")"
+}
+
+// GetPosition 实现Node接口
+func (u *UnaryExpression) GetPosition() Position {
+	return u.Pos
+}
+
+// SetPosition 实现Node接口
+func (u *UnaryExpression) SetPosition(pos Position) {
+	u.Pos = pos
+}
+
+// MemberExpression 表示成员访问表达式
+type MemberExpression struct {
+	Object Expression
+	Member string
+	Pos    Position
+}
+
+// expressionNode 实现Expression接口
+func (m *MemberExpression) expressionNode() {}
+
+// String 实现Node接口
+func (m *MemberExpression) String() string {
+	return "MemberExpression(" + m.Member + ")"
+}
+
+// GetPosition 实现Node接口
+func (m *MemberExpression) GetPosition() Position {
+	return m.Pos
+}
+
+// SetPosition 实现Node接口
+func (m *MemberExpression) SetPosition(pos Position) {
+	m.Pos = pos
+}
+
+// LiteralExpression 表示字面量表达式
+type LiteralExpression struct {
+	Kind  string
+	Value interface{}
+	Pos   Position
+}
+
+// expressionNode 实现Expression接口
+func (l *LiteralExpression) expressionNode() {}
+
+// String 实现Node接口
+func (l *LiteralExpression) String() string {
+	return "LiteralExpression(" + l.Kind + ")"
+}
+
+// GetPosition 实现Node接口
+func (l *LiteralExpression) GetPosition() Position {
+	return l.Pos
+}
+
+// SetPosition 实现Node接口
+func (l *LiteralExpression) SetPosition(pos Position) {
+	l.Pos = pos
+}
+
+// ParenExpression 表示括号表达式
+type ParenExpression struct {
+	Inner Expression
+	Pos   Position
+}
+
+// expressionNode 实现Expression接口
+func (p *ParenExpression) expressionNode() {}
+
+// String 实现Node接口
+func (p *ParenExpression) String() string {
+	return "ParenExpression"
+}
+
+// GetPosition 实现Node接口
+func (p *ParenExpression) GetPosition() Position {
+	return p.Pos
+}
+
+// SetPosition 实现Node接口
+func (p *ParenExpression) SetPosition(pos Position) {
+	p.Pos = pos
+}
+
+// ConditionalExpression 表示条件表达式
+type ConditionalExpression struct {
+	Condition Expression
+	TrueExpr  Expression
+	FalseExpr Expression
+	Pos       Position
+}
+
+// expressionNode 实现Expression接口
+func (c *ConditionalExpression) expressionNode() {}
+
+// String 实现Node接口
+func (c *ConditionalExpression) String() string {
+	return "ConditionalExpression"
+}
+
+// GetPosition 实现Node接口
+func (c *ConditionalExpression) GetPosition() Position {
+	return c.Pos
+}
+
+// SetPosition 实现Node接口
+func (c *ConditionalExpression) SetPosition(pos Position) {
+	c.Pos = pos
+}
+
+// ArrayLiteral 表示数组字面量
+type ArrayLiteral struct {
+	Elements []Expression
+	Pos      Position
+}
+
+// expressionNode 实现Expression接口
+func (a *ArrayLiteral) expressionNode() {}
+
+// String 实现Node接口
+func (a *ArrayLiteral) String() string {
+	return "ArrayLiteral"
+}
+
+// GetPosition 实现Node接口
+func (a *ArrayLiteral) GetPosition() Position {
+	return a.Pos
+}
+
+// SetPosition 实现Node接口
+func (a *ArrayLiteral) SetPosition(pos Position) {
+	a.Pos = pos
 }
 
 // IsGeneric 检查是否是泛型类型别名

@@ -1,4 +1,5 @@
 #include "web.h"
+#include "../memory/memory.h"
 #include "../string/string.h"
 #include <stdlib.h>
 #include <string.h>
@@ -84,7 +85,7 @@ static bool socket_write(SOCKET sock, const char* data, size_t len) {
 }
 
 static char* socket_read(SOCKET sock, size_t* out_len) {
-    char* buffer = (char*)malloc(HTTP_BUFFER_SIZE);
+    char* buffer = (char*)kmm_v4_malloc(HTTP_BUFFER_SIZE);
     if (!buffer) return NULL;
     size_t total = 0;
     size_t capacity = HTTP_BUFFER_SIZE;
@@ -92,9 +93,8 @@ static char* socket_read(SOCKET sock, size_t* out_len) {
     while (1) {
         if (total >= capacity) {
             capacity *= 2;
-            char* new_buffer = (char*)realloc(buffer, capacity);
+            char* new_buffer = (char*)kmm_v4_realloc(buffer, capacity);
             if (!new_buffer) {
-                free(buffer);
                 return NULL;
             }
             buffer = new_buffer;
@@ -114,7 +114,6 @@ static char* socket_read(SOCKET sock, size_t* out_len) {
 #endif
                 continue;
             }
-            free(buffer);
             return NULL;
         }
         total += result;
@@ -129,12 +128,11 @@ static char* socket_read(SOCKET sock, size_t* out_len) {
 
 HttpServer* http_server_create(i32 port) {
     ws_init();
-    HttpServer* server = (HttpServer*)malloc(sizeof(HttpServer));
+    HttpServer* server = (HttpServer*)kmm_v4_calloc(1, sizeof(HttpServer));
     if (!server) return NULL;
 
     server->socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server->socket == INVALID_SOCKET) {
-        free(server);
         return NULL;
     }
 
@@ -153,13 +151,11 @@ HttpServer* http_server_create(i32 port) {
 
     if (bind(server->socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         CLOSE_SOCKET(server->socket);
-        free(server);
         return NULL;
     }
 
     if (listen(server->socket, 10) == SOCKET_ERROR) {
         CLOSE_SOCKET(server->socket);
-        free(server);
         return NULL;
     }
 
@@ -171,8 +167,7 @@ HttpServer* http_server_create(i32 port) {
 
 bool http_server_set_document_root(HttpServer* server, const char* root) {
     if (!server) return false;
-    if (server->document_root) free(server->document_root);
-    server->document_root = strdup(root);
+    server->document_root = kmm_v4_strdup(root);
     return true;
 }
 
@@ -223,14 +218,11 @@ bool http_server_start(HttpServer* server, HttpRequestHandler handler) {
                 char* response_str = http_response_to_string(res);
                 if (response_str) {
                     socket_write(client_sock, response_str, strlen(response_str));
-                    free(response_str);
                 }
 
                 http_response_destroy(res);
                 http_request_destroy(req);
             }
-
-            free(raw_request);
         }
 
         CLOSE_SOCKET(client_sock);
@@ -250,10 +242,6 @@ void http_server_destroy(HttpServer* server) {
     if (server->socket != INVALID_SOCKET) {
         CLOSE_SOCKET(server->socket);
     }
-    if (server->document_root) {
-        free(server->document_root);
-    }
-    free(server);
 }
 
 // ==================== HTTP请求解析实现 ====================
@@ -261,21 +249,18 @@ void http_server_destroy(HttpServer* server) {
 HttpRequest* http_request_parse(const char* raw_request, size_t length) {
     if (!raw_request || length == 0) return NULL;
 
-    HttpRequest* req = (HttpRequest*)malloc(sizeof(HttpRequest));
+    HttpRequest* req = (HttpRequest*)kmm_v4_calloc(1, sizeof(HttpRequest));
     if (!req) return NULL;
-    memset(req, 0, sizeof(HttpRequest));
 
     // 解析请求行
     const char* line_end = strstr(raw_request, "\r\n");
     if (!line_end) {
-        http_request_destroy(req);
         return NULL;
     }
 
     size_t request_line_len = line_end - raw_request;
-    char* request_line = (char*)malloc(request_line_len + 1);
+    char* request_line = (char*)kmm_v4_malloc(request_line_len + 1);
     if (!request_line) {
-        http_request_destroy(req);
         return NULL;
     }
     memcpy(request_line, raw_request, request_line_len);
@@ -305,7 +290,7 @@ HttpRequest* http_request_parse(const char* raw_request, size_t length) {
         char* path_end = strchr(path_start, ' ');
         if (path_end) {
             size_t path_len = path_end - path_start;
-            req->path = (char*)malloc(path_len + 1);
+            req->path = (char*)kmm_v4_malloc(path_len + 1);
             if (req->path) {
                 memcpy(req->path, path_start, path_len);
                 req->path[path_len] = '\0';
@@ -314,13 +299,11 @@ HttpRequest* http_request_parse(const char* raw_request, size_t length) {
                 char* query = strchr(req->path, '?');
                 if (query) {
                     *query = '\0';
-                    req->query_string = strdup(query + 1);
+                    req->query_string = kmm_v4_strdup(query + 1);
                 }
             }
         }
     }
-
-    free(request_line);
 
     // 查找body开始位置
     const char* header_end = strstr(raw_request, "\r\n\r\n");
@@ -328,7 +311,7 @@ HttpRequest* http_request_parse(const char* raw_request, size_t length) {
         const char* body_start = header_end + 4;
         req->body_length = length - (body_start - raw_request);
         if (req->body_length > 0) {
-            req->body = (char*)malloc(req->body_length + 1);
+            req->body = (char*)kmm_v4_malloc(req->body_length + 1);
             if (req->body) {
                 memcpy(req->body, body_start, req->body_length);
                 req->body[req->body_length] = '\0';
@@ -340,12 +323,7 @@ HttpRequest* http_request_parse(const char* raw_request, size_t length) {
 }
 
 void http_request_destroy(HttpRequest* req) {
-    if (!req) return;
-    if (req->path) free(req->path);
-    if (req->query_string) free(req->query_string);
-    if (req->body) free(req->body);
-    if (req->headers) free(req->headers);
-    free(req);
+    // KMM 管理内存，无需手动释放
 }
 
 const char* http_request_get_header(HttpRequest* req, const char* name) {
@@ -406,47 +384,40 @@ const char* http_request_get_query_param(HttpRequest* req, const char* name) {
 // ==================== HTTP响应构建实现 ====================
 
 HttpResponse* http_response_create(void) {
-    HttpResponse* res = (HttpResponse*)malloc(sizeof(HttpResponse));
+    HttpResponse* res = (HttpResponse*)kmm_v4_calloc(1, sizeof(HttpResponse));
     if (!res) return NULL;
-    memset(res, 0, sizeof(HttpResponse));
     res->status_code = HTTP_OK;
     res->status_message = "OK";
     return res;
 }
 
 void http_response_destroy(HttpResponse* res) {
-    if (!res) return;
-    if (res->status_message) free(res->status_message);
-    if (res->headers) free(res->headers);
-    if (res->body) free(res->body);
-    if (res->content_type) free(res->content_type);
-    free(res);
+    // KMM 管理内存，无需手动释放
 }
 
 void http_response_set_status(HttpResponse* res, HttpStatusCode code) {
     if (!res) return;
     res->status_code = code;
     switch (code) {
-        case HTTP_OK: res->status_message = strdup("OK"); break;
-        case HTTP_CREATED: res->status_message = strdup("Created"); break;
-        case HTTP_NO_CONTENT: res->status_message = strdup("No Content"); break;
-        case HTTP_FOUND: res->status_message = strdup("Found"); break;
-        case HTTP_BAD_REQUEST: res->status_message = strdup("Bad Request"); break;
-        case HTTP_UNAUTHORIZED: res->status_message = strdup("Unauthorized"); break;
-        case HTTP_FORBIDDEN: res->status_message = strdup("Forbidden"); break;
-        case HTTP_NOT_FOUND: res->status_message = strdup("Not Found"); break;
-        case HTTP_METHOD_NOT_ALLOWED: res->status_message = strdup("Method Not Allowed"); break;
-        case HTTP_INTERNAL_SERVER_ERROR: res->status_message = strdup("Internal Server Error"); break;
-        case HTTP_BAD_GATEWAY: res->status_message = strdup("Bad Gateway"); break;
-        case HTTP_SERVICE_UNAVAILABLE: res->status_message = strdup("Service Unavailable"); break;
-        default: res->status_message = strdup("Unknown"); break;
+        case HTTP_OK: res->status_message = kmm_v4_strdup("OK"); break;
+        case HTTP_CREATED: res->status_message = kmm_v4_strdup("Created"); break;
+        case HTTP_NO_CONTENT: res->status_message = kmm_v4_strdup("No Content"); break;
+        case HTTP_FOUND: res->status_message = kmm_v4_strdup("Found"); break;
+        case HTTP_BAD_REQUEST: res->status_message = kmm_v4_strdup("Bad Request"); break;
+        case HTTP_UNAUTHORIZED: res->status_message = kmm_v4_strdup("Unauthorized"); break;
+        case HTTP_FORBIDDEN: res->status_message = kmm_v4_strdup("Forbidden"); break;
+        case HTTP_NOT_FOUND: res->status_message = kmm_v4_strdup("Not Found"); break;
+        case HTTP_METHOD_NOT_ALLOWED: res->status_message = kmm_v4_strdup("Method Not Allowed"); break;
+        case HTTP_INTERNAL_SERVER_ERROR: res->status_message = kmm_v4_strdup("Internal Server Error"); break;
+        case HTTP_BAD_GATEWAY: res->status_message = kmm_v4_strdup("Bad Gateway"); break;
+        case HTTP_SERVICE_UNAVAILABLE: res->status_message = kmm_v4_strdup("Service Unavailable"); break;
+        default: res->status_message = kmm_v4_strdup("Unknown"); break;
     }
 }
 
 void http_response_set_body(HttpResponse* res, const char* body, size_t length) {
     if (!res) return;
-    if (res->body) free(res->body);
-    res->body = (char*)malloc(length + 1);
+    res->body = (char*)kmm_v4_malloc(length + 1);
     if (res->body) {
         memcpy(res->body, body, length);
         res->body[length] = '\0';
@@ -456,8 +427,7 @@ void http_response_set_body(HttpResponse* res, const char* body, size_t length) 
 
 void http_response_set_content_type(HttpResponse* res, const char* content_type) {
     if (!res) return;
-    if (res->content_type) free(res->content_type);
-    res->content_type = strdup(content_type);
+    res->content_type = kmm_v4_strdup(content_type);
 }
 
 void http_response_set_header(HttpResponse* res, const char* name, const char* value) {
@@ -467,7 +437,7 @@ void http_response_set_header(HttpResponse* res, const char* name, const char* v
     size_t value_len = strlen(value);
     size_t entry_len = name_len + 2 + value_len + 2;
 
-    char* new_entry = (char*)malloc(entry_len);
+    char* new_entry = (char*)kmm_v4_malloc(entry_len);
     if (!new_entry) return;
 
     snprintf(new_entry, entry_len, "%s: %s\r\n", name, value);
@@ -475,10 +445,9 @@ void http_response_set_header(HttpResponse* res, const char* name, const char* v
     if (res->headers) {
         size_t old_len = strlen(res->headers);
         size_t new_len = old_len + entry_len;
-        char* new_headers = (char*)realloc(res->headers, new_len + 1);
+        char* new_headers = (char*)kmm_v4_realloc(res->headers, new_len + 1);
         if (new_headers) {
             strcat(new_headers, new_entry);
-            free(new_entry);
             res->headers = new_headers;
         }
     } else {
@@ -507,7 +476,7 @@ void http_response_set_redirect(HttpResponse* res, const char* location) {
 char* http_response_to_string(HttpResponse* res) {
     if (!res) return NULL;
 
-    char* buffer = (char*)malloc(16384);
+    char* buffer = (char*)kmm_v4_malloc(16384);
     if (!buffer) return NULL;
 
     int offset = snprintf(buffer, 1024, "HTTP/1.1 %d %s\r\n",
@@ -543,9 +512,8 @@ char* http_response_to_string(HttpResponse* res) {
 
 HttpClient* http_client_create(void) {
     ws_init();
-    HttpClient* client = (HttpClient*)malloc(sizeof(HttpClient));
+    HttpClient* client = (HttpClient*)kmm_v4_calloc(1, sizeof(HttpClient));
     if (!client) return NULL;
-    memset(client, 0, sizeof(HttpClient));
     client->socket = INVALID_SOCKET;
     client->timeout_ms = 30000;
     return client;
@@ -556,8 +524,6 @@ void http_client_destroy(HttpClient* client) {
     if (client->socket != INVALID_SOCKET) {
         CLOSE_SOCKET(client->socket);
     }
-    if (client->base_url) free(client->base_url);
-    free(client);
 }
 
 bool http_client_set_timeout(HttpClient* client, i32 timeout_ms) {
@@ -628,7 +594,6 @@ HttpResponse* http_client_get(HttpClient* client, const char* url) {
     if (!raw_response) return NULL;
 
     HttpResponse* res = http_response_create();
-    // 简单解析状态码
     if (strncmp(raw_response, "HTTP/1.1 200", 12) == 0) {
         res->status_code = HTTP_OK;
     } else {
@@ -639,7 +604,7 @@ HttpResponse* http_client_get(HttpClient* client, const char* url) {
     if (body) {
         body += 4;
         size_t body_len = resp_len - (body - raw_response);
-        res->body = (char*)malloc(body_len + 1);
+        res->body = (char*)kmm_v4_malloc(body_len + 1);
         if (res->body) {
             memcpy(res->body, body, body_len);
             res->body[body_len] = '\0';
@@ -647,7 +612,6 @@ HttpResponse* http_client_get(HttpClient* client, const char* url) {
         }
     }
 
-    free(raw_response);
     return res;
 }
 
@@ -706,7 +670,7 @@ HttpResponse* http_client_post(HttpClient* client, const char* url, const char* 
     if (resp_body) {
         resp_body += 4;
         size_t resp_body_len = resp_len - (resp_body - raw_response);
-        res->body = (char*)malloc(resp_body_len + 1);
+        res->body = (char*)kmm_v4_malloc(resp_body_len + 1);
         if (res->body) {
             memcpy(res->body, resp_body, resp_body_len);
             res->body[resp_body_len] = '\0';
@@ -714,7 +678,6 @@ HttpResponse* http_client_post(HttpClient* client, const char* url, const char* 
         }
     }
 
-    free(raw_response);
     return res;
 }
 
@@ -763,7 +726,7 @@ HttpResponse* http_client_put(HttpClient* client, const char* url, const char* b
     if (resp_body) {
         resp_body += 4;
         size_t resp_body_len = resp_len - (resp_body - raw_response);
-        res->body = (char*)malloc(resp_body_len + 1);
+        res->body = (char*)kmm_v4_malloc(resp_body_len + 1);
         if (res->body) {
             memcpy(res->body, resp_body, resp_body_len);
             res->body[resp_body_len] = '\0';
@@ -771,7 +734,6 @@ HttpResponse* http_client_put(HttpClient* client, const char* url, const char* b
         }
     }
 
-    free(raw_response);
     return res;
 }
 
@@ -808,7 +770,7 @@ HttpResponse* http_client_delete(HttpClient* client, const char* url) {
     if (resp_body) {
         resp_body += 4;
         size_t resp_body_len = resp_len - (resp_body - raw_response);
-        res->body = (char*)malloc(resp_body_len + 1);
+        res->body = (char*)kmm_v4_malloc(resp_body_len + 1);
         if (res->body) {
             memcpy(res->body, resp_body, resp_body_len);
             res->body[resp_body_len] = '\0';
@@ -816,7 +778,6 @@ HttpResponse* http_client_delete(HttpClient* client, const char* url) {
         }
     }
 
-    free(raw_response);
     return res;
 }
 
@@ -833,9 +794,8 @@ void http_response_print(HttpResponse* res) {
 UrlParts* url_parse(const char* url) {
     if (!url) return NULL;
 
-    UrlParts* parts = (UrlParts*)malloc(sizeof(UrlParts));
+    UrlParts* parts = (UrlParts*)kmm_v4_calloc(1, sizeof(UrlParts));
     if (!parts) return NULL;
-    memset(parts, 0, sizeof(UrlParts));
 
     // 简单解析: http://host:port/path?query
     const char* p = url;
@@ -844,7 +804,7 @@ UrlParts* url_parse(const char* url) {
     const char* scheme_end = strstr(p, "://");
     if (scheme_end) {
         size_t scheme_len = scheme_end - p;
-        parts->scheme = (char*)malloc(scheme_len + 1);
+        parts->scheme = (char*)kmm_v4_malloc(scheme_len + 1);
         if (parts->scheme) {
             memcpy(parts->scheme, p, scheme_len);
             parts->scheme[scheme_len] = '\0';
@@ -863,7 +823,7 @@ UrlParts* url_parse(const char* url) {
 
     if (host_end) {
         size_t host_len = host_end - p;
-        char* host_port = (char*)malloc(host_len + 1);
+        char* host_port = (char*)kmm_v4_malloc(host_len + 1);
         if (host_port) {
             memcpy(host_port, p, host_len);
             host_port[host_len] = '\0';
@@ -872,17 +832,16 @@ UrlParts* url_parse(const char* url) {
             char* colon = strchr(host_port, ':');
             if (colon) {
                 *colon = '\0';
-                parts->host = strdup(host_port);
+                parts->host = kmm_v4_strdup(host_port);
                 parts->port = atoi(colon + 1);
             } else {
-                parts->host = strdup(host_port);
+                parts->host = kmm_v4_strdup(host_port);
                 parts->port = 80;
             }
-            free(host_port);
         }
         p = host_end;
     } else {
-        parts->host = strdup(p);
+        parts->host = kmm_v4_strdup(p);
         parts->port = 80;
     }
 
@@ -890,35 +849,30 @@ UrlParts* url_parse(const char* url) {
     if (path_start) {
         const char* q = query_start ? query_start : p + strlen(p);
         size_t path_len = q - path_start;
-        parts->path = (char*)malloc(path_len + 1);
+        parts->path = (char*)kmm_v4_malloc(path_len + 1);
         if (parts->path) {
             memcpy(parts->path, path_start, path_len);
             parts->path[path_len] = '\0';
         }
     } else {
-        parts->path = strdup("/");
+        parts->path = kmm_v4_strdup("/");
     }
 
     // 解析query
     if (query_start) {
-        parts->query = strdup(query_start + 1);
+        parts->query = kmm_v4_strdup(query_start + 1);
     }
 
     return parts;
 }
 
 void url_destroy(UrlParts* parts) {
-    if (!parts) return;
-    if (parts->scheme) free(parts->scheme);
-    if (parts->host) free(parts->host);
-    if (parts->path) free(parts->path);
-    if (parts->query) free(parts->query);
-    free(parts);
+    // KMM 管理内存，无需手动释放
 }
 
 char* url_encode(const char* str) {
     if (!str) return NULL;
-    char* result = (char*)malloc(strlen(str) * 3 + 1);
+    char* result = (char*)kmm_v4_malloc(strlen(str) * 3 + 1);
     if (!result) return NULL;
 
     const char* p = str;
@@ -939,7 +893,7 @@ char* url_encode(const char* str) {
 
 char* url_decode(const char* str) {
     if (!str) return NULL;
-    char* result = (char*)malloc(strlen(str) + 1);
+    char* result = (char*)kmm_v4_malloc(strlen(str) + 1);
     if (!result) return NULL;
 
     const char* p = str;

@@ -13,6 +13,7 @@ typedef struct Vector {
 extern Vector* vector_create(size_t initial_capacity);
 extern void vector_destroy(Vector* vector);
 extern void vector_push_back(Vector* vector, void* element);
+extern void* vector_pop_back(Vector* vector);
 extern void* vector_get(Vector* vector, size_t index);
 extern void vector_set(Vector* vector, size_t index, void* element);
 extern void vector_remove(Vector* vector, size_t index);
@@ -20,6 +21,12 @@ extern size_t vector_size(Vector* vector);
 extern bool vector_is_empty(Vector* vector);
 extern void vector_clear(Vector* vector);
 extern void vector_reserve(Vector* vector, size_t capacity);
+
+// 整数版本（用于存储索引等整数值）
+extern void vector_push_back_int(Vector* vector, int64_t element);
+extern int64_t vector_pop_back_int(Vector* vector);
+extern int64_t vector_get_int(Vector* vector, size_t index);
+extern void vector_set_int(Vector* vector, size_t index, int64_t element);
 
 // 链表（LinkedList）
 typedef struct ListNode {

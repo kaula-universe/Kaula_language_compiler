@@ -1,12 +1,12 @@
 #include "error.h"
+#include "../memory/memory.h"
 #include <stdio.h>
 #include <stdarg.h>
-#include <stdlib.h>
 #include <string.h>
 
 // 错误处理函数
 Error* error_create(ErrorType type, int code, const char* message, const char* file, int line) {
-    Error* error = (Error*)malloc(sizeof(Error));
+    Error* error = (Error*)kmm_v4_malloc(sizeof(Error));
     if (error) {
         error->type = type;
         error->code = code;
@@ -20,9 +20,8 @@ Error* error_create(ErrorType type, int code, const char* message, const char* f
 }
 
 void error_destroy(Error* error) {
-    if (error) {
-        free(error);
-    }
+    // KMM 管理内存，无需手动释放
+    (void)error;
 }
 
 const char* error_get_message(Error* error) {

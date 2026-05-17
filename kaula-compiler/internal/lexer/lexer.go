@@ -35,12 +35,14 @@ const (
 	TOKEN_SELF
 	TOKEN_NONLOCAL
 	TOKEN_PRINTLN
+	TOKEN_BREAK
+	TOKEN_CONTINUE
 	TOKEN_CLASS
 	TOKEN_LITERAL_INTERFACE
 	TOKEN_IMPLEMENTS
 	TOKEN_CONSTRUCTOR
 	TOKEN_STRUCT
-	TOKEN_LET
+	TOKEN_AUTO
 	TOKEN_TYPE
 	// 类型关键字
 	TOKEN_TYPE_INT
@@ -57,6 +59,7 @@ const (
 	// 字面量
 	TOKEN_LITERAL_INT
 	TOKEN_LITERAL_FLOAT
+	TOKEN_LITERAL_CHAR
 	TOKEN_STRING
 	TOKEN_TRUE
 	TOKEN_FALSE
@@ -73,6 +76,7 @@ const (
 	TOKEN_LT
 	TOKEN_GT
 	TOKEN_AND
+	TOKEN_AMPERSAND
 	TOKEN_OR
 	TOKEN_LE
 	TOKEN_GE
@@ -178,6 +182,8 @@ func (l *Lexer) Next() Token {
 			return l.scanNumber()
 		case char == '"':
 			return l.scanString()
+		case char == '\'':
+			return l.scanCharLiteral()
 		case char == '+':
 			l.next()
 			return Token{Type: TOKEN_PLUS, Value: "+", Line: l.line, Column: l.column}
@@ -269,14 +275,14 @@ func (l *Lexer) Next() Token {
 				return Token{Type: TOKEN_COLON, Value: ":", Line: l.line, Column: l.column}
 			}
 		case char == '&':
-			if l.peek() == '&' {
-				l.next()
-				l.next()
-				return Token{Type: TOKEN_AND, Value: "&&", Line: l.line, Column: l.column}
-			} else {
-				l.error("unexpected token")
-				continue
-			}
+		if l.peek() == '&' {
+			l.next()
+			l.next()
+			return Token{Type: TOKEN_AND, Value: "&&", Line: l.line, Column: l.column}
+		} else {
+			l.next()
+			return Token{Type: TOKEN_AMPERSAND, Value: "&", Line: l.line, Column: l.column}
+		}
 		case char == '|':
 			if l.peek() == '|' {
 				l.next()
@@ -384,6 +390,10 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_NONLOCAL
 	case "println":
 		tokenType = TOKEN_PRINTLN
+	case "break":
+		tokenType = TOKEN_BREAK
+	case "continue":
+		tokenType = TOKEN_CONTINUE
 	case "class":
 		tokenType = TOKEN_CLASS
 	case "interface":
@@ -409,6 +419,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_TYPE_VOID
 	case "struct":
 		tokenType = TOKEN_STRUCT
+	case "auto":
+		tokenType = TOKEN_AUTO
 	case "type":
 		tokenType = TOKEN_TYPE
 	case "this":
@@ -465,6 +477,53 @@ func (l *Lexer) scanString() Token {
 	l.next() // 跳过结尾的 "
 	l.column += l.pos - start + 2 // +2 for the quotes
 	return Token{Type: TOKEN_STRING, Value: value, Line: l.line, Column: l.column}
+}
+
+// scanCharLiteral 扫描单引号字符字面量，如 '/'、'\n'
+func (l *Lexer) scanCharLiteral() Token {
+	l.next() // 跳过开头的 '
+	if l.pos >= l.inputLen {
+		l.error("unterminated character literal")
+		return Token{Type: TOKEN_LITERAL_CHAR, Value: "", Line: l.line, Column: l.column}
+	}
+	
+	charValue := ""
+	if l.input[l.pos] == '\\' {
+		// 转义字符
+		l.pos++
+		if l.pos >= l.inputLen {
+			l.error("unterminated character literal")
+			return Token{Type: TOKEN_LITERAL_CHAR, Value: "", Line: l.line, Column: l.column}
+		}
+		escapeChar := l.input[l.pos]
+		switch escapeChar {
+		case 'n':
+			charValue = "\\n"
+		case 'r':
+			charValue = "\\r"
+		case 't':
+			charValue = "\\t"
+		case '\\':
+			charValue = "\\\\"
+		case '\'':
+			charValue = "\\'"
+		case '"':
+			charValue = "\\\""
+		default:
+			charValue = string(escapeChar)
+		}
+	} else {
+		charValue = string(l.input[l.pos])
+	}
+	l.pos++
+	
+	if l.pos < l.inputLen && l.input[l.pos] == '\'' {
+		l.next() // 跳过结尾的 '
+	} else {
+		l.error("unterminated character literal")
+	}
+	
+	return Token{Type: TOKEN_LITERAL_CHAR, Value: charValue, Line: l.line, Column: l.column}
 }
 
 // next 前进到下一个字符
@@ -583,6 +642,10 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "NONLOCAL"
 	case TOKEN_PRINTLN:
 		return "PRINTLN"
+	case TOKEN_BREAK:
+		return "BREAK"
+	case TOKEN_CONTINUE:
+		return "CONTINUE"
 	case TOKEN_CLASS:
 		return "CLASS"
 	case TOKEN_LITERAL_INTERFACE:
@@ -609,14 +672,16 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "STRING"
 	case TOKEN_TYPE_VOID:
 		return "VOID"
-	case TOKEN_LET:
-		return "LET"
+	case TOKEN_AUTO:
+		return "AUTO"
 	case TOKEN_IDENT:
 		return "IDENT"
 	case TOKEN_LITERAL_INT:
 		return "INT"
 	case TOKEN_LITERAL_FLOAT:
 		return "FLOAT"
+	case TOKEN_LITERAL_CHAR:
+		return "CHAR"
 	case TOKEN_STRING:
 		return "STRING"
 	case TOKEN_TRUE:
@@ -649,6 +714,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "GE"
 	case TOKEN_AND:
 		return "AND"
+	case TOKEN_AMPERSAND:
+		return "AMPERSAND"
 	case TOKEN_OR:
 		return "OR"
 	case TOKEN_PREFIX_REF:

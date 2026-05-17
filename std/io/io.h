@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include "../base/types.h"
+#include "../string/string.h"
 
 // ==================== 跨平台路径分隔符 ====================
 #if STD_PLATFORM_WINDOWS
@@ -16,6 +17,7 @@
 // 标准输入输出函数
 extern void print(const char* format, ...);
 extern void println(const char* format, ...);
+extern void println_multi(int arg_count, ...);
 extern void print_char(char c);
 extern void print_int(i64 value);
 extern void print_float(f64 value);

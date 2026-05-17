@@ -1,0 +1,327 @@
+{
+  "version": 1,
+  "entries": {
+    "test_break_continue": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_break_continue.kl",
+      "source_hash": "f271c5d11735261c94abcf2ff2e48d40a51d07997e755a8b76907a05fd44aeb8",
+      "source_size": 504,
+      "source_mod_time": "2026-05-16T21:07:46.7181157+08:00",
+      "ccode_hash": "67ad8b8afe15f5724a51776e06d26a7b4516d11f4d7e1d81b14b778c3130bd29",
+      "ccode_size": 772,
+      "created_at": "2026-05-16T21:07:46.7181157+08:00",
+      "last_accessed": "2026-05-16T21:07:46.7181157+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string",
+        "std.memory"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_char_call": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_char_call.kl",
+      "source_hash": "9202e76725147a8c0a51dc060f711765c81212120096b6fb0d8f4474015eca19",
+      "source_size": 213,
+      "source_mod_time": "2026-05-16T21:27:43.688744+08:00",
+      "ccode_hash": "208cad4280d8d862e10dc3deaf8cef052e759e0a2c50315ad6e6535f026ab166",
+      "ccode_size": 463,
+      "created_at": "2026-05-16T21:27:43.688744+08:00",
+      "last_accessed": "2026-05-16T21:27:43.688744+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_char_cmp": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_char_cmp.kl",
+      "source_hash": "c0b3102aa5c8541fd74b45ee457005b9be4e93727b54944156d98425f54337b7",
+      "source_size": 160,
+      "source_mod_time": "2026-05-16T21:40:30.2403107+08:00",
+      "ccode_hash": "5326ba74933c4a7348568c1be0927dd2ddfe3c099db351485bc98c29fdc05541",
+      "ccode_size": 502,
+      "created_at": "2026-05-16T21:40:30.2403107+08:00",
+      "last_accessed": "2026-05-16T21:40:30.2403107+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_char_type": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_char_type.kl",
+      "source_hash": "db6d78391f0c259bbab901d402dca336e37c8b6ffb0b2115814fc99939050862",
+      "source_size": 578,
+      "source_mod_time": "2026-05-16T21:53:29.4989168+08:00",
+      "ccode_hash": "071cd1b326adc6a689c4eaa85edef681e65a5fdb34e686835274c56775464c79",
+      "ccode_size": 1116,
+      "created_at": "2026-05-16T21:53:29.4989168+08:00",
+      "last_accessed": "2026-05-16T21:53:29.4989168+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_continue_if": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_continue_if.kl",
+      "source_hash": "a5e5c6fcc695836d51300e881b41cf728917d0180f17989100ea4ae86ff7eab4",
+      "source_size": 422,
+      "source_mod_time": "2026-05-16T21:49:58.6113735+08:00",
+      "ccode_hash": "82fe2622bc0812a24510c6b717aff2803f42ece1283be15a6e92c01b8990fc33",
+      "ccode_size": 990,
+      "created_at": "2026-05-16T21:49:58.6113735+08:00",
+      "last_accessed": "2026-05-16T21:49:58.6113735+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_conv": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_conv.kl",
+      "source_hash": "8622113685821be6c7e0af8baf9b8d6241ba3b41c627f58850ab2b57bc152bf7",
+      "source_size": 528,
+      "source_mod_time": "2026-05-16T21:57:25.1191452+08:00",
+      "ccode_hash": "c3371711c14045a01b1aa619b997f29a6a76a7e92c1d4ccdfb87f1ddbc34ee84",
+      "ccode_size": 1156,
+      "created_at": "2026-05-16T21:57:25.1191452+08:00",
+      "last_accessed": "2026-05-16T21:57:25.1191452+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_conv2": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_conv2.kl",
+      "source_hash": "4aca91d7440b90163eef691950db740bf1479a1d43dc75d624ae24314de59aac",
+      "source_size": 817,
+      "source_mod_time": "2026-05-16T21:57:55.5666094+08:00",
+      "ccode_hash": "e038e72eff3e1e8fd68ecce0e81c824005e0435e50dca4472f4db3b18e9e969f",
+      "ccode_size": 1587,
+      "created_at": "2026-05-16T21:57:55.5666094+08:00",
+      "last_accessed": "2026-05-16T21:57:55.5666094+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_exact": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_exact.kl",
+      "source_hash": "b798ed2d943cc749e785e042e110d2ccb695a949963874cad033495707bad4ac",
+      "source_size": 351,
+      "source_mod_time": "2026-05-16T21:26:35.1079638+08:00",
+      "ccode_hash": "12b1fcc091c42ced42e2266831170672ca98b4b838d55b332a42e64278f7e4b7",
+      "ccode_size": 704,
+      "created_at": "2026-05-16T21:26:35.1079638+08:00",
+      "last_accessed": "2026-05-16T21:26:35.1079638+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_funcall": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_funcall.kl",
+      "source_hash": "b11c1a24f53ce66d19bb60ec978b76ce3ad26c27d67ff93091b7b10b41507c01",
+      "source_size": 176,
+      "source_mod_time": "2026-05-16T21:23:56.416403+08:00",
+      "ccode_hash": "6558092a99e557f612460c10b9ac206c889364db17882d8336df040f86da4036",
+      "ccode_size": 423,
+      "created_at": "2026-05-16T21:23:56.416403+08:00",
+      "last_accessed": "2026-05-16T21:23:56.416403+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_i64": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_i64.kl",
+      "source_hash": "6584ebd10f9b980b8ef00839332cb7c5929b6de3501333b55abfbb159a967f10",
+      "source_size": 212,
+      "source_mod_time": "2026-05-16T20:51:50.0337804+08:00",
+      "ccode_hash": "1509567666c9dfee80f1038cfcf25c9bc0fce1182d3c8c2c9d6a1a79ceaf0e37",
+      "ccode_size": 436,
+      "created_at": "2026-05-16T20:51:50.0337804+08:00",
+      "last_accessed": "2026-05-16T20:51:50.0337804+08:00",
+      "used_modules": [
+        "std.io",
+        "std.time"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_if_call": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_if_call.kl",
+      "source_hash": "6b6e59c460f8c38dd2948b01d76155276be84a548b47e7e90941078e02bece4c",
+      "source_size": 189,
+      "source_mod_time": "2026-05-16T21:24:34.196574+08:00",
+      "ccode_hash": "549ce7cabe1111a16dad8283b5678ea582de97644cb2e0cdcffc74eb7347ecc8",
+      "ccode_size": 439,
+      "created_at": "2026-05-16T21:24:34.196574+08:00",
+      "last_accessed": "2026-05-16T21:24:34.196574+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_import": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_import.kl",
+      "source_hash": "a796f91df8b743e615d86fa16946ac1c4a5a4bdb3e6a5d97c0dd4688815cef28",
+      "source_size": 917,
+      "source_mod_time": "2026-05-16T21:58:53.2079698+08:00",
+      "ccode_hash": "6ae18beef2e40eb41c77e56be95282eb5cd19c610fc5895157d24e86606d4349",
+      "ccode_size": 1773,
+      "created_at": "2026-05-16T21:58:53.2079698+08:00",
+      "last_accessed": "2026-05-16T21:58:53.2079698+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string",
+        "std.web",
+        "std.system",
+        "std.memory",
+        "std.time"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_main": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_main.kl",
+      "source_hash": "314aff435803a8103288dedbed45c84cefa5433d909af141188b92df85cc5f8f",
+      "source_size": 860,
+      "source_mod_time": "2026-05-16T20:53:42.1960049+08:00",
+      "ccode_hash": "dd824189d64ccd0cf3acc657502138fb23e706f004c2bb8ad5752f1335d3adaf",
+      "ccode_size": 1516,
+      "created_at": "2026-05-16T20:53:42.1960049+08:00",
+      "last_accessed": "2026-05-16T20:53:42.1960049+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string",
+        "std.web",
+        "std.system",
+        "std.memory",
+        "std.time"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_main2": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_main2.kl",
+      "source_hash": "4b706a177070c124392bd2ec04a71485673e7655df1d809e19132db3ff8ee26d",
+      "source_size": 693,
+      "source_mod_time": "2026-05-16T20:54:09.772106+08:00",
+      "ccode_hash": "c636086b14cab702a11b7be7faa81ca581799e9ac7267138c95ce7f483cbf191",
+      "ccode_size": 1422,
+      "created_at": "2026-05-16T20:54:09.772106+08:00",
+      "last_accessed": "2026-05-16T20:54:09.772106+08:00",
+      "used_modules": [
+        "std.io"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_min": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_min.kl",
+      "source_hash": "014446aa887cc7db41cd9d79f2dc72bc113d7fafa909fef946cf5e150da7063a",
+      "source_size": 191,
+      "source_mod_time": "2026-05-16T21:46:26.3625942+08:00",
+      "ccode_hash": "4e720679f3cc487b7575934ccae46ff57bb0c00aa556e5509b6f7a5358a1bc6e",
+      "ccode_size": 562,
+      "created_at": "2026-05-16T21:46:26.3625942+08:00",
+      "last_accessed": "2026-05-16T21:46:26.3625942+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_minimal": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_minimal.kl",
+      "source_hash": "1ef57c658a8b5388a3a353911340060c2e69e20cc28da2aea94cd08204024943",
+      "source_size": 141,
+      "source_mod_time": "2026-05-16T20:59:50.290587+08:00",
+      "ccode_hash": "3d8072a914635e31b0db9abe97696678020fe3bb414c9c8845795c10f8fc0cf9",
+      "ccode_size": 365,
+      "created_at": "2026-05-16T20:59:50.290587+08:00",
+      "last_accessed": "2026-05-16T20:59:50.290587+08:00",
+      "used_modules": [
+        "std.io"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_minimal_call": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_minimal_call.kl",
+      "source_hash": "9816f507b93d56ca0d98cefb9bc6399ef129a7000ea7acc2b193dee64c238c11",
+      "source_size": 112,
+      "source_mod_time": "2026-05-16T21:39:59.6254723+08:00",
+      "ccode_hash": "a01db796c096575213e1c87a9a874542dcfaefa1884ba8935195cbb19ec23788",
+      "ccode_size": 454,
+      "created_at": "2026-05-16T21:39:59.6254723+08:00",
+      "last_accessed": "2026-05-16T21:39:59.6254723+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_split_if": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_split_if.kl",
+      "source_hash": "1dc27220e87ec641f685da8eaa800fb406af97b8b89a311d198d0f3fbd416f47",
+      "source_size": 636,
+      "source_mod_time": "2026-05-16T21:38:15.3152578+08:00",
+      "ccode_hash": "c6c608c08abf0d9ea0e50266a0b80cebe65873ea72b959881d3e39ee10091825",
+      "ccode_size": 922,
+      "created_at": "2026-05-16T21:38:15.3152578+08:00",
+      "last_accessed": "2026-05-16T21:38:15.3152578+08:00",
+      "used_modules": [
+        "std.io",
+        "std.string"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_while": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_while.kl",
+      "source_hash": "7beac7271a760ede3ca8b172909d2a8e2e4f1f0a44d5c3966ed033d6c3b057a1",
+      "source_size": 103,
+      "source_mod_time": "2026-05-16T20:52:19.2660455+08:00",
+      "ccode_hash": "d2b21ce01a2b6717d1d7fc265a7d6cb57baff6d52512249fa0fa118c7a626c46",
+      "ccode_size": 329,
+      "created_at": "2026-05-16T20:52:19.2660455+08:00",
+      "last_accessed": "2026-05-16T20:52:19.2660455+08:00",
+      "used_modules": [
+        "std.io"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_while_break": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_while_break.kl",
+      "source_hash": "c557733004fc65b4a464c742da2242c33aea6430506da0b0d19cce00d4cbea07",
+      "source_size": 123,
+      "source_mod_time": "2026-05-16T21:31:35.6240828+08:00",
+      "ccode_hash": "55d49129d1936539f79c2a64e92a2780e6886bce42361745733771a7ac5d80b6",
+      "ccode_size": 366,
+      "created_at": "2026-05-16T21:31:35.6240828+08:00",
+      "last_accessed": "2026-05-16T21:31:35.6240828+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_while_char": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_while_char.kl",
+      "source_hash": "993957f9b8f8fd3847e01d1a492372591b0bb606e211d7843be12bf039fe51f3",
+      "source_size": 414,
+      "source_mod_time": "2026-05-16T21:40:59.8656713+08:00",
+      "ccode_hash": "4963b1ff03061d3aa6484b34c228d7be28a47d867c80b53cf03fbcfa4689f99f",
+      "ccode_size": 912,
+      "created_at": "2026-05-16T21:40:59.8656713+08:00",
+      "last_accessed": "2026-05-16T21:40:59.8656713+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_while_if": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_while_if.kl",
+      "source_hash": "259b0e71b2f0a7f75e6414c0c48c3919d1f22ef62768f9e48aad8af4ad20b269",
+      "source_size": 403,
+      "source_mod_time": "2026-05-16T21:47:19.3239697+08:00",
+      "ccode_hash": "8007d4674dd03bdca77f21c5e25f927514b3f3219a04891315e658353968c5aa",
+      "ccode_size": 971,
+      "created_at": "2026-05-16T21:47:19.3239697+08:00",
+      "last_accessed": "2026-05-16T21:47:19.3239697+08:00",
+      "used_modules": [],
+      "compiler_version": "0.1.0-alpha"
+    },
+    "test_while_loop": {
+      "source_path": "..\\kaula-projects\\llm_chat\\test_while_loop.kl",
+      "source_hash": "5072ef953bb56fc25f7b200e8bfaced6f221a4b09d0a26465558114638090fa3",
+      "source_size": 323,
+      "source_mod_time": "2026-05-16T21:01:19.2276601+08:00",
+      "ccode_hash": "cfce12b0ef31d84a6c5a035aa6d4fe16a31799bbd85412e4e09dc2be534a8741",
+      "ccode_size": 610,
+      "created_at": "2026-05-16T21:01:19.2276601+08:00",
+      "last_accessed": "2026-05-16T21:01:19.2276601+08:00",
+      "used_modules": [
+        "std.io"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    }
+  },
+  "last_cleanup": "2026-05-16T20:51:49.9766007+08:00",
+  "total_size": 27856
+}

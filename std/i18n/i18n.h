@@ -99,8 +99,8 @@ extern size_t i18n_utf8_char_count(const char* str);
 extern size_t i18n_utf8_byte_length(const char* str, size_t char_index);
 extern char* i18n_utf8_substring(const char* str, size_t start, size_t count);
 extern size_t i18n_utf8_strlen(const char* str);
-extern int i18n_utf8_encode(wchar_t codepoint, char* out_buffer);
-extern int i18n_utf8_decode(const char* input, wchar_t* out_codepoint);
+extern int i18n_utf8_encode(uint32_t codepoint, char* out_buffer);
+extern int i18n_utf8_decode(const char* input, uint32_t* out_codepoint);
 extern char* i18n_utf8_normalize(const char* input);
 
 // ==================== 本地化数字和日期 ====================

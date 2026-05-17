@@ -1,4 +1,5 @@
 #include "format.h"
+#include "../memory/memory.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,7 +82,7 @@ char* format_valloc(const char* format, va_list args) {
     }
     
     // 分配内存（+1 用于终止符）
-    char* buffer = (char*)malloc((size_t)size + 1);
+    char* buffer = (char*)kmm_v4_malloc((size_t)size + 1);
     if (!buffer) {
         return NULL;
     }
@@ -307,15 +308,14 @@ struct FormatBuilder {
 };
 
 FormatBuilder* format_builder_create(size_t initial_size) {
-    FormatBuilder* fb = (FormatBuilder*)malloc(sizeof(FormatBuilder));
+    FormatBuilder* fb = (FormatBuilder*)kmm_v4_calloc(1, sizeof(FormatBuilder));
     if (!fb) {
         return NULL;
     }
     
     fb->capacity = initial_size > 0 ? initial_size : 256;
-    fb->buffer = (char*)malloc(fb->capacity);
+    fb->buffer = (char*)kmm_v4_malloc(fb->capacity);
     if (!fb->buffer) {
-        free(fb);
         return NULL;
     }
     
@@ -327,10 +327,7 @@ FormatBuilder* format_builder_create(size_t initial_size) {
 }
 
 void format_builder_destroy(FormatBuilder* fb) {
-    if (fb) {
-        free(fb->buffer);
-        free(fb);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 static int format_builder_ensure_capacity(FormatBuilder* fb, size_t additional) {
@@ -343,7 +340,7 @@ static int format_builder_ensure_capacity(FormatBuilder* fb, size_t additional) 
         new_capacity *= 2;
     }
     
-    char* new_buffer = (char*)realloc(fb->buffer, new_capacity);
+    char* new_buffer = (char*)kmm_v4_realloc(fb->buffer, new_capacity);
     if (!new_buffer) {
         return -1;
     }
@@ -489,7 +486,7 @@ void format_builder_reset(FormatBuilder* fb) {
     if (fb) {
         format_builder_clear(fb);
         fb->capacity = 256;
-        char* new_buffer = (char*)realloc(fb->buffer, fb->capacity);
+        char* new_buffer = (char*)kmm_v4_realloc(fb->buffer, fb->capacity);
         if (new_buffer) {
             fb->buffer = new_buffer;
         }

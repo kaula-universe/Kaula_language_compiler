@@ -35,6 +35,12 @@ extern void* fast_alloc(size_t size);
 extern void* fast_calloc(size_t num, size_t size);
 extern void fast_free(void* ptr);
 
+// ==================== KMM 直接包装函数（供标准库使用） ====================
+// kmm_v4_malloc 和 kmm_v4_free 已在 kmm_scoped_allocator_v4.h 中定义
+extern void* kmm_v4_calloc(size_t num, size_t size);
+extern void* kmm_v4_realloc(void* ptr, size_t new_size);
+extern char* kmm_v4_strdup(const char* str);
+
 // ==================== 标准分配器 ====================
 
 extern void* std_malloc(size_t size);

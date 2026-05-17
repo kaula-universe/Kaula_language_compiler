@@ -1,0 +1,15 @@
+{
+  "source_path": "..\\kaula-projects\\llm_chat\\test_char_call.kl",
+  "source_hash": "9202e76725147a8c0a51dc060f711765c81212120096b6fb0d8f4474015eca19",
+  "source_size": 213,
+  "source_mod_time": "2026-05-16T21:27:43.688744+08:00",
+  "ccode_hash": "208cad4280d8d862e10dc3deaf8cef052e759e0a2c50315ad6e6535f026ab166",
+  "ccode_size": 463,
+  "created_at": "2026-05-16T21:27:43.688744+08:00",
+  "last_accessed": "2026-05-16T21:27:43.688744+08:00",
+  "used_modules": [
+    "std.io",
+    "std.string"
+  ],
+  "compiler_version": "0.1.0-alpha"
+}

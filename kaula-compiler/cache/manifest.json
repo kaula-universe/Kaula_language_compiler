@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "entries": {
+    "test_auto": {
+      "source_path": "e:\\Users\\tf\\Desktop\\新建文件夹\\kaula-projects\\glm_cli\\src\\test_auto.kl",
+      "source_hash": "30f0f55aa9d4305a1e4ffd6c7173baf531009c41f9f2f19fba9eefe5dbcccd03",
+      "source_size": 1993,
+      "source_mod_time": "2026-05-17T11:16:33.8667483+08:00",
+      "ccode_hash": "20495a32100dcfee609819cfb84848b25aa2856dfcf4a57a91d4d45616348227",
+      "ccode_size": 1793,
+      "created_at": "2026-05-17T11:16:33.8667483+08:00",
+      "last_accessed": "2026-05-17T11:16:33.8667483+08:00",
+      "used_modules": [
+        "std.io",
+        "std.i18n"
+      ],
+      "compiler_version": "0.1.0-alpha"
+    }
+  },
+  "last_cleanup": "2026-05-17T11:16:33.8148847+08:00",
+  "total_size": 3786
+}

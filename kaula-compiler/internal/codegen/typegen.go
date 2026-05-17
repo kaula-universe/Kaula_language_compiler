@@ -31,7 +31,10 @@ var globalTypeMap = map[string]string{
 	"int32":  "int32_t",
 	"int64":  "int64_t",
 	"int":    "int64_t",
+	"integer": "int64_t",
 	"long":   "int64_t",
+	"long_long": "long long",
+	"short":  "int16_t",
 	"u8":     "uint8_t",
 	"u16":    "uint16_t",
 	"u32":    "uint32_t",
@@ -41,14 +44,29 @@ var globalTypeMap = map[string]string{
 	"uint32": "uint32_t",
 	"uint64": "uint64_t",
 	"uint":   "uint64_t",
+	"uchar":  "unsigned char",
+	"ushort": "uint16_t",
+	"ulong":  "uint64_t",
+	"ulong_long": "unsigned long long",
 	"float":  "float",
 	"f32":    "float",
+	"single": "float",
 	"double": "double",
 	"f64":    "double",
+	"real":   "double",
 	"bool":   "int",
+	"boolean": "int",
 	"char":   "char",
+	"byte":   "uint8_t",
+	"sbyte":  "int8_t",
 	"void":   "void",
 	"string": "char*",
+	"cstring": "const char*",
+	"str":    "char*",
+	"intptr": "intptr_t",
+	"uintptr": "uintptr_t",
+	"size":   "size_t",
+	"ssize":  "ssize_t",
 }
 
 func MapKaulaTypeToC(kaulaType string) string {
@@ -58,25 +76,45 @@ func MapKaulaTypeToC(kaulaType string) string {
 	}
 	if strings.HasPrefix(typeLower, "[]") {
 		innerType := typeLower[2:]
-		if innerType == "string" {
+		if innerType == "string" || innerType == "str" || innerType == "cstring" {
 			return "char**"
 		}
 		if cType, ok := globalTypeMap[innerType]; ok {
 			return cType + "*"
 		}
-		return innerType + "*"
+		return kaulaType[2:] + "*"
 	}
 	if strings.HasPrefix(typeLower, "*") {
 		innerType := typeLower[1:]
-		if innerType == "string" {
+		if innerType == "string" || innerType == "str" || innerType == "cstring" {
 			return "char**"
 		}
 		if cType, ok := globalTypeMap[innerType]; ok {
 			return cType + "*"
 		}
-		return innerType + "*"
+		return kaulaType[1:] + "*"
 	}
-	return "int64_t"
+	if strings.HasSuffix(typeLower, "*") {
+		baseType := typeLower[:len(typeLower)-1]
+		if baseType == "string" || baseType == "str" || baseType == "cstring" {
+			return "char**"
+		}
+		if cType, ok := globalTypeMap[baseType]; ok {
+			return cType + "*"
+		}
+		return kaulaType[:len(kaulaType)-1] + "*"
+	}
+	if strings.HasPrefix(typeLower, "const ") {
+		innerType := typeLower[6:]
+		if innerType == "string" || innerType == "str" {
+			return "const char*"
+		}
+		if cType, ok := globalTypeMap[innerType]; ok {
+			return "const " + cType
+		}
+		return "const " + kaulaType[6:]
+	}
+	return kaulaType
 }
 
 func (tg *TypeGenerator) RegisterClibType(kaulaType string, cType string) {

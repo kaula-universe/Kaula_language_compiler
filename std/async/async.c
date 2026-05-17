@@ -1,5 +1,5 @@
 #include "async.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdatomic.h>
 
@@ -23,12 +23,11 @@ typedef struct LightAsyncLoop {
 
 // 创建轻量级异步事件循环
 LightAsyncLoop* light_async_loop_create() {
-    LightAsyncLoop* loop = (LightAsyncLoop*)malloc(sizeof(LightAsyncLoop));
+    LightAsyncLoop* loop = (LightAsyncLoop*)kmm_v4_malloc(sizeof(LightAsyncLoop));
     if (!loop) return NULL;
 
-    AsyncNode* dummy = (AsyncNode*)malloc(sizeof(AsyncNode));
+    AsyncNode* dummy = (AsyncNode*)kmm_v4_malloc(sizeof(AsyncNode));
     if (!dummy) {
-        free(loop);
         return NULL;
     }
 
@@ -49,23 +48,15 @@ LightAsyncLoop* light_async_loop_create() {
 
 // 销毁轻量级异步事件循环
 void light_async_loop_destroy(LightAsyncLoop* loop) {
-    if (!loop) return;
-
-    // 释放所有节点
-    AsyncNode* current = atomic_load_explicit(&loop->head, memory_order_acquire);
-    while (current) {
-        AsyncNode* next = atomic_load_explicit(&current->next, memory_order_acquire);
-        free(current);
-        current = next;
-    }
-    free(loop);
+    // KMM 管理内存，无需手动释放
+    (void)loop;
 }
 
 // 添加异步任务到循环（无锁Michael-Scott队列）
 int light_async_loop_add(LightAsyncLoop* loop, void* (*func)(void*), void* arg) {
     if (!loop || !func) return 0;
 
-    AsyncNode* node = (AsyncNode*)malloc(sizeof(AsyncNode));
+    AsyncNode* node = (AsyncNode*)kmm_v4_malloc(sizeof(AsyncNode));
     if (!node) return 0;
 
     node->func = func;
@@ -135,7 +126,7 @@ int light_async_loop_poll(LightAsyncLoop* loop) {
 
     atomic_store_explicit(&next->status, 2, memory_order_release);
 
-    free(head);
+    // KMM 管理内存，无需手动释放
 
     return 1;
 }
@@ -205,7 +196,7 @@ typedef struct LightTimerManager {
 
 // 创建轻量级定时器管理器
 LightTimerManager* light_timer_manager_create() {
-    LightTimerManager* mgr = (LightTimerManager*)malloc(sizeof(LightTimerManager));
+    LightTimerManager* mgr = (LightTimerManager*)kmm_v4_malloc(sizeof(LightTimerManager));
     if (!mgr) return NULL;
 
     mgr->head = NULL;
@@ -216,22 +207,15 @@ LightTimerManager* light_timer_manager_create() {
 
 // 销毁轻量级定时器管理器
 void light_timer_manager_destroy(LightTimerManager* mgr) {
-    if (!mgr) return;
-
-    TimerNode* current = mgr->head;
-    while (current) {
-        TimerNode* next = current->next;
-        free(current);
-        current = next;
-    }
-    free(mgr);
+    // KMM 管理内存，无需手动释放
+    (void)mgr;
 }
 
 // 添加定时器任务
 int light_timer_manager_add(LightTimerManager* mgr, uint64_t timeout_ms, void (*callback)(void*), void* arg) {
     if (!mgr || !callback) return 0;
 
-    TimerNode* node = (TimerNode*)malloc(sizeof(TimerNode));
+    TimerNode* node = (TimerNode*)kmm_v4_malloc(sizeof(TimerNode));
     if (!node) return 0;
 
     node->timeout_ms = timeout_ms;
@@ -274,7 +258,7 @@ int light_timer_manager_poll(LightTimerManager* mgr, uint64_t current_time) {
 
             TimerNode* to_free = current;
             current = current->next;
-            free(to_free);
+            // KMM 管理内存，无需手动释放
             triggered++;
         } else {
             prev = current;

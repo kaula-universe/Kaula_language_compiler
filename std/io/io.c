@@ -1,4 +1,5 @@
 #include "io.h"
+#include "../memory/memory.h"
 #include "../format/format.h"
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +48,38 @@ void println(const char* format, ...) {
     va_list args;
     va_start(args, format);
     vprintf(format, args);
+    va_end(args);
+    printf("\n");
+}
+
+// println_multi 支持多参数自动类型推导打印
+// type参数: 0=int, 1=double, 2=string
+void println_multi(int arg_count, ...) {
+    va_list args;
+    va_start(args, arg_count);
+    
+    for (int i = 0; i < arg_count; i++) {
+        int type = va_arg(args, int);
+        switch (type) {
+            case 0: // int
+                printf("%lld", (long long)va_arg(args, long long));
+                break;
+            case 1: { // double
+                double val = va_arg(args, double);
+                // 如果是整数值，不显示小数部分
+                if (val == (long long)val && val >= -1e15 && val <= 1e15) {
+                    printf("%lld", (long long)val);
+                } else {
+                    printf("%g", val);
+                }
+                break;
+            }
+            case 2: // string
+                printf("%s", va_arg(args, char*));
+                break;
+        }
+    }
+    
     va_end(args);
     printf("\n");
 }
@@ -108,7 +141,7 @@ char* read_line() {
     size_t capacity = 256;
     size_t len = 0;
     
-    buffer = (char*)malloc(capacity);
+    buffer = (char*)kmm_v4_malloc(capacity);
     if (!buffer) {
         return NULL;
     }
@@ -117,9 +150,8 @@ char* read_line() {
     while ((c = getchar()) != EOF && c != '\n') {
         if (len + 1 >= capacity) {
             capacity *= 2;
-            char* new_buffer = (char*)realloc(buffer, capacity);
+            char* new_buffer = (char*)kmm_v4_realloc(buffer, capacity);
             if (!new_buffer) {
-                free(buffer);
                 return NULL;
             }
             buffer = new_buffer;
@@ -136,7 +168,7 @@ char* read_string(size_t max_length) {
         return NULL;
     }
     
-    char* buffer = (char*)malloc(max_length + 1);
+    char* buffer = (char*)kmm_v4_malloc(max_length + 1);
     if (!buffer) {
         return NULL;
     }
@@ -173,7 +205,7 @@ char* path_join(const char* path1, const char* path2) {
         total_len += 2; // 需要添加分隔符
     }
     
-    char* result = (char*)malloc(total_len);
+    char* result = (char*)kmm_v4_malloc(total_len);
     if (!result) {
         return NULL;
     }
@@ -210,7 +242,7 @@ char* path_join_multiple(const char* path1, const char* path2, const char* path3
     }
     
     char* result = path_join(temp, path3);
-    free(temp);
+    // temp 由 KMM 管理，作用域结束时自动回收
     
     return result;
 }
@@ -231,9 +263,9 @@ char* path_basename(const char* path) {
     }
     
     if (last_sep) {
-        return strdup(last_sep + 1);
+        return kmm_v4_strdup(last_sep + 1);
     } else {
-        return strdup(path);
+        return kmm_v4_strdup(path);
     }
 }
 
@@ -254,7 +286,7 @@ char* path_dirname(const char* path) {
     
     if (last_sep) {
         size_t len = last_sep - path;
-        char* result = (char*)malloc(len + 1);
+        char* result = (char*)kmm_v4_malloc(len + 1);
         if (!result) {
             return NULL;
         }
@@ -262,7 +294,7 @@ char* path_dirname(const char* path) {
         result[len] = '\0';
         return result;
     } else {
-        return strdup(".");
+        return kmm_v4_strdup(".");
     }
 }
 
@@ -289,7 +321,7 @@ char* path_normalize(const char* path) {
     }
     
     // 简化实现：统一使用当前平台的分隔符
-    char* result = strdup(path);
+    char* result = kmm_v4_strdup(path);
     if (!result) {
         return NULL;
     }
@@ -310,7 +342,7 @@ char* path_to_unix(const char* path) {
         return NULL;
     }
     
-    char* result = strdup(path);
+    char* result = kmm_v4_strdup(path);
     if (!result) {
         return NULL;
     }
@@ -331,7 +363,7 @@ char* path_to_windows(const char* path) {
         return NULL;
     }
     
-    char* result = strdup(path);
+    char* result = kmm_v4_strdup(path);
     if (!result) {
         return NULL;
     }

@@ -1,10 +1,10 @@
 #include "xml.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
 
 XmlDocument* xml_create(const String version, const String encoding) {
-    XmlDocument* doc = (XmlDocument*)calloc(1, sizeof(XmlDocument));
+    XmlDocument* doc = (XmlDocument*)kmm_v4_calloc(1, sizeof(XmlDocument));
     if (doc) {
         doc->version = version ? string_copy(version) : string_create("1.0");
         doc->encoding = encoding ? string_copy(encoding) : string_create("UTF-8");
@@ -21,7 +21,7 @@ static void xml_destroy_node(XmlNode* node) {
         XmlAttribute* next = attr->next;
         string_free(attr->name);
         string_free(attr->value);
-        free(attr);
+        // KMM 管理内存，无需手动释放
         attr = next;
     }
     XmlNode* child = node->first_child;
@@ -30,20 +30,16 @@ static void xml_destroy_node(XmlNode* node) {
         xml_destroy_node(child);
         child = next;
     }
-    free(node);
+    // KMM 管理内存，无需手动释放
 }
 
 void xml_destroy(XmlDocument* doc) {
-    if (doc) {
-        xml_destroy_node(doc->root);
-        string_free(doc->version);
-        string_free(doc->encoding);
-        free(doc);
-    }
+    // KMM 管理内存，无需手动释放
+    (void)doc;
 }
 
 XmlNode* xml_create_element(const String name) {
-    XmlNode* node = (XmlNode*)calloc(1, sizeof(XmlNode));
+    XmlNode* node = (XmlNode*)kmm_v4_calloc(1, sizeof(XmlNode));
     if (node) {
         node->name = string_copy(name);
         node->type = XML_ELEMENT;
@@ -76,7 +72,7 @@ void xml_set_attribute(XmlNode* node, const String name, const String value) {
         if (string_equals(attr->name, name)) { string_free(attr->value); attr->value = string_copy(value); return; }
         attr = attr->next;
     }
-    XmlAttribute* new_attr = (XmlAttribute*)calloc(1, sizeof(XmlAttribute));
+    XmlAttribute* new_attr = (XmlAttribute*)kmm_v4_calloc(1, sizeof(XmlAttribute));
     new_attr->name = string_copy(name);
     new_attr->value = string_copy(value);
     new_attr->next = node->attributes;
@@ -142,18 +138,18 @@ XmlDocument* xml_parse(const String text) {
         const char* name_start = p;
         while (*p && *p != ' ' && *p != '>' && *p != '/') p++;
         size_t name_len = p - name_start;
-        char* name = (char*)malloc(name_len + 1);
+        char* name = (char*)kmm_v4_malloc(name_len + 1);
         memcpy(name, name_start, name_len);
         name[name_len] = '\0';
         XmlNode* node = xml_create_element(name);
-        free(name);
+        // KMM 管理内存，无需手动释放
         while (*p && *p != '>' && *p != '/') {
             while (*p == ' ') p++;
             const char* attr_name_start = p;
             while (*p && *p != '=' && *p != '>' && *p != ' ') p++;
             size_t attr_name_len = p - attr_name_start;
             if (attr_name_len > 0) {
-                char* attr_name = (char*)malloc(attr_name_len + 1);
+                char* attr_name = (char*)kmm_v4_malloc(attr_name_len + 1);
                 memcpy(attr_name, attr_name_start, attr_name_len);
                 attr_name[attr_name_len] = '\0';
                 if (*p == '=') {
@@ -163,15 +159,15 @@ XmlDocument* xml_parse(const String text) {
                         const char* val_start = p;
                         while (*p && *p != '"') p++;
                         size_t val_len = p - val_start;
-                        char* val = (char*)malloc(val_len + 1);
+                        char* val = (char*)kmm_v4_malloc(val_len + 1);
                         memcpy(val, val_start, val_len);
                         val[val_len] = '\0';
                         xml_set_attribute(node, attr_name, val);
-                        free(val);
+                        // KMM 管理内存，无需手动释放
                         if (*p == '"') p++;
                     }
                 }
-                free(attr_name);
+                // KMM 管理内存，无需手动释放
             }
         }
         if (*p == '/') { p += 2; }
@@ -181,14 +177,14 @@ XmlDocument* xml_parse(const String text) {
             while (*p && *p != '<') p++;
             size_t content_len = p - content_start;
             if (content_len > 0) {
-                char* content = (char*)malloc(content_len + 1);
+                char* content = (char*)kmm_v4_malloc(content_len + 1);
                 memcpy(content, content_start, content_len);
                 content[content_len] = '\0';
-                XmlNode* text_node = (XmlNode*)calloc(1, sizeof(XmlNode));
+                XmlNode* text_node = (XmlNode*)kmm_v4_calloc(1, sizeof(XmlNode));
                 text_node->type = XML_TEXT;
                 text_node->content = string_create(content);
                 xml_append_child(node, text_node);
-                free(content);
+                // KMM 管理内存，无需手动释放
             }
             if (strncmp(p, "</", 2) == 0) {
                 while (*p && *p != '>') p++;
@@ -203,8 +199,10 @@ XmlDocument* xml_parse(const String text) {
 XmlDocument* xml_parse_file(const String path) {
     FILE* f = fopen(path, "r"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
-    String buf = (String)malloc(len + 1); fread(buf, 1, len, f); buf[len] = '\0'; fclose(f);
-    XmlDocument* doc = xml_parse(buf); free(buf); return doc;
+    String buf = (String)kmm_v4_malloc(len + 1); fread(buf, 1, len, f); buf[len] = '\0'; fclose(f);
+    XmlDocument* doc = xml_parse(buf);
+    // KMM 管理内存，无需手动释放
+    return doc;
 }
 
 static void xml_write_node(StringBuilder* sb, XmlNode* node, int indent) {

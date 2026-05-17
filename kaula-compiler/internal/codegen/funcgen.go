@@ -57,6 +57,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		return ""
 	}
 	
+	// 设置当前函数返回类型供 return 语句生成使用
+	fg.codegen.currentFunctionReturnType = stmt.ReturnType
+	
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
 	builder.WriteString(safeName)
@@ -64,12 +67,25 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteString("_task(void* arg) {\n")
 	} else if hasAsyncParams {
 		builder.WriteString("_async(void* arg) {\n")
-	} else if len(stmt.Params) > 1 {
-		builder.WriteString("(int64_t* args, int arg_count) {\n")
-	} else if len(stmt.Params) == 1 {
-		builder.WriteString("(int64_t arg) {\n")
 	} else {
-		builder.WriteString("(void) {\n")
+		// 生成原生 C 参数列表
+		builder.WriteString("(")
+		for i, param := range stmt.Params {
+			if i > 0 {
+				builder.WriteString(", ")
+			}
+			// 获取参数类型
+			paramType := "int64_t" // 默认类型
+			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+				paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
+			}
+			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
+			fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		}
+		if len(stmt.Params) == 0 {
+			builder.WriteString("void")
+		}
+		builder.WriteString(") {\n")
 	}
 	fg.codegen.indent++
 
@@ -152,20 +168,6 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			fg.codegen.indent++
 		}
 
-		if len(stmt.Params) == 1 {
-			paramName := stmt.Params[0]
-			builder.WriteString(fg.codegen.indentString())
-			fmt.Fprintf(&builder, "int64_t %s = arg;\n", paramName)
-			fg.codegen.AddSymbol(paramName, "int64_t", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
-		} else if len(stmt.Params) > 1 {
-			indent := fg.codegen.indentString()
-			for i, param := range stmt.Params {
-				builder.WriteString(indent)
-				fmt.Fprintf(&builder, "int64_t %s = args[%d];\n", param, i)
-				fg.codegen.AddSymbol(param, "int64_t", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
-			}
-		}
-
 		indent := fg.codegen.indentString()
 		for _, bodyStmt := range stmt.Body {
 			if bodyStmt == nil {
@@ -183,7 +185,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		}
 	}
 
-	if !hasReturnStatement(stmt.Body) && stmt.ReturnType != "" {
+	if !hasReturnStatement(stmt.Body) && stmt.ReturnType != "" && !isVoidType(stmt.ReturnType) {
 		builder.WriteString(fg.codegen.indentString())
 		builder.WriteString("return 0;\n")
 	}
@@ -191,6 +193,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	builder.WriteString("}\n")
 
 	fg.codegen.ExitScope()
+	fg.codegen.currentFunctionReturnType = ""
 	return builder.String()
 }
 
@@ -308,6 +311,10 @@ func hasReturnStatement(stmts []ast.Statement) bool {
 		}
 	}
 	return false
+}
+
+func isVoidType(typeName string) bool {
+	return typeName == "void" || typeName == "Void"
 }
 
 func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) string {

@@ -1,5 +1,5 @@
 #include "time.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -230,7 +230,7 @@ i64 time_from_datetime(DateTime dt) {
 
 char* time_format_string(i64 timestamp, const char* format) {
     DateTime dt = time_to_datetime(timestamp);
-    char* buffer = (char*)malloc(128);
+    char* buffer = (char*)kmm_v4_malloc(128);
     if (!buffer) return NULL;
 
     char* p = buffer;

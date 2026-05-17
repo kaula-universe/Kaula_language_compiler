@@ -47,6 +47,7 @@ type CodeGenerator struct {
 	currentFuncTypeParams []*ast.TypeParameter
 
 	currentFunctionName string
+	currentFunctionReturnType string
 	callStack           map[string]bool
 }
 
@@ -144,6 +145,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.usedThirdPartyLibs = make(map[string]bool)
 	
 	typeCode := ""
+	globalVars := ""
 	functionCode := ""
 	hasMain := false
 	mainCode := ""
@@ -171,12 +173,19 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			typeCode += cg.generateStatement(stmt) + "\n"
 		} else if _, ok := stmt.(*ast.TypeAliasStatement); ok {
 			typeCode += cg.generateStatement(stmt) + "\n"
+		} else if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
+			initValue := cg.generateExpression(varDecl.Value)
+			if varDecl.IsAuto {
+				cType = "auto"
+			}
+			globalVars += cType + " " + varDecl.Name + " = " + initValue + ";\n"
 		} else {
 			mainCode += cg.indentString() + cg.generateStatement(stmt)
 		}
 	}
 	
-	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"../src/kaula.h\"\n"
+	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n"
 	
 	importedModules := make(map[string]bool)
 	for _, stmt := range program.Statements {
@@ -197,10 +206,9 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if ok {
 				if module.Header != "" {
 					header := module.Header
-					if len(header) >= 3 && header[0] == '.' && header[1] == '.' && header[2] == '/' {
-						header = header[3:]
-					} else if len(header) >= 4 && header[0] == 's' && header[1] == 't' && header[2] == 'd' && header[3] == '/' {
-						header = "../" + header
+					// 去掉 std/ 前缀，因为 std 目录已经在 include 路径中
+					if len(header) >= 4 && header[0] == 's' && header[1] == 't' && header[2] == 'd' && header[3] == '/' {
+						header = header[4:]
 					}
 					thirdPartyIncludes += "#include \"" + header + "\"\n"
 				}
@@ -210,11 +218,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 					if lib.Name == moduleName {
 						found = true
 						for _, header := range lib.Headers {
-							cleanHeader := header
-							if len(header) > 3 && header[0] == '"' && header[1] == '.' && header[2] == '.' && header[3] == '/' {
-								cleanHeader = "\"" + header[4:]
-							}
-							thirdPartyIncludes += "#include " + cleanHeader + "\n"
+							thirdPartyIncludes += "#include " + header + "\n"
 						}
 						break
 					}
@@ -240,6 +244,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		
 		result := template
 		result = strings.ReplaceAll(result, "{{includes}}", allIncludes)
+		result = strings.ReplaceAll(result, "{{global_vars}}", globalVars)
 		result = strings.ReplaceAll(result, "{{type_code}}", typeCode)
 		result = strings.ReplaceAll(result, "{{function_code}}", functionCode)
 		result = strings.ReplaceAll(result, "{{main_code}}", mainCode)
@@ -247,7 +252,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		
 		return result
 	} else {
-		return allIncludes + "\n" + typeCode + functionCode
+		return allIncludes + "\n" + globalVars + "\n" + typeCode + functionCode
 	}
 }
 
@@ -450,6 +455,21 @@ func (cg *CodeGenerator) findFunctionByName(name string) *ast.FunctionStatement 
 		}
 	}
 	return nil
+}
+
+// IsStructType 检查指定名称是否是已定义的结构体类型
+func (cg *CodeGenerator) IsStructType(name string) bool {
+	if cg.program == nil {
+		return false
+	}
+	for _, stmt := range cg.program.Statements {
+		if structStmt, ok := stmt.(*ast.StructStatement); ok {
+			if structStmt.Name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // GetGenericCachedCode 获取缓存的泛型代码

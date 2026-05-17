@@ -80,6 +80,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return fmt.Sprintf("%f", e.Value)
 	case *ast.StringLiteral:
 		return fmt.Sprintf("\"%s\"", e.Value)
+	case *ast.CharLiteral:
+		return fmt.Sprintf("'%s'", e.Value)
 	case *ast.BooleanLiteral:
 		if e.Value {
 			return "true"
@@ -98,6 +100,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.generateMemberAccessExpression(e)
 	case *ast.TypeCastExpression:
 		return eg.generateTypeCastExpression(e)
+	case *ast.UnaryExpression:
+		return eg.generateUnaryExpression(e)
 	default:
 		return "0"
 	}
@@ -283,6 +287,14 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		return fmt.Sprintf("%s && %s", left, right)
 	case "OR", "||":
 		return fmt.Sprintf("%s || %s", left, right)
+	case "BITWISE_AND", "AMPERSAND", "&":
+		return fmt.Sprintf("%s & %s", left, right)
+	case "BITWISE_OR", "PIPE", "|":
+		return fmt.Sprintf("%s | %s", left, right)
+	case "BITWISE_XOR", "CARET", "^":
+		return fmt.Sprintf("%s ^ %s", left, right)
+	case "BITWISE_NOT", "TILDE", "~":
+		return fmt.Sprintf("~%s", left)
 	default:
 		return fmt.Sprintf("%s %s %s", left, e.Operator, right)
 	}
@@ -335,6 +347,13 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	
 	funcName := eg.GenerateExpression(e.Function)
 	
+	// 检查是否是结构体构造函数调用（无参数的类型名调用）
+	if ident, ok := e.Function.(*ast.Identifier); ok && len(e.Args) == 0 && len(e.TypeArgs) == 0 {
+		if eg.codegen.IsStructType(ident.Name) {
+			return "(" + ident.Name + "){0}"
+		}
+	}
+	
 	// 通用泛型适配：如果存在类型参数，则触发实例化
 	if len(e.TypeArgs) > 0 {
 		// 触发泛型实例化
@@ -373,23 +392,17 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	if len(e.Args) == 0 {
 		// 无参数调用
 		return funcName + "()"
-	} else if len(e.Args) == 1 {
-		// 单个参数调用，直接传递参数
-		argCode := eg.GenerateExpression(e.Args[0])
-		return funcName + "(" + argCode + ")"
 	} else {
-		// 多个参数调用，使用 C99 复合字面量 (compound literal) 传递数组
-		// 语法: funcName((int64_t[]){arg1, arg2, ...}, arg_count)
-		argsList := "(int64_t[]){"
+		// 直接传递参数列表（支持任意数量参数）
+		code := funcName + "("
 		for i, arg := range e.Args {
 			if i > 0 {
-				argsList += ", "
+				code += ", "
 			}
-			argsList += eg.GenerateExpression(arg)
+			code += eg.GenerateExpression(arg)
 		}
-		argsList += "}"
-		
-		return funcName + "(" + argsList + ", " + fmt.Sprintf("%d", len(e.Args)) + ")"
+		code += ")"
+		return code
 	}
 }
 
@@ -401,12 +414,19 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	// 检查是否是标准库模块调用（如 std.io.println）
 	// 处理多级成员访问：获取实际的模块名
 	moduleName := ""
+	isStdModuleCall := false
 	if ident, ok := memberAccess.Object.(*ast.Identifier); ok {
 		// 一级成员访问：io.println 或 std.println
 		moduleName = ident.Name
 	} else if nestedMember, ok := memberAccess.Object.(*ast.MemberAccessExpression); ok {
 		// 多级成员访问：std.io.println，methodName 是 "println"，nestedMember.Member 是 "io"
 		moduleName = nestedMember.Member
+		// 检查是否是 std.module.function 模式
+		if innerIdent, ok := nestedMember.Object.(*ast.Identifier); ok {
+			if innerIdent.Name == "std" {
+				isStdModuleCall = true
+			}
+		}
 	}
 	
 	if moduleName != "" && eg.codegen.stdlibConfig != nil {
@@ -419,6 +439,11 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		if module, exists := eg.codegen.stdlibConfig.Modules[stdlibKey]; exists {
 			// 生成标准库函数调用
 			funcName := methodName
+			
+			// 特殊处理 println：使用类型推导版本
+			if funcName == "println" && len(args) > 1 {
+				return eg.generatePrintlnMulti(args)
+			}
 			
 			// 检查 stdlib.json 中是否有这个函数
 			if _, funcExists := module.Functions[funcName]; funcExists {
@@ -465,6 +490,18 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	case "toString":
 		return "object_to_string((Object*)" + object + ")"
 	default:
+		// 对于 std.module.function() 模式，直接调用函数
+		if isStdModuleCall {
+			code := methodName + "("
+			for i, arg := range args {
+				if i > 0 {
+					code += ", "
+				}
+				code += eg.GenerateExpression(arg)
+			}
+			code += ")"
+			return code
+		}
 		return eg.generateObjectMethodCall(object, methodName, args)
 	}
 	
@@ -514,8 +551,8 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 			// 只有字符串，直接输出 (使用 puts 自动添加换行)
 			return fmt.Sprintf("puts(\"%s\")", strEscaped)
 		} else {
-			// 类型推导：自动判断格式化参数
-			return eg.generateTypeInferredPrintf(args)
+			// 类型推导：使用 println_multi 自动处理多参数
+			return eg.generatePrintlnMulti(args)
 		}
 	}
 
@@ -534,8 +571,46 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 		return fmt.Sprintf("printf(\"%%%s\\n\", %s)", argType, argCode)
 	} else {
 		// 类型推导处理多参数
-		return eg.generateTypeInferredPrintf(args)
+		return eg.generatePrintlnMulti(args)
 	}
+}
+
+// generatePrintlnMulti 生成 println_multi 调用代码
+// 使用 println_multi(arg_count, type1, arg1, type2, arg2, ...)
+func (eg *ExpressionGenerator) generatePrintlnMulti(args []ast.Expression) string {
+	if len(args) == 0 {
+		return "putchar('\\n')"
+	}
+
+	// 生成参数列表: 类型标记 + 值
+	var parts []string
+	for _, arg := range args {
+		argType := eg.inferType(arg)
+		argCode := eg.GenerateExpression(arg)
+		
+		// 转换类型标记: d->0(int), f->1(double), s->2(string)
+		var typeMarker string
+		switch argType {
+		case "d":
+			typeMarker = "0"
+			// 强制转换为 int64_t，避免可变参数类型不匹配
+			argCode = "(int64_t)(" + argCode + ")"
+		case "f":
+			typeMarker = "1"
+			// double 类型保持不变
+		case "s":
+			typeMarker = "2"
+			// string 类型保持不变
+		default:
+			typeMarker = "0"
+			argCode = "(int64_t)(" + argCode + ")"
+		}
+		
+		parts = append(parts, typeMarker)
+		parts = append(parts, argCode)
+	}
+
+	return fmt.Sprintf("println_multi(%d, %s)", len(args), strings.Join(parts, ", "))
 }
 
 // inferType 推导表达式的类型
@@ -547,26 +622,81 @@ func (eg *ExpressionGenerator) inferType(expr ast.Expression) string {
 		return "f"
 	case *ast.StringLiteral:
 		return "s"
+	case *ast.BooleanLiteral:
+		return "d"
 	case *ast.Identifier:
-		// 尝试从符号表获取类型
-		sym := eg.codegen.symbolTable.GetSymbol(e.Name)
+		// 尝试从当前作用域符号表获取类型
+		sym := eg.codegen.currentScope.GetSymbol(e.Name)
 		if sym != nil {
 			switch sym.Type {
-			case "int", "int64", "int32":
+			case "int", "int64", "int32", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64":
 				return "d"
-			case "float", "float64", "float32":
+			case "float", "float64", "float32", "f32", "f64", "double":
 				return "f"
 			case "string":
 				return "s"
+			case "bool":
+				return "d"
+			default:
+				// 类型不在上述列表中，尝试推断
+				t := strings.ToLower(sym.Type)
+				if strings.HasPrefix(t, "i") || strings.HasPrefix(t, "u") || t == "int" || t == "int64" || t == "int32" {
+					return "d"
+				}
+				if strings.HasPrefix(t, "f") || t == "float" || t == "double" {
+					return "f"
+				}
+				if t == "string" || t == "char*" || strings.HasSuffix(t, "*") {
+					return "s"
+				}
+				if t == "bool" {
+					return "d"
+				}
+				// 最后尝试通过类型转换反推
+				cType := eg.codegen.typeGenerator.convertType(sym.Type, false)
+				if strings.Contains(cType, "double") || strings.Contains(cType, "float") {
+					return "f"
+				}
+				if strings.Contains(cType, "char*") {
+					return "s"
+				}
 			}
 		}
 		return "d" // 默认整数
 	case *ast.BinaryExpression:
 		// 二元表达式根据操作符推断类型
-		if e.Operator == "+" || e.Operator == "-" || e.Operator == "*" || e.Operator == "/" {
-			return "d"
+		leftType := eg.inferType(e.Left)
+		rightType := eg.inferType(e.Right)
+		// 如果任意一边是浮点，结果为浮点
+		if leftType == "f" || rightType == "f" {
+			return "f"
 		}
 		return "d"
+	case *ast.UnaryExpression:
+		operandType := eg.inferType(e.Right)
+		if e.Operator == "!" {
+			return "d"
+		}
+		return operandType
+	case *ast.CallExpression:
+		// 尝试从标准库获取函数返回类型
+		if ident, ok := e.Function.(*ast.Identifier); ok {
+			if eg.codegen.stdlibConfig != nil {
+				funcName := ident.Name
+				for _, mod := range eg.codegen.stdlibConfig.Modules {
+					if sig, ok := mod.Functions[funcName]; ok && sig.Return != "" {
+						if sig.Return == "string" {
+							return "s"
+						}
+						if sig.Return == "float" || sig.Return == "f64" || sig.Return == "f32" || sig.Return == "double" {
+							return "f"
+						}
+						return "d"
+					}
+				}
+			}
+		}
+		return "d" // 默认整数
 	default:
 		return "d" // 默认整数
 	}
@@ -722,4 +852,19 @@ func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpress
 // mapTypeToC 将 Kaula 类型映射到 C 类型
 func (eg *ExpressionGenerator) mapTypeToC(kaulaType string) string {
 	return MapKaulaTypeToC(kaulaType)
+}
+
+// generateUnaryExpression 生成一元表达式代码
+func (eg *ExpressionGenerator) generateUnaryExpression(e *ast.UnaryExpression) string {
+	right := eg.GenerateExpression(e.Right)
+	switch e.Operator {
+	case "&":
+		return fmt.Sprintf("&%s", right)
+	case "!":
+		return fmt.Sprintf("!%s", right)
+	case "-":
+		return fmt.Sprintf("-%s", right)
+	default:
+		return fmt.Sprintf("%s%s", e.Operator, right)
+	}
 }

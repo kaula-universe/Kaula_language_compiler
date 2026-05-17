@@ -179,10 +179,14 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 	case *ast.NonLocalStatement:
 		sa.analyzeNonLocalStatement(s)
 	case *ast.VariableDeclaration:
-		if s == nil || s.Type == "" {
+		if s == nil {
 			return
 		}
-		sa.analyzeVariableDeclaration(s)
+		if s.IsAuto {
+			sa.analyzeAutoDeclaration(s)
+		} else if s.Type != "" {
+			sa.analyzeVariableDeclaration(s)
+		}
 	case *ast.ImportStatement:
 		sa.analyzeImportStatement(s)
 	case *ast.ExportStatement:
@@ -578,28 +582,89 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	}
 }
 
+// analyzeAutoDeclaration 分析 auto 声明（类型推导）
+func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration) {
+	if stmt.Value == nil {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("auto 声明 '%s' 必须有初始值用于类型推导", stmt.Name),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"auto name = value",
+		)
+		return
+	}
+	
+	// 分析表达式
+	sa.analyzeExpression(stmt.Value)
+	
+	// 推导类型
+	inferredType := sa.inferExpressionType(stmt.Value)
+	if inferredType == "" {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("无法推导变量 '%s' 的类型", stmt.Name),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"使用明确类型的初始值",
+		)
+		return
+	}
+	
+	stmt.Type = inferredType
+	
+	// 添加到符号表
+	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+}
+
 // isTypeValid 检查类型是否有效
 func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 	// 基本类型
 	basicTypes := map[string]bool{
 		"int":    true,
+		"integer": true,
 		"i8":     true,
 		"i16":    true,
 		"i32":    true,
 		"i64":    true,
+		"int8":   true,
+		"int16":  true,
+		"int32":  true,
+		"int64":  true,
 		"u8":     true,
 		"u16":    true,
 		"u32":    true,
 		"u64":    true,
+		"uint8":  true,
+		"uint16": true,
+		"uint32": true,
+		"uint64": true,
+		"uint":   true,
+		"uchar":  true,
+		"ushort": true,
+		"ulong":  true,
 		"float":  true,
 		"f32":    true,
+		"single": true,
 		"f64":    true,
 		"double": true,
+		"real":   true,
 		"bool":   true,
+		"boolean": true,
 		"char":   true,
+		"byte":   true,
+		"sbyte":  true,
 		"string": true,
+		"str":    true,
+		"cstring": true,
 		"void":   true,
 		"any":    true,
+		"long":   true,
+		"short":  true,
+		"size":   true,
+		"ssize":  true,
+		"intptr": true,
+		"uintptr": true,
 	}
 	
 	// 检查是否是基本类型
@@ -611,6 +676,18 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 	if len(typeName) > 0 && typeName[len(typeName)-1] == '*' {
 		baseType := typeName[:len(typeName)-1]
 		return sa.isTypeValid(baseType)
+	}
+	
+	// 检查是否是数组类型（如 []int）
+	if strings.HasPrefix(typeName, "[]") {
+		innerType := typeName[2:]
+		return sa.isTypeValid(innerType)
+	}
+	
+	// 检查是否是const类型（如 const char*）
+	if strings.HasPrefix(typeName, "const ") {
+		innerType := typeName[6:]
+		return sa.isTypeValid(innerType)
 	}
 	
 	// 检查符号表中是否有该类型（类、结构体、接口等）
@@ -718,7 +795,7 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 	if expr.Name == "null" || expr.Name == "true" || expr.Name == "false" {
 		return
 	}
-	symbol := sa.symbolTable.Lookup(expr.Name)
+	symbol := sa.symbolTable.GetSymbol(expr.Name)
 	if symbol == nil {
 		sa.errorCollector.AddSemanticError(
 			fmt.Sprintf("未定义的变量: '%s'", expr.Name),
@@ -742,11 +819,11 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		leftType := sa.inferExpressionType(expr.Left)
 		rightType := sa.inferExpressionType(expr.Right)
 		if leftType != "" && rightType != "" && leftType != rightType {
-			switch expr.Op {
+			switch expr.Operator {
 			case "+", "-", "*", "/", "%":
 				if !isNumericType(leftType) || !isNumericType(rightType) {
 					sa.errorCollector.AddSemanticError(
-						fmt.Sprintf("运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Op, leftType, rightType),
+						fmt.Sprintf("运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
 						expr.Pos.Line,
 						expr.Pos.Column,
 						"type_mismatch",
@@ -756,7 +833,7 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 			case "==", "!=", "<", ">", "<=", ">=":
 				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) {
 					sa.errorCollector.AddSemanticError(
-						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Op, leftType, rightType),
+						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
 						expr.Pos.Line,
 						expr.Pos.Column,
 						"type_mismatch",
@@ -811,28 +888,120 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	}
 	switch e := expr.(type) {
 	case *ast.Identifier:
-		symbol := sa.symbolTable.Lookup(e.Name)
+		if e.Name == "true" || e.Name == "false" {
+			return "bool"
+		}
+		if e.Name == "null" {
+			return "null"
+		}
+		symbol := sa.symbolTable.GetSymbol(e.Name)
 		if symbol != nil {
 			return symbol.Type
 		}
 		return ""
+	case *ast.IntegerLiteral:
+		if e.Value >= 0 && e.Value <= 255 {
+			return "u8"
+		}
+		if e.Value >= -128 && e.Value <= 127 {
+			return "i8"
+		}
+		if e.Value >= 0 && e.Value <= 65535 {
+			return "u16"
+		}
+		if e.Value >= -32768 && e.Value <= 32767 {
+			return "i16"
+		}
+		if e.Value >= 0 && e.Value <= 2147483647 {
+			return "i32"
+		}
+		return "i64"
+	case *ast.FloatLiteral:
+		return "f64"
+	case *ast.StringLiteral:
+		return "string"
+	case *ast.BooleanLiteral:
+		return "bool"
 	case *ast.LiteralExpression:
 		return sa.inferLiteralType(e)
 	case *ast.BinaryExpression:
 		leftType := sa.inferExpressionType(e.Left)
+		rightType := sa.inferExpressionType(e.Right)
+		if leftType != "" && rightType != "" {
+			if isFloatType(leftType) || isFloatType(rightType) {
+				return "f64"
+			}
+			if isIntegerType(leftType) && isIntegerType(rightType) {
+				return promoteIntegerType(leftType, rightType)
+			}
+			if leftType == "string" || rightType == "string" {
+				return "string"
+			}
+			return leftType
+		}
 		if leftType != "" {
 			return leftType
 		}
-		return sa.inferExpressionType(e.Right)
+		return rightType
+	case *ast.UnaryExpression:
+		operandType := sa.inferExpressionType(e.Right)
+		if e.Operator == "!" {
+			return "bool"
+		}
+		if e.Operator == "-" || e.Operator == "+" {
+			// 负号/正号运算：确保结果为有符号类型
+			if operandType == "u8" || operandType == "u16" || operandType == "u32" || operandType == "u64" {
+				// 无符号类型提升为有符号
+				switch operandType {
+				case "u8":
+					return "i8"
+				case "u16":
+					return "i16"
+				case "u32":
+					return "i32"
+				default:
+					return "i64"
+				}
+			}
+		}
+		return operandType
 	case *ast.CallExpression:
 		funcExpr := e.Function
 		if ident, ok := funcExpr.(*ast.Identifier); ok {
-			symbol := sa.symbolTable.Lookup(ident.Name)
+			symbol := sa.symbolTable.GetSymbol(ident.Name)
 			if symbol != nil && symbol.Type == "function" {
-				return "int" // 默认返回类型
+				return "int"
+			}
+		}
+		if member, ok := funcExpr.(*ast.MemberAccessExpression); ok {
+			if sa.stdlibConfig != nil {
+				funcName := member.Member
+				for _, mod := range sa.stdlibConfig.Modules {
+					if sig, ok := mod.Functions[funcName]; ok && sig.Return != "" {
+						return sig.Return
+					}
+				}
 			}
 		}
 		return ""
+	case *ast.ArrayLiteral:
+		if len(e.Elements) > 0 {
+			elemType := sa.inferExpressionType(e.Elements[0])
+			if elemType != "" {
+				return "[]" + elemType
+			}
+		}
+		return "[]any"
+	case *ast.ConditionalExpression:
+		trueType := sa.inferExpressionType(e.TrueExpr)
+		falseType := sa.inferExpressionType(e.FalseExpr)
+		if trueType == falseType {
+			return trueType
+		}
+		if trueType != "" {
+			return trueType
+		}
+		return falseType
 	default:
 		return ""
 	}
@@ -845,9 +1014,27 @@ func (sa *SemanticAnalyzer) inferLiteralType(expr *ast.LiteralExpression) string
 	}
 	switch expr.Kind {
 	case "int":
+		if val, ok := expr.Value.(int64); ok {
+			if val >= 0 && val <= 255 {
+				return "u8"
+			}
+			if val >= -128 && val <= 127 {
+				return "i8"
+			}
+			if val >= 0 && val <= 65535 {
+				return "u16"
+			}
+			if val >= -32768 && val <= 32767 {
+				return "i16"
+			}
+			if val >= 0 && val <= 2147483647 {
+				return "i32"
+			}
+			return "i64"
+		}
 		return "int"
 	case "float":
-		return "float"
+		return "f64"
 	case "string":
 		return "string"
 	case "bool":
@@ -859,6 +1046,40 @@ func (sa *SemanticAnalyzer) inferLiteralType(expr *ast.LiteralExpression) string
 	default:
 		return ""
 	}
+}
+
+// isFloatType 检查是否是浮点类型
+func isFloatType(typeName string) bool {
+	return typeName == "float" || typeName == "f32" || typeName == "f64" || 
+		typeName == "double" || typeName == "real" || typeName == "single"
+}
+
+// isIntegerType 检查是否是整数类型
+func isIntegerType(typeName string) bool {
+	return typeName == "int" || typeName == "integer" || 
+		typeName == "i8" || typeName == "i16" || typeName == "i32" || typeName == "i64" ||
+		typeName == "int8" || typeName == "int16" || typeName == "int32" || typeName == "int64" ||
+		typeName == "u8" || typeName == "u16" || typeName == "u32" || typeName == "u64" ||
+		typeName == "uint8" || typeName == "uint16" || typeName == "uint32" || typeName == "uint64" ||
+		typeName == "uint" || typeName == "uchar" || typeName == "ushort" || typeName == "ulong" ||
+		typeName == "byte" || typeName == "sbyte" || typeName == "long" || typeName == "short"
+}
+
+// promoteIntegerType 整数类型提升
+func promoteIntegerType(left, right string) string {
+	precision := map[string]int{
+		"i8": 1, "int8": 1, "sbyte": 1, "byte": 1, "u8": 1, "uint8": 1, "uchar": 1,
+		"i16": 2, "int16": 2, "short": 2, "u16": 2, "uint16": 2, "ushort": 2,
+		"i32": 3, "int32": 3, "u32": 3, "uint32": 3,
+		"i64": 4, "int64": 4, "int": 4, "integer": 4, "long": 4,
+		"u64": 5, "uint64": 5, "uint": 5, "ulong": 5,
+	}
+	leftPrec := precision[left]
+	rightPrec := precision[right]
+	if leftPrec >= rightPrec {
+		return left
+	}
+	return right
 }
 
 // isNumericType 检查类型是否为数值类型

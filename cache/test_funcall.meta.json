@@ -1,0 +1,15 @@
+{
+  "source_path": "..\\kaula-projects\\llm_chat\\test_funcall.kl",
+  "source_hash": "b11c1a24f53ce66d19bb60ec978b76ce3ad26c27d67ff93091b7b10b41507c01",
+  "source_size": 176,
+  "source_mod_time": "2026-05-16T21:23:56.416403+08:00",
+  "ccode_hash": "6558092a99e557f612460c10b9ac206c889364db17882d8336df040f86da4036",
+  "ccode_size": 423,
+  "created_at": "2026-05-16T21:23:56.416403+08:00",
+  "last_accessed": "2026-05-16T21:23:56.416403+08:00",
+  "used_modules": [
+    "std.io",
+    "std.string"
+  ],
+  "compiler_version": "0.1.0-alpha"
+}

@@ -1,5 +1,5 @@
 #include "net.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -24,7 +24,7 @@
 
 Socket* socket_create(int family, int type, int protocol) {
     SOCKET_INIT;
-    Socket* sock = (Socket*)calloc(1, sizeof(Socket));
+    Socket* sock = (Socket*)kmm_v4_calloc(1, sizeof(Socket));
     if (sock) {
 #if STD_PLATFORM_WINDOWS
         sock->handle = (u64)socket(family, type, protocol);
@@ -42,7 +42,8 @@ Socket* socket_create(int family, int type, int protocol) {
 }
 
 void socket_destroy(Socket* sock) {
-    if (sock) { socket_close(sock); free(sock); }
+    if (sock) { socket_close(sock); }
+    // KMM 管理内存，无需手动释放
 }
 
 bool_t socket_bind(Socket* sock, const String host, u16 port) {
@@ -76,7 +77,7 @@ Socket* socket_accept(Socket* sock) {
     int client = accept(sock->fd, NULL, NULL);
     if (client < 0) return NULL;
 #endif
-    Socket* new_sock = (Socket*)calloc(1, sizeof(Socket));
+    Socket* new_sock = (Socket*)kmm_v4_calloc(1, sizeof(Socket));
     new_sock->family = sock->family;
     new_sock->type = sock->type;
     new_sock->protocol = sock->protocol;

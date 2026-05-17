@@ -64,7 +64,7 @@ kaula/
 │   │   └── timeout/         # 超时控制（内存、时间限制）
 │   ├── templates/           # 代码生成模板
 │   │   └── main.c.tmpl
-│   ├── stdlib.json          # 标准库函数签名定义（20 个模块）
+│   ├── stdlib.json          # 标准库函数签名定义（25 个模块）
 │   └── go.mod
 ├── pkglib/                  # 第三方库自动加载
 │   ├── stb_image/
@@ -81,25 +81,32 @@ kaula/
 │   ├── queue.c              # 优先级队列
 │   ├── prefix_system.c      # 前缀系统
 │   └── tree_system.c        # 树系统
-└── std/                     # 标准库（C 实现，18 个模块）
-    ├── async/               # 异步操作（事件循环、协程、I/O）
+└── std/                     # 标准库（C 实现，25 个模块）
+    ├── async/               # 异步操作（事件循环、协程、I/O、定时器管理）
     ├── base/                # 基础类型转换与比较
-    ├── concurrent/          # 并发原语（线程、锁、原子操作、线程池）
+    ├── concurrent/          # 并发原语（线程、锁、原子操作、线程池、Channel、Future/Promise）
     ├── container/           # 容器（Vector、LinkedList、HashMap、Stack）
+    ├── crypto/              # 加密算法（MD5、SHA256、Base64、CRC32、HMAC）
     ├── error/               # 错误处理
     ├── format/              # 格式化（printf、FormatBuilder）
     ├── gui/                 # GUI 支持（Nuklear 绑定）
-    ├── i18n/                # 国际化（多语言、编码转换、UTF-8）
-    ├── io/                  # I/O 操作（控制台、文件）
-    ├── math/                # 数学函数（标准数学库、随机数）
+    ├── i18n/                # 国际化（多语言、编码转换、UTF-8、RTL 支持）
+    ├── io/                  # I/O 操作（控制台、文件、路径处理）
+    ├── json/                # JSON 解析与序列化
+    ├── logging/             # 日志系统
+    ├── math/                # 数学函数（标准数学库、三角函数、随机数）
     ├── memory/              # 内存管理
+    ├── net/                 # 网络编程（TCP/UDP、DNS 解析）
     ├── prefix/              # 前缀系统接口
-    ├── string/              # 字符串处理
+    ├── string/              # 字符串处理（含正则表达式）
     ├── system/              # 系统调用（进程、文件、环境、网络）
     ├── task/                # 任务调度（优先级队列）
+    ├── testing/             # 单元测试框架
     ├── time/                # 时间测量
+    ├── toml/                # TOML 配置解析
     ├── vo/                  # VO 系统接口
-    └── web/                 # HTTP 服务器/客户端、URL 处理
+    ├── web/                 # HTTP 服务器/客户端、URL 处理
+    └── xml/                 # XML 解析
 ```
 
 ---
@@ -181,28 +188,35 @@ spend(component1, component2):
 
 ### 3. 标准库
 
-提供超过 **400+** 个标准函数，包括：
+提供超过 **500+** 个标准函数，包括：
 
 | 模块 | 功能 |
 |------|------|
 | **base** | 类型转换、比较、类型判断 |
 | **memory** | KMM V4、快速分配器、内存池 |
-| **string** | 字符串创建、操作、搜索、替换 |
+| **string** | 字符串创建、操作、搜索、替换、正则表达式 |
 | **io** | 控制台 I/O、文件操作、路径处理 |
 | **math** | 数学函数、三角函数、随机数 |
 | **container** | Vector、LinkedList、HashMap、Stack |
-| **concurrent** | 线程、互斥锁、条件变量、信号量、读写锁、原子操作、线程池 |
-| **async** | 异步任务、事件循环、协程、异步 I/O |
-| **system** | 系统信息、进程管理、环境变量、文件系统 |
+| **concurrent** | 线程、互斥锁、条件变量、信号量、读写锁、原子操作、线程池、Channel、Future/Promise |
+| **async** | 异步任务、事件循环、协程、异步 I/O、定时器管理 |
+| **system** | 系统信息、进程管理、环境变量、文件系统、网络状态 |
 | **task** | 任务创建、优先级队列调度 |
 | **vo** | VO 系统接口 |
 | **prefix** | 前缀系统接口 |
 | **error** | 错误处理、错误类型、错误打印 |
 | **format** | 格式化输出、FormatBuilder |
 | **time** | 时间测量、日期时间转换 |
-| **i18n** | 国际化、多语言支持、编码转换 |
+| **i18n** | 国际化、多语言支持、编码转换、RTL 支持 |
 | **gui** | GUI 支持（Nuklear 绑定） |
 | **web** | HTTP 服务器/客户端、URL 处理、MIME 类型 |
+| **json** | JSON 解析、序列化、反序列化、pretty 打印 |
+| **crypto** | MD5、SHA256、Base64、CRC32、HMAC |
+| **net** | TCP/UDP 套接字、DNS 解析 |
+| **toml** | TOML 配置解析 |
+| **xml** | XML 解析 |
+| **logging** | 日志系统 |
+| **testing** | 单元测试框架 |
 | **windows** | Windows 特定功能（注册表、进程信息） |
 | **syscall** | 系统调用接口 |
 

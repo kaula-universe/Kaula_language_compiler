@@ -1,4 +1,5 @@
 #include "concurrent.h"
+#include "../memory/memory.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,10 +19,10 @@ Thread thread_create(ThreadFunction func, void* arg) {
 #ifdef _WIN32
     return (Thread)CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)func, arg, 0, NULL);
 #else
-    pthread_t* thread = (pthread_t*)malloc(sizeof(pthread_t));
+    pthread_t* thread = (pthread_t*)kmm_v4_malloc(sizeof(pthread_t));
     if (thread) {
         if (pthread_create(thread, NULL, func, arg) != 0) {
-            free(thread);
+            // KMM 管理内存，无需手动释放
             return NULL;
         }
     }
@@ -36,7 +37,7 @@ void thread_join(Thread thread) {
 #else
     if (thread) {
         pthread_join(*(pthread_t*)thread, NULL);
-        free(thread);
+        // KMM 管理内存，无需手动释放
     }
 #endif
 }
@@ -47,7 +48,7 @@ void thread_detach(Thread thread) {
 #else
     if (thread) {
         pthread_detach(*(pthread_t*)thread);
-        free(thread);
+        // KMM 管理内存，无需手动释放
     }
 #endif
 }
@@ -56,7 +57,7 @@ Thread thread_self() {
 #ifdef _WIN32
     return (Thread)GetCurrentThread();
 #else
-    pthread_t* thread = (pthread_t*)malloc(sizeof(pthread_t));
+    pthread_t* thread = (pthread_t*)kmm_v4_malloc(sizeof(pthread_t));
     if (thread) {
         *thread = pthread_self();
     }
@@ -79,7 +80,7 @@ Mutex mutex_create() {
     HANDLE mutex = CreateMutex(NULL, FALSE, NULL);
     return (Mutex)mutex;
 #else
-    pthread_mutex_t* mutex = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_t* mutex = (pthread_mutex_t*)kmm_v4_malloc(sizeof(pthread_mutex_t));
     if (mutex) {
         pthread_mutex_init(mutex, NULL);
     }
@@ -93,7 +94,7 @@ void mutex_destroy(Mutex mutex) {
 #else
     if (mutex) {
         pthread_mutex_destroy((pthread_mutex_t*)mutex);
-        free(mutex);
+        // KMM 管理内存，无需手动释放
     }
 #endif
 }
@@ -146,7 +147,7 @@ typedef struct {
 
 Condition condition_create() {
 #ifdef _WIN32
-    ConditionImpl* impl = (ConditionImpl*)malloc(sizeof(ConditionImpl));
+    ConditionImpl* impl = (ConditionImpl*)kmm_v4_malloc(sizeof(ConditionImpl));
     if (impl) {
         impl->waiters_count = 0;
         InitializeCriticalSection(&impl->waiters_count_lock);
@@ -156,7 +157,7 @@ Condition condition_create() {
     }
     return (Condition)impl;
 #else
-    pthread_cond_t* cond = (pthread_cond_t*)malloc(sizeof(pthread_cond_t));
+    pthread_cond_t* cond = (pthread_cond_t*)kmm_v4_malloc(sizeof(pthread_cond_t));
     if (cond) {
         pthread_cond_init(cond, NULL);
     }
@@ -165,20 +166,19 @@ Condition condition_create() {
 }
 
 void condition_destroy(Condition condition) {
+    // KMM 管理内存，无需手动释放
 #ifdef _WIN32
     if (condition) {
         ConditionImpl* impl = (ConditionImpl*)condition;
         CloseHandle(impl->event);
         DeleteCriticalSection(&impl->waiters_count_lock);
         if (impl->waiters_mutexes) {
-            free(impl->waiters_mutexes);
+            // KMM 管理内存，无需手动释放
         }
-        free(impl);
     }
 #else
     if (condition) {
         pthread_cond_destroy((pthread_cond_t*)condition);
-        free(condition);
     }
 #endif
 }
@@ -287,7 +287,7 @@ Semaphore semaphore_create(uint32_t initial_value) {
     HANDLE semaphore = CreateSemaphore(NULL, initial_value, UINT32_MAX, NULL);
     return (Semaphore)semaphore;
 #else
-    sem_t* semaphore = (sem_t*)malloc(sizeof(sem_t));
+    sem_t* semaphore = (sem_t*)kmm_v4_malloc(sizeof(sem_t));
     if (semaphore) {
         sem_init(semaphore, 0, initial_value);
     }
@@ -301,7 +301,7 @@ void semaphore_destroy(Semaphore semaphore) {
 #else
     if (semaphore) {
         sem_destroy((sem_t*)semaphore);
-        free(semaphore);
+        // KMM 管理内存，无需手动释放
     }
 #endif
 }
@@ -371,7 +371,7 @@ ReadWriteLock rwlock_create() {
     HANDLE mutex = CreateMutex(NULL, FALSE, NULL);
     return (ReadWriteLock)mutex;
 #else
-    pthread_rwlock_t* rwlock = (pthread_rwlock_t*)malloc(sizeof(pthread_rwlock_t));
+    pthread_rwlock_t* rwlock = (pthread_rwlock_t*)kmm_v4_malloc(sizeof(pthread_rwlock_t));
     if (rwlock) {
         pthread_rwlock_init(rwlock, NULL);
     }
@@ -385,7 +385,7 @@ void rwlock_destroy(ReadWriteLock rwlock) {
 #else
     if (rwlock) {
         pthread_rwlock_destroy((pthread_rwlock_t*)rwlock);
-        free(rwlock);
+        // KMM 管理内存，无需手动释放
     }
 #endif
 }
@@ -536,12 +536,12 @@ static void* thread_pool_worker(void* arg) {
 }
 
 ThreadPool thread_pool_create(size_t thread_count) {
-    ThreadPoolImpl* pool = (ThreadPoolImpl*)malloc(sizeof(ThreadPoolImpl));
+    ThreadPoolImpl* pool = (ThreadPoolImpl*)kmm_v4_malloc(sizeof(ThreadPoolImpl));
     if (pool) {
         pool->thread_count = thread_count;
-        pool->threads = (Thread*)malloc(thread_count * sizeof(Thread));
+        pool->threads = (Thread*)kmm_v4_malloc(thread_count * sizeof(Thread));
         pool->task_capacity = 1024;
-        pool->tasks = (Task*)malloc(pool->task_capacity * sizeof(Task));
+        pool->tasks = (Task*)kmm_v4_malloc(pool->task_capacity * sizeof(Task));
         pool->task_count = 0;
         pool->mutex = mutex_create();
         pool->condition = condition_create();
@@ -563,9 +563,7 @@ void thread_pool_destroy(ThreadPool pool) {
         }
         mutex_destroy(impl->mutex);
         condition_destroy(impl->condition);
-        free(impl->threads);
-        free(impl->tasks);
-        free(impl);
+        // KMM 管理内存，无需手动释放
     }
 }
 
@@ -575,7 +573,7 @@ void thread_pool_add_task(ThreadPool pool, Task task) {
         mutex_lock(impl->mutex);
         if (impl->task_count >= impl->task_capacity) {
             impl->task_capacity *= 2;
-            impl->tasks = (Task*)realloc(impl->tasks, impl->task_capacity * sizeof(Task));
+            impl->tasks = (Task*)kmm_v4_realloc(impl->tasks, impl->task_capacity * sizeof(Task));
         }
         impl->tasks[impl->task_count++] = task;
         condition_signal(impl->condition);
@@ -642,10 +640,10 @@ typedef struct Channel {
 } Channel;
 
 Channel* channel_create(size_t capacity) {
-    Channel* ch = (Channel*)calloc(1, sizeof(Channel));
+    Channel* ch = (Channel*)kmm_v4_calloc(1, sizeof(Channel));
     if (ch) {
         ch->capacity = capacity > 0 ? capacity : 16;
-        ch->buffer = (void**)calloc(ch->capacity, sizeof(void*));
+        ch->buffer = (void**)kmm_v4_calloc(ch->capacity, sizeof(void*));
         ch->mutex = mutex_create();
         ch->not_full = condition_create();
         ch->not_empty = condition_create();
@@ -654,12 +652,11 @@ Channel* channel_create(size_t capacity) {
 }
 
 void channel_destroy(Channel* ch) {
+    // KMM 管理内存，无需手动释放
     if (ch) {
         mutex_destroy(ch->mutex);
         condition_destroy(ch->not_full);
         condition_destroy(ch->not_empty);
-        free(ch->buffer);
-        free(ch);
     }
 }
 
@@ -767,22 +764,21 @@ struct Future {
 };
 
 Promise* promise_create() {
-    Promise* p = (Promise*)calloc(1, sizeof(Promise));
+    Promise* p = (Promise*)kmm_v4_calloc(1, sizeof(Promise));
     if (p) {
         p->mutex = mutex_create();
         p->condition = condition_create();
-        p->future = (Future*)calloc(1, sizeof(Future));
+        p->future = (Future*)kmm_v4_calloc(1, sizeof(Future));
         p->future->promise = p;
     }
     return p;
 }
 
 void promise_destroy(Promise* promise) {
+    // KMM 管理内存，无需手动释放
     if (promise) {
         mutex_destroy(promise->mutex);
         condition_destroy(promise->condition);
-        free(promise->future);
-        free(promise);
     }
 }
 
@@ -813,13 +809,12 @@ bool_t promise_is_error(Promise* promise) { return promise ? promise->has_error 
 Future* future_create() { Promise* p = promise_create(); return p ? p->future : NULL; }
 
 void future_destroy(Future* future) {
+    // KMM 管理内存，无需手动释放
     if (future) {
         if (future->promise) {
             mutex_destroy(future->promise->mutex);
             condition_destroy(future->promise->condition);
-            free(future->promise);
         }
-        free(future);
     }
 }
 
@@ -868,7 +863,7 @@ static void* future_map_worker(void* arg) {
 Future* future_map(Future* input, void* (*func)(void*)) {
     if (!input || !func) return NULL;
     Promise* output = promise_create();
-    MapTaskArg* mta = (MapTaskArg*)malloc(sizeof(MapTaskArg));
+    MapTaskArg* mta = (MapTaskArg*)kmm_v4_malloc(sizeof(MapTaskArg));
     mta->input = input;
     mta->func = func;
     mta->output = output;
@@ -905,11 +900,11 @@ static void* all_worker(void* arg) {
 Future* future_all(Future** futures, size_t count) {
     if (!futures || count == 0) return NULL;
     Promise* output = promise_create();
-    AllTaskArg* ata = (AllTaskArg*)calloc(1, sizeof(AllTaskArg));
+    AllTaskArg* ata = (AllTaskArg*)kmm_v4_calloc(1, sizeof(AllTaskArg));
     ata->futures = futures;
     ata->count = count;
     ata->output = output;
-    ata->results = (void**)calloc(count, sizeof(void*));
+    ata->results = (void**)kmm_v4_calloc(count, sizeof(void*));
     ata->mutex = mutex_create();
     for (size_t i = 0; i < count; i++) {
         thread_detach(thread_create(all_worker, ata));
@@ -921,19 +916,19 @@ Future* future_any(Future** futures, size_t count) {
     if (!futures || count == 0) return NULL;
     Promise* output = promise_create();
     typedef struct { Future** futures; size_t count; Promise* output; Mutex mutex; bool_t done; } AnyArg;
-    AnyArg* aa = (AnyArg*)calloc(1, sizeof(AnyArg));
+    AnyArg* aa = (AnyArg*)kmm_v4_calloc(1, sizeof(AnyArg));
     aa->futures = futures;
     aa->count = count;
     aa->output = output;
     aa->mutex = mutex_create();
     typedef struct { AnyArg* aa; size_t idx; } WorkerArg;
-    WorkerArg* args = (WorkerArg*)malloc(count * sizeof(WorkerArg));
+    WorkerArg* args = (WorkerArg*)kmm_v4_malloc(count * sizeof(WorkerArg));
     for (size_t i = 0; i < count; i++) {
         args[i].aa = aa;
         args[i].idx = i;
         typedef void* (*Func)(void*);
         typedef struct { WorkerArg* arg; } Closure;
-        Closure* c = (Closure*)malloc(sizeof(Closure)); c->arg = &args[i];
+        Closure* c = (Closure*)kmm_v4_malloc(sizeof(Closure)); c->arg = &args[i];
         thread_detach(thread_create((Func)future_map_worker, c));
     }
     return output->future;

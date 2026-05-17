@@ -61,6 +61,19 @@ extern bool string_to_bool(const String str);
 extern void string_free(String str);
 extern String string_realloc(String str, size_t new_size);
 
+// StringBuilder
+typedef struct StringBuilder {
+    char* buffer;
+    size_t length;
+    size_t capacity;
+} StringBuilder;
+
+extern StringBuilder* string_builder_create(void);
+extern void string_builder_destroy(StringBuilder* sb);
+extern void string_builder_append(StringBuilder* sb, const char* str);
+extern void string_builder_append_char(StringBuilder* sb, char c);
+extern String string_builder_to_string(StringBuilder* sb);
+
 // 字符串工具函数
 extern bool string_is_empty(const String str);
 extern bool string_starts_with(const String str, const String prefix);

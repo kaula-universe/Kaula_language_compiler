@@ -1,0 +1,15 @@
+{
+  "source_path": "..\\kaula-projects\\llm_chat\\test_split_if.kl",
+  "source_hash": "1dc27220e87ec641f685da8eaa800fb406af97b8b89a311d198d0f3fbd416f47",
+  "source_size": 636,
+  "source_mod_time": "2026-05-16T21:38:15.3152578+08:00",
+  "ccode_hash": "c6c608c08abf0d9ea0e50266a0b80cebe65873ea72b959881d3e39ee10091825",
+  "ccode_size": 922,
+  "created_at": "2026-05-16T21:38:15.3152578+08:00",
+  "last_accessed": "2026-05-16T21:38:15.3152578+08:00",
+  "used_modules": [
+    "std.io",
+    "std.string"
+  ],
+  "compiler_version": "0.1.0-alpha"
+}

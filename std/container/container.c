@@ -1,40 +1,59 @@
 #include "container.h"
+#include "../memory/memory.h"
 #include <stdlib.h>
 #include <string.h>
 
 // 动态数组（Vector）实现
 Vector* vector_create(size_t initial_capacity) {
-    Vector* vector = (Vector*)malloc(sizeof(Vector));
-    if (vector) {
-        vector->capacity = initial_capacity > 0 ? initial_capacity : 4;
-        vector->size = 0;
-        vector->data = (void**)malloc(vector->capacity * sizeof(void*));
-    }
+    size_t cap = initial_capacity > 0 ? initial_capacity : 4;
+    size_t data_size = cap * sizeof(void*);
+    
+    // 一次性分配Vector结构体和data数组，确保清零
+    size_t total_size = sizeof(Vector) + data_size;
+    void* mem = kmm_v4_malloc(total_size);
+    if (!mem) return NULL;
+    
+    // 清零整个分配区域
+    memset(mem, 0, total_size);
+    
+    Vector* vector = (Vector*)mem;
+    vector->capacity = cap;
+    vector->size = 0;
+    // data指向Vector结构体之后的内存
+    vector->data = (void**)((char*)mem + sizeof(Vector));
+    
     return vector;
 }
 
 void vector_destroy(Vector* vector) {
-    if (vector) {
-        free(vector->data);
-        free(vector);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 void vector_reserve(Vector* vector, size_t capacity) {
-    if (vector && capacity > vector->capacity) {
-        void** new_data = (void**)realloc(vector->data, capacity * sizeof(void*));
-        if (new_data) {
-            vector->data = new_data;
-            vector->capacity = capacity;
-        }
+    if (!vector || capacity <= vector->capacity) return;
+    
+    // 尝试分配新空间
+    void** new_data = (void**)kmm_v4_malloc(capacity * sizeof(void*));
+    if (new_data) {
+        // 复制旧数据
+        memcpy(new_data, vector->data, vector->size * sizeof(void*));
+        vector->data = new_data;
+        vector->capacity = capacity;
     }
+    // 如果分配失败，保持原状（不崩溃）
 }
 
 void vector_push_back(Vector* vector, void* element) {
-    if (vector) {
-        if (vector->size >= vector->capacity) {
-            vector_reserve(vector, vector->capacity * 2);
-        }
+    if (!vector) return;
+    
+    if (vector->size >= vector->capacity) {
+        // 自动扩容，每次翻倍
+        size_t new_capacity = vector->capacity * 2;
+        vector_reserve(vector, new_capacity);
+        // 如果扩容失败，vector_reserve不会修改capacity，这里不继续push
+    }
+    
+    if (vector->size < vector->capacity) {
         vector->data[vector->size++] = element;
     }
 }
@@ -42,6 +61,13 @@ void vector_push_back(Vector* vector, void* element) {
 void* vector_get(Vector* vector, size_t index) {
     if (vector && index < vector->size) {
         return vector->data[index];
+    }
+    return NULL;
+}
+
+void* vector_pop_back(Vector* vector) {
+    if (vector && vector->size > 0) {
+        return vector->data[--vector->size];
     }
     return NULL;
 }
@@ -76,9 +102,44 @@ void vector_clear(Vector* vector) {
     }
 }
 
+// 整数版本实现
+void vector_push_back_int(Vector* vector, int64_t element) {
+    if (!vector) return;
+    
+    if (vector->size >= vector->capacity) {
+        size_t new_capacity = vector->capacity * 2;
+        vector_reserve(vector, new_capacity);
+    }
+    
+    if (vector->size < vector->capacity) {
+        // 将int64_t存储为指针（在64位平台上安全）
+        vector->data[vector->size++] = (void*)(intptr_t)element;
+    }
+}
+
+int64_t vector_pop_back_int(Vector* vector) {
+    if (vector && vector->size > 0) {
+        return (int64_t)(intptr_t)vector->data[--vector->size];
+    }
+    return 0;
+}
+
+int64_t vector_get_int(Vector* vector, size_t index) {
+    if (vector && index < vector->size) {
+        return (int64_t)(intptr_t)vector->data[index];
+    }
+    return 0;
+}
+
+void vector_set_int(Vector* vector, size_t index, int64_t element) {
+    if (vector && index < vector->size) {
+        vector->data[index] = (void*)(intptr_t)element;
+    }
+}
+
 // 链表（LinkedList）实现
 LinkedList* linked_list_create() {
-    LinkedList* list = (LinkedList*)malloc(sizeof(LinkedList));
+    LinkedList* list = (LinkedList*)kmm_v4_malloc(sizeof(LinkedList));
     if (list) {
         list->head = NULL;
         list->tail = NULL;
@@ -88,20 +149,12 @@ LinkedList* linked_list_create() {
 }
 
 void linked_list_destroy(LinkedList* list) {
-    if (list) {
-        ListNode* current = list->head;
-        while (current) {
-            ListNode* next = current->next;
-            free(current);
-            current = next;
-        }
-        free(list);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 void linked_list_push_front(LinkedList* list, void* element) {
     if (list) {
-        ListNode* node = (ListNode*)malloc(sizeof(ListNode));
+        ListNode* node = (ListNode*)kmm_v4_malloc(sizeof(ListNode));
         if (node) {
             node->data = element;
             node->next = list->head;
@@ -119,7 +172,7 @@ void linked_list_push_front(LinkedList* list, void* element) {
 
 void linked_list_push_back(LinkedList* list, void* element) {
     if (list) {
-        ListNode* node = (ListNode*)malloc(sizeof(ListNode));
+        ListNode* node = (ListNode*)kmm_v4_malloc(sizeof(ListNode));
         if (node) {
             node->data = element;
             node->next = NULL;
@@ -145,7 +198,7 @@ void* linked_list_pop_front(LinkedList* list) {
         } else {
             list->tail = NULL;
         }
-        free(node);
+        // KMM 管理内存，无需手动释放
         list->size--;
         return data;
     }
@@ -162,7 +215,7 @@ void* linked_list_pop_back(LinkedList* list) {
         } else {
             list->head = NULL;
         }
-        free(node);
+        // KMM 管理内存，无需手动释放
         list->size--;
         return data;
     }
@@ -212,7 +265,7 @@ void linked_list_remove(LinkedList* list, size_t index) {
         } else {
             list->tail = current->prev;
         }
-        free(current);
+        // KMM 管理内存，无需手动释放
         list->size--;
     }
 }
@@ -230,12 +283,7 @@ bool linked_list_is_empty(LinkedList* list) {
 
 void linked_list_clear(LinkedList* list) {
     if (list) {
-        ListNode* current = list->head;
-        while (current) {
-            ListNode* next = current->next;
-            free(current);
-            current = next;
-        }
+        // KMM 管理内存，无需手动释放
         list->head = NULL;
         list->tail = NULL;
         list->size = 0;
@@ -244,37 +292,26 @@ void linked_list_clear(LinkedList* list) {
 
 // 哈希表（HashMap）实现
 HashMap* hash_map_create(size_t initial_capacity, size_t (*hash_func)(void* key), int (*equal_func)(void* key1, void* key2)) {
-    HashMap* map = (HashMap*)malloc(sizeof(HashMap));
+    HashMap* map = (HashMap*)kmm_v4_malloc(sizeof(HashMap));
     if (map) {
         map->capacity = initial_capacity > 0 ? initial_capacity : 16;
         map->size = 0;
         map->hash_func = hash_func;
         map->equal_func = equal_func;
-        map->buckets = (HashNode**)calloc(map->capacity, sizeof(HashNode*));
+        map->buckets = (HashNode**)kmm_v4_calloc(map->capacity, sizeof(HashNode*));
     }
     return map;
 }
 
 void hash_map_destroy(HashMap* map) {
-    if (map) {
-        for (size_t i = 0; i < map->capacity; i++) {
-            HashNode* current = map->buckets[i];
-            while (current) {
-                HashNode* next = current->next;
-                free(current);
-                current = next;
-            }
-        }
-        free(map->buckets);
-        free(map);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 static void hash_map_resize(HashMap* map, size_t new_capacity) {
     HashNode** old_buckets = map->buckets;
     size_t old_capacity = map->capacity;
     
-    map->buckets = (HashNode**)calloc(new_capacity, sizeof(HashNode*));
+    map->buckets = (HashNode**)kmm_v4_calloc(new_capacity, sizeof(HashNode*));
     if (!map->buckets) {
         map->buckets = old_buckets;
         return;
@@ -292,7 +329,7 @@ static void hash_map_resize(HashMap* map, size_t new_capacity) {
         }
     }
     
-    free(old_buckets);
+    // KMM 管理内存，无需手动释放
 }
 
 void hash_map_put(HashMap* map, void* key, void* value) {
@@ -310,7 +347,7 @@ void hash_map_put(HashMap* map, void* key, void* value) {
             }
             current = current->next;
         }
-        HashNode* node = (HashNode*)malloc(sizeof(HashNode));
+        HashNode* node = (HashNode*)kmm_v4_malloc(sizeof(HashNode));
         if (node) {
             node->key = key;
             node->value = value;
@@ -347,7 +384,7 @@ void hash_map_remove(HashMap* map, void* key) {
                 } else {
                     map->buckets[hash] = current->next;
                 }
-                free(current);
+                // KMM 管理内存，无需手动释放
                 map->size--;
                 return;
             }
@@ -370,13 +407,8 @@ bool hash_map_is_empty(HashMap* map) {
 
 void hash_map_clear(HashMap* map) {
     if (map) {
+        // KMM 管理内存，无需手动释放
         for (size_t i = 0; i < map->capacity; i++) {
-            HashNode* current = map->buckets[i];
-            while (current) {
-                HashNode* next = current->next;
-                free(current);
-                current = next;
-            }
             map->buckets[i] = NULL;
         }
         map->size = 0;
@@ -389,26 +421,23 @@ bool hash_map_contains(HashMap* map, void* key) {
 
 // 栈（Stack）实现
 Stack* stack_create(size_t initial_capacity) {
-    Stack* stack = (Stack*)malloc(sizeof(Stack));
+    Stack* stack = (Stack*)kmm_v4_malloc(sizeof(Stack));
     if (stack) {
         stack->capacity = initial_capacity > 0 ? initial_capacity : 4;
         stack->size = 0;
-        stack->data = (void**)malloc(stack->capacity * sizeof(void*));
+        stack->data = (void**)kmm_v4_malloc(stack->capacity * sizeof(void*));
     }
     return stack;
 }
 
 void stack_destroy(Stack* stack) {
-    if (stack) {
-        free(stack->data);
-        free(stack);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 void stack_push(Stack* stack, void* element) {
     if (stack) {
         if (stack->size >= stack->capacity) {
-            void** new_data = (void**)realloc(stack->data, stack->capacity * 2 * sizeof(void*));
+            void** new_data = (void**)kmm_v4_realloc(stack->data, stack->capacity * 2 * sizeof(void*));
             if (new_data) {
                 stack->data = new_data;
                 stack->capacity *= 2;
@@ -451,33 +480,30 @@ void stack_clear(Stack* stack) {
 
 // 队列（Queue）实现
 Queue* queue_create(size_t initial_capacity) {
-    Queue* queue = (Queue*)malloc(sizeof(Queue));
+    Queue* queue = (Queue*)kmm_v4_malloc(sizeof(Queue));
     if (queue) {
         queue->capacity = initial_capacity > 0 ? initial_capacity : 4;
         queue->size = 0;
         queue->head = 0;
         queue->tail = 0;
-        queue->data = (void**)malloc(queue->capacity * sizeof(void*));
+        queue->data = (void**)kmm_v4_malloc(queue->capacity * sizeof(void*));
     }
     return queue;
 }
 
 void queue_destroy(Queue* queue) {
-    if (queue) {
-        free(queue->data);
-        free(queue);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 void queue_enqueue(Queue* queue, void* element) {
     if (queue) {
         if (queue->size >= queue->capacity) {
-            void** new_data = (void**)malloc(queue->capacity * 2 * sizeof(void*));
+            void** new_data = (void**)kmm_v4_malloc(queue->capacity * 2 * sizeof(void*));
             if (new_data) {
                 for (size_t i = 0; i < queue->size; i++) {
                     new_data[i] = queue->data[(queue->head + i) % queue->capacity];
                 }
-                free(queue->data);
+                // KMM 管理内存，无需手动释放
                 queue->data = new_data;
                 queue->head = 0;
                 queue->tail = queue->size;
@@ -565,37 +591,26 @@ int equal_float(void* key1, void* key2) {
 
 // 集合（Set）实现
 Set* set_create(size_t initial_capacity, size_t (*hash_func)(void* key), int (*equal_func)(void* key1, void* key2)) {
-    Set* set = (Set*)malloc(sizeof(Set));
+    Set* set = (Set*)kmm_v4_malloc(sizeof(Set));
     if (set) {
         set->capacity = initial_capacity > 0 ? initial_capacity : 16;
         set->size = 0;
         set->hash_func = hash_func;
         set->equal_func = equal_func;
-        set->buckets = (SetNode**)calloc(set->capacity, sizeof(SetNode*));
+        set->buckets = (SetNode**)kmm_v4_calloc(set->capacity, sizeof(SetNode*));
     }
     return set;
 }
 
 void set_destroy(Set* set) {
-    if (set) {
-        for (size_t i = 0; i < set->capacity; i++) {
-            SetNode* current = set->buckets[i];
-            while (current) {
-                SetNode* next = current->next;
-                free(current);
-                current = next;
-            }
-        }
-        free(set->buckets);
-        free(set);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 void set_add(Set* set, void* element) {
     if (set && element) {
         if (set_contains(set, element)) return;
         size_t hash = set->hash_func(element) % set->capacity;
-        SetNode* node = (SetNode*)malloc(sizeof(SetNode));
+        SetNode* node = (SetNode*)kmm_v4_malloc(sizeof(SetNode));
         if (node) {
             node->data = element;
             node->next = set->buckets[hash];
@@ -617,7 +632,7 @@ void set_remove(Set* set, void* element) {
                 } else {
                     set->buckets[hash] = current->next;
                 }
-                free(current);
+                // KMM 管理内存，无需手动释放
                 set->size--;
                 return;
             }
@@ -648,13 +663,8 @@ bool set_is_empty(Set* set) {
 
 void set_clear(Set* set) {
     if (set) {
+        // KMM 管理内存，无需手动释放
         for (size_t i = 0; i < set->capacity; i++) {
-            SetNode* current = set->buckets[i];
-            while (current) {
-                SetNode* next = current->next;
-                free(current);
-                current = next;
-            }
             set->buckets[i] = NULL;
         }
         set->size = 0;
@@ -716,7 +726,7 @@ Set* set_difference(Set* set1, Set* set2) {
 
 // TreeMap 实现（红黑树）
 static TreeMapNode* tree_map_create_node(void* key, void* value) {
-    TreeMapNode* node = (TreeMapNode*)malloc(sizeof(TreeMapNode));
+    TreeMapNode* node = (TreeMapNode*)kmm_v4_malloc(sizeof(TreeMapNode));
     if (node) {
         node->key = key;
         node->value = value;
@@ -792,7 +802,7 @@ static void tree_map_fix_insert_violation(TreeMap* map, TreeMapNode* z) {
 }
 
 TreeMap* tree_map_create(int (*compare_func)(void* key1, void* key2)) {
-    TreeMap* map = (TreeMap*)malloc(sizeof(TreeMap));
+    TreeMap* map = (TreeMap*)kmm_v4_malloc(sizeof(TreeMap));
     if (map) {
         map->root = NULL;
         map->size = 0;
@@ -802,18 +812,11 @@ TreeMap* tree_map_create(int (*compare_func)(void* key1, void* key2)) {
 }
 
 static void tree_map_destroy_nodes(TreeMapNode* node) {
-    if (node) {
-        tree_map_destroy_nodes(node->left);
-        tree_map_destroy_nodes(node->right);
-        free(node);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 void tree_map_destroy(TreeMap* map) {
-    if (map) {
-        tree_map_destroy_nodes(map->root);
-        free(map);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 void tree_map_put(TreeMap* map, void* key, void* value) {
@@ -928,7 +931,7 @@ bool tree_map_is_empty(TreeMap* map) {
 
 void tree_map_clear(TreeMap* map) {
     if (map) {
-        tree_map_destroy_nodes(map->root);
+        // KMM 管理内存，无需手动释放
         map->root = NULL;
         map->size = 0;
     }
@@ -977,26 +980,23 @@ void tree_map_remove(TreeMap* map, void* key) {
         else parent->right = y;
         y->parent = parent;
     }
-    free(z);
+    // KMM 管理内存，无需手动释放
     map->size--;
 }
 
 // PriorityQueue 实现
 PriorityQueue* priority_queue_create(size_t initial_capacity) {
-    PriorityQueue* pq = (PriorityQueue*)malloc(sizeof(PriorityQueue));
+    PriorityQueue* pq = (PriorityQueue*)kmm_v4_malloc(sizeof(PriorityQueue));
     if (pq) {
         pq->capacity = initial_capacity > 0 ? initial_capacity : 16;
         pq->size = 0;
-        pq->data = (PriorityQueueNode*)malloc(pq->capacity * sizeof(PriorityQueueNode));
+        pq->data = (PriorityQueueNode*)kmm_v4_malloc(pq->capacity * sizeof(PriorityQueueNode));
     }
     return pq;
 }
 
 void priority_queue_destroy(PriorityQueue* pq) {
-    if (pq) {
-        free(pq->data);
-        free(pq);
-    }
+    // KMM 管理内存，无需手动释放
 }
 
 static void priority_queue_sift_up(PriorityQueue* pq, size_t index) {
@@ -1031,7 +1031,7 @@ void priority_queue_push(PriorityQueue* pq, void* element, int priority) {
     if (!pq) return;
     if (pq->size >= pq->capacity) {
         pq->capacity *= 2;
-        pq->data = (PriorityQueueNode*)realloc(pq->data, pq->capacity * sizeof(PriorityQueueNode));
+        pq->data = (PriorityQueueNode*)kmm_v4_realloc(pq->data, pq->capacity * sizeof(PriorityQueueNode));
     }
     pq->data[pq->size].data = element;
     pq->data[pq->size].priority = priority;

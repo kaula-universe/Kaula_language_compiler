@@ -1,4 +1,5 @@
 #include "system.h"
+#include "../memory/memory.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -316,16 +317,16 @@ char** system_get_env_list() {
     }
     
     // 分配数组
-    env_array = (char**)malloc((env_count + 1) * sizeof(char*));
+    env_array = (char**)kmm_v4_malloc((env_count + 1) * sizeof(char*));
     if (!env_array) {
         FreeEnvironmentStringsW(env_block);
         return NULL;
     }
     
     // 转换并存储
-    env_buffer = (char*)malloc(32768);
+    env_buffer = (char*)kmm_v4_malloc(32768);
     if (!env_buffer) {
-        free(env_array);
+        // KMM 管理内存，无需手动释放
         env_array = NULL;
         FreeEnvironmentStringsW(env_block);
         return NULL;
@@ -446,7 +447,7 @@ int system_execute_with_args(const char* command, char* const args[], char* outp
     }
     
     size_t full_len = cmd_len + args_len + 1;
-    char* full_cmd = (char*)malloc(full_len);
+    char* full_cmd = (char*)kmm_v4_malloc(full_len);
     if (!full_cmd) return -1;
     
     strcpy(full_cmd, command);
@@ -456,7 +457,7 @@ int system_execute_with_args(const char* command, char* const args[], char* outp
     }
     
     int result = system_execute(full_cmd, output, output_size);
-    free(full_cmd);
+    // KMM 管理内存，无需手动释放
     return result;
 }
 
@@ -609,13 +610,13 @@ char** system_directory_list(const char* path, size_t* count) {
     }
     FindClose(hFind);
     if (file_count == 0) return NULL;
-    char** result = (char**)malloc((file_count + 1) * sizeof(char*));
+    char** result = (char**)kmm_v4_malloc((file_count + 1) * sizeof(char*));
     if (!result) return NULL;
     hFind = FindFirstFile(search_path, &data);
     size_t index = 0;
     while (FindNextFile(hFind, &data)) {
         if (strcmp(data.cFileName, ".") != 0 && strcmp(data.cFileName, "..") != 0) {
-            result[index] = strdup(data.cFileName);
+            result[index] = kmm_v4_strdup(data.cFileName);
             index++;
         }
     }
@@ -638,7 +639,7 @@ char** system_directory_list(const char* path, size_t* count) {
         closedir(dir);
         return NULL;
     }
-    char** result = (char**)malloc((file_count + 1) * sizeof(char*));
+    char** result = (char**)kmm_v4_malloc((file_count + 1) * sizeof(char*));
     if (!result) {
         closedir(dir);
         return NULL;
@@ -646,7 +647,7 @@ char** system_directory_list(const char* path, size_t* count) {
     size_t index = 0;
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
-            result[index] = strdup(entry->d_name);
+            result[index] = kmm_v4_strdup(entry->d_name);
             index++;
         }
     }
@@ -660,11 +661,11 @@ char** system_directory_list(const char* path, size_t* count) {
 // 路径函数
 char* system_get_current_directory() {
 #ifdef _WIN32
-    char* buffer = (char*)malloc(MAX_PATH);
+    char* buffer = (char*)kmm_v4_malloc(MAX_PATH);
     if (buffer && GetCurrentDirectory(MAX_PATH, buffer)) {
         return buffer;
     }
-    free(buffer);
+    // KMM 管理内存，无需手动释放
     return NULL;
 #else
     char* buffer = getcwd(NULL, 0);
@@ -682,35 +683,35 @@ bool system_change_directory(const char* path) {
 
 char* system_get_executable_path() {
 #ifdef _WIN32
-    char* buffer = (char*)malloc(MAX_PATH);
+    char* buffer = (char*)kmm_v4_malloc(MAX_PATH);
     if (buffer && GetModuleFileName(NULL, buffer, MAX_PATH)) {
         return buffer;
     }
-    free(buffer);
+    // KMM 管理内存，无需手动释放
     return NULL;
 #elif defined(__APPLE__)
     // macOS 使用 _NSGetExecutablePath
     uint32_t bufsize = 1024;
-    char* buffer = (char*)malloc(bufsize);
+    char* buffer = (char*)kmm_v4_malloc(bufsize);
     if (buffer) {
         if (_NSGetExecutablePath(buffer, &bufsize) == 0) {
             return buffer;
         }
-        free(buffer);
+        // KMM 管理内存，无需手动释放
         // 重试更大的缓冲区
-        buffer = (char*)malloc(bufsize);
+        buffer = (char*)kmm_v4_malloc(bufsize);
         if (buffer && _NSGetExecutablePath(buffer, &bufsize) == 0) {
             return buffer;
         }
-        free(buffer);
+        // KMM 管理内存，无需手动释放
     }
     return NULL;
 #elif defined(__linux__)
-    char* buffer = (char*)malloc(1024);
+    char* buffer = (char*)kmm_v4_malloc(1024);
     if (buffer && readlink("/proc/self/exe", buffer, 1024) != -1) {
         return buffer;
     }
-    free(buffer);
+    // KMM 管理内存，无需手动释放
     return NULL;
 #elif defined(__FreeBSD__)
     // FreeBSD 使用 KERN_PROC_PATHNAME
@@ -718,12 +719,12 @@ char* system_get_executable_path() {
     char buffer[1024];
     size_t cb = sizeof(buffer);
     if (sysctl(mib, 4, buffer, &cb, NULL, 0) == 0) {
-        return strdup(buffer);
+        return kmm_v4_strdup(buffer);
     }
     return NULL;
 #else
     // 其他 Unix 系统回退方案
-    char* buffer = (char*)malloc(1024);
+    char* buffer = (char*)kmm_v4_malloc(1024);
     if (buffer) {
         ssize_t len = readlink("/proc/curproc/file", buffer, 1023);
         if (len != -1) {
@@ -731,40 +732,40 @@ char* system_get_executable_path() {
             return buffer;
         }
     }
-    free(buffer);
+    // KMM 管理内存，无需手动释放
     return NULL;
 #endif
 }
 
 char* system_get_home_directory() {
 #ifdef _WIN32
-    char* buffer = (char*)malloc(MAX_PATH);
+    char* buffer = (char*)kmm_v4_malloc(MAX_PATH);
     if (buffer && GetEnvironmentVariable("USERPROFILE", buffer, MAX_PATH)) {
         return buffer;
     }
-    free(buffer);
+    // KMM 管理内存，无需手动释放
     return NULL;
 #elif defined(__APPLE__)
     // macOS 优先使用 HOME 环境变量
     char* home = getenv("HOME");
     if (home) {
-        return strdup(home);
+        return kmm_v4_strdup(home);
     }
     // 回退到 getpwuid
     struct passwd* pw = getpwuid(getuid());
     if (pw) {
-        return strdup(pw->pw_dir);
+        return kmm_v4_strdup(pw->pw_dir);
     }
     return NULL;
 #else
     // Linux 和其他 Unix 系统
     char* home = getenv("HOME");
     if (home) {
-        return strdup(home);
+        return kmm_v4_strdup(home);
     }
     struct passwd* pw = getpwuid(getuid());
     if (pw) {
-        return strdup(pw->pw_dir);
+        return kmm_v4_strdup(pw->pw_dir);
     }
     return NULL;
 #endif
@@ -1268,17 +1269,17 @@ int system_syscall_kill(int pid, int sig) {
 }
 
 void* system_syscall_malloc(size_t size) {
-    return malloc(size);
+    return kmm_v4_malloc(size);
 }
 
 void system_syscall_free(void* ptr) {
-    free(ptr);
+    // KMM 管理内存，无需手动释放
 }
 
 void* system_syscall_realloc(void* ptr, size_t size) {
-    return realloc(ptr, size);
+    return kmm_v4_realloc(ptr, size);
 }
 
 void* system_syscall_calloc(size_t count, size_t size) {
-    return calloc(count, size);
+    return kmm_v4_calloc(count, size);
 }

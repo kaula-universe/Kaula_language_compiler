@@ -1,121 +1,135 @@
 #include "json.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
 
 static JsonValue* json_parse_value(const char** text, int* error);
-static String json_serialize_value(JsonValue* value, int indent_level, bool_t pretty);
+static String json_serialize_value(JsonValue* value, int indent_level, int pretty);
 
 JsonValue* json_create_null() {
-    JsonValue* value = (JsonValue*)calloc(1, sizeof(JsonValue));
+    JsonValue* value = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
     if (value) value->type = JSON_NULL;
     return value;
 }
 
-JsonValue* json_create_bool(bool_t value) {
-    JsonValue* val = (JsonValue*)calloc(1, sizeof(JsonValue));
-    if (val) { val->type = JSON_BOOL; val->bool_val = value; }
+JsonValue* json_create_bool(int value) {
+    JsonValue* val = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
+    if (val) { val->type = JSON_BOOL; val->value.bool_val = value; }
     return val;
 }
 
-JsonValue* json_create_number(f64 value) {
-    JsonValue* val = (JsonValue*)calloc(1, sizeof(JsonValue));
-    if (val) { val->type = JSON_NUMBER; val->number_val = value; }
+JsonValue* json_create_number(double value) {
+    JsonValue* val = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
+    if (val) { val->type = JSON_NUMBER; val->value.number_val = value; }
     return val;
 }
 
 JsonValue* json_create_string(const String value) {
-    JsonValue* val = (JsonValue*)calloc(1, sizeof(JsonValue));
+    JsonValue* val = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
     if (val && value) {
         val->type = JSON_STRING;
-        val->string_val = string_copy(value);
+        val->value.string_val = string_copy(value);
     }
     return val;
 }
 
 JsonValue* json_create_array() {
-    JsonValue* val = (JsonValue*)calloc(1, sizeof(JsonValue));
+    JsonValue* val = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
     if (val) {
         val->type = JSON_ARRAY;
-        val->array_val = (JsonArray*)calloc(1, sizeof(JsonArray));
-        if (val->array_val) val->array_val->capacity = 8;
+        val->value.array_val = (JsonArray*)kmm_v4_calloc(1, sizeof(JsonArray));
+        if (val->value.array_val) {
+            val->value.array_val->capacity = 8;
+            val->value.array_val->items = (JsonValue**)kmm_v4_calloc(val->value.array_val->capacity, sizeof(JsonValue*));
+        }
     }
     return val;
 }
 
 JsonValue* json_create_object() {
-    JsonValue* val = (JsonValue*)calloc(1, sizeof(JsonValue));
+    JsonValue* val = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
     if (val) {
         val->type = JSON_OBJECT;
-        val->object_val = (JsonObject*)calloc(1, sizeof(JsonObject));
-        if (val->object_val) val->object_val->capacity = 8;
+        val->value.object_val = (JsonObject*)kmm_v4_calloc(1, sizeof(JsonObject));
+        if (val->value.object_val) {
+            val->value.object_val->capacity = 8;
+            val->value.object_val->pairs = (JsonPair*)kmm_v4_calloc(val->value.object_val->capacity, sizeof(JsonPair));
+        }
     }
     return val;
 }
 
 void json_destroy(JsonValue* value) {
     if (!value) return;
-    if (value->type == JSON_STRING) {
-        string_free(value->string_val);
-    } else if (value->type == JSON_ARRAY) {
-        if (value->array_val) {
-            for (size_t i = 0; i < value->array_val->size; i++) {
-                json_destroy(value->array_val->items[i]);
+    switch (value->type) {
+        case JSON_STRING:
+            string_free(value->value.string_val);
+            break;
+        case JSON_ARRAY:
+            if (value->value.array_val) {
+                for (size_t i = 0; i < value->value.array_val->size; i++) {
+                    json_destroy(value->value.array_val->items[i]);
+                }
+                kmm_v4_free(value->value.array_val->items);
+                kmm_v4_free(value->value.array_val);
             }
-            free(value->array_val->items);
-            free(value->array_val);
-        }
-    } else if (value->type == JSON_OBJECT) {
-        if (value->object_val) {
-            for (size_t i = 0; i < value->object_val->size; i++) {
-                string_free(value->object_val->pairs[i].key);
-                json_destroy(value->object_val->pairs[i].value);
+            break;
+        case JSON_OBJECT:
+            if (value->value.object_val) {
+                for (size_t i = 0; i < value->value.object_val->size; i++) {
+                    string_free(value->value.object_val->pairs[i].key);
+                    json_destroy(value->value.object_val->pairs[i].value);
+                }
+                kmm_v4_free(value->value.object_val->pairs);
+                kmm_v4_free(value->value.object_val);
             }
-            free(value->object_val->pairs);
-            free(value->object_val);
-        }
+            break;
+        default:
+            break;
     }
-    free(value);
+    kmm_v4_free(value);
 }
 
 void json_array_append(JsonValue* array, JsonValue* element) {
     if (!array || !element || array->type != JSON_ARRAY) return;
-    if (array->array_val->size >= array->array_val->capacity) {
-        array->array_val->capacity *= 2;
-        array->array_val->items = (JsonValue**)realloc(array->array_val->items, array->array_val->capacity * sizeof(JsonValue*));
+    JsonArray* arr = array->value.array_val;
+    if (arr->size >= arr->capacity) {
+        arr->capacity *= 2;
+        arr->items = (JsonValue**)kmm_v4_realloc(arr->items, arr->capacity * sizeof(JsonValue*));
     }
-    array->array_val->items[array->array_val->size++] = element;
+    arr->items[arr->size++] = element;
 }
 
 void json_array_set(JsonValue* array, size_t index, JsonValue* element) {
-    if (!array || array->type != JSON_ARRAY || index >= array->array_val->size) return;
-    json_destroy(array->array_val->items[index]);
-    array->array_val->items[index] = element;
+    if (!array || array->type != JSON_ARRAY || index >= array->value.array_val->size) return;
+    json_destroy(array->value.array_val->items[index]);
+    array->value.array_val->items[index] = element;
 }
 
 JsonValue* json_array_get(JsonValue* array, size_t index) {
-    if (!array || array->type != JSON_ARRAY || index >= array->array_val->size) return NULL;
-    return array->array_val->items[index];
+    if (!array || array->type != JSON_ARRAY || index >= array->value.array_val->size) return NULL;
+    return array->value.array_val->items[index];
 }
 
 size_t json_array_size(JsonValue* array) {
     if (!array || array->type != JSON_ARRAY) return 0;
-    return array->array_val->size;
+    return array->value.array_val->size;
 }
 
 void json_array_remove(JsonValue* array, size_t index) {
-    if (!array || array->type != JSON_ARRAY || index >= array->array_val->size) return;
-    json_destroy(array->array_val->items[index]);
-    memmove(&array->array_val->items[index], &array->array_val->items[index + 1], (array->array_val->size - index - 1) * sizeof(JsonValue*));
-    array->array_val->size--;
+    if (!array || array->type != JSON_ARRAY || index >= array->value.array_val->size) return;
+    json_destroy(array->value.array_val->items[index]);
+    JsonArray* arr = array->value.array_val;
+    memmove(&arr->items[index], &arr->items[index + 1], (arr->size - index - 1) * sizeof(JsonValue*));
+    arr->size--;
 }
 
 void json_object_set(JsonValue* object, const String key, JsonValue* value) {
     if (!object || !key || !value || object->type != JSON_OBJECT) return;
-    JsonObject* obj = object->object_val;
+    JsonObject* obj = object->value.object_val;
     for (size_t i = 0; i < obj->size; i++) {
-        if (string_equals(obj->pairs[i].key, key)) {
+        if (strcmp(obj->pairs[i].key, key) == 0) {
             json_destroy(obj->pairs[i].value);
             obj->pairs[i].value = value;
             return;
@@ -123,7 +137,7 @@ void json_object_set(JsonValue* object, const String key, JsonValue* value) {
     }
     if (obj->size >= obj->capacity) {
         obj->capacity *= 2;
-        obj->pairs = (JsonPair*)realloc(obj->pairs, obj->capacity * sizeof(JsonPair));
+        obj->pairs = (JsonPair*)kmm_v4_realloc(obj->pairs, obj->capacity * sizeof(JsonPair));
     }
     obj->pairs[obj->size].key = string_copy(key);
     obj->pairs[obj->size].value = value;
@@ -132,18 +146,18 @@ void json_object_set(JsonValue* object, const String key, JsonValue* value) {
 
 JsonValue* json_object_get(JsonValue* object, const String key) {
     if (!object || !key || object->type != JSON_OBJECT) return NULL;
-    JsonObject* obj = object->object_val;
+    JsonObject* obj = object->value.object_val;
     for (size_t i = 0; i < obj->size; i++) {
-        if (string_equals(obj->pairs[i].key, key)) return obj->pairs[i].value;
+        if (strcmp(obj->pairs[i].key, key) == 0) return obj->pairs[i].value;
     }
     return NULL;
 }
 
 void json_object_remove(JsonValue* object, const String key) {
     if (!object || !key || object->type != JSON_OBJECT) return;
-    JsonObject* obj = object->object_val;
+    JsonObject* obj = object->value.object_val;
     for (size_t i = 0; i < obj->size; i++) {
-        if (string_equals(obj->pairs[i].key, key)) {
+        if (strcmp(obj->pairs[i].key, key) == 0) {
             string_free(obj->pairs[i].key);
             json_destroy(obj->pairs[i].value);
             memmove(&obj->pairs[i], &obj->pairs[i + 1], (obj->size - i - 1) * sizeof(JsonPair));
@@ -153,114 +167,107 @@ void json_object_remove(JsonValue* object, const String key) {
     }
 }
 
-bool_t json_object_has(JsonValue* object, const String key) {
+int json_object_has(JsonValue* object, const String key) {
     return json_object_get(object, key) != NULL;
 }
 
 size_t json_object_size(JsonValue* object) {
     if (!object || object->type != JSON_OBJECT) return 0;
-    return object->object_val->size;
+    return object->value.object_val->size;
 }
 
 JsonPair* json_object_pairs(JsonValue* object) {
     if (!object || object->type != JSON_OBJECT) return NULL;
-    return object->object_val->pairs;
+    return object->value.object_val->pairs;
 }
 
 JsonType json_get_type(JsonValue* value) {
-    return value ? value->type : JSON_NULL;
+    if (!value) return JSON_NULL;
+    return value->type;
 }
 
-bool_t json_is_null(JsonValue* value) { return json_get_type(value) == JSON_NULL; }
-bool_t json_is_bool(JsonValue* value) { return json_get_type(value) == JSON_BOOL; }
-bool_t json_is_number(JsonValue* value) { return json_get_type(value) == JSON_NUMBER; }
-bool_t json_is_string(JsonValue* value) { return json_get_type(value) == JSON_STRING; }
-bool_t json_is_array(JsonValue* value) { return json_get_type(value) == JSON_ARRAY; }
-bool_t json_is_object(JsonValue* value) { return json_get_type(value) == JSON_OBJECT; }
+int json_is_null(JsonValue* value) { return !value || value->type == JSON_NULL; }
+int json_is_bool(JsonValue* value) { return value && value->type == JSON_BOOL; }
+int json_is_number(JsonValue* value) { return value && value->type == JSON_NUMBER; }
+int json_is_string(JsonValue* value) { return value && value->type == JSON_STRING; }
+int json_is_array(JsonValue* value) { return value && value->type == JSON_ARRAY; }
+int json_is_object(JsonValue* value) { return value && value->type == JSON_OBJECT; }
 
-bool_t json_get_bool(JsonValue* value) { return (value && value->type == JSON_BOOL) ? value->bool_val : false; }
-f64 json_get_number(JsonValue* value) { return (value && value->type == JSON_NUMBER) ? value->number_val : 0.0; }
-String json_get_string(JsonValue* value) { return (value && value->type == JSON_STRING) ? value->string_val : NULL; }
+int json_get_bool(JsonValue* value) {
+    if (!value || value->type != JSON_BOOL) return 0;
+    return value->value.bool_val;
+}
+
+double json_get_number(JsonValue* value) {
+    if (!value || value->type != JSON_NUMBER) return 0.0;
+    return value->value.number_val;
+}
+
+String json_get_string(JsonValue* value) {
+    if (!value || value->type != JSON_STRING) return "";
+    return value->value.string_val;
+}
 
 static void json_skip_whitespace(const char** text) {
-    while (**text && isspace((unsigned char)**text)) (*text)++;
+    while (**text && isspace(**text)) (*text)++;
 }
 
 static String json_parse_string_content(const char** text, int* error) {
-    if (**text != '"') { *error = 1; return NULL; }
+    if (**text != '"') { *error = 1; return ""; }
     (*text)++;
     const char* start = *text;
-    size_t capacity = 64;
-    String result = (String)malloc(capacity);
-    size_t len = 0;
     while (**text && **text != '"') {
-        if (**text == '\\' && *(*text + 1)) {
-            (*text)++;
-            char c;
-            switch (**text) {
-                case '"': c = '"'; break;
-                case '\\': c = '\\'; break;
-                case '/': c = '/'; break;
-                case 'n': c = '\n'; break;
-                case 'r': c = '\r'; break;
-                case 't': c = '\t'; break;
-                case 'b': c = '\b'; break;
-                case 'f': c = '\f'; break;
-                default: c = **text; break;
-            }
-            if (len + 2 > capacity) { capacity *= 2; result = (String)realloc(result, capacity); }
-            result[len++] = c;
-        } else {
-            if (len + 2 > capacity) { capacity *= 2; result = (String)realloc(result, capacity); }
-            result[len++] = **text;
-        }
-        (*text)++;
+        if (**text == '\\') (*text)++;
+        if (**text) (*text)++;
     }
-    if (**text != '"') { *error = 1; free(result); return NULL; }
-    (*text)++;
+    if (**text != '"') { *error = 1; return ""; }
+    size_t len = *text - start;
+    char* result = (char*)kmm_v4_malloc(len + 1);
+    if (!result) { *error = 1; return ""; }
+    memcpy(result, start, len);
     result[len] = '\0';
+    (*text)++;
+    return result;
+}
+
+static String json_parse_escaped_string(const char* str) {
+    size_t len = strlen(str);
+    char* result = (char*)kmm_v4_malloc(len + 1);
+    if (!result) return "";
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (str[i] == '\\' && i + 1 < len) {
+            i++;
+            switch (str[i]) {
+                case '"': result[j++] = '"'; break;
+                case '\\': result[j++] = '\\'; break;
+                case '/': result[j++] = '/'; break;
+                case 'n': result[j++] = '\n'; break;
+                case 'r': result[j++] = '\r'; break;
+                case 't': result[j++] = '\t'; break;
+                case 'b': result[j++] = '\b'; break;
+                case 'f': result[j++] = '\f'; break;
+                default: result[j++] = '\\'; result[j++] = str[i]; break;
+            }
+        } else {
+            result[j++] = str[i];
+        }
+    }
+    result[j] = '\0';
     return result;
 }
 
 static JsonValue* json_parse_value(const char** text, int* error) {
     json_skip_whitespace(text);
-    if (!**text) { *error = 1; return NULL; }
-    if (**text == 'n') {
-        if (strncmp(*text, "null", 4) == 0) { (*text) += 4; return json_create_null(); }
-        *error = 1; return NULL;
-    }
-    if (**text == 't') {
-        if (strncmp(*text, "true", 4) == 0) { (*text) += 4; return json_create_bool(true); }
-        *error = 1; return NULL;
-    }
-    if (**text == 'f') {
-        if (strncmp(*text, "false", 5) == 0) { (*text) += 5; return json_create_bool(false); }
-        *error = 1; return NULL;
-    }
     if (**text == '"') {
-        String s = json_parse_string_content(text, error);
+        String str = json_parse_string_content(text, error);
         if (*error) return NULL;
-        JsonValue* val = json_create_string(s);
-        free(s);
+        String unescaped = json_parse_escaped_string(str);
+        string_free(str);
+        JsonValue* val = json_create_string(unescaped);
+        string_free(unescaped);
         return val;
-    }
-    if (**text == '[') {
-        (*text)++;
-        JsonValue* arr = json_create_array();
-        json_skip_whitespace(text);
-        if (**text == ']') { (*text)++; return arr; }
-        while (1) {
-            JsonValue* item = json_parse_value(text, error);
-            if (*error) { json_destroy(arr); return NULL; }
-            json_array_append(arr, item);
-            json_skip_whitespace(text);
-            if (**text == ',') { (*text)++; continue; }
-            if (**text == ']') { (*text)++; break; }
-            *error = 1; json_destroy(arr); return NULL;
-        }
-        return arr;
-    }
-    if (**text == '{') {
+    } else if (**text == '{') {
         (*text)++;
         JsonValue* obj = json_create_object();
         json_skip_whitespace(text);
@@ -278,161 +285,197 @@ static JsonValue* json_parse_value(const char** text, int* error) {
             string_free(key);
             json_skip_whitespace(text);
             if (**text == ',') { (*text)++; continue; }
-            if (**text == '}') { (*text)++; break; }
-            *error = 1; json_destroy(obj); return NULL;
+            if (**text == '}') { (*text)++; return obj; }
+            break;
         }
-        return obj;
+        json_destroy(obj);
+        *error = 1;
+        return NULL;
+    } else if (**text == '[') {
+        (*text)++;
+        JsonValue* arr = json_create_array();
+        json_skip_whitespace(text);
+        if (**text == ']') { (*text)++; return arr; }
+        while (1) {
+            JsonValue* val = json_parse_value(text, error);
+            if (*error) { json_destroy(arr); return NULL; }
+            json_array_append(arr, val);
+            json_skip_whitespace(text);
+            if (**text == ',') { (*text)++; continue; }
+            if (**text == ']') { (*text)++; return arr; }
+            break;
+        }
+        json_destroy(arr);
+        *error = 1;
+        return NULL;
+    } else if (**text == 't') {
+        if (strncmp(*text, "true", 4) == 0) { (*text) += 4; return json_create_bool(1); }
+        *error = 1; return NULL;
+    } else if (**text == 'f') {
+        if (strncmp(*text, "false", 5) == 0) { (*text) += 5; return json_create_bool(0); }
+        *error = 1; return NULL;
+    } else if (**text == 'n') {
+        if (strncmp(*text, "null", 4) == 0) { (*text) += 4; return json_create_null(); }
+        *error = 1; return NULL;
+    } else {
+        const char* start = *text;
+        while (**text && (isdigit(**text) || **text == '.' || **text == '-' || **text == '+' || **text == 'e' || **text == 'E')) (*text)++;
+        char* num_str = (char*)kmm_v4_malloc(*text - start + 1);
+        if (!num_str) { *error = 1; return NULL; }
+        memcpy(num_str, start, *text - start);
+        num_str[*text - start] = '\0';
+        double val = atof(num_str);
+        kmm_v4_free(num_str);
+        return json_create_number(val);
     }
-    const char* num_start = *text;
-    while (**text && (isdigit((unsigned char)**text) || **text == '.' || **text == '-' || **text == '+' || **text == 'e' || **text == 'E')) (*text)++;
-    char* num_str = (char*)malloc(*text - num_start + 1);
-    memcpy(num_str, num_start, *text - num_start);
-    num_str[*text - num_start] = '\0';
-    f64 num = atof(num_str);
-    free(num_str);
-    return json_create_number(num);
 }
 
 JsonValue* json_parse(const String text) {
     if (!text) return NULL;
-    const char* p = text;
     int error = 0;
-    JsonValue* val = json_parse_value(&p, &error);
-    if (error) { json_destroy(val); return NULL; }
-    return val;
+    const char* p = text;
+    JsonValue* result = json_parse_value(&p, &error);
+    return error ? NULL : result;
 }
 
 JsonValue* json_parse_file(const String path) {
-    FILE* f = fopen(path, "rb");
+    FILE* f = fopen(path, "r");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    String buf = (String)malloc(len + 1);
-    fread(buf, 1, len, f);
-    buf[len] = '\0';
+    char* buffer = (char*)kmm_v4_malloc(len + 1);
+    if (!buffer) { fclose(f); return NULL; }
+    fread(buffer, 1, len, f);
+    buffer[len] = '\0';
     fclose(f);
-    JsonValue* val = json_parse(buf);
-    free(buf);
-    return val;
-}
-
-static void json_write_escape(FILE* f, const String s) {
-    fputc('"', f);
-    for (size_t i = 0; s[i]; i++) {
-        switch (s[i]) {
-            case '"': fputs("\\\"", f); break;
-            case '\\': fputs("\\\\", f); break;
-            case '\n': fputs("\\n", f); break;
-            case '\r': fputs("\\r", f); break;
-            case '\t': fputs("\\t", f); break;
-            case '\b': fputs("\\b", f); break;
-            case '\f': fputs("\\f", f); break;
-            default: fputc(s[i], f); break;
-        }
-    }
-    fputc('"', f);
-}
-
-static String json_serialize_value(JsonValue* value, int indent_level, bool_t pretty) {
-    String result = (String)malloc(1024);
-    size_t capacity = 1024;
-    size_t len = 0;
-    #define APPEND(fmt, ...) do { \
-        int n = snprintf(NULL, 0, fmt, ##__VA_ARGS__); \
-        if (len + n + 1 > capacity) { while (len + n + 1 > capacity) capacity *= 2; result = (String)realloc(result, capacity); } \
-        n = snprintf(result + len, capacity - len, fmt, ##__VA_ARGS__); \
-        len += n; \
-    } while(0)
-    
-    if (!value) { APPEND("null"); }
-    else switch (value->type) {
-        case JSON_NULL: APPEND("null"); break;
-        case JSON_BOOL: APPEND(value->bool_val ? "true" : "false"); break;
-        case JSON_NUMBER: {
-            if (value->number_val == (i64)value->number_val) APPEND("%lld", (i64)value->number_val);
-            else APPEND("%lf", value->number_val);
-            break;
-        }
-        case JSON_STRING: json_write_escape(stdout, value->string_val); break;
-        case JSON_ARRAY: {
-            APPEND("[");
-            for (size_t i = 0; i < value->array_val->size; i++) {
-                if (i > 0) APPEND(",");
-                if (pretty) APPEND("\n%*s", (indent_level + 1) * 2, "");
-                String item = json_serialize_value(value->array_val->items[i], indent_level + 1, pretty);
-                APPEND("%s", item); string_free(item);
-            }
-            if (pretty && value->array_val->size > 0) APPEND("\n%*s", indent_level * 2, "");
-            APPEND("]");
-            break;
-        }
-        case JSON_OBJECT: {
-            APPEND("{");
-            for (size_t i = 0; i < value->object_val->size; i++) {
-                if (i > 0) APPEND(",");
-                if (pretty) APPEND("\n%*s", (indent_level + 1) * 2, "");
-                json_write_escape(stdout, value->object_val->pairs[i].key);
-                APPEND(":");
-                if (pretty) APPEND(" ");
-                String v = json_serialize_value(value->object_val->pairs[i].value, indent_level + 1, pretty);
-                APPEND("%s", v); string_free(v);
-            }
-            if (pretty && value->object_val->size > 0) APPEND("\n%*s", indent_level * 2, "");
-            APPEND("}");
-            break;
-        }
-    }
-    #undef APPEND
-    result[len] = '\0';
+    JsonValue* result = json_parse(buffer);
+    kmm_v4_free(buffer);
     return result;
 }
 
-String json_serialize(JsonValue* value) { return json_serialize_value(value, 0, false); }
-String json_serialize_pretty(JsonValue* value, int indent_level) { return json_serialize_value(value, indent_level, true); }
-
-bool_t json_to_file(JsonValue* value, const String path) {
-    FILE* f = fopen(path, "w");
-    if (!f) return false;
-    String s = json_serialize(value);
-    fputs(s, f);
-    string_free(s);
-    fclose(f);
-    return true;
+static String json_serialize_value(JsonValue* value, int indent_level, int pretty) {
+    if (!value) return string_copy("null");
+    
+    switch (value->type) {
+        case JSON_NULL: return string_copy("null");
+        case JSON_BOOL: return string_copy(value->value.bool_val ? "true" : "false");
+        case JSON_NUMBER: {
+            char buf[64];
+            if (value->value.number_val == (long long)value->value.number_val) {
+                sprintf(buf, "%lld", (long long)value->value.number_val);
+            } else {
+                sprintf(buf, "%g", value->value.number_val);
+            }
+            return string_copy(buf);
+        }
+        case JSON_STRING: {
+            String src = value->value.string_val;
+            size_t len = strlen(src);
+            size_t buf_size = len * 2 + 3;
+            char* buf = (char*)kmm_v4_malloc(buf_size);
+            char* p = buf;
+            *p++ = '"';
+            for (size_t i = 0; i < len; i++) {
+                switch (src[i]) {
+                    case '"': *p++ = '\\'; *p++ = '"'; break;
+                    case '\\': *p++ = '\\'; *p++ = '\\'; break;
+                    case '\n': *p++ = '\\'; *p++ = 'n'; break;
+                    case '\r': *p++ = '\\'; *p++ = 'r'; break;
+                    case '\t': *p++ = '\\'; *p++ = 't'; break;
+                    default: *p++ = src[i]; break;
+                }
+            }
+            *p++ = '"';
+            *p = '\0';
+            String result = string_copy(buf);
+            kmm_v4_free(buf);
+            return result;
+        }
+        case JSON_ARRAY: {
+            if (!value->value.array_val || value->value.array_val->size == 0) return string_copy("[]");
+            String result = string_copy("[");
+            for (size_t i = 0; i < value->value.array_val->size; i++) {
+                if (i > 0) {
+                    String tmp = result;
+                    result = string_concat(tmp, ",");
+                    string_free(tmp);
+                }
+                String item = json_serialize_value(value->value.array_val->items[i], indent_level + 1, pretty);
+                String tmp = result;
+                result = string_concat(tmp, item);
+                string_free(tmp);
+                string_free(item);
+            }
+            String tmp = result;
+            result = string_concat(tmp, "]");
+            string_free(tmp);
+            return result;
+        }
+        case JSON_OBJECT: {
+            if (!value->value.object_val || value->value.object_val->size == 0) return string_copy("{}");
+            String result = string_copy("{");
+            for (size_t i = 0; i < value->value.object_val->size; i++) {
+                if (i > 0) {
+                    String tmp = result;
+                    result = string_concat(tmp, ",");
+                    string_free(tmp);
+                }
+                String key_json = json_serialize_value(json_create_string(value->value.object_val->pairs[i].key), 0, 0);
+                String val_json = json_serialize_value(value->value.object_val->pairs[i].value, indent_level + 1, pretty);
+                String tmp = result;
+                result = string_concat(tmp, key_json);
+                string_free(tmp);
+                string_free(key_json);
+                tmp = result;
+                result = string_concat(tmp, ":");
+                string_free(tmp);
+                tmp = result;
+                result = string_concat(tmp, val_json);
+                string_free(tmp);
+                string_free(val_json);
+            }
+            String tmp = result;
+            result = string_concat(tmp, "}");
+            string_free(tmp);
+            return result;
+        }
+    }
+    return string_copy("null");
 }
 
-bool_t json_to_file_pretty(JsonValue* value, const String path) {
+String json_serialize(JsonValue* value) {
+    return json_serialize_value(value, 0, 0);
+}
+
+String json_serialize_pretty(JsonValue* value, int indent_level) {
+    return json_serialize_value(value, indent_level, 1);
+}
+
+int json_to_file(JsonValue* value, const String path) {
     FILE* f = fopen(path, "w");
-    if (!f) return false;
-    String s = json_serialize_pretty(value, 0);
-    fputs(s, f);
-    fputc('\n', f);
-    string_free(s);
+    if (!f) return 0;
+    String json = json_serialize(value);
+    fprintf(f, "%s", json);
+    string_free(json);
     fclose(f);
-    return true;
+    return 1;
+}
+
+int json_to_file_pretty(JsonValue* value, const String path) {
+    FILE* f = fopen(path, "w");
+    if (!f) return 0;
+    String json = json_serialize_pretty(value, 0);
+    fprintf(f, "%s", json);
+    string_free(json);
+    fclose(f);
+    return 1;
 }
 
 JsonValue* json_deep_copy(JsonValue* value) {
     if (!value) return NULL;
-    switch (value->type) {
-        case JSON_NULL: return json_create_null();
-        case JSON_BOOL: return json_create_bool(value->bool_val);
-        case JSON_NUMBER: return json_create_number(value->number_val);
-        case JSON_STRING: return json_create_string(value->string_val);
-        case JSON_ARRAY: {
-            JsonValue* arr = json_create_array();
-            for (size_t i = 0; i < value->array_val->size; i++) {
-                json_array_append(arr, json_deep_copy(value->array_val->items[i]));
-            }
-            return arr;
-        }
-        case JSON_OBJECT: {
-            JsonValue* obj = json_create_object();
-            for (size_t i = 0; i < value->object_val->size; i++) {
-                json_object_set(obj, value->object_val->pairs[i].key, json_deep_copy(value->object_val->pairs[i].value));
-            }
-            return obj;
-        }
-    }
-    return NULL;
+    String json = json_serialize(value);
+    JsonValue* result = json_parse(json);
+    string_free(json);
+    return result;
 }

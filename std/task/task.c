@@ -1,5 +1,5 @@
 #include "task.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdatomic.h>
 
@@ -22,12 +22,11 @@ typedef struct LightTaskQueue {
 // 创建轻量级任务队列
 LightTaskQueue* light_task_queue_create(int capacity) {
     (void)capacity;  // 未使用，保留接口兼容性
-    LightTaskQueue* q = (LightTaskQueue*)malloc(sizeof(LightTaskQueue));
+    LightTaskQueue* q = (LightTaskQueue*)kmm_v4_malloc(sizeof(LightTaskQueue));
     if (!q) return NULL;
 
-    TaskNode* dummy = (TaskNode*)malloc(sizeof(TaskNode));
+    TaskNode* dummy = (TaskNode*)kmm_v4_malloc(sizeof(TaskNode));
     if (!dummy) {
-        free(q);
         return NULL;
     }
 
@@ -46,16 +45,8 @@ LightTaskQueue* light_task_queue_create(int capacity) {
 
 // 销毁轻量级任务队列
 void light_task_queue_destroy(LightTaskQueue* q) {
-    if (!q) return;
-
-    // 释放所有节点
-    TaskNode* current = atomic_load_explicit(&q->head, memory_order_relaxed);
-    while (current) {
-        TaskNode* next = atomic_load_explicit(&current->next, memory_order_relaxed);
-        free(current);
-        current = next;
-    }
-    free(q);
+    // KMM 管理内存，无需手动释放
+    (void)q;
 }
 
 // 添加任务到队列（无锁，线程安全）
@@ -64,7 +55,7 @@ int light_task_queue_add(LightTaskQueue* q, void* (*func)(void*), void* arg, int
         return 0;
     }
 
-    TaskNode* node = (TaskNode*)malloc(sizeof(TaskNode));
+    TaskNode* node = (TaskNode*)kmm_v4_malloc(sizeof(TaskNode));
     if (!node) return 0;
 
     node->func = func;
@@ -102,8 +93,7 @@ TaskNode* light_task_queue_dequeue(LightTaskQueue* q) {
     next->arg = head->arg;
     next->priority = head->priority;
 
-    // 释放旧的头节点
-    free(head);
+    // KMM 管理内存，无需手动释放
 
     return next;
 }
@@ -132,7 +122,7 @@ void* light_task_queue_execute_next(LightTaskQueue* q) {
     if (!node) return NULL;
 
     void* result = node->func(node->arg);
-    free(node);
+    // KMM 管理内存，无需手动释放
     return result;
 }
 
@@ -144,7 +134,7 @@ int light_task_queue_batch_execute(LightTaskQueue* q, int max_tasks) {
         if (!node) break;
 
         node->func(node->arg);
-        free(node);
+        // KMM 管理内存，无需手动释放
         executed++;
     }
     return executed;
@@ -160,7 +150,7 @@ typedef struct PriorityTaskQueue {
 
 // 创建优先级任务队列
 PriorityTaskQueue* priority_task_queue_create(int capacity_per_queue) {
-    PriorityTaskQueue* pq = (PriorityTaskQueue*)malloc(sizeof(PriorityTaskQueue));
+    PriorityTaskQueue* pq = (PriorityTaskQueue*)kmm_v4_malloc(sizeof(PriorityTaskQueue));
     if (!pq) return NULL;
 
     for (int i = 0; i < PRIORITY_LEVELS; i++) {
@@ -169,7 +159,6 @@ PriorityTaskQueue* priority_task_queue_create(int capacity_per_queue) {
             for (int j = 0; j < i; j++) {
                 light_task_queue_destroy(pq->queues[j]);
             }
-            free(pq);
             return NULL;
         }
     }
@@ -180,11 +169,8 @@ PriorityTaskQueue* priority_task_queue_create(int capacity_per_queue) {
 
 // 销毁优先级任务队列
 void priority_task_queue_destroy(PriorityTaskQueue* pq) {
-    if (!pq) return;
-    for (int i = 0; i < PRIORITY_LEVELS; i++) {
-        light_task_queue_destroy(pq->queues[i]);
-    }
-    free(pq);
+    // KMM 管理内存，无需手动释放
+    (void)pq;
 }
 
 // 添加优先级任务
@@ -218,7 +204,7 @@ void* priority_task_queue_execute_next(PriorityTaskQueue* pq) {
     if (!node) return NULL;
 
     void* result = node->func(node->arg);
-    free(node);
+    // KMM 管理内存，无需手动释放
     return result;
 }
 
@@ -244,7 +230,7 @@ int priority_task_queue_batch_execute(PriorityTaskQueue* pq, int max_tasks) {
         if (!node) break;
 
         node->func(node->arg);
-        free(node);
+        // KMM 管理内存，无需手动释放
         executed++;
     }
     return executed;
@@ -281,7 +267,7 @@ void* task_queue_dequeue(TaskQueue* queue) {
     TaskNode* node = light_task_queue_dequeue(queue);
     if (!node) return NULL;
     void* result = node->func(node->arg);
-    free(node);
+    // KMM 管理内存，无需手动释放
     return result;
 }
 

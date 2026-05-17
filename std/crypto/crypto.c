@@ -1,5 +1,5 @@
 #include "crypto.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -93,7 +93,7 @@ void md5_final(MD5Context* ctx, u8* digest) {
 String md5_string(const String input) {
     MD5Context ctx; u8 digest[16];
     md5_init(&ctx); md5_update(&ctx, (const u8*)input, strlen(input)); md5_final(&ctx, digest);
-    String result = (String)malloc(33);
+    String result = (String)kmm_v4_malloc(33);
     for (int i = 0; i < 16; i++) sprintf(result + i*2, "%02x", digest[i]);
     result[32] = '\0'; return result;
 }
@@ -103,7 +103,7 @@ String md5_file(const String path) {
     MD5Context ctx; md5_init(&ctx); u8 buf[4096]; size_t n;
     while ((n = fread(buf, 1, 4096, f)) > 0) md5_update(&ctx, buf, n);
     fclose(f); u8 digest[16]; md5_final(&ctx, digest);
-    String result = (String)malloc(33);
+    String result = (String)kmm_v4_malloc(33);
     for (int i = 0; i < 16; i++) sprintf(result + i*2, "%02x", digest[i]);
     result[32] = '\0'; return result;
 }
@@ -167,7 +167,7 @@ void sha256_final(SHA256Context* ctx, u8* digest) {
 String sha256_string(const String input) {
     SHA256Context ctx; u8 digest[32];
     sha256_init(&ctx); sha256_update(&ctx, (const u8*)input, strlen(input)); sha256_final(&ctx, digest);
-    String result = (String)malloc(65);
+    String result = (String)kmm_v4_malloc(65);
     for (int i = 0; i < 32; i++) sprintf(result + i*2, "%02x", digest[i]);
     result[64] = '\0'; return result;
 }
@@ -177,7 +177,7 @@ String sha256_file(const String path) {
     SHA256Context ctx; sha256_init(&ctx); u8 buf[4096]; size_t n;
     while ((n = fread(buf, 1, 4096, f)) > 0) sha256_update(&ctx, buf, n);
     fclose(f); u8 digest[32]; sha256_final(&ctx, digest);
-    String result = (String)malloc(65);
+    String result = (String)kmm_v4_malloc(65);
     for (int i = 0; i < 32; i++) sprintf(result + i*2, "%02x", digest[i]);
     result[64] = '\0'; return result;
 }
@@ -186,7 +186,7 @@ String sha256_file(const String path) {
 static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 String base64_encode(const u8* data, size_t len) {
-    String result = (String)malloc((len + 2) / 3 * 4 + 1);
+    String result = (String)kmm_v4_malloc((len + 2) / 3 * 4 + 1);
     size_t i = 0, j = 0;
     while (i < len) {
         u32 octet_a = i < len ? data[i++] : 0;
@@ -206,12 +206,12 @@ String base64_encode(const u8* data, size_t len) {
 u8* base64_decode(const String input, size_t* out_len) {
     size_t len = strlen(input); if (len % 4 != 0) return NULL;
     size_t out_len_val = len / 4 * 3; if (len > 0 && input[len-1] == '=') out_len_val--; if (len > 1 && input[len-2] == '=') out_len_val--;
-    u8* output = (u8*)malloc(out_len_val + 1); size_t i = 0, j = 0;
+    u8* output = (u8*)kmm_v4_malloc(out_len_val + 1); size_t i = 0, j = 0;
     while (i < len) {
-        u32 sextet_a = input[i] == '=' ? 0 : (u32)strchr(base64_chars, input[i]) - base64_chars; i++;
-        u32 sextet_b = input[i] == '=' ? 0 : (u32)strchr(base64_chars, input[i]) - base64_chars; i++;
-        u32 sextet_c = input[i] == '=' ? 0 : (u32)strchr(base64_chars, input[i]) - base64_chars; i++;
-        u32 sextet_d = input[i] == '=' ? 0 : (u32)strchr(base64_chars, input[i]) - base64_chars; i++;
+        u32 sextet_a = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
+        u32 sextet_b = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
+        u32 sextet_c = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
+        u32 sextet_d = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
         u32 triple = (sextet_a << 18) | (sextet_b << 12) | (sextet_c << 6) | sextet_d;
         if (j < out_len_val) output[j++] = (triple >> 16) & 0xFF;
         if (j < out_len_val) output[j++] = (triple >> 8) & 0xFF;
@@ -309,7 +309,7 @@ String hmac_sha256(const u8* key, size_t key_len, const u8* data, size_t data_le
     for (int i = 0; i < 64; i++) { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
     sha256_init(&ctx); sha256_update(&ctx, ipad, 64); sha256_update(&ctx, data, data_len); sha256_final(&ctx, hash);
     sha256_init(&ctx); sha256_update(&ctx, opad, 64); sha256_update(&ctx, hash, 32); sha256_final(&ctx, hash);
-    String result = (String)malloc(65);
+    String result = (String)kmm_v4_malloc(65);
     for (int i = 0; i < 32; i++) sprintf(result + i*2, "%02x", hash[i]);
     result[64] = '\0'; return result;
 }

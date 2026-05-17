@@ -65,6 +65,10 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.generateSwitchStatement(s)
 	case *ast.ReturnStatement:
 		return sg.generateReturnStatement(s)
+	case *ast.BreakStatement:
+		return sg.generateBreakStatement(s)
+	case *ast.ContinueStatement:
+		return sg.generateContinueStatement(s)
 	case *ast.ImportStatement:
 		return sg.generateImportStatement(s)
 	case *ast.ExportStatement:
@@ -103,51 +107,67 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 
 // generateVariableDeclaration 生成变量声明代码
 func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDeclaration) string {
-	// 将变量添加到当前作用域的符号表
+	if stmt.IsAuto {
+		return sg.generateAutoDeclaration(stmt)
+	}
+	
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
+	
+	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
 	
 	var builder strings.Builder
 	builder.Grow(64)
 	
-	// 生成 C 风格的变量声明
-	switch stmt.Type {
-	case "int":
-		builder.WriteString("int ")
-	case "float":
-		builder.WriteString("float ")
-	case "double":
-		builder.WriteString("double ")
-	case "bool":
-		builder.WriteString("bool ")
-	case "char":
-		builder.WriteString("char ")
-	case "string":
-		builder.WriteString("char* ")
-	case "i64":
-		builder.WriteString("int64_t ")
-	case "u64":
-		builder.WriteString("uint64_t ")
-	case "i32":
-		builder.WriteString("int32_t ")
-	case "u32":
-		builder.WriteString("uint32_t ")
-	default:
-		// 自定义类型或关键字映射到C类型
-		builder.WriteString(stmt.Type)
-		builder.WriteByte(' ')
-	}
-	
+	builder.WriteString(cType)
+	builder.WriteByte(' ')
 	builder.WriteString(stmt.Name)
 	
 	if stmt.Value != nil {
 		builder.WriteString(" = ")
 		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 	} else if stmt.Nullable {
-		// 对于可空类型，如果没有初始化值，初始化为 NULL
 		builder.WriteString(" = NULL")
 	}
 	builder.WriteString(";\n")
 	return builder.String()
+}
+
+// generateAutoDeclaration 生成 auto 声明代码（类型推导）
+func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclaration) string {
+	if stmt.Type == "" {
+		sg.codegen.error(fmt.Sprintf("编译错误：auto 变量 '%s' 类型推导失败，无法生成代码。请显式声明类型。", stmt.Name))
+		return fmt.Sprintf("// ERROR: auto '%s' type not inferred - compilation should have stopped\n", stmt.Name)
+	}
+	
+	sg.codegen.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+	
+	cType := sg.codegen.typeGenerator.convertType(stmt.Type, false)
+	
+	var builder strings.Builder
+	builder.Grow(64)
+	
+	builder.WriteString(cType)
+	builder.WriteByte(' ')
+	builder.WriteString(stmt.Name)
+	
+	if stmt.Value != nil {
+		builder.WriteString(" = ")
+		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+	}
+	builder.WriteString(";\n")
+	return builder.String()
+}
+
+// generateExpressionInMain 在 main 函数体中生成表达式语句
+func (sg *StatementGenerator) generateExpressionInMain(expr ast.Expression) string {
+	if callExpr, ok := expr.(*ast.CallExpression); ok {
+		if ident, ok := callExpr.Function.(*ast.Identifier); ok && ident.Name == "println" {
+			if len(callExpr.Args) > 1 {
+				return sg.codegen.expressionGenerator.generatePrintlnMulti(callExpr.Args)
+			}
+		}
+	}
+	return sg.codegen.expressionGenerator.GenerateExpression(expr) + ";\n"
 }
 
 // generateGenericInstantiation 生成泛型实例化代码（编译期特化，零成本）
@@ -618,21 +638,35 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 	condCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
 	code += condCode
 	code += ") {\n"
+	
+	// 插入KMM作用域开始
+	code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 	sg.codegen.indent++
+	sg.codegen.EnterScope("if_body")
 	for _, bodyStmt := range stmt.Body {
 		code += sg.codegen.indentString()
 		code += sg.codegen.generateStatement(bodyStmt)
 	}
+	sg.codegen.ExitScope()
 	sg.codegen.indent--
+	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	
 	code += sg.codegen.indentString() + "}"
 	if len(stmt.Else) > 0 {
 		code += " else {\n"
+		
+		// 插入KMM作用域开始
+		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		sg.codegen.indent++
+		sg.codegen.EnterScope("else_body")
 		for _, elseStmt := range stmt.Else {
 			code += sg.codegen.indentString()
 			code += sg.codegen.generateStatement(elseStmt)
 		}
+		sg.codegen.ExitScope()
 		sg.codegen.indent--
+		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		
 		code += sg.codegen.indentString() + "}"
 	}
 	code += "\n"
@@ -644,12 +678,19 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	code := "while ("
 	code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
 	code += ") {\n"
+	
+	// 插入KMM作用域开始
+	code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 	sg.codegen.indent++
+	sg.codegen.EnterScope("while_body")
 	for _, bodyStmt := range stmt.Body {
 		code += sg.codegen.indentString()
 		code += sg.codegen.generateStatement(bodyStmt)
 	}
+	sg.codegen.ExitScope()
 	sg.codegen.indent--
+	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	
 	code += sg.codegen.indentString() + "}\n"
 	return code
 }
@@ -685,12 +726,19 @@ func (sg *StatementGenerator) generateForStatement(stmt *ast.ForStatement) strin
 		code += ""
 	}
 	code += ") {\n"
+	
+	// 插入KMM作用域开始
+	code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 	sg.codegen.indent++
+	sg.codegen.EnterScope("for_body")
 	for _, bodyStmt := range stmt.Body {
 		code += sg.codegen.indentString()
 		code += sg.codegen.generateStatement(bodyStmt)
 	}
+	sg.codegen.ExitScope()
 	sg.codegen.indent--
+	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	
 	code += sg.codegen.indentString() + "}\n"
 	return code
 }
@@ -735,6 +783,14 @@ func (sg *StatementGenerator) generateSwitchStatement(stmt *ast.SwitchStatement)
 
 // generateReturnStatement 生成 return 语句代码
 func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement) string {
+	retType := sg.codegen.currentFunctionReturnType
+	isVoid := (retType == "" || retType == "void" || retType == "Void")
+	
+	if isVoid {
+		code := "return;\n"
+		return sg.codegen.indentString() + code
+	}
+	
 	code := "return "
 	if stmt.Value != nil {
 		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
@@ -742,7 +798,17 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 		code += "0"
 	}
 	code += ";\n"
-	return code
+	return sg.codegen.indentString() + code
+}
+
+// generateBreakStatement 生成 break 语句代码
+func (sg *StatementGenerator) generateBreakStatement(stmt *ast.BreakStatement) string {
+	return sg.codegen.indentString() + "break;\n"
+}
+
+// generateContinueStatement 生成 continue 语句代码
+func (sg *StatementGenerator) generateContinueStatement(stmt *ast.ContinueStatement) string {
+	return sg.codegen.indentString() + "continue;\n"
 }
 
 // generateImportStatement 生成 import 语句代码
@@ -793,7 +859,8 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	// 进入块作用域
 	sg.codegen.EnterScope("block")
 	
-	code := "{\n"
+	// 插入KMM作用域开始
+	code := "KMM_V4_SCOPE_START {\n"
 	sg.codegen.indent++
 	for _, bodyStmt := range stmt.Statements {
 		code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
@@ -811,7 +878,7 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	}
 	
 	sg.codegen.indent--
-	code += sg.codegen.indentString() + "}\n"
+	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
 	
 	// 退出块作用域
 	sg.codegen.ExitScope()

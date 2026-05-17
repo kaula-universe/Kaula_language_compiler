@@ -1,7 +1,10 @@
 #include "testing.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 static TestReport* g_current_report = NULL;
 static TestSuite** g_all_suites = NULL;
@@ -12,7 +15,7 @@ static size_t g_suite_capacity = 16;
 static size_t g_case_capacity = 64;
 
 TestSuite* test_suite_create(const String name, void (*setup)(void), void (*teardown)(void)) {
-    TestSuite* suite = (TestSuite*)calloc(1, sizeof(TestSuite));
+    TestSuite* suite = (TestSuite*)kmm_v4_calloc(1, sizeof(TestSuite));
     if (suite) {
         suite->name = string_copy(name);
         suite->setup = setup;
@@ -20,21 +23,19 @@ TestSuite* test_suite_create(const String name, void (*setup)(void), void (*tear
     }
     if (g_suite_count >= g_suite_capacity) {
         g_suite_capacity *= 2;
-        g_all_suites = (TestSuite**)realloc(g_all_suites, g_suite_capacity * sizeof(TestSuite*));
+        g_all_suites = (TestSuite**)kmm_v4_realloc(g_all_suites, g_suite_capacity * sizeof(TestSuite*));
     }
     g_all_suites[g_suite_count++] = suite;
     return suite;
 }
 
 void test_suite_destroy(TestSuite* suite) {
-    if (suite) {
-        string_free(suite->name);
-        free(suite);
-    }
+    // KMM 管理内存，无需手动释放
+    (void)suite;
 }
 
 TestCase* test_case_create(const String name, void (*func)(void), const String suite_name) {
-    TestCase* tc = (TestCase*)calloc(1, sizeof(TestCase));
+    TestCase* tc = (TestCase*)kmm_v4_calloc(1, sizeof(TestCase));
     if (tc) {
         tc->name = string_copy(name);
         tc->func = func;
@@ -42,7 +43,7 @@ TestCase* test_case_create(const String name, void (*func)(void), const String s
     }
     if (g_case_count >= g_case_capacity) {
         g_case_capacity *= 2;
-        g_all_cases = (TestCase**)realloc(g_all_cases, g_case_capacity * sizeof(TestCase*));
+        g_all_cases = (TestCase**)kmm_v4_realloc(g_all_cases, g_case_capacity * sizeof(TestCase*));
     }
     g_all_cases[g_case_count++] = tc;
     return tc;
@@ -50,12 +51,12 @@ TestCase* test_case_create(const String name, void (*func)(void), const String s
 
 TestReport* test_run_all() {
     if (g_case_count == 0) {
-        TestReport* report = (TestReport*)calloc(1, sizeof(TestReport));
+        TestReport* report = (TestReport*)kmm_v4_calloc(1, sizeof(TestReport));
         return report;
     }
-    TestReport* report = (TestReport*)calloc(1, sizeof(TestReport));
+    TestReport* report = (TestReport*)kmm_v4_calloc(1, sizeof(TestReport));
     report->capacity = g_case_count;
-    report->results = (TestResult*)calloc(g_case_count, sizeof(TestResult));
+    report->results = (TestResult*)kmm_v4_calloc(g_case_count, sizeof(TestResult));
     g_current_report = report;
     for (size_t i = 0; i < g_case_count; i++) {
         TestCase* tc = g_all_cases[i];
@@ -116,15 +117,8 @@ void test_report_print(TestReport* report) {
 }
 
 void test_report_destroy(TestReport* report) {
-    if (report) {
-        for (size_t i = 0; i < report->count; i++) {
-            string_free(report->results[i].name);
-            string_free(report->results[i].message);
-            string_free(report->results[i].file);
-        }
-        free(report->results);
-        free(report);
-    }
+    // KMM 管理内存，无需手动释放
+    (void)report;
 }
 
 bool_t test_assert_true(bool_t condition, const String message, const String file, int line) {

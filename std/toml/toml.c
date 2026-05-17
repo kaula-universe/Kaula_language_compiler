@@ -1,5 +1,5 @@
 #include "toml.h"
-#include <stdlib.h>
+#include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -7,15 +7,15 @@
 static void toml_skip_whitespace(const char** p) { while (**p && isspace((unsigned char)**p) && **p != '\n') (*p)++; }
 static void toml_skip_to_eol(const char** p) { while (**p && **p != '\n') (*p)++; if (**p == '\n') (*p)++; }
 
-TomlValue* toml_create_string(String val) { TomlValue* v = calloc(1, sizeof(TomlValue)); v->type = TOML_STRING; v->string_val = val; return v; }
-TomlValue* toml_create_int(i64 val) { TomlValue* v = calloc(1, sizeof(TomlValue)); v->type = TOML_INTEGER; v->int_val = val; return v; }
-TomlValue* toml_create_float(f64 val) { TomlValue* v = calloc(1, sizeof(TomlValue)); v->type = TOML_FLOAT; v->float_val = val; return v; }
-TomlValue* toml_create_bool(bool_t val) { TomlValue* v = calloc(1, sizeof(TomlValue)); v->type = TOML_BOOLEAN; v->bool_val = val; return v; }
-TomlValue* toml_create_table() { TomlValue* v = calloc(1, sizeof(TomlValue)); v->type = TOML_TABLE; v->table_val = calloc(1, sizeof(TomlTable)); v->table_val->capacity = 8; return v; }
+TomlValue* toml_create_string(String val) { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_STRING; v->string_val = val; return v; }
+TomlValue* toml_create_int(i64 val) { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_INTEGER; v->int_val = val; return v; }
+TomlValue* toml_create_float(f64 val) { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_FLOAT; v->float_val = val; return v; }
+TomlValue* toml_create_bool(bool_t val) { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_BOOLEAN; v->bool_val = val; return v; }
+TomlValue* toml_create_table() { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_TABLE; v->table_val = kmm_v4_calloc(1, sizeof(TomlTable)); v->table_val->capacity = 8; return v; }
 
 static void toml_table_set(TomlTable* table, const String key, TomlValue* val) {
     for (size_t i = 0; i < table->size; i++) { if (string_equals(table->keys[i], key)) { table->values[i] = val; return; } }
-    if (table->size >= table->capacity) { table->capacity *= 2; table->keys = realloc(table->keys, table->capacity * sizeof(String)); table->values = realloc(table->values, table->capacity * sizeof(TomlValue*)); }
+    if (table->size >= table->capacity) { table->capacity *= 2; table->keys = kmm_v4_realloc(table->keys, table->capacity * sizeof(String)); table->values = kmm_v4_realloc(table->values, table->capacity * sizeof(TomlValue*)); }
     table->keys[table->size] = string_copy(key); table->values[table->size] = val; table->size++;
 }
 
@@ -35,7 +35,7 @@ static TomlValue* toml_parse_value(const char* val_str) {
     while (isspace((unsigned char)*val_str)) val_str++;
     size_t len = strlen(val_str);
     if (val_str[0] == '"' && val_str[len-1] == '"') {
-        char* s = (char*)malloc(len - 1); memcpy(s, val_str + 1, len - 2); s[len-2] = '\0';
+        char* s = (char*)kmm_v4_malloc(len - 1); memcpy(s, val_str + 1, len - 2); s[len-2] = '\0';
         return toml_create_string(s);
     }
     if (strcmp(val_str, "true") == 0) return toml_create_bool(true);
@@ -50,8 +50,8 @@ static TomlValue* toml_parse_value(const char* val_str) {
 
 TomlDocument* toml_parse(const String text) {
     if (!text) return NULL;
-    TomlDocument* doc = calloc(1, sizeof(TomlDocument));
-    doc->root = calloc(1, sizeof(TomlTable)); doc->root->capacity = 16;
+    TomlDocument* doc = kmm_v4_calloc(1, sizeof(TomlDocument));
+    doc->root = kmm_v4_calloc(1, sizeof(TomlTable)); doc->root->capacity = 16;
     TomlTable* current = doc->root;
     const char* p = text;
     while (*p) {
@@ -65,19 +65,19 @@ TomlDocument* toml_parse(const String text) {
             const char* name_start = p;
             while (*p && *p != ']' && *p != '\n') p++;
             size_t name_len = p - name_start;
-            char* name = (char*)malloc(name_len + 1);
+            char* name = (char*)kmm_v4_malloc(name_len + 1);
             memcpy(name, name_start, name_len); name[name_len] = '\0';
             while (*p && *p != ']') p++; if (*p == ']') p++; if (*p == ']') p++;
             TomlValue* table = toml_create_table();
             toml_table_set(current, name, table);
             current = table->table_val;
-            free(name);
+            // KMM 管理内存，无需手动释放
         } else {
             const char* key_start = p;
             while (*p && *p != '=' && *p != '\n') p++;
             size_t key_len = p - key_start;
             while (key_len > 0 && isspace((unsigned char)key_start[key_len-1])) key_len--;
-            char* key = (char*)malloc(key_len + 1);
+            char* key = (char*)kmm_v4_malloc(key_len + 1);
             memcpy(key, key_start, key_len); key[key_len] = '\0';
             if (*p == '=') p++;
             while (isspace((unsigned char)*p)) p++;
@@ -85,10 +85,10 @@ TomlDocument* toml_parse(const String text) {
             while (*p && *p != '\n' && *p != '#') p++;
             size_t val_len = p - val_start;
             while (val_len > 0 && isspace((unsigned char)val_start[val_len-1])) val_len--;
-            char* val_str = (char*)malloc(val_len + 1);
+            char* val_str = (char*)kmm_v4_malloc(val_len + 1);
             memcpy(val_str, val_start, val_len); val_str[val_len] = '\0';
             toml_table_set(current, key, toml_parse_value(val_str));
-            free(key); free(val_str);
+            // KMM 管理内存，无需手动释放
         }
     }
     return doc;
@@ -97,29 +97,15 @@ TomlDocument* toml_parse(const String text) {
 TomlDocument* toml_parse_file(const String path) {
     FILE* f = fopen(path, "r"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
-    String buf = (String)malloc(len + 1); fread(buf, 1, len, f); buf[len] = '\0'; fclose(f);
-    TomlDocument* doc = toml_parse(buf); free(buf); return doc;
+    String buf = (String)kmm_v4_malloc(len + 1); fread(buf, 1, len, f); buf[len] = '\0'; fclose(f);
+    TomlDocument* doc = toml_parse(buf);
+    // KMM 管理内存，无需手动释放
+    return doc;
 }
 
 void toml_destroy(TomlDocument* doc) {
-    if (!doc) return;
-    for (size_t i = 0; i < doc->root->size; i++) {
-        string_free(doc->root->keys[i]);
-        if (doc->root->values[i]) {
-            if (doc->root->values[i]->type == TOML_STRING) string_free(doc->root->values[i]->string_val);
-            else if (doc->root->values[i]->type == TOML_TABLE) {
-                for (size_t j = 0; j < doc->root->values[i]->table_val->size; j++) {
-                    string_free(doc->root->values[i]->table_val->keys[j]);
-                    free(doc->root->values[i]->table_val->values[j]);
-                }
-                free(doc->root->values[i]->table_val->keys);
-                free(doc->root->values[i]->table_val->values);
-                free(doc->root->values[i]->table_val);
-            }
-            free(doc->root->values[i]);
-        }
-    }
-    free(doc->root->keys); free(doc->root->values); free(doc->root); free(doc);
+    // KMM 管理内存，无需手动释放
+    (void)doc;
 }
 
 String toml_serialize(TomlDocument* doc) {
