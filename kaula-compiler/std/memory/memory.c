@@ -6,6 +6,12 @@
  */
 
 #include "memory.h"
+
+/* 禁用头文件中的 static inline 版本，使用 .c 中的非 inline 版本 */
+#define KMM_V4_RESET_IMPL
+#define KMM_V4_USAGE_IMPL
+#define KMM_V4_AVAILABLE_IMPL
+
 #include "../../src/kmm_scoped_allocator_v4.h"
 #include "../../src/kaula.h"
 #include <stdlib.h>
@@ -93,6 +99,9 @@ void kmm_v4_scope_exit(void) {
 /* ============================================================================
  * 状态查询
  * ============================================================================ */
+
+/* 注意：kmm_v4_usage、kmm_v4_available、kmm_v4_reset 已在 kmm_scoped_allocator_v4.h 中定义为 static inline，
+ * 但通过定义 KMM_V4_*_IMPL 宏禁用了 inline 版本，此处提供非 inline 版本用于跨 TU 链接。 */
 
 size_t kmm_v4_usage(void) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1

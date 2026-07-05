@@ -502,22 +502,22 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		}
 		
 		if module, exists := eg.codegen.stdlibConfig.Modules[stdlibKey]; exists {
-			// 生成标准库函数调用
-			funcName := methodName
-			
 			// 特殊处理 println：使用类型推导版本
-			if funcName == "println" && len(args) > 1 {
+			if methodName == "println" && len(args) > 1 {
 				return eg.generatePrintlnMulti(args)
 			}
 			
 			// 检查 stdlib.json 中是否有这个函数
-			if _, funcExists := module.Functions[funcName]; funcExists {
+			if _, funcExists := module.Functions[methodName]; funcExists {
 				// 追踪第三方库的使用
-				if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(funcName); isThirdParty {
+				if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(methodName); isThirdParty {
 					eg.codegen.usedThirdPartyLibs[lib.Name] = true
 				}
 				
-				code := funcName + "("
+				// 使用 GetCFunctionName 自动添加模块前缀
+				cFuncName := eg.codegen.stdlibConfig.GetCFunctionName(stdlibKey, methodName)
+				
+				code := cFuncName + "("
 				for i, arg := range args {
 					if i > 0 {
 						code += ", "

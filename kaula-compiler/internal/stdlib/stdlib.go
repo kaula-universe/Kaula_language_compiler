@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -16,6 +17,7 @@ type Function struct {
 
 type Module struct {
 	Header    string                `json:"header"`
+	Prefix    string                `json:"prefix,omitempty"`
 	Functions map[string]Function `json:"functions"`
 }
 
@@ -243,6 +245,33 @@ func (sc *StdlibConfig) GetFunction(moduleName, funcName string) *Function {
 		}
 	}
 	return nil
+}
+
+// GetCFunctionName 获取 C 函数名（自动映射 Kaula 函数名到 C 函数名）
+// 策略：
+// 1. 如果模块有 Prefix 字段，直接拼接
+// 2. 否则通过后缀匹配：funcName="sleep" -> 查找模块中 "_sleep" 结尾的函数
+func (sc *StdlibConfig) GetCFunctionName(moduleName, funcName string) string {
+	if module, ok := sc.Modules[moduleName]; ok {
+		// 优先使用 Prefix 字段
+		if module.Prefix != "" {
+			return module.Prefix + funcName
+		}
+		
+		// 通过后缀匹配查找
+		suffix := "_" + funcName
+		for cFuncName := range module.Functions {
+			if strings.HasSuffix(cFuncName, suffix) {
+				return cFuncName
+			}
+		}
+		
+		// 最后尝试直接匹配
+		if _, exists := module.Functions[funcName]; exists {
+			return funcName
+		}
+	}
+	return funcName
 }
 
 func (sc *StdlibConfig) IsStdlibFunction(funcName string) bool {

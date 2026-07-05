@@ -176,28 +176,20 @@ void kmm_v4_reset(void);
  *   int* p = KMM_V4_ALLOC(int);           // 分配 1 个 int
  *   Point* pt = KMM_V4_ALLOC(Point);      // 分配 1 个 Point
  */
+#ifndef KMM_V4_ALLOC
 #define KMM_V4_ALLOC(type) \
     ((type*)kmm_v4_alloc(sizeof(type)))
+#endif
 
-/**
- * KMM_V4_ALLOC_ZERO(type) - 类型安全的零初始化分配
- *
- * 示例:
- *   int* p = KMM_V4_ALLOC_ZERO(int);      // 分配 1 个 int，初始化为 0
- *   Point* pt = KMM_V4_ALLOC_ZERO(Point); // 分配 1 个 Point，所有字段为 0
- */
+#ifndef KMM_V4_ALLOC_ZERO
 #define KMM_V4_ALLOC_ZERO(type) \
     ((type*)kmm_v4_calloc(1, sizeof(type)))
+#endif
 
-/**
- * KMM_V4_ALLOC_ARRAY(type, count) - 类型安全的数组分配
- *
- * 示例:
- *   int* arr = KMM_V4_ALLOC_ARRAY(int, 100);       // 分配 100 个 int
- *   Point* pts = KMM_V4_ALLOC_ARRAY(Point, 10);    // 分配 10 个 Point
- */
+#ifndef KMM_V4_ALLOC_ARRAY
 #define KMM_V4_ALLOC_ARRAY(type, count) \
     ((type*)kmm_v4_alloc(sizeof(type) * (count)))
+#endif
 
 /**
  * KMM_V4_ALLOC_ARRAY_ZERO(type, count) - 零初始化的数组分配

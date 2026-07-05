@@ -1157,6 +1157,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		if _, err := arCmd.CombinedOutput(); err != nil {
 			// llvm-lib 不可用时回退到直接链接 .o 文件
 			fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
+			// 不写入 key 文件，下次继续尝试
 		} else {
 			os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
 			// 用 std.lib 替换所有 .o 文件
@@ -1176,21 +1177,56 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
 		}
 	} else {
-		// std.lib 缓存命中，替换 .o 列表
-		clangArgs = clangArgs[:0]
-		clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-		clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-		if poolCapacity > 0 {
-			clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+		// std.lib 缓存命中，但需确认文件确实存在
+		if _, err := os.Stat(stdLibPath); err != nil {
+			// 文件不存在，清除 key 并重新构建
+			os.Remove(libKeyFile)
+			fmt.Printf("[Compile] Warning: std.lib key exists but file missing, rebuilding\n")
+			// 重新走 rebuild 逻辑
+			var objPaths []string
+			for _, ms := range moduleSources {
+				objPaths = append(objPaths, ms.objPath)
+			}
+			if _, err := os.Stat(kmmV4Obj); err == nil {
+				objPaths = append(objPaths, kmmV4Obj)
+			}
+			arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
+			arCmd.Args = append(arCmd.Args, objPaths...)
+			if _, err := arCmd.CombinedOutput(); err != nil {
+				fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
+			} else {
+				os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
+				clangArgs = clangArgs[:0]
+				clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
+				clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+				if poolCapacity > 0 {
+					clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+				}
+				for _, p := range validSrcPaths {
+					clangArgs = append(clangArgs, "-I", p)
+				}
+				for _, p := range validStdPaths {
+					clangArgs = append(clangArgs, "-I", p)
+				}
+				clangArgs = append(clangArgs, "-x", "none", stdLibPath)
+				fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
+			}
+		} else {
+			clangArgs = clangArgs[:0]
+			clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
+			clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+			if poolCapacity > 0 {
+				clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+			}
+			for _, p := range validSrcPaths {
+				clangArgs = append(clangArgs, "-I", p)
+			}
+			for _, p := range validStdPaths {
+				clangArgs = append(clangArgs, "-I", p)
+			}
+			clangArgs = append(clangArgs, "-x", "none", stdLibPath)
+			fmt.Printf("[Compile] Using cached std.lib\n")
 		}
-		for _, p := range validSrcPaths {
-			clangArgs = append(clangArgs, "-I", p)
-		}
-		for _, p := range validStdPaths {
-			clangArgs = append(clangArgs, "-I", p)
-		}
-		clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-		fmt.Printf("[Compile] Using cached std.lib\n")
 	}
 
 	// 添加 Windows 系统库链接
@@ -1199,6 +1235,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		clangArgs = append(clangArgs, "-lwininet")
 		clangArgs = append(clangArgs, "-lgdi32")
 		clangArgs = append(clangArgs, "-luser32")
+		clangArgs = append(clangArgs, "-ladvapi32")
 	}
 
 	// 消费 pkglib 第三方库的 libraries/include_path/library_path 字段

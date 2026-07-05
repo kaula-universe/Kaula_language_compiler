@@ -505,6 +505,7 @@ extern kmm_context_t g_kmm_ctx;
 // ==================== 编译期检查 ====================
 // kmm_v4_malloc / kmm_v4_free / kmm_v4_calloc 由 .c 文件提供（非 static，支持跨 TU 链接）
 
+#ifndef KMM_V4_RESET_IMPL
 static inline void kmm_v4_reset(void) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     KMM_ATOMIC_STORE(g_kmm_v4_offset, 0);
@@ -518,7 +519,9 @@ static inline void kmm_v4_reset(void) {
     #endif
 #endif
 }
+#endif
 
+#ifndef KMM_V4_USAGE_IMPL
 static inline size_t kmm_v4_usage(void) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     return KMM_ATOMIC_LOAD(g_kmm_v4_offset);
@@ -526,7 +529,9 @@ static inline size_t kmm_v4_usage(void) {
     return g_kmm_v4_offset;
 #endif
 }
+#endif
 
+#ifndef KMM_V4_AVAILABLE_IMPL
 static inline size_t kmm_v4_available(void) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     return KMM_V4_POOL_SIZE - KMM_ATOMIC_LOAD(g_kmm_v4_offset);
@@ -534,6 +539,7 @@ static inline size_t kmm_v4_available(void) {
     return KMM_V4_POOL_SIZE - g_kmm_v4_offset;
 #endif
 }
+#endif
 
 // KMM_V4_ALLOC_ARRAY 已在智能宏系统区定义，此处不再重复
 
