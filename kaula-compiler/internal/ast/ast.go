@@ -357,6 +357,21 @@ func traverseNode(node Node, visitor func(Node)) {
 		// 无子节点
 	case *Param:
 		// 无子节点
+	case *YeideStatement:
+		if n.Source != nil {
+			traverseNode(n.Source, visitor)
+		}
+	case *ReleaseStatement:
+		if n.Source != nil {
+			traverseNode(n.Source, visitor)
+		}
+	case *ExtractStatement:
+		if n.Source != nil {
+			traverseNode(n.Source, visitor)
+		}
+		if n.Index != nil {
+			traverseNode(n.Index, visitor)
+		}
 	}
 }
 
@@ -713,6 +728,8 @@ type FunctionStatement struct {
 	NoKMM         bool      // 是否禁用 KMM 内存管理
 	Inline        bool      // 是否内联函数
 	Annotation    TreeAnnotationType // 函数注解 (prefix,tree, root,tree)
+	SOREnabled    bool      // 函数级 SOR 启用（#[sor] 注解）
+	IsPublic      bool      // pub 修饰符：导出给其他 .kl 文件
 	PrefixName    string    // 如果使用prefix，记录prefix名称
 	TaskParams    []*TaskParam // 任务参数列表（如 task(1)）
 	AsyncParams   []*AsyncParam // 异步参数列表（如 async(value)）
@@ -1048,8 +1065,10 @@ func (c *ContinueStatement) SetPosition(pos Position) {
 
 // ImportStatement 表示import语句
 type ImportStatement struct {
-	Module string
-	Pos    Position
+	Module   string // 模块名（如 "std.io" 或 "utils"）
+	IsLocal  bool   // 是否是本地 .kl 文件导入
+	LocalPath string // 解析后的本地 .kl 文件路径（仅 IsLocal=true 时有效）
+	Pos      Position
 }
 
 // statementNode 实现Statement接口
@@ -1095,6 +1114,17 @@ func (e *ExportStatement) SetPosition(pos Position) {
 	e.Pos = pos
 }
 
+// PackageStatement 表示 package 声明
+type PackageStatement struct {
+	Name string   // 包名（如 "utils", "math.geometry"）
+	Pos  Position
+}
+
+func (p *PackageStatement) statementNode() {}
+func (p *PackageStatement) String() string  { return "PackageStatement" }
+func (p *PackageStatement) GetPosition() Position { return p.Pos }
+func (p *PackageStatement) SetPosition(pos Position) { p.Pos = pos }
+
 // NonLocalStatement 表示 nonlocal 语句
 type NonLocalStatement struct {
 	Type  string
@@ -1128,6 +1158,7 @@ type VariableDeclaration struct {
 	Value    Expression
 	Nullable bool
 	IsAuto   bool
+	IsPublic bool // pub 修饰符
 	Pos      Position
 }
 
@@ -2033,3 +2064,43 @@ func (a *ArrayLiteral) SetPosition(pos Position) {
 func (ta *TypeAliasStatement) IsGeneric() bool {
 	return ta.Generic || len(ta.TypeParams) > 0
 }
+
+// YeideStatement 表示 yeide（所有权转移）语句
+// 语法: yeide source -> target
+type YeideStatement struct {
+	Source Expression // 被转移的对象
+	Target string    // 目标变量名
+	Pos    Position
+}
+
+func (y *YeideStatement) statementNode() {}
+func (y *YeideStatement) String() string { return "YeideStatement" }
+func (y *YeideStatement) GetPosition() Position { return y.Pos }
+func (y *YeideStatement) SetPosition(pos Position) { y.Pos = pos }
+
+// ReleaseStatement 表示 release（所有权分发）语句
+// 语法: release source -> [holder1, holder2, ...]
+type ReleaseStatement struct {
+	Source  Expression // 被分发的对象
+	Holders []string  // 持有者变量名列表
+	Pos     Position
+}
+
+func (r *ReleaseStatement) statementNode() {}
+func (r *ReleaseStatement) String() string { return "ReleaseStatement" }
+func (r *ReleaseStatement) GetPosition() Position { return r.Pos }
+func (r *ReleaseStatement) SetPosition(pos Position) { r.Pos = pos }
+
+// ExtractStatement 表示 extract（子结构提取）语句
+// 语法: extract source[index] -> target
+type ExtractStatement struct {
+	Source Expression // 源对象
+	Index  Expression // 提取的索引
+	Target string    // 目标变量名
+	Pos    Position
+}
+
+func (e *ExtractStatement) statementNode() {}
+func (e *ExtractStatement) String() string { return "ExtractStatement" }
+func (e *ExtractStatement) GetPosition() Position { return e.Pos }
+func (e *ExtractStatement) SetPosition(pos Position) { e.Pos = pos }

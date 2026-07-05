@@ -100,6 +100,12 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 	case *ast.BlockStatement:
 		return sg.generateBlockStatement(s)
+	case *ast.YeideStatement:
+		return sg.generateYeideStatement(s)
+	case *ast.ReleaseStatement:
+		return sg.generateReleaseStatement(s)
+	case *ast.ExtractStatement:
+		return sg.generateExtractStatement(s)
 	default:
 		return ""
 	}
@@ -116,8 +122,51 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
 	
 	var builder strings.Builder
-	builder.Grow(64)
-	
+	builder.Grow(128)
+
+	// SOR Arena 路由落地：如果 SOR 分析启用且变量是指针类型且决策为 arena/bump pool，
+	// 用 kmm_v4_alloc_auto 分配，由 KMM 作用域自动回收
+	adapter := sg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		if decision := adapter.GetVarDecision(stmt.Name); decision != nil {
+			isPointer := strings.HasSuffix(cType, "*")
+			isArenaOrPool := decision.AllocKind == "ArenaTiny" ||
+				decision.AllocKind == "ArenaSmall" ||
+				decision.AllocKind == "ArenaMedium" ||
+				decision.AllocKind == "BumpPool"
+			// 指针类型变量走 KMM 分配器
+			if isPointer && isArenaOrPool && stmt.Value == nil {
+				// 去掉末尾的 * 得到基类型用于 sizeof
+				baseType := strings.TrimRight(cType, "*")
+				builder.WriteString(cType)
+				builder.WriteByte(' ')
+				builder.WriteString(stmt.Name)
+				builder.WriteString(" = (")
+				builder.WriteString(cType)
+				builder.WriteString(")kmm_v4_alloc_auto(sizeof(")
+				builder.WriteString(baseType)
+				builder.WriteString(")); /* sor: ")
+				builder.WriteString(decision.AllocKind)
+				builder.WriteString(" */\n")
+				return builder.String()
+			}
+			// 值类型：保持栈分配，在注释中标注 SOR 决策
+			if !isPointer {
+				builder.WriteString(cType)
+				builder.WriteByte(' ')
+				builder.WriteString(stmt.Name)
+				if stmt.Value != nil {
+					builder.WriteString(" = ")
+					builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+				}
+				builder.WriteString("; /* sor: ")
+				builder.WriteString(decision.AllocKind)
+				builder.WriteString(" */\n")
+				return builder.String()
+			}
+		}
+	}
+
 	builder.WriteString(cType)
 	builder.WriteByte(' ')
 	builder.WriteString(stmt.Name)
@@ -639,33 +688,67 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 	code += condCode
 	code += ") {\n"
 	
-	// 插入KMM作用域开始
-	code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("if_body")
+	
+	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
+	if useKMM {
+		sg.codegen.EnterKMMScope()
+	}
+	
+	var bodyCode strings.Builder
 	for _, bodyStmt := range stmt.Body {
-		code += sg.codegen.indentString()
-		code += sg.codegen.generateStatement(bodyStmt)
+		bodyCode.WriteString(sg.codegen.indentString())
+		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
+	}
+	
+	if useKMM {
+		sg.codegen.ExitKMMScope()
 	}
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
-	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	
+	if useKMM {
+		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	} else {
+		code += bodyCode.String()
+	}
 	
 	code += sg.codegen.indentString() + "}"
+	
 	if len(stmt.Else) > 0 {
 		code += " else {\n"
 		
-		// 插入KMM作用域开始
-		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		sg.codegen.indent++
 		sg.codegen.EnterScope("else_body")
+		
+		useKMMElse := sg.shouldUseKMMScopeForBody(stmt.Else)
+		if useKMMElse {
+			sg.codegen.EnterKMMScope()
+		}
+		
+		var elseCode strings.Builder
 		for _, elseStmt := range stmt.Else {
-			code += sg.codegen.indentString()
-			code += sg.codegen.generateStatement(elseStmt)
+			elseCode.WriteString(sg.codegen.indentString())
+			elseCode.WriteString(sg.codegen.generateStatement(elseStmt))
+		}
+		
+		if useKMMElse {
+			sg.codegen.ExitKMMScope()
 		}
 		sg.codegen.ExitScope()
 		sg.codegen.indent--
-		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		
+		if useKMMElse {
+			code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+			code += elseCode.String()
+			code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		} else {
+			code += elseCode.String()
+		}
 		
 		code += sg.codegen.indentString() + "}"
 	}
@@ -679,20 +762,458 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
 	code += ") {\n"
 	
-	// 插入KMM作用域开始
-	code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("while_body")
+	
+	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
+	if useKMM {
+		sg.codegen.EnterKMMScope()
+	}
+	
+	var bodyCode strings.Builder
 	for _, bodyStmt := range stmt.Body {
-		code += sg.codegen.indentString()
-		code += sg.codegen.generateStatement(bodyStmt)
+		bodyCode.WriteString(sg.codegen.indentString())
+		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
+	}
+	
+	if useKMM {
+		sg.codegen.ExitKMMScope()
 	}
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
-	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	
+	if useKMM {
+		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	} else {
+		code += bodyCode.String()
+	}
 	
 	code += sg.codegen.indentString() + "}\n"
 	return code
+}
+
+// trimForClause 去除 for 循环子句末尾的分号、SOR 注释和换行
+func trimForClause(code string) string {
+	code = strings.TrimSuffix(code, "\n")
+	code = strings.TrimSpace(code)
+	// 去除 SOR 行尾注释 /* sor: ... */
+	if idx := strings.LastIndex(code, "/* sor:"); idx != -1 {
+		code = code[:idx]
+		code = strings.TrimSpace(code)
+	}
+	code = strings.TrimSuffix(code, ";")
+	code = strings.TrimSpace(code)
+	return code
+}
+
+// needsKMMScope 检查一段已生成的代码是否需要 KMM scope
+// 优化策略：
+// - 作用域合并：如果外层已有 KMM scope，内层不需要再插入
+// - SOR 模式：使用精确的变量决策信息判断（从符号表获取当前 scope 的变量，排除函数参数）
+// - 非 SOR 模式：基于符号表的类型分析 + 代码内容检测
+// 纯 Stack 变量、std_malloc 的变量或函数参数的 scope 可以省略，消除运行时开销
+func (sg *StatementGenerator) needsKMMScope(bodyCode string) bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if sg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	// SOR 模式：使用精确的变量决策
+	adapter := sg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		currentScope := sg.codegen.GetCurrentScope()
+		var varNames []string
+		if currentScope != nil {
+			for name, sym := range currentScope.GetAllSymbols() {
+				if sym.Scope != "parameter" && sym.Scope != "param" && 
+				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+					varNames = append(varNames, name)
+				}
+			}
+		}
+		return adapter.NeedsKMMScopeByVars(varNames)
+	}
+
+	// 非 SOR 模式：智能分析
+	return sg.needsKMMScopeNonSOR(bodyCode)
+}
+
+// shouldUseKMMScope 预判断：在生成 body 之前基于符号表判断是否需要 KMM scope
+// 用于作用域合并优化：如果预判断需要 KMM，先 EnterKMMScope 再生成 body，
+// 这样内层作用域的 needsKMMScope 会检测到外层已有 KMM 而跳过插入
+func (sg *StatementGenerator) shouldUseKMMScope() bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if sg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	// SOR 模式：使用精确的变量决策（不依赖 body 代码）
+	adapter := sg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		currentScope := sg.codegen.GetCurrentScope()
+		var varNames []string
+		if currentScope != nil {
+			for name, sym := range currentScope.GetAllSymbols() {
+				if sym.Scope != "parameter" && sym.Scope != "param" && 
+				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+					varNames = append(varNames, name)
+				}
+			}
+		}
+		return adapter.NeedsKMMScopeByVars(varNames)
+	}
+
+	// 非 SOR 模式：基于符号表类型分析（不依赖 body 代码）
+	currentScope := sg.codegen.GetCurrentScope()
+	if currentScope != nil {
+		for _, sym := range currentScope.GetAllSymbols() {
+			if sym.Scope == "parameter" || sym.Scope == "param" || 
+			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+				continue
+			}
+			if needsKMMForType(sym.Type) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// allocFuncNames 需要检测的动态分配函数名
+var allocFuncNames = map[string]bool{
+	"kmm_v4_malloc":     true,
+	"kmm_v4_alloc_auto": true,
+	"std_malloc":        true,
+	"malloc":            true,
+}
+
+// bodyContainsAllocation 递归检测语句列表中是否包含动态分配调用
+// 用于在循环体等内存热点处插入 KMM scope，削平峰值
+func bodyContainsAllocation(stmts []ast.Statement) bool {
+	for _, stmt := range stmts {
+		if stmtContainsAllocation(stmt) {
+			return true
+		}
+	}
+	return false
+}
+
+func stmtContainsAllocation(stmt ast.Statement) bool {
+	if stmt == nil {
+		return false
+	}
+	switch s := stmt.(type) {
+	case *ast.VariableDeclaration:
+		if s == nil {
+			return false
+		}
+		return exprContainsAllocation(s.Value)
+	case *ast.ExpressionStatement:
+		if s == nil {
+			return false
+		}
+		return exprContainsAllocation(s.Expression)
+	case *ast.IfStatement:
+		if s == nil {
+			return false
+		}
+		if exprContainsAllocation(s.Condition) {
+			return true
+		}
+		for _, bs := range s.Body {
+			if stmtContainsAllocation(bs) {
+				return true
+			}
+		}
+		for _, bs := range s.Else {
+			if stmtContainsAllocation(bs) {
+				return true
+			}
+		}
+	case *ast.WhileStatement:
+		if s == nil {
+			return false
+		}
+		if exprContainsAllocation(s.Condition) {
+			return true
+		}
+		for _, bs := range s.Body {
+			if stmtContainsAllocation(bs) {
+				return true
+			}
+		}
+	case *ast.ForStatement:
+		if s == nil {
+			return false
+		}
+		for _, bs := range s.Body {
+			if stmtContainsAllocation(bs) {
+				return true
+			}
+		}
+	case *ast.BlockStatement:
+		if s == nil {
+			return false
+		}
+		for _, bs := range s.Statements {
+			if stmtContainsAllocation(bs) {
+				return true
+			}
+		}
+	case *ast.ReturnStatement:
+		if s == nil {
+			return false
+		}
+		return exprContainsAllocation(s.Value)
+	}
+	return false
+}
+
+func exprContainsAllocation(expr ast.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		if isAllocCall(e.Function) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if exprContainsAllocation(arg) {
+				return true
+			}
+		}
+	case *ast.BinaryExpression:
+		if exprContainsAllocation(e.Left) {
+			return true
+		}
+		if exprContainsAllocation(e.Right) {
+			return true
+		}
+	case *ast.UnaryExpression:
+		return exprContainsAllocation(e.Right)
+	case *ast.MemberAccessExpression:
+		return exprContainsAllocation(e.Object)
+	case *ast.ParenExpression:
+		return exprContainsAllocation(e.Inner)
+	case *ast.TypeCastExpression:
+		return exprContainsAllocation(e.Expression)
+	case *ast.ConditionalExpression:
+		if exprContainsAllocation(e.Condition) {
+			return true
+		}
+		if exprContainsAllocation(e.TrueExpr) {
+			return true
+		}
+		if exprContainsAllocation(e.FalseExpr) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAllocCall(fn ast.Expression) bool {
+	if fn == nil {
+		return false
+	}
+	switch e := fn.(type) {
+	case *ast.Identifier:
+		return allocFuncNames[e.Name]
+	case *ast.MemberAccessExpression:
+		return allocFuncNames[e.Member]
+	}
+	return false
+}
+
+// shouldUseKMMScopeForBody 基于 AST body 语句列表预判断是否需要 KMM scope
+// 解决符号表在 body 生成前未填充的问题：直接扫描 AST 变量声明
+// 优先使用 SOR 作用域决策（如果已注册），否则回退到变量级别判断
+// 额外检测动态分配调用（kmm_v4_malloc 等），在内存热点处插入 KMM scope 削平峰值
+func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement) bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if sg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	adapter := sg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		// 优先使用作用域级别的 SOR 决策（如果当前作用域已注册）
+		currentScope := sg.codegen.GetCurrentScope()
+		if currentScope != nil {
+			scopeName := currentScope.GetScopeName()
+			if scopeName != "" {
+				// 尝试作用域级别判断
+				scopeID := adapter.GetScopeIDByName(scopeName)
+				if scopeID > 0 {
+					if sd := adapter.GetScopeDecision(scopeID); sd != nil {
+						// 有作用域决策，直接使用
+						return sd.UsesBumpPool || sd.UsesArena != ""
+					}
+				}
+			}
+		}
+		// 回退：变量级别判断
+		var varNames []string
+		for _, stmt := range bodyStmts {
+			if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+				varNames = append(varNames, varDecl.Name)
+			}
+		}
+		if adapter.NeedsKMMScopeByVars(varNames) {
+			return true
+		}
+		// SOR 决策不需要 KMM 时，补充检查 SOR 未追踪的指针类型变量
+		for _, stmt := range bodyStmts {
+			if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+				if needsKMMForType(varDecl.Type) {
+					return true
+				}
+			}
+		}
+		// 内存热点检测：body 中含动态分配调用时插入 KMM scope
+		// 每次循环迭代结束时 scope_pop 回收 bump 指针，削平峰值
+		if bodyContainsAllocation(bodyStmts) {
+			return true
+		}
+		return false
+	}
+
+	// 非 SOR 模式：扫描 body 中的变量类型
+	for _, stmt := range bodyStmts {
+		if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+			if needsKMMForType(varDecl.Type) {
+				return true
+			}
+		}
+	}
+	// 内存热点检测：body 中含动态分配调用时插入 KMM scope
+	if bodyContainsAllocation(bodyStmts) {
+		return true
+	}
+	return false
+}
+
+// needsKMMScopeNonSOR 非 SOR 模式下的智能 KMM 判断
+// 基于符号表分析变量类型，判断是否需要 KMM scope
+func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
+	// 快速检查：如果代码中没有内存分配相关操作，直接返回 false
+	if !strings.Contains(bodyCode, "std_malloc") && 
+	   !strings.Contains(bodyCode, "kmm_v4") &&
+	   !strings.Contains(bodyCode, "string_concat") &&
+	   !strings.Contains(bodyCode, "string_dup") {
+		return false
+	}
+
+	// 基于符号表分析
+	currentScope := sg.codegen.GetCurrentScope()
+	if currentScope != nil {
+		for _, sym := range currentScope.GetAllSymbols() {
+			// 排除函数参数
+			if sym.Scope == "parameter" || sym.Scope == "param" || 
+			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+				continue
+			}
+			// 检查变量类型是否需要 KMM
+			if needsKMMForType(sym.Type) {
+				return true
+			}
+		}
+	}
+
+	// 代码内容检测：如果有 kmm_v4_alloc_auto 调用，需要 KMM
+	if strings.Contains(bodyCode, "kmm_v4_alloc_auto") {
+		return true
+	}
+
+	return false
+}
+
+// needsKMMForType 判断类型是否需要 KMM 内存管理
+// - 指针类型 (*T) 需要 KMM
+// - 字符串类型 (string, str) 需要 KMM
+// - 复合类型 ([]T, map[K]V) 需要 KMM
+// - 值类型 (int, bool, float, double, etc.) 不需要 KMM
+func needsKMMForType(typeName string) bool {
+	if typeName == "" {
+		return false
+	}
+	t := strings.ToLower(typeName)
+	
+	// 指针类型
+	if strings.Contains(t, "*") {
+		return true
+	}
+	
+	// 字符串类型
+	if t == "string" || t == "str" {
+		return true
+	}
+	
+	// 切片类型
+	if strings.HasPrefix(t, "[]") {
+		return true
+	}
+	
+	// Map 类型
+	if strings.HasPrefix(t, "map[") {
+		return true
+	}
+	
+	// 数组类型（大数组可能需要 KMM，但这里保守处理）
+	if strings.HasPrefix(t, "[") {
+		return true
+	}
+	
+	// 值类型不需要 KMM
+	switch t {
+	case "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"i8", "i16", "i32", "i64",
+		"u8", "u16", "u32", "u64",
+		"float", "float32", "float64", "f32", "f64",
+		"double", "bool", "char", "byte",
+		"isize", "usize", "size", "void":
+		return false
+	}
+	
+	// 其他未知类型，保守处理为需要 KMM
+	return true
+}
+
+// optimizeForUpdate 检测 for 循环 update 表达式的常见模式并特化
+// x = x + 1 → x++, x = x - 1 → x--
+func optimizeForUpdate(stmt ast.Statement) string {
+	exprStmt, ok := stmt.(*ast.ExpressionStatement)
+	if !ok {
+		return ""
+	}
+	binExpr, ok := exprStmt.Expression.(*ast.BinaryExpression)
+	if !ok {
+		return ""
+	}
+	// 模式: x = x + 1 或 x = x - 1
+	if binExpr.Operator == "ASSIGN" {
+		if rightBin, ok := binExpr.Right.(*ast.BinaryExpression); ok {
+			if ident, ok := binExpr.Left.(*ast.Identifier); ok {
+				if rightIdent, ok := rightBin.Left.(*ast.Identifier); ok {
+					if ident.Name == rightIdent.Name {
+						if intLit, ok := rightBin.Right.(*ast.IntegerLiteral); ok && intLit.Value == 1 {
+							switch rightBin.Operator {
+							case "PLUS", "+":
+								return ident.Name + "++"
+							case "MINUS", "-":
+								return ident.Name + "--"
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // generateForStatement 生成 for 语句代码
@@ -702,8 +1223,8 @@ func (sg *StatementGenerator) generateForStatement(stmt *ast.ForStatement) strin
 		if exprStmt, ok := stmt.Init.(*ast.ExpressionStatement); ok {
 			code += sg.codegen.expressionGenerator.GenerateExpression(exprStmt.Expression)
 		} else {
-			code += sg.codegen.generateStatement(stmt.Init)
-			code = strings.TrimSuffix(code, ";\n")
+			initCode := sg.codegen.generateStatement(stmt.Init)
+			code += trimForClause(initCode)
 		}
 	} else {
 		code += ""
@@ -716,31 +1237,85 @@ func (sg *StatementGenerator) generateForStatement(stmt *ast.ForStatement) strin
 	}
 	code += "; "
 	if stmt.Update != nil {
-		if exprStmt, ok := stmt.Update.(*ast.ExpressionStatement); ok {
+		// 尝试特化常见增量模式: i = i + 1 → i++
+		if optimized := optimizeForUpdate(stmt.Update); optimized != "" {
+			code += optimized
+		} else if exprStmt, ok := stmt.Update.(*ast.ExpressionStatement); ok {
 			code += sg.codegen.expressionGenerator.GenerateExpression(exprStmt.Expression)
 		} else {
-			code += sg.codegen.generateStatement(stmt.Update)
-			code = strings.TrimSuffix(code, ";\n")
+			updateCode := sg.codegen.generateStatement(stmt.Update)
+			code += trimForClause(updateCode)
 		}
 	} else {
 		code += ""
 	}
 	code += ") {\n"
 	
-	// 插入KMM作用域开始
-	code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("for_body")
+	
+	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
+	if useKMM {
+		sg.codegen.EnterKMMScope()
+	}
+	
+	var bodyCode strings.Builder
 	for _, bodyStmt := range stmt.Body {
-		code += sg.codegen.indentString()
-		code += sg.codegen.generateStatement(bodyStmt)
+		bodyCode.WriteString(sg.codegen.indentString())
+		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
+	}
+	
+	if useKMM {
+		sg.codegen.ExitKMMScope()
 	}
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
-	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	
+	if useKMM {
+		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+	} else {
+		code += bodyCode.String()
+	}
 	
 	code += sg.codegen.indentString() + "}\n"
 	return code
+}
+
+// shouldUseKMMScopeForForBody 预判断 for 循环体是否需要 KMM scope
+// 保留用于兼容，实际已被 shouldUseKMMScopeForBody 替代
+func (sg *StatementGenerator) shouldUseKMMScopeForForBody() bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if sg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	adapter := sg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		currentScope := sg.codegen.GetCurrentScope()
+		if currentScope == nil {
+			return false
+		}
+		var varNames []string
+		for name, sym := range currentScope.GetAllSymbols() {
+			if sym.Scope == "local" {
+				varNames = append(varNames, name)
+			}
+		}
+		return adapter.NeedsKMMScopeByVars(varNames)
+	}
+	// 非 SOR 模式：基于符号表类型分析
+	currentScope := sg.codegen.GetCurrentScope()
+	if currentScope != nil {
+		for _, sym := range currentScope.GetAllSymbols() {
+			if sym.Scope == "local" && needsKMMForType(sym.Type) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // generateSwitchStatement 生成 switch 语句代码
@@ -883,4 +1458,101 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	// 退出块作用域
 	sg.codegen.ExitScope()
 	return code
+}
+
+// generateYeideStatement 生成 yeide 语句代码
+// 语法: yeide source -> target
+// 生成: /* SOR: yeide source -> target */ target = source; source = NULL;
+// 优化: 当源表达式是字面量 0 时，yeide 是纯死代码（target = 0, source = 0 → no-op），直接跳过
+func (sg *StatementGenerator) generateYeideStatement(stmt *ast.YeideStatement) string {
+	srcCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Source)
+
+	// 死代码消除：源为字面量 0 的 yeide 是无操作，跳过生成
+	if srcCode == "0" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("/* SOR: yeide ")
+	b.WriteString(srcCode)
+	b.WriteString(" -> ")
+	b.WriteString(stmt.Target)
+	b.WriteString(" */\n")
+	b.WriteString(stmt.Target)
+	b.WriteString(" = ")
+	b.WriteString(srcCode)
+	b.WriteString(";\n")
+	b.WriteString(srcCode)
+	b.WriteString(" = 0; /* SOR: ownership moved */\n")
+	return b.String()
+}
+
+// generateReleaseStatement 生成 release 语句代码
+// 语法: release source -> [holder1, holder2, ...]
+// 语义: 将 source 的只读访问权分发给各 holder
+// 策略:
+//   - holder 已预先声明: 直接赋值 (零开销, 只读语义由 SOR 分析器编译期保证)
+//   - holder 未声明: 创建 const void* 指针别名 (利用 C const 系统保证只读)
+func (sg *StatementGenerator) generateReleaseStatement(stmt *ast.ReleaseStatement) string {
+	srcCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Source)
+	var b strings.Builder
+	b.WriteString("/* SOR: release ")
+	b.WriteString(srcCode)
+	b.WriteString(" -> [")
+	b.WriteString(strings.Join(stmt.Holders, ", "))
+	b.WriteString("] */\n")
+	for _, holder := range stmt.Holders {
+		if sg.codegen.HasSymbol(holder) {
+			b.WriteString(holder)
+			b.WriteString(" = ")
+			b.WriteString(srcCode)
+			b.WriteString("; /* SOR: release read-only */\n")
+		} else {
+			b.WriteString("const void* ")
+			b.WriteString(holder)
+			b.WriteString(" = &(/* release-read-only */ ")
+			b.WriteString(srcCode)
+			b.WriteString("); /* SOR: read-only alias */\n")
+		}
+	}
+	return b.String()
+}
+
+// generateExtractStatement 生成 extract 语句代码
+// 语法: extract source[index] -> target
+// 生成: target = source[index]; source[index] = NULL; (真正留下 hollow 状态)
+func (sg *StatementGenerator) generateExtractStatement(stmt *ast.ExtractStatement) string {
+	// parsePrimaryExpressionIterative 会将 data[2] 解析为 IndexExpression
+	// 所以 Source 实际是 IndexExpression{Object: data, Index: 2}
+	var baseCode, idxCode string
+	if idxExpr, ok := stmt.Source.(*ast.IndexExpression); ok {
+		baseCode = sg.codegen.expressionGenerator.GenerateExpression(idxExpr.Object)
+		idxCode = sg.codegen.expressionGenerator.GenerateExpression(idxExpr.Index)
+	} else {
+		baseCode = sg.codegen.expressionGenerator.GenerateExpression(stmt.Source)
+		if stmt.Index != nil {
+			idxCode = sg.codegen.expressionGenerator.GenerateExpression(stmt.Index)
+		} else {
+			idxCode = "0"
+		}
+	}
+	var b strings.Builder
+	b.WriteString("/* SOR: extract ")
+	b.WriteString(baseCode)
+	b.WriteString("[")
+	b.WriteString(idxCode)
+	b.WriteString("] -> ")
+	b.WriteString(stmt.Target)
+	b.WriteString(" */\n")
+	b.WriteString(stmt.Target)
+	b.WriteString(" = ")
+	b.WriteString(baseCode)
+	b.WriteString("[")
+	b.WriteString(idxCode)
+	b.WriteString("]; /* SOR: extracted value */\n")
+	b.WriteString(baseCode)
+	b.WriteString("[")
+	b.WriteString(idxCode)
+	b.WriteString("] = 0; /* SOR: hollow — source slot now null */\n")
+	return b.String()
 }

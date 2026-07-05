@@ -2,6 +2,7 @@
 #define STD_I18N_I18N_H
 
 #include "../base/types.h"
+#include <time.h>
 
 // ==================== 语言标识 ====================
 typedef enum {

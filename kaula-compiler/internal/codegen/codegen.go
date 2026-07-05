@@ -41,7 +41,8 @@ type CodeGenerator struct {
 	statementGenerator  *StatementGenerator
 
 	usedThirdPartyLibs map[string]bool
-	
+	localImportFuncs   map[string]bool // 本地导入的 pub 函数名集合
+
 	genericCache       map[string]*GenericInstanceCache
 	genericInstantiated map[string]bool
 	currentFuncTypeParams []*ast.TypeParameter
@@ -49,6 +50,10 @@ type CodeGenerator struct {
 	currentFunctionName string
 	currentFunctionReturnType string
 	callStack           map[string]bool
+
+	sorAdapter *SORCodeGenAdapter
+
+	kmmScopeDepth int // 当前 KMM 作用域嵌套深度（用于作用域合并优化）
 }
 
 func (cg *CodeGenerator) error(message string) {
@@ -65,6 +70,33 @@ func (cg *CodeGenerator) HasErrors() bool {
 
 func (cg *CodeGenerator) SetStdlibConfig(cfg *stdlib.StdlibConfig) {
 	cg.stdlibConfig = cfg
+}
+
+// SetSORResult 设置 SOR 分析结果，供代码生成阶段使用
+func (cg *CodeGenerator) SetSORResult(result map[string]interface{}) {
+	cg.sorAdapter = NewSORCodeGenAdapter(result)
+}
+
+// GetSORAdapter 获取 SOR CodeGen 适配器
+func (cg *CodeGenerator) GetSORAdapter() *SORCodeGenAdapter {
+	return cg.sorAdapter
+}
+
+// IsInKMMScope 当前是否在 KMM 作用域内
+func (cg *CodeGenerator) IsInKMMScope() bool {
+	return cg.kmmScopeDepth > 0
+}
+
+// EnterKMMScope 进入 KMM 作用域
+func (cg *CodeGenerator) EnterKMMScope() {
+	cg.kmmScopeDepth++
+}
+
+// ExitKMMScope 退出 KMM 作用域
+func (cg *CodeGenerator) ExitKMMScope() {
+	if cg.kmmScopeDepth > 0 {
+		cg.kmmScopeDepth--
+	}
 }
 
 func (cg *CodeGenerator) GetStdlibConfig() *stdlib.StdlibConfig {
@@ -84,6 +116,11 @@ func (cg *CodeGenerator) MarkGenericInstantiated(name string) {
 
 func (cg *CodeGenerator) GetUsedModules() []string {
 	return cg.usedModules
+}
+
+// SetLocalImportFuncs 注册本地导入的 pub 函数名
+func (cg *CodeGenerator) SetLocalImportFuncs(funcs map[string]bool) {
+	cg.localImportFuncs = funcs
 }
 
 func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
@@ -128,6 +165,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		currentScope:    symbolTable,
 		errors:          []string{},
 		usedThirdPartyLibs: make(map[string]bool),
+		localImportFuncs:   make(map[string]bool),
 		genericCache:       make(map[string]*GenericInstanceCache),
 		genericInstantiated: make(map[string]bool),
 	}
@@ -143,54 +181,68 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.program = program
 	cg.usedThirdPartyLibs = make(map[string]bool)
-	
-	typeCode := ""
-	globalVars := ""
-	functionCode := ""
+
+	var typeCode strings.Builder
+	var globalVars strings.Builder
+	var functionCode strings.Builder
+	var mainCode strings.Builder
+	typeCode.Grow(4096)
+	globalVars.Grow(1024)
+	functionCode.Grow(8192)
+	mainCode.Grow(4096)
+
 	hasMain := false
-	mainCode := ""
-	
+
+	importedModules := make(map[string]bool)
+
 	for _, stmt := range program.Statements {
 		if stmt == nil {
 			continue
 		}
-		if _, ok := stmt.(*ast.ImportStatement); ok {
+		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
+			importedModules[importStmt.Module] = true
 			continue
 		}
-		
+		if _, ok := stmt.(*ast.PackageStatement); ok {
+			continue
+		}
+		if _, ok := stmt.(*ast.ExportStatement); ok {
+			continue
+		}
+
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
 			if fnStmt.Name == "main" {
 				hasMain = true
-				functionCode += cg.generateStatement(stmt) + "\n"
-			} else {
-				functionCode += cg.generateStatement(stmt) + "\n"
 			}
+			functionCode.WriteString(cg.generateStatement(stmt))
+			functionCode.WriteByte('\n')
 		} else if _, ok := stmt.(*ast.ClassStatement); ok {
-			typeCode += cg.generateStatement(stmt) + "\n"
+			typeCode.WriteString(cg.generateStatement(stmt))
+			typeCode.WriteByte('\n')
 		} else if _, ok := stmt.(*ast.InterfaceStatement); ok {
-			typeCode += cg.generateStatement(stmt) + "\n"
+			typeCode.WriteString(cg.generateStatement(stmt))
+			typeCode.WriteByte('\n')
 		} else if _, ok := stmt.(*ast.StructStatement); ok {
-			typeCode += cg.generateStatement(stmt) + "\n"
+			typeCode.WriteString(cg.generateStatement(stmt))
+			typeCode.WriteByte('\n')
 		} else if _, ok := stmt.(*ast.TypeAliasStatement); ok {
-			typeCode += cg.generateStatement(stmt) + "\n"
+			typeCode.WriteString(cg.generateStatement(stmt))
+			typeCode.WriteByte('\n')
 		} else if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
 			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
 			initValue := cg.generateExpression(varDecl.Value)
 			if varDecl.IsAuto {
 				cType = "auto"
 			}
-			globalVars += cType + " " + varDecl.Name + " = " + initValue + ";\n"
+			globalVars.WriteString(cType)
+			globalVars.WriteByte(' ')
+			globalVars.WriteString(varDecl.Name)
+			globalVars.WriteString(" = ")
+			globalVars.WriteString(initValue)
+			globalVars.WriteString(";\n")
 		} else {
-			mainCode += cg.indentString() + cg.generateStatement(stmt)
-		}
-	}
-	
-	baseIncludes := "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n"
-	
-	importedModules := make(map[string]bool)
-	for _, stmt := range program.Statements {
-		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
-			importedModules[importStmt.Module] = true
+			mainCode.WriteString(cg.indentString())
+			mainCode.WriteString(cg.generateStatement(stmt))
 		}
 	}
 
@@ -199,60 +251,116 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		cg.usedModules = append(cg.usedModules, moduleName)
 	}
 
-	thirdPartyIncludes := ""
+	var allIncludes strings.Builder
+	allIncludes.Grow(2048)
+	allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
+
 	if cg.stdlibConfig != nil {
 		for moduleName := range importedModules {
 			module, ok := cg.stdlibConfig.Modules[moduleName]
 			if ok {
 				if module.Header != "" {
 					header := module.Header
-					// 去掉 std/ 前缀，因为 std 目录已经在 include 路径中
 					if len(header) >= 4 && header[0] == 's' && header[1] == 't' && header[2] == 'd' && header[3] == '/' {
 						header = header[4:]
 					}
-					thirdPartyIncludes += "#include \"" + header + "\"\n"
+					allIncludes.WriteString("#include \"")
+					allIncludes.WriteString(header)
+					allIncludes.WriteString("\"\n")
 				}
 			} else {
-				found := false
 				for _, lib := range cg.stdlibConfig.ThirdParty {
 					if lib.Name == moduleName {
-						found = true
+						if lib.Type == "single_header" && lib.ImplementMacro != "" {
+							allIncludes.WriteString("#define ")
+							allIncludes.WriteString(lib.ImplementMacro)
+							allIncludes.WriteByte('\n')
+						}
 						for _, header := range lib.Headers {
-							thirdPartyIncludes += "#include " + header + "\n"
+							allIncludes.WriteString("#include ")
+							allIncludes.WriteString(header)
+							allIncludes.WriteByte('\n')
 						}
 						break
 					}
 				}
-				if !found {
-				}
 			}
 		}
 	}
-	
-	allIncludes := baseIncludes + thirdPartyIncludes
-	
+
+	var forwardDecls strings.Builder
+	forwardDecls.Grow(1024)
+	for _, stmt := range program.Statements {
+		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsPublic && fnStmt.Name != "main" {
+			returnType := cg.typeGenerator.convertType(fnStmt.ReturnType, false)
+			if returnType == "" {
+				returnType = "void"
+			}
+			forwardDecls.WriteString(returnType)
+			forwardDecls.WriteByte(' ')
+			forwardDecls.WriteString(fnStmt.Name)
+			forwardDecls.WriteByte('(')
+			for i, pType := range fnStmt.ParamTypes {
+				if i > 0 {
+					forwardDecls.WriteString(", ")
+				}
+				cType := cg.typeGenerator.convertType(pType, false)
+				if cType == "" {
+					cType = "void*"
+				}
+				forwardDecls.WriteString(cType)
+				forwardDecls.WriteByte(' ')
+				forwardDecls.WriteString(fnStmt.Params[i])
+			}
+			forwardDecls.WriteString(");\n")
+		}
+	}
+
 	cacheDir := "cache"
 	if err := os.MkdirAll(cacheDir, 0755); err == nil {
-		os.WriteFile(filepath.Join(cacheDir, "all_includes.txt"), []byte(allIncludes), 0644)
+		os.WriteFile(filepath.Join(cacheDir, "all_includes.txt"), []byte(allIncludes.String()), 0644)
 	}
-	
+
 	if !hasMain {
 		template, ok := cg.templateManager.GetTemplate("main")
 		if !ok {
-			template = "{{includes}}\n\n{{type_code}}\n{{function_code}}\n\nint main() {\n    {{main_code}}\n    return 0;\n}\n"
+			var result strings.Builder
+			result.Grow(allIncludes.Len() + forwardDecls.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
+			result.WriteString(allIncludes.String())
+			result.WriteString("\n\n")
+			result.WriteString(forwardDecls.String())
+			result.WriteByte('\n')
+			result.WriteString(typeCode.String())
+			result.WriteByte('\n')
+			result.WriteString(functionCode.String())
+			result.WriteString("\n\nint main() {\n    ")
+			result.WriteString(mainCode.String())
+			result.WriteString("\n    return 0;\n}\n")
+			return result.String()
 		}
-		
+
 		result := template
-		result = strings.ReplaceAll(result, "{{includes}}", allIncludes)
-		result = strings.ReplaceAll(result, "{{global_vars}}", globalVars)
-		result = strings.ReplaceAll(result, "{{type_code}}", typeCode)
-		result = strings.ReplaceAll(result, "{{function_code}}", functionCode)
-		result = strings.ReplaceAll(result, "{{main_code}}", mainCode)
+		result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
+		result = strings.ReplaceAll(result, "{{forward_decls}}", forwardDecls.String())
+		result = strings.ReplaceAll(result, "{{global_vars}}", globalVars.String())
+		result = strings.ReplaceAll(result, "{{type_code}}", typeCode.String())
+		result = strings.ReplaceAll(result, "{{function_code}}", functionCode.String())
+		result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
 		result = strings.ReplaceAll(result, "{{code}}", "")
-		
+
 		return result
 	} else {
-		return allIncludes + "\n" + globalVars + "\n" + typeCode + functionCode
+		var result strings.Builder
+		result.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + 16)
+		result.WriteString(allIncludes.String())
+		result.WriteString("\n")
+		result.WriteString(forwardDecls.String())
+		result.WriteString("\n")
+		result.WriteString(globalVars.String())
+		result.WriteString("\n")
+		result.WriteString(typeCode.String())
+		result.WriteString(functionCode.String())
+		return result.String()
 	}
 }
 
@@ -295,9 +403,14 @@ func (cg *CodeGenerator) RegisterPlugin(plugin Plugin) {
 }
 
 // EnterScope 进入一个新的作用域
+// 如果 SOR 适配器启用，同时注册作用域 ID 映射
 func (cg *CodeGenerator) EnterScope(scopeName string) {
 	newScope := symbol.NewSymbolTable(cg.currentScope, scopeName)
 	cg.currentScope = newScope
+	// 注册 SOR 作用域 ID 映射
+	if cg.sorAdapter != nil && cg.sorAdapter.IsActive {
+		cg.sorAdapter.RegisterScope(scopeName)
+	}
 }
 
 // ExitScope 退出当前作用域

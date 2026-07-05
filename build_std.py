@@ -37,8 +37,13 @@ class BuildConfig:
             "-Wall",
             "-Wextra",
             "-Wno-unused-parameter",
-            "-fPIC",
         ]
+        # -fPIC 仅在非 Windows 平台需要
+        if not sys.platform.startswith("win"):
+            self.common_flags.append("-fPIC")
+        else:
+            # Windows: 抑制 CRT 安全函数弃用警告
+            self.common_flags.append("-D_CRT_SECURE_NO_WARNINGS")
 
         # 跳过不需要编译的文件
         self.skip_files = set()
@@ -49,6 +54,7 @@ class CompilerDetector:
     @staticmethod
     def detect():
         """检测可用的C编译器"""
+        # 优先检测 GCC/Clang（对 GCC 扩展兼容性更好）
         for compiler in ["gcc", "clang", "cc"]:
             try:
                 result = subprocess.run(
@@ -64,7 +70,23 @@ class CompilerDetector:
             except (subprocess.TimeoutExpired, FileNotFoundError):
                 continue
 
-        print("[-] 错误: 未找到可用的C编译器 (gcc/clang/cc)")
+        # 回退到 MSVC (cl.exe)
+        try:
+            result = subprocess.run(
+                ["cl", "/nologo"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            # cl 不带参数返回非零，但 stderr 包含错误信息表示存在
+            output = (result.stderr if result.stderr else result.stdout).strip()
+            if "error D8003" in output or "Compiler Version" in output or "Optimizing Compiler" in output:
+                print(f"[+] 检测到编译器: MSVC cl.exe")
+                return "cl"
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+        print("[-] 错误: 未找到可用的C编译器 (gcc/clang/cc/msvc)")
         sys.exit(1)
 
 
@@ -74,6 +96,22 @@ class ArchiverDetector:
     def detect(compiler):
         """检测可用的归档工具"""
         is_clang = "clang" in compiler.lower()
+        is_msvc = compiler == "cl"
+
+        if is_msvc:
+            # MSVC 使用 lib.exe
+            try:
+                result = subprocess.run(
+                    ["lib", "/nologo", "/list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                # lib.exe 没有输入文件会报错，但说明存在
+                print("[+] 使用归档工具: lib.exe (MSVC)")
+                return "lib"
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
 
         # 尝试顺序
         candidates = ["llvm-ar", "gcc-ar", "ar"]
@@ -108,11 +146,30 @@ class BuildSystem:
         self.is_windows = sys.platform.startswith("win")
         self.is_macos = sys.platform == "darwin"
         self.is_linux = sys.platform.startswith("linux")
+        self.is_msvc = (self.compiler == "cl")
 
         self.release = release
-        self.flags = self.config.common_flags + (
-            self.config.release_flags if release else self.config.debug_flags
-        )
+        if self.is_msvc:
+            # MSVC 编译标志
+            self.common_flags = [
+                "/nologo",
+                "/std:c11",
+                "/W3",
+                "/utf-8",
+                "/D_CRT_SECURE_NO_WARNINGS",
+            ]
+            self.debug_flags = ["/Od", "/Zi", "/DKMM_V4_DEBUG"]
+            self.release_flags = ["/O2", "/DNDEBUG"]
+            self.flags = self.common_flags + (
+                self.release_flags if release else self.debug_flags
+            )
+            self.obj_ext = ".obj"
+        else:
+            self.flags = self.config.common_flags + (
+                self.config.release_flags if release else self.config.debug_flags
+            )
+            self.obj_ext = ".o"
+
         self.obj_files = []
 
     def find_source_files(self):
@@ -131,12 +188,18 @@ class BuildSystem:
 
     def compile_file(self, src_file):
         """编译单个源文件"""
-        obj_file = self.config.build_dir / (src_file.stem + ".o")
+        obj_file = self.config.build_dir / (src_file.stem + self.obj_ext)
 
-        cmd = [self.compiler] + self.flags
-        for inc_dir in self.config.include_dirs:
-            cmd.extend(["-I", inc_dir])
-        cmd.extend(["-c", str(src_file), "-o", str(obj_file)])
+        if self.is_msvc:
+            cmd = [self.compiler] + self.flags
+            for inc_dir in self.config.include_dirs:
+                cmd.extend(["/I", inc_dir])
+            cmd.extend(["/c", str(src_file), f"/Fo{obj_file}"])
+        else:
+            cmd = [self.compiler] + self.flags
+            for inc_dir in self.config.include_dirs:
+                cmd.extend(["-I", inc_dir])
+            cmd.extend(["-c", str(src_file), "-o", str(obj_file)])
 
         try:
             result = subprocess.run(
@@ -147,10 +210,11 @@ class BuildSystem:
             )
             if result.returncode != 0:
                 print(f"  [-] 编译失败: {src_file.name}")
-                if result.stderr:
-                    # 只显示前几行错误
-                    stderr_lines = result.stderr.strip().split('\n')[:5]
-                    for line in stderr_lines:
+                # 显示前几行错误
+                error_output = result.stderr if result.stderr else result.stdout
+                if error_output:
+                    error_lines = error_output.strip().split('\n')[:5]
+                    for line in error_lines:
                         print(f"      {line}")
                 return False
             self.obj_files.append(obj_file)
@@ -166,16 +230,27 @@ class BuildSystem:
             print("[-] 错误: 没有成功编译的目标文件")
             return False
 
-        print(f"\n[*] 创建静态库: {self.config.output_lib}")
+        # 根据编译器类型确定输出库文件
+        if self.is_msvc:
+            output_lib = self.config.project_root / "std" / "kaula_std.lib"
+        else:
+            output_lib = self.config.output_lib
+
+        print(f"\n[*] 创建静态库: {output_lib}")
 
         # 删除旧库
-        if self.config.output_lib.exists():
-            self.config.output_lib.unlink()
+        if output_lib.exists():
+            output_lib.unlink()
 
         # 创建静态库
-        cmd = [self.archiver, "rcs", str(self.config.output_lib)] + [
-            str(f) for f in self.obj_files
-        ]
+        if self.is_msvc:
+            cmd = [self.archiver, "/nologo", f"/OUT:{output_lib}"] + [
+                str(f) for f in self.obj_files
+            ]
+        else:
+            cmd = [self.archiver, "rcs", str(output_lib)] + [
+                str(f) for f in self.obj_files
+            ]
 
         try:
             result = subprocess.run(
@@ -185,10 +260,11 @@ class BuildSystem:
                 timeout=30
             )
             if result.returncode != 0:
-                print(f"[-] 创建静态库失败: {result.stderr}")
+                error_output = result.stderr if result.stderr else result.stdout
+                print(f"[-] 创建静态库失败: {error_output}")
                 return False
 
-            lib_size = self.config.output_lib.stat().st_size
+            lib_size = output_lib.stat().st_size
             print(f"[✓] 静态库创建成功! 大小: {lib_size / 1024:.1f} KB")
             return True
         except subprocess.TimeoutExpired:
@@ -204,6 +280,12 @@ class BuildSystem:
         if self.config.output_lib.exists():
             self.config.output_lib.unlink()
             print(f"[+] 已清理: {self.config.output_lib}")
+
+        # 清理 MSVC 生成的 .lib
+        msvc_lib = self.config.project_root / "std" / "kaula_std.lib"
+        if msvc_lib.exists():
+            msvc_lib.unlink()
+            print(f"[+] 已清理: {msvc_lib}")
 
     def build(self):
         """执行完整构建"""

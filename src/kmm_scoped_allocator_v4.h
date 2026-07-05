@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 
 // 原子操作支持（轻量实时线程安全）
 #if KMM_THREAD_SAFETY_LEVEL >= 1
@@ -22,7 +23,7 @@
 // 使用 C11 标准原子操作
 #define KMM_USE_ATOMICS 1
 #include <stdatomic.h>
-#define KMM_ATOMIC_TYPE size_t
+#define KMM_ATOMIC_TYPE _Atomic size_t
 #define KMM_ATOMIC_LOAD(var) atomic_load(&(var))
 #define KMM_ATOMIC_STORE(var, val) atomic_store(&(var), (val))
 #define KMM_ATOMIC_CAS(var, expected, desired) \
@@ -56,6 +57,9 @@
 #define KMM_ENABLE_THREAD_CACHE (KMM_THREAD_SAFETY_LEVEL >= 1)
 #define KMM_ENABLE_CLEANUP_STACK 1
 #define KMM_ENABLE_UNION_DOMAIN 1
+#ifndef KMM_ENABLE_SAFE_ALLOC
+#define KMM_ENABLE_SAFE_ALLOC 1
+#endif
 
 // ==================== 前向类型声明 ====================
 typedef struct kmm_arena kmm_arena_t;
@@ -96,6 +100,11 @@ typedef enum {
 #define KMM_MAX_DEPENDENCIES 32
 #endif
 
+// 作用域栈最大深度（支持嵌套作用域）
+#ifndef KMM_V4_MAX_SCOPE_DEPTH
+#define KMM_V4_MAX_SCOPE_DEPTH 64
+#endif
+
 // ==================== 结构体定义 ====================
 // Arena 结构（用于分级内存管理）
 struct kmm_arena {
@@ -108,6 +117,13 @@ struct kmm_arena {
     size_t offset;
     bool is_initialized;
 } __attribute__((aligned(KMM_CACHE_LINE_SIZE)));
+
+// 作用域栈结构（支持嵌套作用域，每层独立保存/恢复 offset）
+// 解决嵌套作用域退出时回滚外层分配的问题
+typedef struct {
+    size_t offsets[KMM_V4_MAX_SCOPE_DEPTH];
+    size_t depth;
+} kmm_scope_stack_t;
 
 // 清理节点
 struct kmm_cleanup_node {
@@ -159,11 +175,7 @@ struct kmm_union_domain {
 
 #ifdef _WIN32
     #define KMM_V4_WINDOWS 1
-    #if defined(__clang__) || defined(__GNUC__)
-        #define KMM_TLS __thread
-    #else
-        #define KMM_TLS __declspec(thread)
-    #endif
+    #define KMM_TLS __declspec(thread)
 #else
     #define KMM_V4_WINDOWS 0
     #define KMM_TLS __thread
@@ -227,14 +239,19 @@ struct kmm_union_domain {
     _Static_assert(((uintptr_t)(ptr) % (align)) == 0, "Alignment check failed")
 
 // ==================== 智能内存池（自动化管理） ====================
-// 内存池声明（实际定义在 .c 文件中）
-extern uint8_t g_kmm_v4_pool[];
+// 内存池声明（实际定义在 .c 文件中，由 VirtualAlloc 分配）
+extern uint8_t* g_kmm_v4_pool;
+extern size_t g_kmm_v4_pool_capacity;
+extern void kmm_v4_pool_commit(size_t needed);
 
 #if KMM_THREAD_SAFETY_LEVEL >= 1
 extern KMM_ATOMIC_TYPE g_kmm_v4_offset;
 #else
 extern size_t g_kmm_v4_offset;
 #endif
+
+// 作用域栈（线程本地，支持嵌套作用域）
+extern KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack;
 
 #ifdef KMM_V4_DEBUG
 extern size_t g_kmm_v4_peak;
@@ -259,12 +276,11 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
     size_t aligned_size = (size + mask) & ~mask;
     
 #if KMM_THREAD_SAFETY_LEVEL >= 1
-    // 无锁CAS实现（轻量实时，保证实时性）
     size_t offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
     size_t new_offset;
     do {
         new_offset = offset + aligned_size;
-        if (KMM_V4_UNLIKELY(new_offset > KMM_V4_POOL_SIZE)) {
+        if (KMM_V4_UNLIKELY(new_offset > g_kmm_v4_pool_capacity)) {
             #if KMM_V4_ENABLE_FALLBACK
                 return malloc(size);
             #else
@@ -273,9 +289,11 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
         }
     } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS(g_kmm_v4_offset, offset, new_offset)));
     
+    // 按需提交页面
+    kmm_v4_pool_commit(new_offset);
+    
     #ifdef KMM_V4_DEBUG
     KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
-    // 更新峰值（非严格原子，允许轻微误差）
     size_t peak = KMM_ATOMIC_LOAD(g_kmm_v4_peak);
     while (new_offset > peak) {
         if (KMM_ATOMIC_CAS(g_kmm_v4_peak, peak, new_offset)) break;
@@ -286,12 +304,14 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
     KMM_V4_PREFETCH(g_kmm_v4_pool + new_offset);
     return g_kmm_v4_pool + offset;
 #else
-    // 单线程快速路径（零开销）
     size_t offset = g_kmm_v4_offset;
     size_t new_offset = offset + aligned_size;
     
-    if (KMM_V4_LIKELY(new_offset <= KMM_V4_POOL_SIZE)) {
+    if (KMM_V4_LIKELY(new_offset <= g_kmm_v4_pool_capacity)) {
         g_kmm_v4_offset = new_offset;
+        
+        // 按需提交页面
+        kmm_v4_pool_commit(new_offset);
         
         #ifdef KMM_V4_DEBUG
         if (new_offset > g_kmm_v4_peak) g_kmm_v4_peak = new_offset;
@@ -302,7 +322,6 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
         return g_kmm_v4_pool + offset;
     }
     
-    // 慢速路径：自动回退
     #if KMM_V4_ENABLE_FALLBACK
         return malloc(size);
     #else
@@ -382,14 +401,53 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
     }
 #endif
 
-// 作用域自动清理（更简洁的语法）
-#define KMM_V4_SCOPE_START \
-    for (size_t kmm_v4_scope_offset __attribute__((unused)) = g_kmm_v4_offset, \
-         kmm_v4_scope_used = 0; \
-         kmm_v4_scope_used == 0; \
-         kmm_v4_scope_used = 1, g_kmm_v4_offset = kmm_v4_scope_offset)
+// 作用域栈操作函数（嵌套作用域支持）
+// kmm_v4_scope_push: 进入作用域，保存当前 offset 到作用域栈
+// kmm_v4_scope_pop: 退出作用域，恢复到本层开始时的 offset（只回收本层分配）
+// 注意：定义必须放在头文件中，因为 static inline 函数具有内部链接，
+// 跨编译单元不可见。将定义放在 .c 文件中会导致链接错误。
+static inline void kmm_v4_scope_push(void) {
+    kmm_scope_stack_t* stack = &g_kmm_v4_scope_stack;
+    if (KMM_V4_UNLIKELY(stack->depth >= KMM_V4_MAX_SCOPE_DEPTH)) {
+        #ifdef KMM_V4_DEBUG
+        fprintf(stderr, "KMM ERROR: Scope stack overflow (max depth: %zu)\n", KMM_V4_MAX_SCOPE_DEPTH);
+        #endif
+        return;
+    }
+    #if KMM_THREAD_SAFETY_LEVEL >= 1
+    stack->offsets[stack->depth++] = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+    #else
+    stack->offsets[stack->depth++] = g_kmm_v4_offset;
+    #endif
+}
 
-#define KMM_V4_SCOPE_END
+static inline void kmm_v4_scope_pop(void) {
+    kmm_scope_stack_t* stack = &g_kmm_v4_scope_stack;
+    if (KMM_V4_UNLIKELY(stack->depth == 0)) {
+        #ifdef KMM_V4_DEBUG
+        fprintf(stderr, "KMM ERROR: Scope stack underflow\n");
+        #endif
+        return;
+    }
+    stack->depth--;
+    size_t saved_offset = stack->offsets[stack->depth];
+    #if KMM_THREAD_SAFETY_LEVEL >= 1
+    KMM_ATOMIC_STORE(g_kmm_v4_offset, saved_offset);
+    #else
+    g_kmm_v4_offset = saved_offset;
+    #endif
+}
+
+// 作用域自动清理（支持嵌套，每层独立管理）
+// 使用 do-while 结构确保在进入块前执行 push，退出块时执行 pop
+// 解决嵌套作用域退出时回滚外层分配的问题
+#define KMM_V4_SCOPE_START \
+    kmm_v4_scope_push(); \
+    do
+
+#define KMM_V4_SCOPE_END \
+    while (0); \
+    kmm_v4_scope_pop()
 
 // ==================== 智能统计（零成本，编译期优化） ====================
 #ifdef KMM_V4_STATS
@@ -416,10 +474,7 @@ static kmm_v4_stats_t g_kmm_v4_stats = {0};
 
 // ==================== 自动化 API ====================
 
-// 缓存行大小（用于对齐）
-#ifndef KMM_CACHE_LINE_SIZE
-#define KMM_CACHE_LINE_SIZE 64
-#endif
+// KMM_CACHE_LINE_SIZE 已在常量定义区定义，此处不再重复
 
 // 完整的 KMM 上下文结构
 typedef struct kmm_context {
@@ -447,16 +502,8 @@ typedef struct kmm_context {
 // 全局上下文实例
 extern kmm_context_t g_kmm_ctx;
 
-static inline void* kmm_v4_malloc(size_t size) {
-    void* ptr = kmm_v4_alloc_auto(size);
-    KMM_V4_RECORD_ALLOC(size);
-    return ptr;
-}
-
-static inline void kmm_v4_free(void* ptr) {
-    // 池内对象不释放，自动管理
-    (void)ptr;
-}
+// ==================== 编译期检查 ====================
+// kmm_v4_malloc / kmm_v4_free / kmm_v4_calloc 由 .c 文件提供（非 static，支持跨 TU 链接）
 
 static inline void kmm_v4_reset(void) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
@@ -488,7 +535,7 @@ static inline size_t kmm_v4_available(void) {
 #endif
 }
 
-#define KMM_V4_ALLOC_ARRAY(type, count) ((type*)kmm_v4_alloc_auto(sizeof(type) * (count)))
+// KMM_V4_ALLOC_ARRAY 已在智能宏系统区定义，此处不再重复
 
 // ==================== 编译期检查 ====================
 _Static_assert(KMM_V4_POOL_SIZE > 0, "Pool size must be positive");

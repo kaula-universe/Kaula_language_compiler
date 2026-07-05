@@ -1,7 +1,5 @@
 package symbol
 
-import "sync"
-
 // Symbol 表示符号表中的一个符号
 type Symbol struct {
 	Name        string
@@ -24,12 +22,11 @@ type GenericInstanceInfo struct {
 // SymbolTable 表示符号表
 type SymbolTable struct {
 	symbols       map[string]*Symbol
-	genericTypes  map[string][]string // 泛型类型参数映射
+	genericTypes  map[string][]string
 	parent        *SymbolTable
 	scopeName     string
 	scopeDepth    int
-	mu            sync.RWMutex
-	typeCache     map[string]*Symbol // 类型缓存
+	typeCache     map[string]*Symbol
 }
 
 // NewSymbolTable 创建一个新的符号表
@@ -50,10 +47,6 @@ func NewSymbolTable(parent *SymbolTable, scopeName string) *SymbolTable {
 
 // AddSymbol 添加一个符号
 func (st *SymbolTable) AddSymbol(name, symbolType string, nullable bool, scope string, line, column int) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	
-	// 清除缓存
 	delete(st.typeCache, name)
 	
 	st.symbols[name] = &Symbol{
@@ -68,9 +61,6 @@ func (st *SymbolTable) AddSymbol(name, symbolType string, nullable bool, scope s
 
 // AddGenericSymbol 添加泛型符号
 func (st *SymbolTable) AddGenericSymbol(name, symbolType string, typeParams []string, nullable bool, scope string, line, column int) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	
 	st.genericTypes[name] = typeParams
 	delete(st.typeCache, name)
 	
@@ -91,15 +81,12 @@ func (st *SymbolTable) AddGenericSymbol(name, symbolType string, typeParams []st
 
 // InstantiateGeneric 实例化泛型类型
 func (st *SymbolTable) InstantiateGeneric(name string, typeArgs []string) (*Symbol, error) {
-	st.mu.RLock()
 	symbol, exists := st.symbols[name]
-	st.mu.RUnlock()
 	
 	if !exists || !symbol.IsGeneric {
 		return nil, nil
 	}
 	
-	// 生成实例化后的名称
 	instName := name + "<"
 	for i, arg := range typeArgs {
 		if i > 0 {
@@ -109,15 +96,10 @@ func (st *SymbolTable) InstantiateGeneric(name string, typeArgs []string) (*Symb
 	}
 	instName += ">"
 	
-	// 检查缓存
-	st.mu.RLock()
 	if cached, ok := st.typeCache[instName]; ok {
-		st.mu.RUnlock()
 		return cached, nil
 	}
-	st.mu.RUnlock()
 	
-	// 创建实例化符号
 	instSymbol := &Symbol{
 		Name:      instName,
 		Type:      symbol.Type,
@@ -132,19 +114,13 @@ func (st *SymbolTable) InstantiateGeneric(name string, typeArgs []string) (*Symb
 		},
 	}
 	
-	// 添加到缓存
-	st.mu.Lock()
 	st.typeCache[instName] = instSymbol
-	st.mu.Unlock()
 	
 	return instSymbol, nil
 }
 
-// GetSymbol 获取一个符号（线程安全）
+// GetSymbol 获取一个符号
 func (st *SymbolTable) GetSymbol(name string) *Symbol {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	
 	if symbol, exists := st.symbols[name]; exists {
 		return symbol
 	}
@@ -154,44 +130,33 @@ func (st *SymbolTable) GetSymbol(name string) *Symbol {
 	return nil
 }
 
-// GetLocalSymbol 获取当前作用域中的符号（线程安全）
+// GetLocalSymbol 获取当前作用域中的符号
 func (st *SymbolTable) GetLocalSymbol(name string) *Symbol {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	
 	if symbol, exists := st.symbols[name]; exists {
 		return symbol
 	}
 	return nil
 }
 
-// HasSymbol 检查是否存在符号（线程安全）
+// HasSymbol 检查是否存在符号
 func (st *SymbolTable) HasSymbol(name string) bool {
 	return st.GetSymbol(name) != nil
 }
 
-// HasLocalSymbol 检查当前作用域是否存在符号（线程安全）
+// HasLocalSymbol 检查当前作用域是否存在符号
 func (st *SymbolTable) HasLocalSymbol(name string) bool {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
 	_, exists := st.symbols[name]
 	return exists
 }
 
 // IsGenericType 检查是否是泛型类型
 func (st *SymbolTable) IsGenericType(name string) bool {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	
 	symbol, exists := st.symbols[name]
 	return exists && symbol.IsGeneric
 }
 
 // GetTypeParams 获取类型参数
 func (st *SymbolTable) GetTypeParams(name string) []string {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	
 	return st.genericTypes[name]
 }
 

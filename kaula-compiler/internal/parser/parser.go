@@ -8,6 +8,7 @@ import (
 	"kaula-compiler/internal/stdlib"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -49,6 +50,7 @@ type Parser struct {
 	loggingEnabled bool
 	file string
 	taskStack []ParseTask
+	skipMainCheck bool // 跳过 main 函数检查（用于导入的库文件）
 }
 
 // NewParser 创建一个新的语法分析器
@@ -68,6 +70,11 @@ func NewParser(lexer *lexer.Lexer) *Parser {
 // EnableLogging 启用日志记录
 func (p *Parser) EnableLogging(enabled bool) {
 	p.loggingEnabled = enabled
+}
+
+// SetSkipMainCheck 设置是否跳过 main 函数检查（用于导入的库文件）
+func (p *Parser) SetSkipMainCheck(skip bool) {
+	p.skipMainCheck = skip
 }
 
 // log 记录日志
@@ -166,6 +173,12 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 		return p.parseTypeStatementIterative()
 	case lexer.TOKEN_AUTO:
 		return p.parseAutoDeclarationIterative()
+	case lexer.TOKEN_YEIDE:
+		return p.parseYeideStatementIterative()
+	case lexer.TOKEN_RELEASE:
+		return p.parseReleaseStatementIterative()
+	case lexer.TOKEN_EXTRACT:
+		return p.parseExtractStatementIterative()
 	case lexer.TOKEN_IF:
 		return p.parseIfStatementIterative()
 	case lexer.TOKEN_WHILE:
@@ -184,6 +197,10 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 		return p.parseImportStatementIterative()
 	case lexer.TOKEN_EXPORT:
 		return p.parseExportStatementIterative()
+	case lexer.TOKEN_PACKAGE:
+		return p.parsePackageStatementIterative()
+	case lexer.TOKEN_PUB:
+		return p.parsePubStatementIterative()
 	case lexer.TOKEN_NONLOCAL:
 		return p.parseNonLocalStatementIterative()
 	case lexer.TOKEN_PRINTLN:
@@ -865,6 +882,8 @@ func (p *Parser) parseFunctionAnnotations(stmt *ast.FunctionStatement) *ast.Func
 				stmt.NoKMM = true
 			case "inline":
 				stmt.Inline = true
+			case "sor":
+				stmt.SOREnabled = true
 			case "prefix":
 				stmt.Annotation = ast.TreeAnnotationPrefix
 			case "tree":
@@ -1024,7 +1043,13 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		}
 	}
 	// 解析返回类型（如果存在）
-	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT {
+	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT || p.curTok.Type == lexer.TOKEN_MULTIPLY {
+		isPointer := false
+		// 处理指针前缀 (*Type)
+		if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			isPointer = true
+			p.nextToken()
+		}
 		if p.isTypeToken(p.curTok.Type) {
 			stmt.ReturnType = strings.ToLower(lexer.TokenTypeToString(p.curTok.Type))
 			stmt.ReturnType = strings.TrimPrefix(stmt.ReturnType, "type_")
@@ -1032,6 +1057,14 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 			stmt.ReturnType = p.curTok.Value
 		}
 		p.nextToken()
+		// 处理指针后缀 (Type*)
+		if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			isPointer = true
+			p.nextToken()
+		}
+		if isPointer {
+			stmt.ReturnType = stmt.ReturnType + "*"
+		}
 	}
 	if p.curTok.Type == lexer.TOKEN_COLON {
 		p.error("unexpected ':' - Kaula uses braces {} for function bodies, not colons")
@@ -1380,6 +1413,69 @@ func (p *Parser) parseImportStatementIterative() *ast.ImportStatement {
 		}
 	}
 	return stmt
+}
+
+// parsePackageStatementIterative 解析 package 声明
+func (p *Parser) parsePackageStatementIterative() *ast.PackageStatement {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	stmt := &ast.PackageStatement{Pos: pos}
+	p.nextToken() // 消耗 'package'
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		stmt.Name = p.curTok.Value
+		p.nextToken()
+		for p.curTok.Type == lexer.TOKEN_DOT {
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_IDENT {
+				stmt.Name += "." + p.curTok.Value
+				p.nextToken()
+			} else {
+				break
+			}
+		}
+	}
+	return stmt
+}
+
+// parsePubStatementIterative 解析 pub 修饰符 + 声明
+// pub fn name() { ... }       → FunctionStatement{IsPublic: true}
+// pub struct Name { ... }     → StructStatement (标记 public)
+// pub var name = value        → VariableDeclaration (标记 public)
+func (p *Parser) parsePubStatementIterative() ast.Statement {
+	p.nextToken() // 消耗 'pub'
+
+	switch p.curTok.Type {
+	case lexer.TOKEN_FUNC:
+		fn := p.parseFunctionStatementIterative()
+		if fn != nil {
+			fn.IsPublic = true
+		}
+		return fn
+	case lexer.TOKEN_STRUCT:
+		stmt := p.parseStructStatementIterative()
+		// StructStatement 没有直接的 IsPublic 字段，但我们可以标记
+		// 对于跨文件，struct 定义本身已经可见，pub 只是语义标记
+		return stmt
+	case lexer.TOKEN_CLASS:
+		stmt := p.parseClassStatementIterative()
+		return stmt
+	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+		lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+		lexer.TOKEN_TYPE_VOID, lexer.TOKEN_IDENT, lexer.TOKEN_AUTO:
+		stmt := p.parseVariableDeclarationIterative()
+		if stmt != nil {
+			stmt.IsPublic = true
+		}
+		return stmt
+	default:
+		// pub 后面不是已知声明类型，报错
+		p.log("pub 后面必须是 fn/struct/class/变量声明，得到: %s", lexer.TokenTypeToString(p.curTok.Type))
+		p.nextToken()
+		return nil
+	}
 }
 
 // parseExportStatementIterative 迭代解析 export 语句
@@ -1939,7 +2035,20 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 	typeName := p.curTok.Value
 	p.nextToken()
 	
-	// 检查是否是逗号或分号
+	// 检查是否是逗号、分号或指针后缀
+	if p.curTok.Type != lexer.TOKEN_COMMA && p.curTok.Type != lexer.TOKEN_SEMICOLON && p.curTok.Type != lexer.TOKEN_MULTIPLY {
+		p.curTok = savedCurTok
+		p.peekTok = savedPeekTok
+		return nil
+	}
+	
+	// 处理指针后缀（如 ListNode* → "ListNode*"）
+	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+		typeName = typeName + "*"
+		p.nextToken()
+	}
+	
+	// 检查是否是逗号或分号（指针后缀之后）
 	if p.curTok.Type != lexer.TOKEN_COMMA && p.curTok.Type != lexer.TOKEN_SEMICOLON {
 		p.curTok = savedCurTok
 		p.peekTok = savedPeekTok
@@ -1985,15 +2094,29 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 		isTypeKeyword = true
 	}
 	
-	if p.curTok.Type != lexer.TOKEN_IDENT && !isTypeKeyword {
+	if p.curTok.Type != lexer.TOKEN_IDENT && !isTypeKeyword && p.curTok.Type != lexer.TOKEN_MULTIPLY {
 		p.log("不是方法声明，返回 nil")
 		p.curTok = savedCurTok
 		p.peekTok = savedPeekTok
 		return nil
 	}
+	// 处理指针前缀 (*Type)
+	isPointer := false
+	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+		isPointer = true
+		p.nextToken()
+	}
 	method.ReturnType = p.curTok.Value
 	p.log("解析返回类型：%s", p.curTok.Value)
 	p.nextToken()
+	// 处理指针后缀 (Type*)
+	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+		isPointer = true
+		p.nextToken()
+	}
+	if isPointer {
+		method.ReturnType = method.ReturnType + "*"
+	}
 	p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 	if p.curTok.Type == lexer.TOKEN_QUESTION {
 		p.log("跳过 QUESTION token")
@@ -2322,6 +2445,9 @@ var precedences = map[lexer.TokenType]int{
 	lexer.TOKEN_GT:     5,
 	lexer.TOKEN_LE:     5,
 	lexer.TOKEN_GE:     5,
+	lexer.TOKEN_LSHIFT: 5,
+	lexer.TOKEN_RSHIFT: 5,
+	lexer.TOKEN_XOR:    4,
 	lexer.TOKEN_PLUS:   6,
 	lexer.TOKEN_MINUS:  6,
 	lexer.TOKEN_MULTIPLY: 7,
@@ -2351,10 +2477,7 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 	case lexer.TOKEN_STRING:
 		return p.parseStringLiteralIterative()
 	case lexer.TOKEN_LPAREN:
-		// 检查是否是类型转换表达式 (type)(expr)
-		if p.isTypeCastExpression() {
-			return p.parseTypeCastExpressionIterative()
-		}
+		// 分组表达式 (expr)
 		return p.parseGroupedExpressionIterative()
 	case lexer.TOKEN_LBRACKET:
 		return p.parseIndexExpressionIterative()
@@ -2460,7 +2583,7 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			Value: false,
 			Pos:   pos,
 		}
-	case lexer.TOKEN_RBRACE, lexer.TOKEN_LBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT, lexer.TOKEN_RPAREN, lexer.TOKEN_COMMA:
+	case lexer.TOKEN_RBRACE, lexer.TOKEN_LBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT, lexer.TOKEN_LSHIFT, lexer.TOKEN_RSHIFT, lexer.TOKEN_RPAREN, lexer.TOKEN_COMMA:
 		return nil
 	default:
 		p.error(fmt.Sprintf("unexpected token: %s", lexer.TokenTypeToString(p.curTok.Type)))
@@ -2555,7 +2678,7 @@ func (p *Parser) parseIntegerLiteralIterative() *ast.IntegerLiteral {
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	value, err := strconv.ParseInt(p.curTok.Value, 10, 64)
+	value, err := strconv.ParseInt(p.curTok.Value, 0, 64)
 	if err != nil {
 		p.error(fmt.Sprintf("invalid integer literal: %s", p.curTok.Value))
 		return &ast.IntegerLiteral{Value: 0, Pos: pos}
@@ -2893,6 +3016,137 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 	return nil
 }
 
+// parseYeideStatementIterative 解析 yeide 语句
+// 语法: yeide source -> target
+func (p *Parser) parseYeideStatementIterative() ast.Statement {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	p.nextToken() // 跳过 yeide
+
+	// 解析 source 表达式（标识符或索引表达式）
+	source := p.parsePrimaryExpressionIterative()
+	if source == nil {
+		p.error("yeide: expected source expression")
+		return nil
+	}
+
+	// 期望 -> 箭头
+	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+		p.nextToken() // 跳过 -
+		p.nextToken() // 跳过 >
+	}
+
+	// 解析目标标识符
+	target := ""
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		target = p.curTok.Value
+		p.nextToken()
+	}
+
+	if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+		p.nextToken()
+	}
+
+	return &ast.YeideStatement{
+		Source: source,
+		Target: target,
+		Pos:    pos,
+	}
+}
+
+// parseReleaseStatementIterative 解析 release 语句
+// 语法: release source -> [holder1, holder2, ...]
+func (p *Parser) parseReleaseStatementIterative() ast.Statement {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	p.nextToken() // 跳过 release
+
+	// 解析 source 表达式
+	source := p.parsePrimaryExpressionIterative()
+	if source == nil {
+		p.error("release: expected source expression")
+		return nil
+	}
+
+	// 期望 ->
+	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+		p.nextToken()
+		p.nextToken()
+	}
+
+	// 解析持有者列表 [holder1, holder2, ...]
+	var holders []string
+	if p.curTok.Type == lexer.TOKEN_LBRACKET {
+		p.nextToken() // 跳过 [
+		for p.curTok.Type == lexer.TOKEN_IDENT {
+			holders = append(holders, p.curTok.Value)
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACKET {
+			p.nextToken() // 跳过 ]
+		}
+	}
+
+	if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+		p.nextToken()
+	}
+
+	return &ast.ReleaseStatement{
+		Source:  source,
+		Holders: holders,
+		Pos:     pos,
+	}
+}
+
+// parseExtractStatementIterative 解析 extract 语句
+// 语法: extract source[index] -> target
+func (p *Parser) parseExtractStatementIterative() ast.Statement {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	p.nextToken() // 跳过 extract
+
+	// 解析 source 表达式（标识符）
+	source := p.parsePrimaryExpressionIterative()
+	if source == nil {
+		p.error("extract: expected source expression")
+		return nil
+	}
+
+	// 解析索引 [index]
+	var index ast.Expression
+	if p.curTok.Type == lexer.TOKEN_LBRACKET {
+		p.nextToken() // 跳过 [
+		index = p.parsePrimaryExpressionIterative()
+		if p.curTok.Type == lexer.TOKEN_RBRACKET {
+			p.nextToken() // 跳过 ]
+		}
+	}
+
+	// 期望 ->
+	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+		p.nextToken()
+		p.nextToken()
+	}
+
+	// 解析目标标识符
+	target := ""
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		target = p.curTok.Value
+		p.nextToken()
+	}
+
+	if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+		p.nextToken()
+	}
+
+	return &ast.ExtractStatement{
+		Source: source,
+		Index:  index,
+		Target: target,
+		Pos:    pos,
+	}
+}
+
 // error 报告错误
 func (p *Parser) error(message string) {
 	suggestion := errors.GenerateSuggestion(message)
@@ -2976,7 +3230,7 @@ func (p *Parser) Validate(program *ast.Program) {
 		}
 	}
 	
-	if !hasMain {
+	if !hasMain && !p.skipMainCheck {
 		p.error("找不到 main 函数")
 	}
 	
@@ -3092,7 +3346,25 @@ func (p *Parser) Validate(program *ast.Program) {
 			if importStmt.Module == "" {
 				p.error("import 语句缺少模块名称")
 			} else if !validModules[importStmt.Module] {
-				p.error(fmt.Sprintf("导入的模块不存在：%s", importStmt.Module))
+				// 检查是否是本地 .kl 文件
+				localPath := importStmt.Module + ".kl"
+				if _, err := os.Stat(localPath); err == nil {
+					importStmt.IsLocal = true
+					importStmt.LocalPath = localPath
+				} else {
+					// 尝试在同级目录查找
+					dir := filepath.Dir(p.file)
+					if dir == "" {
+						dir = "."
+					}
+					localPath2 := filepath.Join(dir, importStmt.Module+".kl")
+					if _, err := os.Stat(localPath2); err == nil {
+						importStmt.IsLocal = true
+						importStmt.LocalPath = localPath2
+					} else {
+						p.error(fmt.Sprintf("导入的模块不存在：%s", importStmt.Module))
+					}
+				}
 			}
 		}
 	}

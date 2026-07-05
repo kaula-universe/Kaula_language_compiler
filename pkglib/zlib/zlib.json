@@ -2,6 +2,9 @@
   "name": "zlib",
   "header": "zlib/zlib.h",
   "headers": ["<zlib.h>"],
+  "libraries": ["z"],
+  "include_path": "",
+  "library_path": "",
   "functions": {
     "zlibVersion": {
       "args": [],

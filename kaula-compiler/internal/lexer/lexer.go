@@ -32,6 +32,8 @@ const (
 	TOKEN_RETURN
 	TOKEN_IMPORT
 	TOKEN_EXPORT
+	TOKEN_PACKAGE
+	TOKEN_PUB
 	TOKEN_SELF
 	TOKEN_NONLOCAL
 	TOKEN_PRINTLN
@@ -43,6 +45,9 @@ const (
 	TOKEN_CONSTRUCTOR
 	TOKEN_STRUCT
 	TOKEN_AUTO
+	TOKEN_YEIDE
+	TOKEN_RELEASE
+	TOKEN_EXTRACT
 	TOKEN_TYPE
 	// 类型关键字
 	TOKEN_TYPE_INT
@@ -80,6 +85,9 @@ const (
 	TOKEN_OR
 	TOKEN_LE
 	TOKEN_GE
+	TOKEN_LSHIFT
+	TOKEN_RSHIFT
+	TOKEN_XOR
 	TOKEN_PREFIX_REF
 	TOKEN_QUESTION
 	TOKEN_AT // @ 符号用于前缀调用
@@ -139,12 +147,31 @@ func NewLexer(input string) *Lexer {
 	}
 }
 
+func isASCIISpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isASCIIDigit(c byte) bool {
+	return c >= '0' && c <= '9'
+}
+
+func isASCIIAlnum(c byte) bool {
+	return isASCIILetter(c) || isASCIIDigit(c)
+}
+
 // Next 返回下一个token
 func (l *Lexer) Next() Token {
 	for l.pos < l.inputLen {
 		char := l.input[l.pos]
 		switch {
-		case unicode.IsSpace(rune(char)):
+		case char < 0x80 && isASCIISpace(char):
+			l.skipWhitespace()
+			continue
+		case char >= 0x80 && unicode.IsSpace(rune(char)):
 			l.skipWhitespace()
 			continue
 		case char == '#':
@@ -176,9 +203,13 @@ func (l *Lexer) Next() Token {
 		case char == '/' && l.peek() == '/':
 			l.skipComment()
 			continue
-		case unicode.IsLetter(rune(char)) || char == '_' || (char >= 0x80): // 允许中文字符
+		case char < 0x80 && (isASCIILetter(char) || char == '_'):
 			return l.scanIdentifier()
-		case unicode.IsDigit(rune(char)):
+		case char >= 0x80 && (unicode.IsLetter(rune(char)) || char == '_' || char >= 0x80):
+			return l.scanIdentifier()
+		case char < 0x80 && isASCIIDigit(char):
+			return l.scanNumber()
+		case char >= 0x80 && unicode.IsDigit(rune(char)):
 			return l.scanNumber()
 		case char == '"':
 			return l.scanString()
@@ -228,6 +259,10 @@ func (l *Lexer) Next() Token {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_LE, Value: "<=", Line: l.line, Column: l.column}
+			} else if l.peek() == '<' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_LSHIFT, Value: "<<", Line: l.line, Column: l.column}
 			} else {
 				l.next()
 				return Token{Type: TOKEN_LT, Value: "<", Line: l.line, Column: l.column}
@@ -237,6 +272,10 @@ func (l *Lexer) Next() Token {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_GE, Value: ">=", Line: l.line, Column: l.column}
+			} else if l.peek() == '>' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_RSHIFT, Value: ">>", Line: l.line, Column: l.column}
 			} else {
 				l.next()
 				return Token{Type: TOKEN_GT, Value: ">", Line: l.line, Column: l.column}
@@ -298,6 +337,9 @@ func (l *Lexer) Next() Token {
 		case char == '?':
 			l.next()
 			return Token{Type: TOKEN_QUESTION, Value: "?", Line: l.line, Column: l.column}
+		case char == '^':
+			l.next()
+			return Token{Type: TOKEN_XOR, Value: "^", Line: l.line, Column: l.column}
 		default:
 			l.error(fmt.Sprintf("unexpected character: %c", char))
 			continue
@@ -308,14 +350,27 @@ func (l *Lexer) Next() Token {
 
 // skipWhitespace 跳过空白字符
 func (l *Lexer) skipWhitespace() {
-	for l.pos < l.inputLen && unicode.IsSpace(rune(l.input[l.pos])) {
-		if l.input[l.pos] == '\n' {
-			l.line++
-			l.column = 1
+	for l.pos < l.inputLen {
+		c := l.input[l.pos]
+		if c < 0x80 && isASCIISpace(c) {
+			if c == '\n' {
+				l.line++
+				l.column = 1
+			} else {
+				l.column++
+			}
+			l.pos++
+		} else if c >= 0x80 && unicode.IsSpace(rune(c)) {
+			if c == '\n' {
+				l.line++
+				l.column = 1
+			} else {
+				l.column++
+			}
+			l.pos++
 		} else {
-			l.column++
+			break
 		}
-		l.pos++
 	}
 }
 
@@ -338,8 +393,15 @@ func (l *Lexer) skipComment() {
 // scanIdentifier 扫描标识符
 func (l *Lexer) scanIdentifier() Token {
 	start := l.pos
-	for l.pos < l.inputLen && (unicode.IsLetter(rune(l.input[l.pos])) || unicode.IsDigit(rune(l.input[l.pos])) || l.input[l.pos] == '_') {
-		l.pos++
+	for l.pos < l.inputLen {
+		c := l.input[l.pos]
+		if c < 0x80 && (isASCIILetter(c) || isASCIIDigit(c) || c == '_') {
+			l.pos++
+		} else if c >= 0x80 && (unicode.IsLetter(rune(c)) || unicode.IsDigit(rune(c)) || c == '_') {
+			l.pos++
+		} else {
+			break
+		}
 	}
 	value := l.input[start:l.pos]
 	tokenType := TOKEN_IDENT
@@ -384,6 +446,10 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_IMPORT
 	case "export":
 		tokenType = TOKEN_EXPORT
+	case "package":
+		tokenType = TOKEN_PACKAGE
+	case "pub":
+		tokenType = TOKEN_PUB
 	case "self":
 		tokenType = TOKEN_SELF
 	case "nonlocal":
@@ -421,6 +487,12 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_STRUCT
 	case "auto":
 		tokenType = TOKEN_AUTO
+	case "yeide":
+		tokenType = TOKEN_YEIDE
+	case "release":
+		tokenType = TOKEN_RELEASE
+	case "extract":
+		tokenType = TOKEN_EXTRACT
 	case "type":
 		tokenType = TOKEN_TYPE
 	case "this":
@@ -436,18 +508,77 @@ func (l *Lexer) scanIdentifier() Token {
 	return Token{Type: tokenType, Value: value, Line: l.line, Column: l.column}
 }
 
-// scanNumber 扫描数字
+// scanNumber 扫描数字（支持 0x/0o/0b 前缀）
 func (l *Lexer) scanNumber() Token {
 	start := l.pos
-	// 整数部分
-	for l.pos < l.inputLen && unicode.IsDigit(rune(l.input[l.pos])) {
-		l.pos++
+
+	// 检查 0x/0o/0b 前缀
+	if l.pos < l.inputLen && l.input[l.pos] == '0' && l.pos+1 < l.inputLen {
+		next := l.input[l.pos+1]
+		if next == 'x' || next == 'X' {
+			// 十六进制 0x...
+			l.pos += 2
+			for l.pos < l.inputLen {
+				c := l.input[l.pos]
+				if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+					l.pos++
+				} else {
+					break
+				}
+			}
+			l.column += l.pos - start
+			return Token{Type: TOKEN_LITERAL_INT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
+		} else if next == 'o' || next == 'O' {
+			// 八进制 0o...
+			l.pos += 2
+			for l.pos < l.inputLen {
+				c := l.input[l.pos]
+				if c >= '0' && c <= '7' {
+					l.pos++
+				} else {
+					break
+				}
+			}
+			l.column += l.pos - start
+			return Token{Type: TOKEN_LITERAL_INT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
+		} else if next == 'b' || next == 'B' {
+			// 二进制 0b...
+			l.pos += 2
+			for l.pos < l.inputLen {
+				c := l.input[l.pos]
+				if c == '0' || c == '1' {
+					l.pos++
+				} else {
+					break
+				}
+			}
+			l.column += l.pos - start
+			return Token{Type: TOKEN_LITERAL_INT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
+		}
 	}
-	// 小数部分
+
+	// 普通十进制/浮点数
+	for l.pos < l.inputLen {
+		c := l.input[l.pos]
+		if c < 0x80 && isASCIIDigit(c) {
+			l.pos++
+		} else if c >= 0x80 && unicode.IsDigit(rune(c)) {
+			l.pos++
+		} else {
+			break
+		}
+	}
 	if l.pos < l.inputLen && l.input[l.pos] == '.' {
 		l.pos++
-		for l.pos < l.inputLen && unicode.IsDigit(rune(l.input[l.pos])) {
-			l.pos++
+		for l.pos < l.inputLen {
+			c := l.input[l.pos]
+			if c < 0x80 && isASCIIDigit(c) {
+				l.pos++
+			} else if c >= 0x80 && unicode.IsDigit(rune(c)) {
+				l.pos++
+			} else {
+				break
+			}
 		}
 		l.column += l.pos - start
 		return Token{Type: TOKEN_LITERAL_FLOAT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
@@ -636,6 +767,10 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "RETURN"
 	case TOKEN_IMPORT:
 		return "IMPORT"
+	case TOKEN_PACKAGE:
+		return "PACKAGE"
+	case TOKEN_PUB:
+		return "PUB"
 	case TOKEN_SELF:
 		return "SELF"
 	case TOKEN_NONLOCAL:
@@ -674,6 +809,12 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "VOID"
 	case TOKEN_AUTO:
 		return "AUTO"
+	case TOKEN_YEIDE:
+		return "YEIDE"
+	case TOKEN_RELEASE:
+		return "RELEASE"
+	case TOKEN_EXTRACT:
+		return "EXTRACT"
 	case TOKEN_IDENT:
 		return "IDENT"
 	case TOKEN_LITERAL_INT:
@@ -712,6 +853,12 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "LE"
 	case TOKEN_GE:
 		return "GE"
+	case TOKEN_LSHIFT:
+		return "LSHIFT"
+	case TOKEN_RSHIFT:
+		return "RSHIFT"
+	case TOKEN_XOR:
+		return "XOR"
 	case TOKEN_AND:
 		return "AND"
 	case TOKEN_AMPERSAND:

@@ -26,6 +26,9 @@
     // Kaula scope pointer (required by kmm_union_auto_alloc_fn)
     __thread kmm_context_t* g_kaula_scope = NULL;
     
+    __thread kmm_scope_stack_t g_kmm_v4_scope_stack = {{0}, 0};
+
+    
 #else
     #include "kmm_scoped_allocator_v4.h"
     
@@ -74,42 +77,10 @@ static inline int clock_gettime(int clk_id, struct timespec* ts) {
 #endif
 
 // ==================== 智能配置（v4 自动化特性） ====================
-// 自动检测是否需要启用高级功能
-#ifndef KMM_ENABLE_ARENA
-#define KMM_ENABLE_ARENA 1
-#endif
-
-#ifndef KMM_ENABLE_THREAD_CACHE
-#define KMM_ENABLE_THREAD_CACHE 1
-#endif
-
-#ifndef KMM_ENABLE_SAFE_ALLOC
-#define KMM_ENABLE_SAFE_ALLOC 1
-#endif
-
-#ifndef KMM_ENABLE_CLEANUP_STACK
-#define KMM_ENABLE_CLEANUP_STACK 1
-#endif
-
-#ifndef KMM_ENABLE_UNION_DOMAIN
-#define KMM_ENABLE_UNION_DOMAIN 1  // 联合域功能
-#endif
-
-// 联合域配置
-#ifndef KMM_MAX_UNION_DEPTH
-#define KMM_MAX_UNION_DEPTH 64
-#endif
-
-#ifndef KMM_MAX_DEPENDENCIES
-#define KMM_MAX_DEPENDENCIES 32
-#endif
-
-#ifndef KMM_MAX_UNION_NODES
-#define KMM_MAX_UNION_NODES 128
-#endif
+// 所有功能开关和联合域配置已在 kmm_scoped_allocator_v4.h 中统一定义
+// 此处仅保留 .c 文件特有的 Arena 配置参数
 
 // 智能配置参数（根据平台自动调整）
-// 注意：KMM_CACHE_LINE_SIZE 和 KMM_THREAD_CACHE_SIZE 已在 kmm_scoped_allocator_v4.h 中定义
 
 // Arena 配置（v3 特色，v4 风格智能默认值）
 #ifndef KMM_ARENA_TINY_MIN
@@ -226,6 +197,10 @@ static inline void kmm_thread_cache_free(void* ptr) {
     }
 }
 #endif
+
+// ==================== 作用域栈管理（嵌套作用域支持） ====================
+// 注意：kmm_v4_scope_push 和 kmm_v4_scope_pop 的定义已移至 kmm_scoped_allocator_v4.h
+// 因为 static inline 函数具有内部链接，定义必须在头文件中才能跨编译单元可见。
 
 // ==================== Arena 管理（v3 功能，v4 风格） ====================
 #if KMM_ENABLE_ARENA

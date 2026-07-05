@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"path": "../../../../release"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"kaula.h": "c"
+		}
+	}
+}

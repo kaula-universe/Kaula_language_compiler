@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type Function struct {
@@ -18,17 +19,13 @@ type Module struct {
 	Functions map[string]Function `json:"functions"`
 }
 
-// ThirdPartyLibrary 表示第三方库的配置
 type ThirdPartyLibrary struct {
-	// 库名称
 	Name string `json:"name"`
-	// 需要包含的头文件列表（支持 <> 和 "" 形式）
 	Headers []string `json:"headers"`
-	// 链接的库文件列表（Windows: .lib, Linux: .so）
 	Libraries []string `json:"libraries"`
-	// 库函数定义
+	Type string `json:"type,omitempty"`
+	ImplementMacro string `json:"implement_macro,omitempty"`
 	Functions map[string]Function `json:"functions"`
-	// 库的搜索路径（可选）
 	IncludePath string `json:"include_path,omitempty"`
 	LibraryPath string `json:"library_path,omitempty"`
 }
@@ -38,7 +35,15 @@ type StdlibConfig struct {
 	ThirdParty []ThirdPartyLibrary
 }
 
-// LoadPkgLibraries 从 pkglib 目录自动加载第三方库
+var (
+	configCache     map[string]*StdlibConfig
+	configCacheMu   sync.RWMutex
+)
+
+func init() {
+	configCache = make(map[string]*StdlibConfig)
+}
+
 func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 	libraries := []ThirdPartyLibrary{}
 	
@@ -57,35 +62,45 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		
+
 		libName := entry.Name()
 		libDir := filepath.Join(pkglibPath, libName)
-		
+
 		// 查找与目录同名的 .json 配置文件
 		configFile := filepath.Join(libDir, libName+".json")
 		if _, err := os.Stat(configFile); os.IsNotExist(err) {
-			// 没有配置文件，跳过这个库
-			continue
+			// 没有配置文件，自动分析生成
+			fmt.Printf("No config for %s, auto-analyzing...\n", libName)
+			result, analyzeErr := AnalyzePackage(libDir)
+			if analyzeErr != nil {
+				fmt.Printf("Warning: Failed to auto-analyze %s: %v\n", libName, analyzeErr)
+				continue
+			}
+			if writeErr := result.WriteConfig(libDir); writeErr != nil {
+				fmt.Printf("Warning: Failed to write config for %s: %v\n", libName, writeErr)
+				continue
+			}
+			fmt.Printf("Auto-generated config: %s (%d functions)\n", configFile, len(result.Functions))
 		}
-		
-		// 读取并解析配置文件
+
+		// 读取并解析配置文件（新生成的或已存在的）
 		data, err := os.ReadFile(configFile)
 		if err != nil {
 			fmt.Printf("Warning: Failed to read %s: %v\n", configFile, err)
 			continue
 		}
-		
+
 		var libConfig ThirdPartyLibrary
 		if err := json.Unmarshal(data, &libConfig); err != nil {
 			fmt.Printf("Warning: Failed to parse %s: %v\n", configFile, err)
 			continue
 		}
-		
+
 		// 设置库名称（如果配置文件中没有指定）
 		if libConfig.Name == "" {
 			libConfig.Name = libName
 		}
-		
+
 		libraries = append(libraries, libConfig)
 		fmt.Printf("Loaded third-party library: %s from %s\n", libConfig.Name, configFile)
 	}
@@ -94,12 +109,23 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 }
 
 func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		absPath = configPath
+	}
+
+	configCacheMu.RLock()
+	if cached, ok := configCache[absPath]; ok {
+		configCacheMu.RUnlock()
+		return cached, nil
+	}
+	configCacheMu.RUnlock()
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read stdlib config: %w", err)
 	}
 
-	// 尝试使用新的 Module 结构解析（支持 header 字段）
 	var rawModules map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawModules); err != nil {
 		return nil, fmt.Errorf("failed to parse stdlib config structure: %w", err)
@@ -109,15 +135,12 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 		Modules: make(map[string]Module),
 	}
 
-	// 将原始数据转换为 Module 结构
 	for moduleName, rawData := range rawModules {
-		// 先尝试解析为 Module 结构（带 header 和 functions 嵌套）
 		var moduleWithHeader struct {
 			Header    string                `json:"header"`
 			Functions map[string]Function `json:"functions"`
 		}
 		if err := json.Unmarshal(rawData, &moduleWithHeader); err == nil && len(moduleWithHeader.Functions) > 0 {
-			// 新格式（嵌套在 functions 下）
 			config.Modules[moduleName] = Module{
 				Header:    moduleWithHeader.Header,
 				Functions: moduleWithHeader.Functions,
@@ -125,7 +148,6 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 			continue
 		}
 
-	// 回退到旧格式：扁平结构，header 在顶层，函数也在顶层
 		var header string
 		var rawMap map[string]interface{}
 		if err := json.Unmarshal(rawData, &rawMap); err == nil {
@@ -136,21 +158,18 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 			}
 		}
 		
-		// 解析函数 - 跳过 header 字段
 		flatFunctions := make(map[string]Function)
 		if rawMap != nil {
 			for key, value := range rawMap {
 				if key == "header" {
-					continue // 跳过 header
+					continue
 				}
-				// 将 value 重新序列化为 JSON 再解析为 Function
 				valueJSON, err := json.Marshal(value)
 				if err != nil {
 					continue
 				}
 				var fn Function
 				if err := json.Unmarshal(valueJSON, &fn); err != nil {
-					// 如果解析失败，创建一个空的 Function
 					flatFunctions[key] = Function{}
 				} else {
 					flatFunctions[key] = fn
@@ -164,8 +183,6 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 		}
 	}
 
-	// 不再从 thirdparty.json 加载，改为从 pkglib 目录自动加载
-	// 保留向后兼容，如果 thirdparty.json 存在则也加载
 	thirdPartyPath := filepath.Join(filepath.Dir(configPath), "thirdparty.json")
 	if _, err := os.Stat(thirdPartyPath); err == nil {
 		thirdPartyData, err := os.ReadFile(thirdPartyPath)
@@ -179,23 +196,19 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 		}
 	}
 	
-	// 从 pkglib 目录加载所有第三方库
-	// 使用可执行文件所在目录作为基准
 	exePath, err := os.Executable()
 	if err != nil {
 		exePath = configPath
 	}
 	exeDir := filepath.Dir(exePath)
-	// 尝试多个 pkglib 路径
 	pkglibPaths := []string{
-		filepath.Join(exeDir, "pkglib"),              // kaula-compiler/pkglib (kaula 目录内)
-		filepath.Join(filepath.Dir(filepath.Dir(configPath)), "pkglib"), // kaula/pkglib
-		filepath.Join(exeDir, "..", "pkglib"),        // kaula-compiler/../pkglib (旧位置)
-		"pkglib",                                     // 当前目录
+		filepath.Join(exeDir, "pkglib"),
+		filepath.Join(filepath.Dir(filepath.Dir(configPath)), "pkglib"),
+		filepath.Join(exeDir, "..", "pkglib"),
+		"pkglib",
 	}
 	
 	for _, pkglibPath := range pkglibPaths {
-		fmt.Printf("Attempting to load pkglib from: %s\n", pkglibPath)
 		if _, err := os.Stat(pkglibPath); err == nil {
 			pkgLibraries, loadErr := LoadPkgLibraries(pkglibPath)
 			if loadErr != nil {
@@ -204,9 +217,13 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 				fmt.Printf("Successfully loaded %d libraries from pkglib\n", len(pkgLibraries))
 				config.ThirdParty = append(config.ThirdParty, pkgLibraries...)
 			}
-			break // 找到并加载后退出
+			break
 		}
 	}
+
+	configCacheMu.Lock()
+	configCache[absPath] = config
+	configCacheMu.Unlock()
 
 	return config, nil
 }

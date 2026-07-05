@@ -16,6 +16,263 @@ func NewFunctionGenerator(cg *CodeGenerator) *FunctionGenerator {
 	}
 }
 
+// needsKMMScope 检查函数体是否需要 KMM scope
+func (fg *FunctionGenerator) needsKMMScope(bodyCode string) bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if fg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	adapter := fg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		currentScope := fg.codegen.GetCurrentScope()
+		var varNames []string
+		if currentScope != nil {
+			for name, sym := range currentScope.GetAllSymbols() {
+				if sym.Scope != "parameter" && sym.Scope != "param" && 
+				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+					varNames = append(varNames, name)
+				}
+			}
+		}
+		return adapter.NeedsKMMScopeByVars(varNames)
+	}
+
+	// 非 SOR 模式：智能分析
+	return fg.needsKMMScopeNonSOR(bodyCode)
+}
+
+// shouldUseKMMScopeForBody 基于 AST body 语句列表预判断是否需要 KMM scope
+// 解决符号表在 body 生成前未填充的问题：直接扫描 AST 变量声明
+// 跨函数分析优化：纯函数（无指针所有权传递）可以跳过 KMM
+func (fg *FunctionGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement) bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if fg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	adapter := fg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		// 跨函数分析：纯函数跳过 KMM
+		// 注意：此处不使用 IsPureFunction，因为即使函数是纯函数，
+		// 函数体内部仍可能声明需要 KMM 的局部变量（指针/字符串）
+		// SOR 模式：收集 body 中的变量名
+		var varNames []string
+		for _, stmt := range bodyStmts {
+			if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+				varNames = append(varNames, varDecl.Name)
+			}
+		}
+		return adapter.NeedsKMMScopeByVars(varNames)
+	}
+
+	// 非 SOR 模式：扫描 body 中的变量类型
+	for _, stmt := range bodyStmts {
+		if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+			if needsKMMForType(varDecl.Type) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bodyHasAllocationCall 扫描函数体是否包含内存分配调用
+// 纯计算函数（无 std_malloc/kmm_v4/yeide/release/extract）可跳过 scope 管理
+func (fg *FunctionGenerator) bodyHasAllocationCall(bodyStmts []ast.Statement) bool {
+	for _, stmt := range bodyStmts {
+		if stmt == nil {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.ExpressionStatement:
+			if s.Expression != nil {
+				if fg.exprHasAllocCall(s.Expression) {
+					return true
+				}
+			}
+		case *ast.VariableDeclaration:
+			if s.Value != nil {
+				if fg.exprHasAllocCall(s.Value) {
+					return true
+				}
+			}
+		case *ast.ReturnStatement:
+			if s.Value != nil {
+				if fg.exprHasAllocCall(s.Value) {
+					return true
+				}
+			}
+		case *ast.IfStatement:
+			if fg.bodyHasAllocationCall(s.Body) {
+				return true
+			}
+			if s.Else != nil && fg.bodyHasAllocationCall(s.Else) {
+				return true
+			}
+		case *ast.WhileStatement:
+			if fg.bodyHasAllocationCall(s.Body) {
+				return true
+			}
+		case *ast.ForStatement:
+			if fg.bodyHasAllocationCall(s.Body) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (fg *FunctionGenerator) exprHasAllocCall(expr ast.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		if ident, ok := e.Function.(*ast.Identifier); ok {
+			name := ident.Name
+			if name == "std_malloc" || name == "kmm_v4_malloc" || name == "kmm_v4_alloc_auto" {
+				return true
+			}
+		}
+		// 检查 std.memory.std_malloc 等链式调用
+		if member, ok := e.Function.(*ast.MemberAccessExpression); ok {
+			if member.Member == "std_malloc" || member.Member == "kmm_v4_malloc" {
+				return true
+			}
+		}
+	case *ast.BinaryExpression:
+		return fg.exprHasAllocCall(e.Left) || fg.exprHasAllocCall(e.Right)
+	case *ast.UnaryExpression:
+		return fg.exprHasAllocCall(e.Right)
+	}
+	return false
+}
+
+// shouldUseKMMScopeForFunc 函数级别的 KMM 判断，结合跨函数分析
+// 如果 SOR 跨函数分析确定函数是纯函数且函数体无 KMM 变量，则跳过 KMM
+func (fg *FunctionGenerator) shouldUseKMMScopeForFunc(funcName string, bodyStmts []ast.Statement) bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if fg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	// 优化：扫描函数体是否包含分配调用，纯计算函数跳过 scope
+	if !fg.bodyHasAllocationCall(bodyStmts) {
+		return false
+	}
+
+	adapter := fg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		// SOR 模式：先基于 SOR 决策判断
+		var varNames []string
+		for _, stmt := range bodyStmts {
+			if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+				varNames = append(varNames, varDecl.Name)
+			}
+		}
+		if adapter.NeedsKMMScopeByVars(varNames) {
+			return true
+		}
+		// SOR 决策不需要 KMM 时，补充检查 SOR 未追踪的指针类型变量
+		// （如 std_malloc 分配的指针，SOR 不追踪但需要 KMM 管理）
+		for _, stmt := range bodyStmts {
+			if stmt == nil {
+				continue
+			}
+			if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+				if needsKMMForType(varDecl.Type) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// 非 SOR 模式：扫描 body 中的变量类型
+	for _, stmt := range bodyStmts {
+		if stmt == nil {
+			continue
+		}
+		varDecl, ok := stmt.(*ast.VariableDeclaration)
+		if !ok || varDecl == nil {
+			continue
+		}
+		if needsKMMForType(varDecl.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldUseKMMScope 预判断：在生成 body 之前基于符号表判断是否需要 KMM scope
+func (fg *FunctionGenerator) shouldUseKMMScope() bool {
+	// 作用域合并：外层已有 KMM scope 时，内层跳过
+	if fg.codegen.IsInKMMScope() {
+		return false
+	}
+
+	adapter := fg.codegen.GetSORAdapter()
+	if adapter != nil && adapter.IsActive {
+		currentScope := fg.codegen.GetCurrentScope()
+		var varNames []string
+		if currentScope != nil {
+			for name, sym := range currentScope.GetAllSymbols() {
+				if sym.Scope != "parameter" && sym.Scope != "param" && 
+				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+					varNames = append(varNames, name)
+				}
+			}
+		}
+		return adapter.NeedsKMMScopeByVars(varNames)
+	}
+
+	// 非 SOR 模式：基于符号表类型分析
+	currentScope := fg.codegen.GetCurrentScope()
+	if currentScope != nil {
+		for _, sym := range currentScope.GetAllSymbols() {
+			if sym.Scope == "parameter" || sym.Scope == "param" || 
+			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+				continue
+			}
+			if needsKMMForType(sym.Type) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// needsKMMScopeNonSOR 非 SOR 模式下的智能 KMM 判断
+// 基于符号表分析变量类型，判断是否需要 KMM scope
+func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
+	if !strings.Contains(bodyCode, "std_malloc") && 
+	   !strings.Contains(bodyCode, "kmm_v4") &&
+	   !strings.Contains(bodyCode, "string_concat") &&
+	   !strings.Contains(bodyCode, "string_dup") {
+		return false
+	}
+
+	currentScope := fg.codegen.GetCurrentScope()
+	if currentScope != nil {
+		for _, sym := range currentScope.GetAllSymbols() {
+			if sym.Scope == "parameter" || sym.Scope == "param" || 
+			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+				continue
+			}
+			if needsKMMForType(sym.Type) {
+				return true
+			}
+		}
+	}
+
+	if strings.Contains(bodyCode, "kmm_v4_alloc_auto") {
+		return true
+	}
+
+	return false
+}
+
 func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStatement) string {
 	fg.codegen.EnterScope("function_" + stmt.Name)
 
@@ -159,31 +416,54 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			builder.WriteString(indent)
 			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
-	} else {
-		shouldUseKMM := !stmt.NoKMM && !stmt.Inline
-		if shouldUseKMM {
-			indent := fg.codegen.indentString()
-			builder.WriteString(indent)
-			builder.WriteString("KMM_V4_SCOPE_START {\n")
-			fg.codegen.indent++
-		}
+		} else {
+			shouldUseKMM := !stmt.NoKMM && !stmt.Inline
+			if shouldUseKMM {
+				// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
+				// 跨函数分析：结合函数签名判断是否需要 KMM
+				useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
+				if useKMM {
+					fg.codegen.EnterKMMScope()
+				}
 
-		indent := fg.codegen.indentString()
-		for _, bodyStmt := range stmt.Body {
-			if bodyStmt == nil {
-				continue
+				var bodyBuilder strings.Builder
+				bodyIndent := fg.codegen.indentString()
+				fg.codegen.indent++
+				for _, bodyStmt := range stmt.Body {
+					if bodyStmt == nil {
+						continue
+					}
+					bodyBuilder.WriteString(fg.codegen.indentString())
+					bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
+				}
+				fg.codegen.indent--
+
+				if useKMM {
+					fg.codegen.ExitKMMScope()
+				}
+
+				bodyCode := bodyBuilder.String()
+
+				if useKMM {
+					builder.WriteString(bodyIndent)
+					builder.WriteString("KMM_V4_SCOPE_START {\n")
+					builder.WriteString(bodyCode)
+					builder.WriteString(bodyIndent)
+					builder.WriteString("} KMM_V4_SCOPE_END;\n")
+				} else {
+					builder.WriteString(bodyCode)
+				}
+			} else {
+				indent := fg.codegen.indentString()
+				for _, bodyStmt := range stmt.Body {
+					if bodyStmt == nil {
+						continue
+					}
+					builder.WriteString(indent)
+					builder.WriteString(fg.codegen.generateStatement(bodyStmt))
+				}
 			}
-			builder.WriteString(indent)
-			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
-
-		if shouldUseKMM {
-			fg.codegen.indent--
-			indent := fg.codegen.indentString()
-			builder.WriteString(indent)
-			builder.WriteString("} KMM_V4_SCOPE_END;\n")
-		}
-	}
 
 	if !hasReturnStatement(stmt.Body) && stmt.ReturnType != "" && !isVoidType(stmt.ReturnType) {
 		builder.WriteString(fg.codegen.indentString())
@@ -198,83 +478,89 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 }
 
 func (fg *FunctionGenerator) generatePrefixFunction(stmt *ast.FunctionStatement) string {
-	code := "// Prefix function: AST generation for cross-file reuse\n"
-	code += fmt.Sprintf("int64_t %s", stmt.Name)
+	var code strings.Builder
+	code.Grow(1024)
+	code.WriteString("// Prefix function: AST generation for cross-file reuse\n")
+	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
 
 	if len(stmt.Params) > 0 {
-		code += "(int64_t arg) {\n"
+		code.WriteString("(int64_t arg) {\n")
 	} else {
-		code += "(void) {\n"
+		code.WriteString("(void) {\n")
 	}
 
 	fg.codegen.indent++
 
 	if stmt.PrefixName != "" {
-		code += fg.codegen.indentString()
-		code += fmt.Sprintf("prefix_enter(\"%s\");\n", stmt.PrefixName)
+		code.WriteString(fg.codegen.indentString())
+		fmt.Fprintf(&code, "prefix_enter(\"%s\");\n", stmt.PrefixName)
 	}
 
 	for _, bodyStmt := range stmt.Body {
 		if bodyStmt == nil {
 			continue
 		}
-		code += fg.codegen.indentString()
-		code += fg.codegen.generateStatement(bodyStmt)
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString(fg.codegen.generateStatement(bodyStmt))
 	}
 
 	if stmt.PrefixName != "" {
-		code += fg.codegen.indentString()
-		code += "prefix_leave();\n"
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString("prefix_leave();\n")
 	}
 
 	fg.codegen.indent--
-	code += "}\n"
+	code.WriteString("}\n")
 
 	fg.codegen.ExitScope()
-	return code
+	return code.String()
 }
 
 func (fg *FunctionGenerator) generateTreeFunction(stmt *ast.FunctionStatement) string {
-	code := "// Tree function: AST generation with root validation\n"
-	code += fmt.Sprintf("int64_t %s", stmt.Name)
+	var code strings.Builder
+	code.Grow(1024)
+	code.WriteString("// Tree function: AST generation with root validation\n")
+	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
 
 	if len(stmt.Params) > 0 {
-		code += "(int64_t arg) {\n"
+		code.WriteString("(int64_t arg) {\n")
 	} else {
-		code += "(void) {\n"
+		code.WriteString("(void) {\n")
 	}
 
 	fg.codegen.indent++
 
 	rootTree := fg.codegen.treeManager.GetRootTree()
 	if rootTree == nil {
-		code += fg.codegen.indentString()
-		code += "// ERROR: Tree function but no root tree defined\n"
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString("// ERROR: Tree function but no root tree defined\n")
 	}
 
 	for _, bodyStmt := range stmt.Body {
 		if bodyStmt == nil {
 			continue
 		}
-		code += fg.codegen.indentString()
-		code += fg.codegen.generateStatement(bodyStmt)
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString(fg.codegen.generateStatement(bodyStmt))
 	}
 
 	fg.codegen.indent--
-	code += "}\n"
+	code.WriteString("}\n")
 
 	fg.codegen.ExitScope()
-	return code
+	return code.String()
 }
 
 func (fg *FunctionGenerator) generateRootTreeFunction(stmt *ast.FunctionStatement) string {
-	code := "// Root tree function: defines global tree structure\n"
-	code += fmt.Sprintf("int64_t %s", stmt.Name)
+	var code strings.Builder
+	code.Grow(1024)
+	code.WriteString("// Root tree function: defines global tree structure\n")
+	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
 
 	if len(stmt.Params) > 0 {
-		code += "(int64_t arg) {\n"
+		code.WriteString("(int64_t arg) {\n")
 	} else {
-		code += "(void) {\n"
+		code.WriteString("(void) {\n")
 	}
 
 	fg.codegen.indent++
@@ -283,15 +569,15 @@ func (fg *FunctionGenerator) generateRootTreeFunction(stmt *ast.FunctionStatemen
 		if bodyStmt == nil {
 			continue
 		}
-		code += fg.codegen.indentString()
-		code += fg.codegen.generateStatement(bodyStmt)
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString(fg.codegen.generateStatement(bodyStmt))
 	}
 
 	fg.codegen.indent--
-	code += "}\n"
+	code.WriteString("}\n")
 
 	fg.codegen.ExitScope()
-	return code
+	return code.String()
 }
 
 func hasReturnStatement(stmts []ast.Statement) bool {
@@ -318,39 +604,52 @@ func isVoidType(typeName string) bool {
 }
 
 func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) string {
-	code := ""
+	var code strings.Builder
+	code.Grow(2048)
 	if stmt.Inline {
-		code += "__attribute__((always_inline)) "
+		code.WriteString("__attribute__((always_inline)) ")
 	}
-	code += "int main() {\n"
+	code.WriteString("int main() {\n")
 	fg.codegen.indent++
 	
-	if !stmt.NoKMM {
-		code += fg.codegen.indentString()
-		code += "KMM_V4_SCOPE_START {\n"
-		fg.codegen.indent++
+	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
+	useKMM := !stmt.NoKMM && fg.shouldUseKMMScopeForBody(stmt.Body)
+	if useKMM {
+		fg.codegen.EnterKMMScope()
 	}
-	
+
+	var bodyBuilder strings.Builder
 	for _, bodyStmt := range stmt.Body {
 		if bodyStmt == nil {
 			continue
 		}
-		code += fg.codegen.indentString()
-		code += fg.codegen.generateStatement(bodyStmt)
+		bodyBuilder.WriteString(fg.codegen.indentString())
+		bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
+	}
+
+	if useKMM {
+		fg.codegen.ExitKMMScope()
+	}
+
+	bodyCode := bodyBuilder.String()
+
+	if useKMM {
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString("KMM_V4_SCOPE_START {\n")
+		code.WriteString(bodyCode)
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString("} KMM_V4_SCOPE_END;\n")
+	} else {
+		code.WriteString(bodyCode)
 	}
 	
-	if !stmt.NoKMM {
-		fg.codegen.indent--
-		code += fg.codegen.indentString()
-		code += "} KMM_V4_SCOPE_END;\n"
-	}
-	
-	code += fg.codegen.indentString() + "return 0;\n"
+	code.WriteString(fg.codegen.indentString())
+	code.WriteString("return 0;\n")
 	fg.codegen.indent--
-	code += "}\n"
+	code.WriteString("}\n")
 	
 	fg.codegen.ExitScope()
-	return code
+	return code.String()
 }
 
 func (fg *FunctionGenerator) mapReturnType(returnType string) string {

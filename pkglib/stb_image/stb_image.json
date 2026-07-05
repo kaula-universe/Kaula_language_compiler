@@ -1,27 +1,51 @@
 {
   "name": "stb_image",
+  "type": "single_header",
   "header": "stb_image/stb_image.h",
-  "headers": ["\"stb_image/stb_image.h\""],
+  "headers": [
+    "\"stb_image/stb_image.h\""
+  ],
+  "implement_macro": "STB_IMAGE_IMPLEMENTATION",
+  "include_path": "C:\\Users\\28507\\Desktop\\kaula\\pkglib",
   "functions": {
-    "stbi_load": {
-      "args": ["const char*", "int*", "int*", "int*", "int"],
-      "return": "unsigned char*"
-    },
-    "stbi_image_free": {
-      "args": ["void*"],
-      "return": "void"
-    },
     "stbi_failure_reason": {
       "args": [],
       "return": "const char*"
     },
-    "stbi_set_flip_vertically_on_load": {
-      "args": ["int"],
+    "stbi_image_free": {
+      "args": [
+        "void*"
+      ],
       "return": "void"
     },
-    "stbi_load_from_memory": {
-      "args": ["const unsigned char*", "int", "int*", "int*", "int*", "int"],
+    "stbi_load": {
+      "args": [
+        "const char*",
+        "int*",
+        "int*",
+        "int*",
+        "int"
+      ],
       "return": "unsigned char*"
+    },
+    "stbi_load_from_memory": {
+      "args": [
+        "const unsigned char*",
+        "int",
+        "int*",
+        "int*",
+        "int*",
+        "int"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbi_set_flip_vertically_on_load": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
     }
-  }
+  },
+  "auto_generated": true,
+  "generated_at": "2026-07-02T21:53:12+08:00"
 }

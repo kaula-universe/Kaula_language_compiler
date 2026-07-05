@@ -1,12 +1,15 @@
 package sema
 
 import (
+	"encoding/json"
 	"fmt"
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/core"
 	"kaula-compiler/internal/errors"
 	"kaula-compiler/internal/symbol"
 	"kaula-compiler/internal/stdlib"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -15,6 +18,7 @@ type SemanticAnalyzer struct {
 	scope            int
 	errorCollector   *errors.ErrorCollector
 	currentFunction *ast.FunctionStatement
+	sorGlobalEnabled bool // 全局 SOR 模式（--sor 标志）
 	program         *ast.Program
 	stdlibConfig    *stdlib.StdlibConfig
 	genericStack    []*ast.FunctionStatement
@@ -27,6 +31,23 @@ type SemanticAnalyzer struct {
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
+// SetSOREnabled 设置是否启用全局 SOR 模式（--sor 标志）
+func (sa *SemanticAnalyzer) SetSOREnabled(enabled bool) {
+	sa.sorGlobalEnabled = enabled
+}
+
+// isFunctionSOR 判断当前函数是否启用了 SOR
+// 优先级：--sor 全局标志 > #[sor] 函数注解
+func (sa *SemanticAnalyzer) isFunctionSOR() bool {
+	if sa.sorGlobalEnabled {
+		return true
+	}
+	if sa.currentFunction != nil && sa.currentFunction.SOREnabled {
+		return true
+	}
+	return false
+}
+
 func NewSemanticAnalyzer() *SemanticAnalyzer {
 	errorCollector := errors.NewErrorCollector()
 	return NewSemanticAnalyzerWithConfig("kaula-compiler/stdlib.json", errorCollector)
@@ -127,6 +148,17 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 		sa.analyzeStatement(bodyStmt)
 	}
 
+	// 检查 SOR 函数是否使用了 SOR 原语
+	// 全局 SOR 模式下所有函数都必须使用 SOR 原语，或单独标注 #[sor] 的函数也必须使用
+	if sa.isFunctionSOR() {
+		if !sa.hasSORPrimitives(stmt.Body) {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("函数 '%s' 在 SOR 模式下未使用任何 SOR 原语 (yeide/release/extract)", stmt.Name),
+				stmt.Pos.Line, stmt.Pos.Column, "",
+				"在函数体内使用 yeide/release/extract 原语，或使用 --no-sor 禁用 SOR 模式")
+		}
+	}
+
 	// 弹出泛型函数栈
 	if stmt.IsGeneric() {
 		sa.genericStack = sa.genericStack[:len(sa.genericStack)-1]
@@ -191,6 +223,9 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		sa.analyzeImportStatement(s)
 	case *ast.ExportStatement:
 		sa.analyzeExportStatement(s)
+	case *ast.PackageStatement:
+		// package 声明：记录包名，不需要额外分析
+		// 包名仅用于语义层面，不影响 C 代码生成
 	case *ast.ExpressionStatement:
 		if s == nil || s.Expression == nil {
 			return
@@ -201,6 +236,12 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 			return
 		}
 		sa.analyzeExpression(s.Expression)
+	case *ast.YeideStatement:
+		sa.analyzeYeideStatement(s)
+	case *ast.ReleaseStatement:
+		sa.analyzeReleaseStatement(s)
+	case *ast.ExtractStatement:
+		sa.analyzeExtractStatement(s)
 	}
 }
 
@@ -216,7 +257,7 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 		if !strings.HasPrefix(stdlibKey, "std.") {
 			stdlibKey = "std." + moduleName
 		}
-		
+
 		if mod, ok := sa.stdlibConfig.Modules[stdlibKey]; ok {
 			for funcName := range mod.Functions {
 				qualifiedName := fmt.Sprintf("%s.%s", stdlibKey, funcName)
@@ -228,6 +269,69 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 				qualifiedName := fmt.Sprintf("%s.%s", moduleName, funcName)
 				sa.symbolTable.AddSymbol(qualifiedName, "third_party_function", false, "global", 0, 0)
 			}
+		} else {
+			// 未找到库配置，尝试按需分析 pkglib 中的库
+			sa.tryAnalyzeMissingPackage(moduleName)
+		}
+	}
+}
+
+// tryAnalyzeMissingPackage 尝试按需分析 pkglib 中存在但尚未生成配置的库
+func (sa *SemanticAnalyzer) tryAnalyzeMissingPackage(moduleName string) {
+	if sa.stdlibConfig == nil {
+		return
+	}
+	// 尝试在已知 pkglib 路径中查找该库
+	exePath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	exeDir := filepath.Dir(exePath)
+	pkglibPaths := []string{
+		filepath.Join(exeDir, "pkglib"),
+		filepath.Join(exeDir, "..", "pkglib"),
+		"pkglib",
+	}
+
+	for _, pkglibPath := range pkglibPaths {
+		libDir := filepath.Join(pkglibPath, moduleName)
+		if info, err := os.Stat(libDir); err == nil && info.IsDir() {
+			// pkglib 中存在该库目录，但没有配置文件，按需分析
+			fmt.Printf("Import '%s' not found in config, auto-analyzing from %s...\n", moduleName, libDir)
+			result, analyzeErr := stdlib.AnalyzePackage(libDir)
+			if analyzeErr != nil {
+				fmt.Printf("Warning: Failed to auto-analyze %s: %v\n", moduleName, analyzeErr)
+				return
+			}
+			if writeErr := result.WriteConfig(libDir); writeErr != nil {
+				fmt.Printf("Warning: Failed to write config for %s: %v\n", moduleName, writeErr)
+				return
+			}
+
+			// 重新加载该库配置到 stdlibConfig
+			configFile := filepath.Join(libDir, moduleName+".json")
+			data, err := os.ReadFile(configFile)
+			if err != nil {
+				return
+			}
+			var libConfig stdlib.ThirdPartyLibrary
+			if err := json.Unmarshal(data, &libConfig); err != nil {
+				return
+			}
+			if libConfig.Name == "" {
+				libConfig.Name = moduleName
+			}
+
+			// 添加到 ThirdParty 列表
+			sa.stdlibConfig.ThirdParty = append(sa.stdlibConfig.ThirdParty, libConfig)
+
+			// 注册函数到符号表
+			for funcName := range libConfig.Functions {
+				qualifiedName := fmt.Sprintf("%s.%s", moduleName, funcName)
+				sa.symbolTable.AddSymbol(qualifiedName, "third_party_function", false, "global", 0, 0)
+			}
+			fmt.Printf("Auto-analyzed and loaded: %s (%d functions)\n", moduleName, len(libConfig.Functions))
+			return
 		}
 	}
 }
@@ -1180,4 +1284,87 @@ func (sa *SemanticAnalyzer) SetStdlibConfig(cfg *stdlib.StdlibConfig) {
 
 func (sa *SemanticAnalyzer) HasErrors() bool {
 	return sa.errorCollector.HasErrors()
+}
+
+// analyzeYeideStatement 分析 yeide 语句
+func (sa *SemanticAnalyzer) analyzeYeideStatement(stmt *ast.YeideStatement) {
+	if !sa.isFunctionSOR() {
+		sa.errorCollector.AddSemanticError(
+			"未定义: 'yeide' 是 SOR 扩展的原语，需要使用 #[sor] 注解或 --sor 标志才能使用",
+			stmt.Pos.Line, stmt.Pos.Column, "",
+			"在函数上添加 #[sor] 注解，或使用 'kaulac --sor <文件>' 编译")
+		return
+	}
+	if stmt.Source != nil {
+		sa.analyzeExpression(stmt.Source)
+	}
+}
+
+// analyzeReleaseStatement 分析 release 语句
+func (sa *SemanticAnalyzer) analyzeReleaseStatement(stmt *ast.ReleaseStatement) {
+	if !sa.isFunctionSOR() {
+		sa.errorCollector.AddSemanticError(
+			"未定义: 'release' 是 SOR 扩展的原语，需要使用 #[sor] 注解或 --sor 标志才能使用",
+			stmt.Pos.Line, stmt.Pos.Column, "",
+			"在函数上添加 #[sor] 注解，或使用 'kaulac --sor <文件>' 编译")
+		return
+	}
+	if stmt.Source != nil {
+		sa.analyzeExpression(stmt.Source)
+	}
+}
+
+// analyzeExtractStatement 分析 extract 语句
+func (sa *SemanticAnalyzer) analyzeExtractStatement(stmt *ast.ExtractStatement) {
+	if !sa.isFunctionSOR() {
+		sa.errorCollector.AddSemanticError(
+			"未定义: 'extract' 是 SOR 扩展的原语，需要使用 #[sor] 注解或 --sor 标志才能使用",
+			stmt.Pos.Line, stmt.Pos.Column, "",
+			"在函数上添加 #[sor] 注解，或使用 'kaulac --sor <文件>' 编译")
+		return
+	}
+	if stmt.Source != nil {
+		sa.analyzeExpression(stmt.Source)
+	}
+	if stmt.Index != nil {
+		sa.analyzeExpression(stmt.Index)
+	}
+}
+
+// hasSORPrimitives 递归检查函数体中是否使用了 SOR 原语 (yeide/release/extract)
+func (sa *SemanticAnalyzer) hasSORPrimitives(body []ast.Statement) bool {
+	for _, stmt := range body {
+		if stmt == nil {
+			continue
+		}
+		switch stmt.(type) {
+		case *ast.YeideStatement:
+			return true
+		case *ast.ReleaseStatement:
+			return true
+		case *ast.ExtractStatement:
+			return true
+		case *ast.BlockStatement:
+			block := stmt.(*ast.BlockStatement)
+			if sa.hasSORPrimitives(block.Statements) {
+				return true
+			}
+		case *ast.IfStatement:
+			ifStmt := stmt.(*ast.IfStatement)
+			if sa.hasSORPrimitives(ifStmt.Body) || sa.hasSORPrimitives(ifStmt.Else) {
+				return true
+			}
+		case *ast.WhileStatement:
+			whileStmt := stmt.(*ast.WhileStatement)
+			if sa.hasSORPrimitives(whileStmt.Body) {
+				return true
+			}
+		case *ast.ForStatement:
+			forStmt := stmt.(*ast.ForStatement)
+			if sa.hasSORPrimitives(forStmt.Body) {
+				return true
+			}
+		}
+	}
+	return false
 }

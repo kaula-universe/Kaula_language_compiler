@@ -319,38 +319,27 @@ func (tg *TypeGenerator) generateStatementWithSelfPrefix(className string, stmt 
 	if generated == "" {
 		return generated
 	}
-	
-	lines := []string{}
-	currentLine := ""
-	for i := 0; i < len(generated); i++ {
-		if generated[i] == '\n' {
-			if currentLine != "" {
-				lines = append(lines, currentLine)
-				currentLine = ""
-			} else {
-				lines = append(lines, "")
-			}
-		} else {
-			currentLine += string(generated[i])
-		}
+
+	// 预计算类字段集合，避免每行重复查询
+	fieldSet := make(map[string]bool)
+	for _, field := range tg.getClassFields(className) {
+		fieldSet[field.Name] = true
 	}
-	if currentLine != "" {
-		lines = append(lines, currentLine)
-	}
-	
-	result := ""
+
+	lines := strings.Split(generated, "\n")
+	var b strings.Builder
+	b.Grow(len(generated) + 64)
+
 	for _, line := range lines {
-		trimmed := line
-		for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t') {
-			trimmed = trimmed[1:]
-		}
-		
+		trimmed := strings.TrimLeft(line, " \t")
+
 		if trimmed == "" || trimmed == ";" || trimmed == "}" || trimmed == "{" {
-			result += line + "\n"
+			b.WriteString(line)
+			b.WriteByte('\n')
 			continue
 		}
-		
-		needsSelfPrefix := false
+
+		// 查找赋值位置（跳过 ==）
 		assignPos := -1
 		for i := 0; i < len(trimmed); i++ {
 			if i+1 < len(trimmed) && trimmed[i] == '=' && trimmed[i+1] == '=' {
@@ -362,152 +351,71 @@ func (tg *TypeGenerator) generateStatementWithSelfPrefix(className string, stmt 
 				break
 			}
 		}
-		
+
 		if assignPos > 0 {
-			lhs := trimmed[:assignPos]
-			lhsTrimmed := lhs
-			for len(lhsTrimmed) > 0 && lhsTrimmed[len(lhsTrimmed)-1] == ' ' {
-				lhsTrimmed = lhsTrimmed[:len(lhsTrimmed)-1]
-			}
-			
-			isFieldRef := false
-			for _, field := range tg.getClassFields(className) {
-				if lhsTrimmed == field.Name {
-					isFieldRef = true
-					break
-				}
-			}
-			
-			if isFieldRef {
-				needsSelfPrefix = true
+			lhsTrimmed := strings.TrimRight(trimmed[:assignPos], " ")
+			if fieldSet[lhsTrimmed] {
+				// 需要添加 self-> 前缀
+				prefix := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+				b.WriteString(prefix)
+				b.WriteString("self->")
+				b.WriteString(lhsTrimmed)
+				b.WriteString(trimmed[assignPos:])
+				b.WriteByte('\n')
+				continue
 			}
 		}
-		
-		if assignPos > 0 {
-			lhs := trimmed[:assignPos]
-			lhsTrimmed := lhs
-			for len(lhsTrimmed) > 0 && lhsTrimmed[len(lhsTrimmed)-1] == ' ' {
-				lhsTrimmed = lhsTrimmed[:len(lhsTrimmed)-1]
-			}
-			
-			isFieldRef := false
-			for _, field := range tg.getClassFields(className) {
-				if lhsTrimmed == field.Name {
-					isFieldRef = true
-					break
-				}
-			}
-			
-			if isFieldRef {
-				needsSelfPrefix = true
-			}
-		}
-		
-		if needsSelfPrefix {
-			if assignPos > 0 {
-				lhs := trimmed[:assignPos]
-				lhsTrimmed := lhs
-				for len(lhsTrimmed) > 0 && lhsTrimmed[len(lhsTrimmed)-1] == ' ' {
-					lhsTrimmed = lhsTrimmed[:len(lhsTrimmed)-1]
-				}
-				rhs := trimmed[assignPos:]
-				prefix := ""
-				for i := 0; i < len(line); i++ {
-					if line[i] != ' ' && line[i] != '\t' {
-						break
-					}
-					prefix += string(line[i])
-				}
-				result += prefix + "self->" + lhsTrimmed + rhs + "\n"
-			} else {
-				result += line + "\n"
-			}
-		} else {
-			result += line + "\n"
-		}
+
+		b.WriteString(line)
+		b.WriteByte('\n')
 	}
-	
-	return result
+
+	return b.String()
 }
 
 func (tg *TypeGenerator) getMethodBodyWithSelfPrefix(className string, method *ast.MethodStatement) string {
-	code := ""
+	// 预计算类字段集合
+	fieldSet := make(map[string]bool)
+	for _, field := range tg.getClassFields(className) {
+		fieldSet[field.Name] = true
+	}
+
+	var b strings.Builder
 	for _, bodyStmt := range method.Body {
 		generated := tg.codegen.generateStatement(bodyStmt)
 		if generated == "" {
 			continue
 		}
-		
-		lines := []string{}
-		currentLine := ""
-		for i := 0; i < len(generated); i++ {
-			if generated[i] == '\n' {
-				if currentLine != "" {
-					lines = append(lines, currentLine)
-					currentLine = ""
-				} else {
-					lines = append(lines, "")
-				}
-			} else {
-				currentLine += string(generated[i])
-			}
-		}
-		if currentLine != "" {
-			lines = append(lines, currentLine)
-		}
-		
+
+		lines := strings.Split(generated, "\n")
 		for _, line := range lines {
-			trimmed := line
-			for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\t') {
-				trimmed = trimmed[1:]
-			}
-			
+			trimmed := strings.TrimLeft(line, " \t")
+
 			if trimmed == "" || trimmed == ";" || trimmed == "}" || trimmed == "{" {
-				code += line + "\n"
+				b.WriteString(line)
+				b.WriteByte('\n')
 				continue
 			}
-			
-			if len(trimmed) >= 6 && trimmed[:6] == "return" {
-				returnExpr := trimmed[6:]
-				// Remove trailing semicolon if present
-				if len(returnExpr) > 0 && returnExpr[len(returnExpr)-1] == ';' {
-					returnExpr = returnExpr[:len(returnExpr)-1]
+
+			if strings.HasPrefix(trimmed, "return") {
+				returnExpr := strings.TrimRight(trimmed[6:], "; ")
+				returnExpr = strings.TrimSpace(returnExpr)
+
+				prefix := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+				b.WriteString(prefix)
+				b.WriteString("return ")
+				if fieldSet[returnExpr] {
+					b.WriteString("self->")
 				}
-				returnExprTrimmed := returnExpr
-				for len(returnExprTrimmed) > 0 && returnExprTrimmed[len(returnExprTrimmed)-1] == ' ' {
-					returnExprTrimmed = returnExprTrimmed[:len(returnExprTrimmed)-1]
-				}
-				for len(returnExprTrimmed) > 0 && returnExprTrimmed[0] == ' ' {
-					returnExprTrimmed = returnExprTrimmed[1:]
-				}
-				
-				isFieldRef := false
-				for _, field := range tg.getClassFields(className) {
-					if returnExprTrimmed == field.Name {
-						isFieldRef = true
-						break
-					}
-				}
-				
-				prefix := ""
-				for i := 0; i < len(line); i++ {
-					if line[i] != ' ' && line[i] != '\t' {
-						break
-					}
-					prefix += string(line[i])
-				}
-				
-				if isFieldRef {
-					code += prefix + "return self->" + returnExprTrimmed + ";\n"
-				} else {
-					code += prefix + "return " + returnExprTrimmed + ";\n"
-				}
+				b.WriteString(returnExpr)
+				b.WriteString(";\n")
 			} else {
-				code += line + "\n"
+				b.WriteString(line)
+				b.WriteByte('\n')
 			}
 		}
 	}
-	return code
+	return b.String()
 }
 
 func (tg *TypeGenerator) getClassFields(className string) []*ast.FieldDeclaration {
@@ -588,6 +496,14 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
+		// In C, self-referential pointer fields need "struct" tag: e.g. struct ListNode* next
+		// because typedef hasn't completed yet inside the struct body
+		if strings.HasSuffix(fieldType, "*") {
+			baseType := strings.TrimSuffix(fieldType, "*")
+			if baseType == stmt.Name {
+				fieldType = "struct " + fieldType
+			}
+		}
 		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
 	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
@@ -617,6 +533,13 @@ func (tg *TypeGenerator) GenerateGenericStructStatement(stmt *ast.StructStatemen
 		fieldType := tg.eraseGenericType(field.Type)
 		if field.Nullable {
 			fieldType += "*"
+		}
+		// Self-referential pointer fields need "struct" tag in C
+		if strings.HasSuffix(fieldType, "*") {
+			baseType := strings.TrimSuffix(fieldType, "*")
+			if baseType == stmt.Name {
+				fieldType = "struct " + fieldType
+			}
 		}
 		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}

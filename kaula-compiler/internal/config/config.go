@@ -25,6 +25,8 @@ type Config struct {
 	TargetLanguage string `json:"target_language"`
 	// 标准库路径
 	StdlibPath string `json:"-"`
+	// 启用 SOR 所有权分析
+	SOR bool `json:"sor"`
 }
 
 // DefaultConfig 返回默认配置
@@ -65,6 +67,7 @@ func LoadConfig() (*Config, error) {
 	queueSize := flag.Int("queue", config.QueueSize, "队列大小")
 	spendableSize := flag.Int("spendable", config.SpendableSize, "可花费组件大小")
 	targetLanguage := flag.String("target", config.TargetLanguage, "目标语言")
+	sorMode := flag.Bool("sor", false, "启用 SOR (Sub-structural Ownership) 编译时所有权分析")
 
 	flag.Parse()
 
@@ -75,6 +78,7 @@ func LoadConfig() (*Config, error) {
 	config.QueueSize = *queueSize
 	config.SpendableSize = *spendableSize
 	config.TargetLanguage = *targetLanguage
+	config.SOR = *sorMode
 
 	// 确保路径是绝对路径
 	if !filepath.IsAbs(config.BasePath) {

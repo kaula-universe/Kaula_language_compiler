@@ -5,15 +5,11 @@
 #include <string.h>
 
 // ==================== 跨平台 snprintf 实现 ====================
-#if FORMAT_PLATFORM_WINDOWS
-    // Windows: 使用 snprintf_s (MSVC) 或 snprintf (MinGW)
-    #if defined(_MSC_VER)
-        #define format_snprintf _snprintf_s
-    #else
-        #define format_snprintf snprintf
-    #endif
+#if FORMAT_PLATFORM_WINDOWS && defined(_MSC_VER)
+    // MSVC: _snprintf_s 多一个 count 参数，用 _TRUNCATE 表示截断到缓冲区大小
+    #define format_snprintf(buf, size, fmt, ...) _snprintf_s(buf, size, _TRUNCATE, fmt, __VA_ARGS__)
 #else
-    // Unix/Linux/macOS: 使用标准 snprintf
+    // 标准 C / MinGW / Unix: 使用标准 snprintf
     #define format_snprintf snprintf
 #endif
 
