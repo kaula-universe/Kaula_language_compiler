@@ -570,6 +570,21 @@ func (cg *CodeGenerator) findFunctionByName(name string) *ast.FunctionStatement 
 	return nil
 }
 
+// findPrefixStatement 在程序中查找 prefix 语句
+func (cg *CodeGenerator) findPrefixStatement(name string) *ast.PrefixStatement {
+	if cg.program == nil {
+		return nil
+	}
+	for _, stmt := range cg.program.Statements {
+		if prefixStmt, ok := stmt.(*ast.PrefixStatement); ok {
+			if prefixStmt.Name == name {
+				return prefixStmt
+			}
+		}
+	}
+	return nil
+}
+
 // IsStructType 检查指定名称是否是已定义的结构体类型
 func (cg *CodeGenerator) IsStructType(name string) bool {
 	if cg.program == nil {

@@ -2509,7 +2509,7 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		p.nextToken()
 		if p.curTok.Type == lexer.TOKEN_IDENT {
 			ident := &ast.Identifier{
-				Name: "$" + p.curTok.Value,
+				Name: p.curTok.Value,
 				IsPrefixVar: true,
 			}
 			p.nextToken()

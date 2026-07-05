@@ -28,6 +28,8 @@ type SemanticAnalyzer struct {
 	prefixManager   *core.PrefixManager
 	rootTreeFound   bool
 	source          string // 源码用于错误上下文
+	prefixSymbolTables map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
+	currentPrefixTable *symbol.SymbolTable             // 当前 @前缀块 的符号表
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -86,6 +88,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		treeManager:     core.NewTreeManager(),
 		prefixManager:   core.NewPrefixManager(),
 		rootTreeFound:   false,
+		prefixSymbolTables: make(map[string]*symbol.SymbolTable),
 	}
 }
 
@@ -424,16 +427,33 @@ func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
 		sa.analyzeStatement(bodyStmt)
 	}
 
+	// 保存前缀的符号表，以便 @前缀块 中引用 $变量
+	sa.prefixSymbolTables[stmt.Name] = sa.symbolTable
+
 	sa.symbolTable = oldSymbolTable
 	sa.scope--
 }
 
 // analyzePrefixCallExpression 分析前缀调用表达式
-// 检测变量遮蔽等潜在问题
+// 分析调用体内的语句并检测变量遮蔽等潜在问题
 func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpression) {
 	// 获取前缀函数定义
 	funcDecl := sa.findFunctionDeclaration(expr.Name)
 	if funcDecl == nil {
+		// 尝试查找前缀定义（prefix 语句）
+		if prefixTable, ok := sa.prefixSymbolTables[expr.Name]; ok {
+			oldPrefixTable := sa.currentPrefixTable
+			sa.currentPrefixTable = prefixTable
+			for _, bodyStmt := range expr.Body {
+				sa.analyzeStatement(bodyStmt)
+			}
+			sa.currentPrefixTable = oldPrefixTable
+			return
+		}
+		// 如果找不到前缀定义，仍然需要分析调用体内的语句
+		for _, bodyStmt := range expr.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
 		return
 	}
 
@@ -441,6 +461,20 @@ func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpr
 	annotation := funcDecl.GetAnnotation()
 	if annotation != ast.TreeAnnotationPrefix &&
 		annotation != ast.TreeAnnotationPrefixTree {
+		// 不是前缀函数，但仍然需要分析调用体内的语句
+		// 尝试查找前缀定义（prefix 语句）
+		if prefixTable, ok := sa.prefixSymbolTables[expr.Name]; ok {
+			oldPrefixTable := sa.currentPrefixTable
+			sa.currentPrefixTable = prefixTable
+			for _, bodyStmt := range expr.Body {
+				sa.analyzeStatement(bodyStmt)
+			}
+			sa.currentPrefixTable = oldPrefixTable
+			return
+		}
+		for _, bodyStmt := range expr.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
 		return
 	}
 
@@ -452,6 +486,7 @@ func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpr
 
 	// 分析调用体内的语句，检测变量遮蔽
 	for _, bodyStmt := range expr.Body {
+		sa.analyzeStatement(bodyStmt)
 		sa.checkPrefixVariableShadowing(bodyStmt, prefixParams)
 	}
 }
@@ -899,6 +934,33 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 	if expr.Name == "null" || expr.Name == "true" || expr.Name == "false" {
 		return
 	}
+
+	// 处理前缀变量（$var）
+	if expr.IsPrefixVar {
+		if sa.currentPrefixTable != nil {
+			symbol := sa.currentPrefixTable.GetSymbol(expr.Name)
+			if symbol == nil {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("未定义的前缀变量: '$%s'", expr.Name),
+					expr.Pos.Line,
+					expr.Pos.Column,
+					"undefined_variable",
+					"请确保前缀变量已声明后再使用",
+				)
+			}
+			return
+		}
+		// 如果不在 @前缀块 中，$var 引用是不合法的
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("前缀变量 '$%s' 只能在 @前缀块 中使用", expr.Name),
+			expr.Pos.Line,
+			expr.Pos.Column,
+			"undefined_variable",
+			"请确保在 @前缀名 { } 块中使用 $ 前缀变量",
+		)
+		return
+	}
+
 	symbol := sa.symbolTable.GetSymbol(expr.Name)
 	if symbol == nil {
 		sa.errorCollector.AddSemanticError(

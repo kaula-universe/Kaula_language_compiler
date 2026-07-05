@@ -483,8 +483,21 @@ func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression
 	// 查找前缀函数的声明
 	funcDecl := sg.findFunctionDeclaration(e.Name)
 	if funcDecl == nil {
-		// 如果找不到函数声明，说明还没有解析到前缀定义，跳过
-		// 或者前缀来自导入
+		// 尝试查找 prefix 语句（非函数前缀）
+		prefixStmt := sg.codegen.findPrefixStatement(e.Name)
+		if prefixStmt != nil {
+			// 展开 prefix 语句的变量声明，然后追加调用体内的语句
+			sg.codegen.indent++
+			for _, bodyStmt := range prefixStmt.Body {
+				code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+			}
+			for _, bodyStmt := range e.Body {
+				code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+			}
+			sg.codegen.indent--
+			return code
+		}
+		// 如果找不到前缀定义，跳过
 		return ""
 	}
 
