@@ -41,7 +41,7 @@ VOModule* vo_create(int cache_max) {
     VOModule* vo = (VOModule*)fast_alloc(sizeof(VOModule));
     vo->cache_max = cache_max;
     vo->data_cache = (VOData*)fast_calloc(cache_max + 1, sizeof(VOData));
-    vo->code_cache = (void* (*)(void*))fast_calloc(cache_max + 1, sizeof(void*));
+    vo->code_cache = (void* (**)(void*))fast_calloc(cache_max + 1, sizeof(void*));
     vo->lru_head = -1;
     vo->lru_tail = -1;
     vo->access_counter = 0;

@@ -23,8 +23,13 @@ size_t g_kmm_v4_offset = 0;
 KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack = { .offsets = {0}, .depth = 0 };
 
 #ifdef KMM_V4_DEBUG
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+KMM_ATOMIC_TYPE g_kmm_v4_peak = 0;
+KMM_ATOMIC_TYPE g_kmm_v4_alloc_count = 0;
+#else
 size_t g_kmm_v4_peak = 0;
 size_t g_kmm_v4_alloc_count = 0;
+#endif
 #endif
 
 kmm_context_t g_kmm_ctx = { .is_initialized = false };

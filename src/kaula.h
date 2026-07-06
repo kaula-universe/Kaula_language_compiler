@@ -106,7 +106,7 @@ typedef struct VOData {
 typedef struct VOModule {
     int cache_max;
     VOData* data_cache;
-    void* (*code_cache)[VO_CACHE_SIZE + 1];
+    void* (**code_cache)(void*);
     int lru_head;
     int lru_tail;
     uint64_t access_counter;

@@ -254,8 +254,13 @@ extern size_t g_kmm_v4_offset;
 extern KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack;
 
 #ifdef KMM_V4_DEBUG
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+extern KMM_ATOMIC_TYPE g_kmm_v4_peak;
+extern KMM_ATOMIC_TYPE g_kmm_v4_alloc_count;
+#else
 extern size_t g_kmm_v4_peak;
 extern size_t g_kmm_v4_alloc_count;
+#endif
 #endif
 
 // 自动预取（根据硬件能力）
@@ -325,7 +330,6 @@ static inline void kmm_v4_offset_restore(size_t saved) {
 #endif
 }
 #endif
-}
 
 // ==================== 自动化分配策略 ====================
 // 智能选择分配路径（轻量实时：无锁CAS原子操作）
@@ -468,7 +472,7 @@ static inline void kmm_v4_scope_push(void) {
     kmm_scope_stack_t* stack = &g_kmm_v4_scope_stack;
     if (KMM_V4_UNLIKELY(stack->depth >= KMM_V4_MAX_SCOPE_DEPTH)) {
         #ifdef KMM_V4_DEBUG
-        fprintf(stderr, "KMM ERROR: Scope stack overflow (max depth: %zu)\n", KMM_V4_MAX_SCOPE_DEPTH);
+        fprintf(stderr, "KMM ERROR: Scope stack overflow (max depth: %d)\n", KMM_V4_MAX_SCOPE_DEPTH);
         #endif
         return;
     }
@@ -600,6 +604,15 @@ static inline size_t kmm_v4_available(void) {
 #endif
 
 // KMM_V4_ALLOC_ARRAY 已在智能宏系统区定义，此处不再重复
+
+// ==================== 兼容 API: malloc/calloc/free/strdup ====================
+// 为旧代码提供兼容接口，底层基于 bump allocator
+// 实现在 kmm_scoped_allocator_v4.c 中
+void* kmm_v4_malloc(size_t size);
+void* kmm_v4_calloc(size_t num, size_t size);
+void  kmm_v4_free(void* ptr);
+void* kmm_v4_strdup(const char* s);
+void  kmm_v4_init_pool(size_t reserved);
 
 // ==================== 编译期检查 ====================
 _Static_assert(KMM_V4_POOL_SIZE > 0, "Pool size must be positive");
