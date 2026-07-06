@@ -660,3 +660,88 @@ String string_builder_to_string(StringBuilder* sb) {
     if (!sb || !sb->buffer) return NULL;
     return string_copy(sb->buffer);
 }
+
+// ==================== KString（带长度缓存）====================
+
+KString kstring_create(const char* str) {
+    KString ks = {NULL, 0};
+    if (!str) return ks;
+    ks.len = strlen(str);
+    ks.data = (char*)kmm_v4_malloc(ks.len + 1);
+    if (ks.data) {
+        memcpy(ks.data, str, ks.len + 1);
+    }
+    return ks;
+}
+
+KString kstring_create_with_len(const char* str, size_t len) {
+    KString ks = {NULL, 0};
+    if (!str || len == 0) return ks;
+    ks.len = len;
+    ks.data = (char*)kmm_v4_malloc(len + 1);
+    if (ks.data) {
+        memcpy(ks.data, str, len);
+        ks.data[len] = '\0';
+    }
+    return ks;
+}
+
+KString kstring_copy(const KString* ks) {
+    KString result = {NULL, 0};
+    if (!ks || !ks->data) return result;
+    result.len = ks->len;
+    result.data = (char*)kmm_v4_malloc(ks->len + 1);
+    if (result.data) {
+        memcpy(result.data, ks->data, ks->len + 1);
+    }
+    return result;
+}
+
+void kstring_concat(KString* dst, const KString* src) {
+    if (!dst || !src || !src->data || !dst->data) return;
+    size_t new_len = dst->len + src->len;
+    char* new_data = (char*)kmm_v4_malloc(new_len + 1);
+    if (!new_data) return;
+    memcpy(new_data, dst->data, dst->len);
+    memcpy(new_data + dst->len, src->data, src->len);
+    new_data[new_len] = '\0';
+    dst->data = new_data;
+    dst->len = new_len;
+}
+
+void kstring_append(KString* ks, const char* str) {
+    if (!ks || !str) return;
+    size_t str_len = strlen(str);
+    if (str_len == 0) return;
+    size_t new_len = ks->len + str_len;
+    char* new_data = (char*)kmm_v4_malloc(new_len + 1);
+    if (!new_data) return;
+    if (ks->data) {
+        memcpy(new_data, ks->data, ks->len);
+    }
+    memcpy(new_data + ks->len, str, str_len);
+    new_data[new_len] = '\0';
+    ks->data = new_data;
+    ks->len = new_len;
+}
+
+size_t kstring_length(const KString* ks) {
+    return ks ? ks->len : 0;
+}
+
+bool kstring_equals(const KString* a, const KString* b) {
+    if (!a || !b) return a == b;
+    if (a->len != b->len) return false;
+    return memcmp(a->data, b->data, a->len) == 0;
+}
+
+int kstring_compare(const KString* a, const KString* b) {
+    if (!a || !b) return (a == NULL) ? -1 : 1;
+    int cmp = memcmp(a->data, b->data, (a->len < b->len) ? a->len : b->len);
+    if (cmp != 0) return cmp;
+    return (a->len > b->len) ? 1 : ((a->len < b->len) ? -1 : 0);
+}
+
+void kstring_free(KString* ks) {
+    (void)ks;
+}

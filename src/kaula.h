@@ -99,13 +99,17 @@ typedef struct VOData {
     void* (*code)(void*);
     int has_code;
     int code_index;
-    uint64_t last_access;
+    int lru_prev;
+    int lru_next;
 } VOData;
 
 typedef struct VOModule {
     int cache_max;
     VOData* data_cache;
     void* (*code_cache)[VO_CACHE_SIZE + 1];
+    int lru_head;
+    int lru_tail;
+    uint64_t access_counter;
 } VOModule;
 
 VOModule* vo_create(int cache_max);

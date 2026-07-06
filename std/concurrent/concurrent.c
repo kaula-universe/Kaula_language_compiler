@@ -130,16 +130,8 @@ bool mutex_trylock(Mutex mutex) {
 
 // 条件变量实现
 typedef struct {
-    // 等待该条件变量的线程计数
-    volatile int waiters_count;
-    // 用于保护 waiters_count 的临界区
 #ifdef _WIN32
-    CRITICAL_SECTION waiters_count_lock;
-    // 用于阻塞/唤醒线程的事件
-    HANDLE event;
-    // 保存等待中的互斥锁句柄
-    HANDLE* waiters_mutexes;
-    size_t waiters_mutexes_capacity;
+    CONDITION_VARIABLE cond;
 #else
     pthread_cond_t cond;
 #endif
@@ -149,11 +141,7 @@ Condition condition_create() {
 #ifdef _WIN32
     ConditionImpl* impl = (ConditionImpl*)kmm_v4_malloc(sizeof(ConditionImpl));
     if (impl) {
-        impl->waiters_count = 0;
-        InitializeCriticalSection(&impl->waiters_count_lock);
-        impl->event = CreateEvent(NULL, FALSE, FALSE, NULL);
-        impl->waiters_mutexes = NULL;
-        impl->waiters_mutexes_capacity = 0;
+        InitializeConditionVariable(&impl->cond);
     }
     return (Condition)impl;
 #else
@@ -166,16 +154,8 @@ Condition condition_create() {
 }
 
 void condition_destroy(Condition condition) {
-    // KMM 管理内存，无需手动释放
 #ifdef _WIN32
-    if (condition) {
-        ConditionImpl* impl = (ConditionImpl*)condition;
-        CloseHandle(impl->event);
-        DeleteCriticalSection(&impl->waiters_count_lock);
-        if (impl->waiters_mutexes) {
-            // KMM 管理内存，无需手动释放
-        }
-    }
+    (void)condition;
 #else
     if (condition) {
         pthread_cond_destroy((pthread_cond_t*)condition);
@@ -187,20 +167,7 @@ void condition_wait(Condition condition, Mutex mutex) {
 #ifdef _WIN32
     if (!condition || !mutex) return;
     ConditionImpl* impl = (ConditionImpl*)condition;
-    
-    // 增加等待计数
-    EnterCriticalSection(&impl->waiters_count_lock);
-    impl->waiters_count++;
-    LeaveCriticalSection(&impl->waiters_count_lock);
-    
-    // 释放互斥锁
-    mutex_unlock(mutex);
-    
-    // 等待信号
-    WaitForSingleObject(impl->event, INFINITE);
-    
-    // 重新获取互斥锁
-    mutex_lock(mutex);
+    SleepConditionVariableCS(&impl->cond, (CRITICAL_SECTION*)mutex, INFINITE);
 #else
     if (condition && mutex) {
         pthread_cond_wait((pthread_cond_t*)condition, (pthread_mutex_t*)mutex);
@@ -212,22 +179,7 @@ bool condition_timedwait(Condition condition, Mutex mutex, uint64_t timeout_ms) 
 #ifdef _WIN32
     if (!condition || !mutex) return false;
     ConditionImpl* impl = (ConditionImpl*)condition;
-    
-    // 增加等待计数
-    EnterCriticalSection(&impl->waiters_count_lock);
-    impl->waiters_count++;
-    LeaveCriticalSection(&impl->waiters_count_lock);
-    
-    // 释放互斥锁
-    mutex_unlock(mutex);
-    
-    // 等待信号或超时
-    DWORD result = WaitForSingleObject(impl->event, (DWORD)timeout_ms);
-    
-    // 重新获取互斥锁
-    mutex_lock(mutex);
-    
-    return result == WAIT_OBJECT_0;
+    return SleepConditionVariableCS(&impl->cond, (CRITICAL_SECTION*)mutex, (DWORD)timeout_ms) != FALSE;
 #else
     if (!condition || !mutex) return false;
     struct timespec ts;
@@ -246,13 +198,7 @@ void condition_signal(Condition condition) {
 #ifdef _WIN32
     if (!condition) return;
     ConditionImpl* impl = (ConditionImpl*)condition;
-    
-    EnterCriticalSection(&impl->waiters_count_lock);
-    if (impl->waiters_count > 0) {
-        SetEvent(impl->event);
-        impl->waiters_count--;
-    }
-    LeaveCriticalSection(&impl->waiters_count_lock);
+    WakeConditionVariable(&impl->cond);
 #else
     if (condition) {
         pthread_cond_signal((pthread_cond_t*)condition);
@@ -264,16 +210,7 @@ void condition_broadcast(Condition condition) {
 #ifdef _WIN32
     if (!condition) return;
     ConditionImpl* impl = (ConditionImpl*)condition;
-    
-    EnterCriticalSection(&impl->waiters_count_lock);
-    if (impl->waiters_count > 0) {
-        // 唤醒所有等待线程
-        for (int i = 0; i < impl->waiters_count; i++) {
-            SetEvent(impl->event);
-        }
-        impl->waiters_count = 0;
-    }
-    LeaveCriticalSection(&impl->waiters_count_lock);
+    WakeAllConditionVariable(&impl->cond);
 #else
     if (condition) {
         pthread_cond_broadcast((pthread_cond_t*)condition);
@@ -367,9 +304,11 @@ uint32_t semaphore_get_value(Semaphore semaphore) {
 // 读写锁实现
 ReadWriteLock rwlock_create() {
 #ifdef _WIN32
-    // 在Windows上使用互斥锁模拟读写锁
-    HANDLE mutex = CreateMutex(NULL, FALSE, NULL);
-    return (ReadWriteLock)mutex;
+    SRWLOCK* rwlock = (SRWLOCK*)kmm_v4_malloc(sizeof(SRWLOCK));
+    if (rwlock) {
+        InitializeSRWLock(rwlock);
+    }
+    return rwlock;
 #else
     pthread_rwlock_t* rwlock = (pthread_rwlock_t*)kmm_v4_malloc(sizeof(pthread_rwlock_t));
     if (rwlock) {
@@ -381,19 +320,20 @@ ReadWriteLock rwlock_create() {
 
 void rwlock_destroy(ReadWriteLock rwlock) {
 #ifdef _WIN32
-    CloseHandle((HANDLE)rwlock);
+    // SRWLOCK 不需要销毁
+    (void)rwlock;
 #else
     if (rwlock) {
         pthread_rwlock_destroy((pthread_rwlock_t*)rwlock);
-        // KMM 管理内存，无需手动释放
     }
 #endif
 }
 
 void rwlock_read_lock(ReadWriteLock rwlock) {
 #ifdef _WIN32
-    // 在Windows上使用互斥锁模拟读写锁
-    WaitForSingleObject((HANDLE)rwlock, INFINITE);
+    if (rwlock) {
+        AcquireSRWLockShared((SRWLOCK*)rwlock);
+    }
 #else
     if (rwlock) {
         pthread_rwlock_rdlock((pthread_rwlock_t*)rwlock);
@@ -403,8 +343,9 @@ void rwlock_read_lock(ReadWriteLock rwlock) {
 
 void rwlock_read_unlock(ReadWriteLock rwlock) {
 #ifdef _WIN32
-    // 在Windows上使用互斥锁模拟读写锁
-    ReleaseMutex((HANDLE)rwlock);
+    if (rwlock) {
+        ReleaseSRWLockShared((SRWLOCK*)rwlock);
+    }
 #else
     if (rwlock) {
         pthread_rwlock_unlock((pthread_rwlock_t*)rwlock);
@@ -414,8 +355,9 @@ void rwlock_read_unlock(ReadWriteLock rwlock) {
 
 void rwlock_write_lock(ReadWriteLock rwlock) {
 #ifdef _WIN32
-    // 在Windows上使用互斥锁模拟读写锁
-    WaitForSingleObject((HANDLE)rwlock, INFINITE);
+    if (rwlock) {
+        AcquireSRWLockExclusive((SRWLOCK*)rwlock);
+    }
 #else
     if (rwlock) {
         pthread_rwlock_wrlock((pthread_rwlock_t*)rwlock);
@@ -425,8 +367,9 @@ void rwlock_write_lock(ReadWriteLock rwlock) {
 
 void rwlock_write_unlock(ReadWriteLock rwlock) {
 #ifdef _WIN32
-    // 在Windows上使用互斥锁模拟读写锁
-    ReleaseMutex((HANDLE)rwlock);
+    if (rwlock) {
+        ReleaseSRWLockExclusive((SRWLOCK*)rwlock);
+    }
 #else
     if (rwlock) {
         pthread_rwlock_unlock((pthread_rwlock_t*)rwlock);
@@ -436,8 +379,8 @@ void rwlock_write_unlock(ReadWriteLock rwlock) {
 
 bool rwlock_try_read_lock(ReadWriteLock rwlock) {
 #ifdef _WIN32
-    // 在Windows上使用互斥锁模拟读写锁
-    return WaitForSingleObject((HANDLE)rwlock, 0) == WAIT_OBJECT_0;
+    if (!rwlock) return false;
+    return TryAcquireSRWLockShared((SRWLOCK*)rwlock) != FALSE;
 #else
     if (!rwlock) return false;
     return pthread_rwlock_tryrdlock((pthread_rwlock_t*)rwlock) == 0;
@@ -446,8 +389,8 @@ bool rwlock_try_read_lock(ReadWriteLock rwlock) {
 
 bool rwlock_try_write_lock(ReadWriteLock rwlock) {
 #ifdef _WIN32
-    // 在Windows上使用互斥锁模拟读写锁
-    return WaitForSingleObject((HANDLE)rwlock, 0) == WAIT_OBJECT_0;
+    if (!rwlock) return false;
+    return TryAcquireSRWLockExclusive((SRWLOCK*)rwlock) != FALSE;
 #else
     if (!rwlock) return false;
     return pthread_rwlock_trywrlock((pthread_rwlock_t*)rwlock) == 0;
@@ -508,7 +451,8 @@ typedef struct ThreadPoolImpl {
     Thread* threads;
     size_t thread_count;
     Task* tasks;
-    size_t task_count;
+    size_t task_head;
+    size_t task_tail;
     size_t task_capacity;
     Mutex mutex;
     Condition condition;
@@ -519,16 +463,15 @@ static void* thread_pool_worker(void* arg) {
     ThreadPoolImpl* pool = (ThreadPoolImpl*)arg;
     while (kaula_atomic_load((volatile int*)&pool->running)) {
         mutex_lock(pool->mutex);
-        while (pool->task_count == 0 && kaula_atomic_load((volatile int*)&pool->running)) {
+        while (pool->task_head == pool->task_tail && kaula_atomic_load((volatile int*)&pool->running)) {
             condition_wait(pool->condition, pool->mutex);
         }
         if (!kaula_atomic_load((volatile int*)&pool->running)) {
             mutex_unlock(pool->mutex);
             break;
         }
-        Task task = pool->tasks[0];
-        memmove(&pool->tasks[0], &pool->tasks[1], (pool->task_count - 1) * sizeof(Task));
-        pool->task_count--;
+        Task task = pool->tasks[pool->task_head];
+        pool->task_head = (pool->task_head + 1) % pool->task_capacity;
         mutex_unlock(pool->mutex);
         task.func(task.arg);
     }
@@ -542,7 +485,8 @@ ThreadPool thread_pool_create(size_t thread_count) {
         pool->threads = (Thread*)kmm_v4_malloc(thread_count * sizeof(Thread));
         pool->task_capacity = 1024;
         pool->tasks = (Task*)kmm_v4_malloc(pool->task_capacity * sizeof(Task));
-        pool->task_count = 0;
+        pool->task_head = 0;
+        pool->task_tail = 0;
         pool->mutex = mutex_create();
         pool->condition = condition_create();
         pool->running = true;
@@ -571,11 +515,29 @@ void thread_pool_add_task(ThreadPool pool, Task task) {
     ThreadPoolImpl* impl = (ThreadPoolImpl*)pool;
     if (impl) {
         mutex_lock(impl->mutex);
-        if (impl->task_count >= impl->task_capacity) {
-            impl->task_capacity *= 2;
-            impl->tasks = (Task*)kmm_v4_realloc(impl->tasks, impl->task_capacity * sizeof(Task));
+        size_t next_tail = (impl->task_tail + 1) % impl->task_capacity;
+        if (next_tail == impl->task_head) {
+            size_t new_capacity = impl->task_capacity * 2;
+            Task* new_tasks = (Task*)kmm_v4_malloc(new_capacity * sizeof(Task));
+            if (new_tasks) {
+                size_t count = (impl->task_tail >= impl->task_head) ? 
+                    (impl->task_tail - impl->task_head) :
+                    (impl->task_capacity - impl->task_head + impl->task_tail);
+                for (size_t i = 0; i < count; i++) {
+                    new_tasks[i] = impl->tasks[(impl->task_head + i) % impl->task_capacity];
+                }
+                impl->tasks = new_tasks;
+                impl->task_capacity = new_capacity;
+                impl->task_head = 0;
+                impl->task_tail = count;
+                next_tail = count + 1;
+            } else {
+                mutex_unlock(impl->mutex);
+                return;
+            }
         }
-        impl->tasks[impl->task_count++] = task;
+        impl->tasks[impl->task_tail] = task;
+        impl->task_tail = next_tail;
         condition_signal(impl->condition);
         mutex_unlock(impl->mutex);
     }
@@ -587,7 +549,7 @@ void thread_pool_wait_completion(ThreadPool pool) {
         bool done;
         do {
             mutex_lock(impl->mutex);
-            done = impl->task_count == 0;
+            done = impl->task_head == impl->task_tail;
             mutex_unlock(impl->mutex);
             if (!done) {
                 concurrent_sleep(1);

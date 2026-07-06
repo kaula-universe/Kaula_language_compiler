@@ -1,17 +1,13 @@
+#include "kaula.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-// 树系统：层次化数据结构
-
-// 树节点类型
 typedef enum TreeNodeType {
     NODE_TYPE_VALUE,
     NODE_TYPE_OBJECT,
     NODE_TYPE_ARRAY
 } TreeNodeType;
 
-// 树节点结构
 typedef struct TreeNode {
     char* key;
     TreeNodeType type;
@@ -23,24 +19,20 @@ typedef struct TreeNode {
     struct TreeNode* parent;
 } TreeNode;
 
-// 树系统结构
 typedef struct TreeSystem {
     TreeNode* root;
 } TreeSystem;
 
-// 创建树系统
 TreeSystem* create_tree_system() {
-    TreeSystem* system = (TreeSystem*)malloc(sizeof(TreeSystem));
+    TreeSystem* system = (TreeSystem*)kmm_v4_malloc(sizeof(TreeSystem));
     if (!system) return NULL;
     
-    // 创建根节点
-    system->root = (TreeNode*)malloc(sizeof(TreeNode));
+    system->root = (TreeNode*)kmm_v4_malloc(sizeof(TreeNode));
     if (!system->root) {
-        free(system);
         return NULL;
     }
     
-    system->root->key = strdup("");
+    system->root->key = kmm_v4_strdup("");
     system->root->type = NODE_TYPE_OBJECT;
     system->root->data.children = NULL;
     system->root->next = NULL;
@@ -49,11 +41,9 @@ TreeSystem* create_tree_system() {
     return system;
 }
 
-// 释放树节点
 void free_tree_node(TreeNode* node) {
     if (!node) return;
     
-    // 释放子节点
     if (node->type == NODE_TYPE_OBJECT || node->type == NODE_TYPE_ARRAY) {
         TreeNode* child = node->data.children;
         while (child) {
@@ -62,22 +52,15 @@ void free_tree_node(TreeNode* node) {
             child = next;
         }
     } else if (node->type == NODE_TYPE_VALUE) {
-        free(node->data.value);
+        (void)node->data.value;
     }
-    
-    free(node->key);
-    free(node);
 }
 
-// 销毁树系统
 void destroy_tree_system(TreeSystem* system) {
     if (!system) return;
-    
     free_tree_node(system->root);
-    free(system);
 }
 
-// 查找子节点
 TreeNode* find_tree_child(TreeNode* parent, const char* key) {
     if (!parent || !key || (parent->type != NODE_TYPE_OBJECT && parent->type != NODE_TYPE_ARRAY)) {
         return NULL;
@@ -94,12 +77,11 @@ TreeNode* find_tree_child(TreeNode* parent, const char* key) {
     return NULL;
 }
 
-// 创建树节点
 TreeNode* create_tree_node(const char* key, TreeNodeType type) {
-    TreeNode* node = (TreeNode*)malloc(sizeof(TreeNode));
+    TreeNode* node = (TreeNode*)kmm_v4_malloc(sizeof(TreeNode));
     if (!node) return NULL;
     
-    node->key = strdup(key);
+    node->key = kmm_v4_strdup(key);
     node->type = type;
     
     if (type == NODE_TYPE_OBJECT || type == NODE_TYPE_ARRAY) {
@@ -114,7 +96,6 @@ TreeNode* create_tree_node(const char* key, TreeNodeType type) {
     return node;
 }
 
-// 添加子节点
 int add_tree_child(TreeNode* parent, TreeNode* child) {
     if (!parent || !child || (parent->type != NODE_TYPE_OBJECT && parent->type != NODE_TYPE_ARRAY)) {
         return 0;
@@ -135,21 +116,18 @@ int add_tree_child(TreeNode* parent, TreeNode* child) {
     return 1;
 }
 
-// 设置节点值
 int set_tree_node_value(TreeNode* node, void* value) {
     if (!node || node->type != NODE_TYPE_VALUE) {
         return 0;
     }
     
     if (node->data.value) {
-        free(node->data.value);
     }
     
     node->data.value = value;
     return 1;
 }
 
-// 获取节点值
 void* get_tree_node_value(TreeNode* node) {
     if (!node || node->type != NODE_TYPE_VALUE) {
         return NULL;
@@ -158,7 +136,6 @@ void* get_tree_node_value(TreeNode* node) {
     return node->data.value;
 }
 
-// 递归查找节点
 TreeNode* find_tree_node(TreeNode* root, const char* path) {
     if (!root || !path) return NULL;
     
@@ -166,7 +143,7 @@ TreeNode* find_tree_node(TreeNode* root, const char* path) {
         return root;
     }
     
-    char* path_copy = strdup(path);
+    char* path_copy = kmm_v4_strdup(path);
     if (!path_copy) return NULL;
     
     char* token = strtok(path_copy, ".");
@@ -175,17 +152,14 @@ TreeNode* find_tree_node(TreeNode* root, const char* path) {
     while (token) {
         current = find_tree_child(current, token);
         if (!current) {
-            free(path_copy);
             return NULL;
         }
         token = strtok(NULL, ".");
     }
     
-    free(path_copy);
     return current;
 }
 
-// 打印树系统
 void print_tree_node(TreeNode* node, int depth) {
     if (!node) return;
     
@@ -232,7 +206,6 @@ void print_tree_node(TreeNode* node, int depth) {
     }
 }
 
-// 测试树系统
 void test_tree_system() {
     printf("=== 树系统测试 ===\n");
     
@@ -242,37 +215,31 @@ void test_tree_system() {
         return;
     }
     
-    // 创建对象节点
     TreeNode* user = create_tree_node("user", NODE_TYPE_OBJECT);
     add_tree_child(system->root, user);
     
-    // 添加子节点
     TreeNode* name = create_tree_node("name", NODE_TYPE_VALUE);
-    set_tree_node_value(name, strdup("Kaula"));
+    set_tree_node_value(name, kmm_v4_strdup("Kaula"));
     add_tree_child(user, name);
     
     TreeNode* age = create_tree_node("age", NODE_TYPE_VALUE);
-    set_tree_node_value(age, strdup("1"));
+    set_tree_node_value(age, kmm_v4_strdup("1"));
     add_tree_child(user, age);
     
-    // 创建数组节点
     TreeNode* skills = create_tree_node("skills", NODE_TYPE_ARRAY);
     add_tree_child(user, skills);
     
-    // 添加数组元素
     TreeNode* skill1 = create_tree_node("0", NODE_TYPE_VALUE);
-    set_tree_node_value(skill1, strdup("Programming"));
+    set_tree_node_value(skill1, kmm_v4_strdup("Programming"));
     add_tree_child(skills, skill1);
     
     TreeNode* skill2 = create_tree_node("1", NODE_TYPE_VALUE);
-    set_tree_node_value(skill2, strdup("Compiling"));
+    set_tree_node_value(skill2, kmm_v4_strdup("Compiling"));
     add_tree_child(skills, skill2);
     
-    // 打印树系统
     printf("\n树系统结构:\n");
     print_tree_node(system->root, 0);
     
-    // 测试查找节点
     printf("\n查找节点: user.name\n");
     TreeNode* node = find_tree_node(system->root, "user.name");
     if (node) {
@@ -281,23 +248,16 @@ void test_tree_system() {
         printf("未找到节点\n");
     }
     
-    // 测试修改节点值
     printf("\n修改节点值: user.age = 2\n");
     node = find_tree_node(system->root, "user.age");
     if (node) {
-        set_tree_node_value(node, strdup("2"));
+        set_tree_node_value(node, kmm_v4_strdup("2"));
         printf("修改后的值: %s\n", (char*)get_tree_node_value(node));
     }
     
-    // 打印修改后的树
     printf("\n修改后的树系统:\n");
     print_tree_node(system->root, 0);
     
     destroy_tree_system(system);
     printf("\n树系统测试完成\n");
-}
-
-int main() {
-    test_tree_system();
-    return 0;
 }

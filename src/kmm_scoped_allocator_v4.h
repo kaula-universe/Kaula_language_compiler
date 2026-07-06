@@ -269,6 +269,64 @@ extern size_t g_kmm_v4_alloc_count;
 #define KMM_V4_LIKELY(x)   __builtin_expect(!!(x), 1)
 #define KMM_V4_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
+// ==================== 批量分配 API（编译器生成，减少原子操作次数）====================
+
+#ifndef KMM_V4_BUMP_IMPL
+// kmm_v4_bump: 批量分配，单次原子加法分配 total_size 字节，返回起始地址
+// 用于编译器将同一 scope 内的多次 malloc 合并为一次分配
+static inline void* kmm_v4_bump(size_t total_size) {
+    const size_t mask = KMM_V4_ALIGNMENT - 1;
+    size_t aligned_size = (total_size + mask) & ~mask;
+
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    size_t offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+    size_t new_offset;
+    do {
+        new_offset = offset + aligned_size;
+        if (KMM_V4_UNLIKELY(new_offset > g_kmm_v4_pool_capacity)) {
+            return NULL;
+        }
+    } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS(g_kmm_v4_offset, offset, new_offset)));
+
+    kmm_v4_pool_commit(new_offset);
+    return g_kmm_v4_pool + offset;
+#else
+    size_t offset = g_kmm_v4_offset;
+    size_t new_offset = offset + aligned_size;
+
+    if (KMM_V4_LIKELY(new_offset <= g_kmm_v4_pool_capacity)) {
+        g_kmm_v4_offset = new_offset;
+        kmm_v4_pool_commit(new_offset);
+        return g_kmm_v4_pool + offset;
+    }
+    return NULL;
+#endif
+}
+#endif
+
+#ifndef KMM_V4_OFFSET_SAVE_IMPL
+// kmm_v4_offset_save: 保存当前 offset（用于 scope 优化）
+static inline size_t kmm_v4_offset_save(void) {
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    return KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+#else
+    return g_kmm_v4_offset;
+#endif
+}
+#endif
+
+#ifndef KMM_V4_OFFSET_RESTORE_IMPL
+// kmm_v4_offset_restore: 直接恢复 offset（跳过 scope 栈，用于简单 scope 模式）
+static inline void kmm_v4_offset_restore(size_t saved) {
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    KMM_ATOMIC_STORE(g_kmm_v4_offset, saved);
+#else
+    g_kmm_v4_offset = saved;
+#endif
+}
+#endif
+}
+
 // ==================== 自动化分配策略 ====================
 // 智能选择分配路径（轻量实时：无锁CAS原子操作）
 static inline void* kmm_v4_alloc_auto(size_t size) {

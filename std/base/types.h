@@ -51,8 +51,11 @@ typedef intptr_t ssize_t;
 typedef ssize_t ssize_t;
 #endif
 
-// 空类型
-typedef void void_t;
+// 字符串类型（带长度缓存，避免重复 strlen）
+typedef struct KString {
+    char* data;
+    size_t len;
+} KString;
 
 // 类型常量（避免与Windows定义冲突）
 #ifndef TRUE

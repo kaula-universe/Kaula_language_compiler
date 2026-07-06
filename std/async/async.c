@@ -1,5 +1,6 @@
 #include "async.h"
 #include "../memory/memory.h"
+#include "../concurrent/concurrent.h"
 #include <string.h>
 #include <stdatomic.h>
 
@@ -19,6 +20,7 @@ typedef struct LightAsyncLoop {
     _Atomic int count;           // 任务计数
     _Atomic int running;          // 运行标志
     _Atomic int worker_active;    // 活跃worker数
+    ThreadPool thread_pool;       // 线程池
 } LightAsyncLoop;
 
 // 创建轻量级异步事件循环
@@ -43,12 +45,16 @@ LightAsyncLoop* light_async_loop_create() {
     atomic_store_explicit(&loop->running, 0, memory_order_release);
     atomic_store_explicit(&loop->worker_active, 0, memory_order_release);
 
+    loop->thread_pool = thread_pool_create(concurrent_get_processor_count());
+
     return loop;
 }
 
 // 销毁轻量级异步事件循环
 void light_async_loop_destroy(LightAsyncLoop* loop) {
-    // KMM 管理内存，无需手动释放
+    if (loop && loop->thread_pool) {
+        thread_pool_destroy(loop->thread_pool);
+    }
     (void)loop;
 }
 
@@ -83,8 +89,15 @@ int light_async_loop_add(LightAsyncLoop* loop, void* (*func)(void*), void* arg) 
     return 1;
 }
 
+static void async_task_wrapper(void* arg) {
+    AsyncNode* node = (AsyncNode*)arg;
+    atomic_store_explicit(&node->status, 1, memory_order_release);
+    node->result = node->func(node->arg);
+    atomic_store_explicit(&node->status, 2, memory_order_release);
+}
+
 // 获取并执行下一个任务（无锁Michael-Scott队列）
-// 返回 1 表示执行了任务，0 表示队列空
+// 返回 1 表示分发了任务，0 表示队列空
 int light_async_loop_poll(LightAsyncLoop* loop) {
     if (!loop) return 0;
 
@@ -120,13 +133,8 @@ int light_async_loop_poll(LightAsyncLoop* loop) {
 
     atomic_fetch_sub_explicit(&loop->count, 1, memory_order_acq_rel);
 
-    atomic_store_explicit(&next->status, 1, memory_order_release);
-
-    next->result = next->func(next->arg);
-
-    atomic_store_explicit(&next->status, 2, memory_order_release);
-
-    // KMM 管理内存，无需手动释放
+    Task task = {async_task_wrapper, next};
+    thread_pool_add_task(loop->thread_pool, task);
 
     return 1;
 }

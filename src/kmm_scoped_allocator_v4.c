@@ -105,6 +105,27 @@ void kmm_v4_free(void* ptr) {
 void* kmm_v4_realloc(void* ptr, size_t size) {
     if (!ptr) return kmm_v4_malloc(size);
     if (size == 0) return NULL;
+    
+    size_t ptr_offset = (uint8_t*)ptr - g_kmm_v4_pool;
+    #if KMM_THREAD_SAFETY_LEVEL >= 1
+    size_t current_offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+    #else
+    size_t current_offset = g_kmm_v4_offset;
+    #endif
+    
+    if (ptr_offset + size >= current_offset) {
+        size_t new_offset = ptr_offset + size;
+        if (new_offset <= g_kmm_v4_pool_capacity) {
+            kmm_v4_pool_commit(new_offset);
+            #if KMM_THREAD_SAFETY_LEVEL >= 1
+            KMM_ATOMIC_STORE(g_kmm_v4_offset, new_offset);
+            #else
+            g_kmm_v4_offset = new_offset;
+            #endif
+            return ptr;
+        }
+    }
+    
     void* p = kmm_v4_malloc(size);
     if (p) memcpy(p, ptr, size);
     return p;
@@ -114,7 +135,14 @@ __attribute__((used))
 void* kmm_v4_calloc(size_t count, size_t size) {
     size_t total = count * size;
     void* p = kmm_v4_malloc(total);
-    if (p) memset(p, 0, total);
+    if (p) {
+        size_t ptr_offset = (uint8_t*)p - g_kmm_v4_pool;
+        if (ptr_offset < g_committed_bytes) {
+            size_t overlap_end = ptr_offset + total;
+            size_t bytes_to_zero = (overlap_end < g_committed_bytes) ? total : (g_committed_bytes - ptr_offset);
+            memset(p, 0, bytes_to_zero);
+        }
+    }
     return p;
 }
 

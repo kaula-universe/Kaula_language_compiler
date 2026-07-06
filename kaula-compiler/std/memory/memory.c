@@ -11,6 +11,9 @@
 #define KMM_V4_RESET_IMPL
 #define KMM_V4_USAGE_IMPL
 #define KMM_V4_AVAILABLE_IMPL
+#define KMM_V4_BUMP_IMPL
+#define KMM_V4_OFFSET_SAVE_IMPL
+#define KMM_V4_OFFSET_RESTORE_IMPL
 
 #include "../../src/kmm_scoped_allocator_v4.h"
 #include "../../src/kaula.h"
@@ -94,6 +97,22 @@ void kmm_v4_scope_enter(void) {
 
 void kmm_v4_scope_exit(void) {
     kmm_v4_scope_pop();
+}
+
+/* ============================================================================
+ * 批量分配 API（编译器生成，减少原子操作次数）
+ * ============================================================================ */
+
+void* kmm_v4_bump(size_t total_size) {
+    return kmm_v4_bump_inline(total_size);
+}
+
+size_t kmm_v4_offset_save(void) {
+    return kmm_v4_offset_save_inline();
+}
+
+void kmm_v4_offset_restore(size_t saved) {
+    kmm_v4_offset_restore_inline(saved);
 }
 
 /* ============================================================================

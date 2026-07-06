@@ -81,7 +81,16 @@ extern bool string_ends_with(const String str, const String suffix);
 extern size_t string_count(const String str, char c);
 extern size_t string_count_string(const String str, const String substr);
 
-// 正则表达式匹配 (使用平台正则库)
+// KString 操作函数（带长度缓存，避免重复 strlen）
+extern KString kstring_create(const char* str);
+extern KString kstring_create_with_len(const char* str, size_t len);
+extern KString kstring_copy(const KString* ks);
+extern void kstring_concat(KString* dst, const KString* src);
+extern void kstring_append(KString* ks, const char* str);
+extern size_t kstring_length(const KString* ks);
+extern bool kstring_equals(const KString* a, const KString* b);
+extern int kstring_compare(const KString* a, const KString* b);
+extern void kstring_free(KString* ks);
 extern bool string_match_regex(const String str, const String pattern);
 extern size_t string_match_regex_offset(const String str, const String pattern, size_t start_offset);
 extern String* string_find_all_regex(const String str, const String pattern, size_t* count);
