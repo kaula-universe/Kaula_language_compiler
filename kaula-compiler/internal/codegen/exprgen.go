@@ -409,8 +409,17 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	if memberAccess, ok := e.Function.(*ast.MemberAccessExpression); ok {
 		return eg.generateMethodCall(memberAccess, e.Args)
 	}
-	
+
 	funcName := eg.GenerateExpression(e.Function)
+
+	// 自动将 std_malloc 重写为 kmm_v4_alloc_auto（当外层已有 KMM scope 时）
+	// 这样内存会在作用域结束时自动回收，无需手动 free
+	if eg.codegen.IsInKMMScope() && (funcName == "std_malloc" || funcName == "std.memory.std_malloc") {
+		if len(e.Args) == 1 {
+			sizeArg := eg.GenerateExpression(e.Args[0])
+			return "kmm_v4_alloc_auto(" + sizeArg + ")"
+		}
+	}
 	
 	// 检查是否是结构体构造函数调用（无参数的类型名调用）
 	if ident, ok := e.Function.(*ast.Identifier); ok && len(e.Args) == 0 && len(e.TypeArgs) == 0 {
@@ -514,10 +523,18 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 					eg.codegen.usedThirdPartyLibs[lib.Name] = true
 				}
 				
-				// 使用 GetCFunctionName 自动添加模块前缀
-				cFuncName := eg.codegen.stdlibConfig.GetCFunctionName(stdlibKey, methodName)
-				
-				code := cFuncName + "("
+			// 使用 GetCFunctionName 自动添加模块前缀
+			cFuncName := eg.codegen.stdlibConfig.GetCFunctionName(stdlibKey, methodName)
+
+			// 自动将 std_malloc 重写为 kmm_v4_alloc_auto（当外层已有 KMM scope 时）
+			if eg.codegen.IsInKMMScope() && (cFuncName == "std_malloc" || methodName == "std_malloc") {
+				if len(args) == 1 {
+					sizeArg := eg.GenerateExpression(args[0])
+					return "kmm_v4_alloc_auto(" + sizeArg + ")"
+				}
+			}
+
+			code := cFuncName + "("
 				for i, arg := range args {
 					if i > 0 {
 						code += ", "

@@ -3,104 +3,242 @@ package config
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
-// Config 表示编译器的配置
+// Config 表示编译器的完整配置
 type Config struct {
-	// 基础路径
-	BasePath string `json:"base_path"`
-	// 模板路径
+	// ====== 基础路径 ======
+	BasePath     string `json:"base_path"`
 	TemplatePath string `json:"template_path"`
-	// 包含路径
-	IncludePath string `json:"include_path"`
-	// VO 缓存大小
-	VOCacheSize int `json:"vo_cache_size"`
-	// 队列大小
-	QueueSize int `json:"queue_size"`
-	// 可花费组件大小
-	SpendableSize int `json:"spendable_size"`
-	// 目标语言
+	IncludePath  string `json:"include_path"`
+	StdlibPath   string `json:"stdlib_path,omitempty"`
+	PkglibPath   string `json:"pkglib_path,omitempty"`
+	SourceDir    string `json:"source_dir,omitempty"`
+	OutputDir    string `json:"output_dir,omitempty"`
+
+	// ====== 目标语言 ======
 	TargetLanguage string `json:"target_language"`
-	// 标准库路径
-	StdlibPath string `json:"-"`
-	// 启用 SOR 所有权分析
-	SOR bool `json:"sor"`
+
+	// ====== 优化选项 ======
+	OptLevel string `json:"opt_level,omitempty"` // O0/O1/O2/O3, 覆盖所有默认值
+
+	// ====== 编译模式 ======
+	SOR     bool `json:"sor"`
+	Release bool `json:"release,omitempty"`
+
+	// ====== 缓存选项 ======
+	NoCache bool `json:"no_cache,omitempty"`
+
+	// ====== VO / 队列 / 可花费组件 ======
+	VOCacheSize   int `json:"vo_cache_size"`
+	QueueSize     int `json:"queue_size"`
+	SpendableSize int `json:"spendable_size"`
+
+	// ====== 资源限制 ======
+	MemoryLimitMB int `json:"memory_limit_mb,omitempty"` // 内存限制 (MB)
+	TimeoutSec    int `json:"timeout_sec,omitempty"`      // 超时限制 (秒)
+
+	// ====== 编译器选项 ======
+	CFlags   []string `json:"c_flags,omitempty"`   // 额外的 C 编译器参数
+	CDefines []string `json:"c_defines,omitempty"` // 额外的 C 宏定义 (#define)
+	CLibs    []string `json:"c_libs,omitempty"`    // 额外的链接库
+
+	// ====== 源码映射 ======
+	SourceMap bool `json:"sourcemap,omitempty"`
+
+	// ====== 静态分析 ======
+	AnalyzePkg    string `json:"analyze_pkg,omitempty"`
+	AnalyzePkgAll bool   `json:"analyze_pkg_all,omitempty"`
 }
 
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
-	// 获取当前工作目录作为默认BasePath
 	basePath, _ := os.Getwd()
 	return &Config{
-		BasePath:        basePath,
-		TemplatePath:    "templates",
-		IncludePath:     "../std",
-		VOCacheSize:     2048,
-		QueueSize:       100,
-		SpendableSize:   10,
-		TargetLanguage:  "c",
+		BasePath:       basePath,
+		TemplatePath:   "templates",
+		IncludePath:    "../std",
+		TargetLanguage: "c",
+		VOCacheSize:    2048,
+		QueueSize:      100,
+		SpendableSize:  10,
+		MemoryLimitMB:  4096,
+		TimeoutSec:     120,
 	}
+}
+
+// ResolveOptLevel 根据编译模式确定优化级别
+// 优先级: --opt 手动指定 > --sor > --release > 默认 O2
+func (cfg *Config) ResolveOptLevel(optOverride string) string {
+	level := "-O2"
+
+	if cfg.SOR {
+		level = "-O3"
+	}
+	if cfg.Release {
+		level = "-O3"
+	}
+	if optOverride != "" {
+		level = "-" + optOverride
+	}
+
+	// 验证优化级别
+	valid := map[string]bool{"-O0": true, "-O1": true, "-O2": true, "-O3": true}
+	if !valid[level] {
+		level = "-O2"
+	}
+	return level
+}
+
+// OutputFile 返回可执行文件的输出路径
+func (cfg *Config) OutputFile(inputFile string) string {
+	inputDir := filepath.Dir(inputFile)
+	inputBase := filepath.Base(inputFile)
+	inputName := inputBase[:len(inputBase)-3]
+
+	if cfg.OutputDir != "" {
+		inputDir = cfg.OutputDir
+	}
+
+	if runtime.GOOS == "windows" {
+		return filepath.Join(inputDir, inputName+".exe")
+	}
+	return filepath.Join(inputDir, inputName)
 }
 
 // LoadConfig 从配置文件和命令行参数加载配置
 func LoadConfig() (*Config, error) {
-	// 加载默认配置
+	// 1. 加载默认配置
 	config := DefaultConfig()
 
-	// 从配置文件加载
-	configFile := "kaula.json"
-	if _, err := os.Stat(configFile); err == nil {
-		data, err := os.ReadFile(configFile)
-		if err == nil {
-			if err := json.Unmarshal(data, config); err != nil {
-				// 配置文件解析失败，使用默认配置
-			}
-		}
+	// 2. 从 kaula.json 加载项目配置
+	if err := loadProjectConfig(config); err != nil {
+		return nil, fmt.Errorf("failed to load kaula.json: %w", err)
 	}
 
-	// 命令行参数覆盖
-	templatePath := flag.String("template", config.TemplatePath, "模板路径")
-	includePath := flag.String("include", config.IncludePath, "包含路径")
-	voCacheSize := flag.Int("vo-cache", config.VOCacheSize, "VO 缓存大小")
-	queueSize := flag.Int("queue", config.QueueSize, "队列大小")
-	spendableSize := flag.Int("spendable", config.SpendableSize, "可花费组件大小")
-	targetLanguage := flag.String("target", config.TargetLanguage, "目标语言")
-	sorMode := flag.Bool("sor", false, "启用 SOR (Sub-structural Ownership) 编译时所有权分析")
+	// 3. 从命令行 flag 加载（覆盖配置文件）
+	loadFlags(config)
+
+	// 4. 规范化路径
+	normalizePaths(config)
+
+	return config, nil
+}
+
+// loadProjectConfig 从 kaula.json 加载项目配置
+func loadProjectConfig(config *Config) error {
+	configFile := "kaula.json"
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 配置文件不存在，使用默认值
+		}
+		return err
+	}
+	if err := json.Unmarshal(data, config); err != nil {
+		return fmt.Errorf("kaula.json parse error: %w", err)
+	}
+	return nil
+}
+
+// loadFlags 从命令行参数加载配置
+func loadFlags(config *Config) {
+	// 基础路径
+	flag.StringVar(&config.TemplatePath, "template", config.TemplatePath, "模板路径")
+	flag.StringVar(&config.IncludePath, "include", config.IncludePath, "包含路径")
+	flag.StringVar(&config.StdlibPath, "stdlib", config.StdlibPath, "标准库路径")
+	flag.StringVar(&config.PkglibPath, "pkglib", config.PkglibPath, "第三方库路径")
+	flag.StringVar(&config.SourceDir, "source-dir", config.SourceDir, "源文件目录")
+	flag.StringVar(&config.OutputDir, "output-dir", config.OutputDir, "输出目录")
+
+	// 目标与优化
+	flag.StringVar(&config.TargetLanguage, "target", config.TargetLanguage, "目标语言")
+	flag.StringVar(&config.OptLevel, "opt", config.OptLevel, "优化级别 (O0/O1/O2/O3)")
+
+	// 编译模式
+	flag.BoolVar(&config.SOR, "sor", config.SOR, "启用 SOR 编译时所有权分析")
+	flag.BoolVar(&config.Release, "release", config.Release, "Release 模式 (-O3)")
+
+	// 缓存
+	flag.BoolVar(&config.NoCache, "no-cache", config.NoCache, "禁用增量编译缓存")
+
+	// 运行时配置
+	flag.IntVar(&config.VOCacheSize, "vo-cache", config.VOCacheSize, "VO 缓存大小")
+	flag.IntVar(&config.QueueSize, "queue", config.QueueSize, "队列大小")
+	flag.IntVar(&config.SpendableSize, "spendable", config.SpendableSize, "可花费组件大小")
+
+	// 资源限制
+	flag.IntVar(&config.MemoryLimitMB, "memory-limit", config.MemoryLimitMB, "内存限制 (MB)")
+	flag.IntVar(&config.TimeoutSec, "timeout", config.TimeoutSec, "超时限制 (秒)")
+
+	// C 编译器选项
+	cFlags := flag.String("cflags", "", "额外的 C 编译器参数 (空格分隔)")
+	cDefines := flag.String("defines", "", "额外的 C 宏定义 (逗号分隔)")
+	cLibs := flag.String("libs", "", "额外的链接库 (逗号分隔)")
+
+	// 源码映射
+	flag.BoolVar(&config.SourceMap, "sourcemap", config.SourceMap, "生成源码映射文件")
 
 	flag.Parse()
 
-	// 更新配置
-	config.TemplatePath = *templatePath
-	config.IncludePath = *includePath
-	config.VOCacheSize = *voCacheSize
-	config.QueueSize = *queueSize
-	config.SpendableSize = *spendableSize
-	config.TargetLanguage = *targetLanguage
-	config.SOR = *sorMode
+	// 解析逗号/空格分隔的列表
+	if *cFlags != "" {
+		config.CFlags = splitList(*cFlags)
+	}
+	if *cDefines != "" {
+		config.CDefines = splitList(*cDefines)
+	}
+	if *cLibs != "" {
+		config.CLibs = splitList(*cLibs)
+	}
+}
 
-	// 确保路径是绝对路径
-	if !filepath.IsAbs(config.BasePath) {
-		absPath, err := filepath.Abs(config.BasePath)
-		if err == nil {
-			config.BasePath = absPath
+// normalizePaths 确保路径是绝对路径
+func normalizePaths(config *Config) {
+	paths := []*string{
+		&config.BasePath,
+		&config.TemplatePath,
+		&config.IncludePath,
+		&config.StdlibPath,
+		&config.PkglibPath,
+		&config.SourceDir,
+		&config.OutputDir,
+	}
+	for _, p := range paths {
+		if *p != "" && !filepath.IsAbs(*p) {
+			if abs, err := filepath.Abs(*p); err == nil {
+				*p = abs
+			}
 		}
 	}
+}
 
-	if !filepath.IsAbs(config.TemplatePath) {
-		absPath, err := filepath.Abs(config.TemplatePath)
-		if err == nil {
-			config.TemplatePath = absPath
-		}
+// splitList 按逗号和空格分割字符串
+func splitList(s string) []string {
+	s = strings.ReplaceAll(s, ",", " ")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
 	}
+	parts := strings.Fields(s)
+	return parts
+}
 
-	if !filepath.IsAbs(config.IncludePath) {
-		absPath, err := filepath.Abs(config.IncludePath)
-		if err == nil {
-			config.IncludePath = absPath
-		}
+// SaveConfig 将配置保存到 kaula.json
+func SaveConfig(config *Config, path string) error {
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
 	}
+	return os.WriteFile(path, data, 0644)
+}
 
-	return config, nil
+// GenerateDefaultConfig 生成默认配置文件并写入磁盘
+func GenerateDefaultConfig(path string) error {
+	return SaveConfig(DefaultConfig(), path)
 }

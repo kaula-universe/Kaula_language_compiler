@@ -97,14 +97,20 @@ func (ipa *InterProcAnalyzer) AnalyzeInterProc(stmts []Stmt, tracker *OwnershipT
 	}
 
 	// 第一遍：构建调用图
-	for _, stmt := range stmts {
-		if stmt.Kind == StmtCall {
-			if stmt.FuncName != "" {
-				ipa.callGraph = append(ipa.callGraph, CallGraphEdge{
-					Caller: "main", // 简化：顶层调用者
-					Callee: stmt.FuncName,
-					Line:   stmt.Line,
-				})
+	// 从 AST 中提取函数体内的调用，确定实际的 caller
+	if astProgram != nil {
+		ipa.buildCallGraphFromAST(astProgram)
+	} else {
+		// 回退到简化模型：所有调用者为 "main"
+		for _, stmt := range stmts {
+			if stmt.Kind == StmtCall {
+				if stmt.FuncName != "" {
+					ipa.callGraph = append(ipa.callGraph, CallGraphEdge{
+						Caller: "main",
+						Callee: stmt.FuncName,
+						Line:   stmt.Line,
+					})
+				}
 			}
 		}
 	}
@@ -136,9 +142,83 @@ func (ipa *InterProcAnalyzer) AnalyzeInterProc(stmts []Stmt, tracker *OwnershipT
 	}
 
 	return &InterProcResult{
-		FuncSigs:      ipa.sigs,
-		CallGraph:     ipa.callGraph,
+		FuncSigs:       ipa.sigs,
+		CallGraph:      ipa.callGraph,
 		TransferPoints: ipa.transfers,
+	}
+}
+
+// buildCallGraphFromAST 从 AST 构建完整的调用图
+// 识别每个函数体内的函数调用，建立 caller -> callee 边
+func (ipa *InterProcAnalyzer) buildCallGraphFromAST(program *ast.Program) {
+	if program == nil {
+		return
+	}
+
+	for _, stmt := range program.Statements {
+		if fn, ok := stmt.(*ast.FunctionStatement); ok {
+			// 遍历函数体，找到所有函数调用
+			ipa.scanFuncBodyForCalls(fn.Name, fn.Body)
+		}
+	}
+}
+
+// scanFuncBodyForCalls 扫描函数体中的函数调用
+func (ipa *InterProcAnalyzer) scanFuncBodyForCalls(callerName string, body []ast.Statement) {
+	for _, stmt := range body {
+		if stmt == nil {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.ExpressionStatement:
+			if s.Expression != nil {
+				if callExpr, ok := s.Expression.(*ast.CallExpression); ok {
+					calleeName := extractFuncName(callExpr.Function)
+					if calleeName != "" {
+						ipa.callGraph = append(ipa.callGraph, CallGraphEdge{
+							Caller: callerName,
+							Callee: calleeName,
+							Line:   s.Pos.Line,
+						})
+					}
+				}
+			}
+		case *ast.FunctionStatement:
+			// 嵌套函数（如果有）
+			if s != nil {
+				ipa.scanFuncBodyForCalls(callerName, s.Body)
+			}
+		case *ast.IfStatement:
+			if s != nil {
+				ipa.scanFuncBodyForCalls(callerName, s.Body)
+				ipa.scanFuncBodyForCalls(callerName, s.Else)
+			}
+		case *ast.WhileStatement:
+			if s != nil {
+				ipa.scanFuncBodyForCalls(callerName, s.Body)
+			}
+		case *ast.ForStatement:
+			if s != nil {
+				ipa.scanFuncBodyForCalls(callerName, s.Body)
+			}
+		case *ast.BlockStatement:
+			if s != nil {
+				ipa.scanFuncBodyForCalls(callerName, s.Statements)
+			}
+		case *ast.ReturnStatement:
+			if s != nil && s.Value != nil {
+				if callExpr, ok := s.Value.(*ast.CallExpression); ok {
+					calleeName := extractFuncName(callExpr.Function)
+					if calleeName != "" {
+						ipa.callGraph = append(ipa.callGraph, CallGraphEdge{
+							Caller: callerName,
+							Callee: calleeName,
+							Line:   s.Pos.Line,
+						})
+					}
+				}
+			}
+		}
 	}
 }
 

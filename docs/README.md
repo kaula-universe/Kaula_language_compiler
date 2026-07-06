@@ -1,0 +1,52 @@
+# Kaula 编译器文档
+
+本目录包含 Kaula 编译器各组件的详细文档。
+
+## 文档索引
+
+### 架构概览
+
+- [编译器架构](compiler-architecture.md) - 整体架构、编译流程、目录结构
+- [编译配置文件](build-config.md) - kaula.json 配置系统、所有参数说明
+
+### 编译器组件
+
+- [词法分析器 (Lexer)](lexer.md) - Token 类型、扫描策略、API
+- [语法分析器 (Parser)](parser.md) - 语法规则、递归下降解析、错误恢复
+- [抽象语法树 (AST)](ast.md) - 节点类型、层次结构、遍历机制
+- [语义分析](semantic-analysis.md) - 两遍分析、类型检查、符号管理
+- [代码生成器 (Codegen)](code-generation.md) - 模块化生成、模板系统、SOR 集成
+- [符号表 (Symbol Table)](symbol-table.md) - 层次化作用域、泛型支持
+
+### 编译器系统
+
+- [增量编译缓存](cache-system.md) - SHA-256 验证、原子写入、自动清理
+- [错误处理](error-handling.md) - 错误类型、源码上下文、修复建议
+- [SOR 子结构所有权](sor-system.md) - 所有权原语、分析流程、内存优化
+- [标准库集成](stdlib-integration.md) - 配置驱动、自动发现、第三方库
+- [核心运行时特性](core-runtime.md) - VO 系统、前缀系统、任务调度
+- [超时与内存控制](timeout-memory.md) - 资源监控、阶段统计、调试输出
+
+## 快速导航
+
+### 想了解编译流程？
+
+从 [编译器架构](compiler-architecture.md) 开始，了解从源代码到可执行文件的完整流程。
+
+### 想了解语言语法？
+
+查看 [语法分析器 (Parser)](parser.md) 中的语法规则部分。
+
+### 想了解内存管理？
+
+查看 [SOR 子结构所有权](sor-system.md) 和 [核心运行时特性](core-runtime.md)。
+
+### 想了解如何扩展编译器？
+
+查看 [代码生成器 (Codegen)](code-generation.md) 中的插件系统部分。
+
+## 文档约定
+
+- 代码示例使用 Kaula 语法或 Go 语法
+- API 说明基于实际源码
+- 类型定义直接引用源码中的结构体

@@ -368,10 +368,33 @@ func isCompositeType(typeName string) bool {
 }
 
 // estimateForLoopIterCount 尝试从 ForStatement 的 Condition 静态推断迭代次数
+// 支持模式：for i := 0; i < N; i++  其中 N 为整数字面量
 // 返回 0 表示无法确定
 func estimateForLoopIterCount(stmt *ast.ForStatement) int {
-	// 当前简化实现：无法静态确定时返回 0
-	// 后续可增强为解析 range 表达式
+	if stmt == nil || stmt.Condition == nil {
+		return 0
+	}
+	// 期望 Condition 是 i < N 的比较表达式
+	binExpr, ok := stmt.Condition.(*ast.BinaryExpression)
+	if !ok {
+		return 0
+	}
+	// 操作符必须是 < 或 <=
+	if binExpr.Operator != "<" && binExpr.Operator != "LT" &&
+		binExpr.Operator != "<=" && binExpr.Operator != "LE" {
+		return 0
+	}
+	// 右侧应为整数字面量
+	if rightLit, ok := binExpr.Right.(*ast.IntegerLiteral); ok {
+		if rightLit.Value > 0 {
+			n := int(rightLit.Value)
+			// 如果是 <=，迭代次数为 N+1
+			if binExpr.Operator == "<=" || binExpr.Operator == "LE" {
+				n++
+			}
+			return n
+		}
+	}
 	return 0
 }
 

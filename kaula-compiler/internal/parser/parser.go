@@ -2612,8 +2612,12 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 	for {
 		if p.curTok.Type == lexer.TOKEN_DOT {
 			p.nextToken()
-			// 支持标识符、类型关键字（如 string/int 作为模块名）和其他关键字作为成员名
-			if p.isIdentOrTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_PRINTLN {
+			// 成员名可以是标识符、类型关键字、或带下划线的标识符（如 string_contains_string）
+			if p.isIdentOrTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_PRINTLN || p.curTok.Type == lexer.TOKEN_LPAREN {
+				// 如果点后面直接是 (，如 obj.(expr)，跳过
+				if p.curTok.Type == lexer.TOKEN_LPAREN {
+					break
+				}
 				memberName := p.curTok.Value
 				memberPos := ast.Position{
 					Line:   p.curTok.Line,
@@ -2621,14 +2625,14 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 					File:   p.file,
 				}
 				p.nextToken()
-				
+
 				// 创建新的成员访问表达式
 				expr = &ast.MemberAccessExpression{
 					Object: expr,
 					Member: memberName,
 					Pos:    memberPos,
 				}
-				
+
 				// 如果后面还有 LPAREN，说明是函数调用
 				if p.curTok.Type == lexer.TOKEN_LPAREN {
 					return p.parseCallExpressionIterative(expr)

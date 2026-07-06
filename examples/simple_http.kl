@@ -1,0 +1,28 @@
+import std.io
+import std.net
+
+fn main() {
+    println("Kaula HTTP Server on :8080")
+
+    Socket* server = tcp_server_create("0.0.0.0", 8080)
+
+    if server == null {
+        println("ERROR")
+        return
+    }
+
+    println("Server started")
+
+    while true {
+        Socket* client = socket_accept(server)
+        if client != null {
+            u8[4096] buffer
+            size_t received = tcp_receive(client, buffer, 4096)
+            if received > 0 {
+                cstring response = "HTTP/1.1 200 OK\r\n\r\nHello"
+                tcp_send(client, (u8*)(response), 21)
+            }
+            socket_close(client)
+        }
+    }
+}

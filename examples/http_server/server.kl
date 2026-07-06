@@ -1,0 +1,21 @@
+import std.io
+import std.net
+import handler
+
+fn main() {
+    println("Kaula HTTP Server on :8080")
+
+    Socket* server = tcp_server_create("0.0.0.0", 8080)
+    if server == null {
+        println("ERROR: bind failed")
+        return
+    }
+
+    println("Listening...")
+    while true {
+        Socket* client = socket_accept(server)
+        if client != null {
+            handle_request(client)
+        }
+    }
+}

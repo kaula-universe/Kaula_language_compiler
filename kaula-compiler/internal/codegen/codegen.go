@@ -9,6 +9,7 @@ import (
 	"kaula-compiler/internal/symbol"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -41,7 +42,7 @@ type CodeGenerator struct {
 	statementGenerator  *StatementGenerator
 
 	usedThirdPartyLibs map[string]bool
-	localImportFuncs   map[string]bool // 本地导入的 pub 函数名集合
+	localImportFuncs   map[string]bool
 
 	genericCache       map[string]*GenericInstanceCache
 	genericInstantiated map[string]bool
@@ -53,7 +54,10 @@ type CodeGenerator struct {
 
 	sorAdapter *SORCodeGenAdapter
 
-	kmmScopeDepth int // 当前 KMM 作用域嵌套深度（用于作用域合并优化）
+	kmmScopeDepth int
+
+	sourceMap *SourceMap
+	sourceFile string
 }
 
 func (cg *CodeGenerator) error(message string) {
@@ -85,6 +89,16 @@ func (cg *CodeGenerator) GetSORAdapter() *SORCodeGenAdapter {
 // IsInKMMScope 当前是否在 KMM 作用域内
 func (cg *CodeGenerator) IsInKMMScope() bool {
 	return cg.kmmScopeDepth > 0
+}
+
+// GetSourceMap 获取源代码映射
+func (cg *CodeGenerator) GetSourceMap() *SourceMap {
+	return cg.sourceMap
+}
+
+// SetSourceFile 设置源文件名
+func (cg *CodeGenerator) SetSourceFile(filename string) {
+	cg.sourceFile = filename
 }
 
 // EnterKMMScope 进入 KMM 作用域
@@ -168,6 +182,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		localImportFuncs:   make(map[string]bool),
 		genericCache:       make(map[string]*GenericInstanceCache),
 		genericInstantiated: make(map[string]bool),
+		sourceMap:          NewSourceMap("", ""),
 	}
 	
 	cg.typeGenerator = NewTypeGenerator(cg)
@@ -181,6 +196,59 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.program = program
 	cg.usedThirdPartyLibs = make(map[string]bool)
+
+	type rawEntry struct {
+		section   string
+		relLine   int
+		srcLine   int
+		srcCol    int
+		kind      string
+		symbol    string
+	}
+	var rawEntries []rawEntry
+	var typeLine, globalLine, funcLine, mainLine int
+
+	addEntry := func(section string, srcLine, srcCol int, kind, symbol string, lineCount int) {
+		if srcLine > 0 {
+			var baseLine *int
+			switch section {
+			case "type":
+				baseLine = &typeLine
+			case "global":
+				baseLine = &globalLine
+			case "func":
+				baseLine = &funcLine
+			case "main":
+				baseLine = &mainLine
+			}
+			if baseLine != nil {
+				rawEntries = append(rawEntries, rawEntry{
+					section: section,
+					relLine: *baseLine + 1,
+					srcLine: srcLine,
+					srcCol:  srcCol,
+					kind:    kind,
+					symbol:  symbol,
+				})
+			}
+			*baseLine += lineCount
+		} else {
+			var baseLine *int
+			switch section {
+			case "type":
+				baseLine = &typeLine
+			case "global":
+				baseLine = &globalLine
+			case "func":
+				baseLine = &funcLine
+			case "main":
+				baseLine = &mainLine
+			}
+			if baseLine != nil {
+				*baseLine += lineCount
+			}
+		}
+	}
 
 	var typeCode strings.Builder
 	var globalVars strings.Builder
@@ -214,35 +282,49 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if fnStmt.Name == "main" {
 				hasMain = true
 			}
-			functionCode.WriteString(cg.generateStatement(stmt))
-			functionCode.WriteByte('\n')
-		} else if _, ok := stmt.(*ast.ClassStatement); ok {
-			typeCode.WriteString(cg.generateStatement(stmt))
-			typeCode.WriteByte('\n')
-		} else if _, ok := stmt.(*ast.InterfaceStatement); ok {
-			typeCode.WriteString(cg.generateStatement(stmt))
-			typeCode.WriteByte('\n')
-		} else if _, ok := stmt.(*ast.StructStatement); ok {
-			typeCode.WriteString(cg.generateStatement(stmt))
-			typeCode.WriteByte('\n')
-		} else if _, ok := stmt.(*ast.TypeAliasStatement); ok {
-			typeCode.WriteString(cg.generateStatement(stmt))
-			typeCode.WriteByte('\n')
+			code := cg.generateStatement(stmt) + "\n"
+			lines := strings.Count(code, "\n")
+			addEntry("func", fnStmt.Pos.Line, fnStmt.Pos.Column, "function", fnStmt.Name, lines)
+			functionCode.WriteString(code)
+		} else if classStmt, ok := stmt.(*ast.ClassStatement); ok {
+			code := cg.generateStatement(stmt) + "\n"
+			lines := strings.Count(code, "\n")
+			addEntry("type", classStmt.Pos.Line, classStmt.Pos.Column, "class", classStmt.Name, lines)
+			typeCode.WriteString(code)
+		} else if ifaceStmt, ok := stmt.(*ast.InterfaceStatement); ok {
+			code := cg.generateStatement(stmt) + "\n"
+			lines := strings.Count(code, "\n")
+			addEntry("type", ifaceStmt.Pos.Line, ifaceStmt.Pos.Column, "interface", ifaceStmt.Name, lines)
+			typeCode.WriteString(code)
+		} else if structStmt, ok := stmt.(*ast.StructStatement); ok {
+			code := cg.generateStatement(stmt) + "\n"
+			lines := strings.Count(code, "\n")
+			addEntry("type", structStmt.Pos.Line, structStmt.Pos.Column, "struct", structStmt.Name, lines)
+			typeCode.WriteString(code)
+		} else if typeStmt, ok := stmt.(*ast.TypeAliasStatement); ok {
+			code := cg.generateStatement(stmt) + "\n"
+			lines := strings.Count(code, "\n")
+			addEntry("type", typeStmt.Pos.Line, typeStmt.Pos.Column, "type", typeStmt.Name, lines)
+			typeCode.WriteString(code)
 		} else if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
 			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
 			initValue := cg.generateExpression(varDecl.Value)
 			if varDecl.IsAuto {
 				cType = "auto"
 			}
-			globalVars.WriteString(cType)
-			globalVars.WriteByte(' ')
-			globalVars.WriteString(varDecl.Name)
-			globalVars.WriteString(" = ")
-			globalVars.WriteString(initValue)
-			globalVars.WriteString(";\n")
+			code := fmt.Sprintf("%s %s = %s;\n", cType, varDecl.Name, initValue)
+			lines := strings.Count(code, "\n")
+			addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
+			globalVars.WriteString(code)
 		} else {
-			mainCode.WriteString(cg.indentString())
-			mainCode.WriteString(cg.generateStatement(stmt))
+			code := cg.indentString() + cg.generateStatement(stmt)
+			lines := strings.Count(code, "\n")
+			if pos := getStmtPos(stmt); pos != nil {
+				addEntry("main", pos.Line, pos.Column, "statement", "", lines)
+			} else {
+				addEntry("main", 0, 0, "statement", "", lines)
+			}
+			mainCode.WriteString(code)
 		}
 	}
 
@@ -321,47 +403,98 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		os.WriteFile(filepath.Join(cacheDir, "all_includes.txt"), []byte(allIncludes.String()), 0644)
 	}
 
+	var result string
+	var typeOffset, globalOffset, funcOffset, mainOffset int
+
 	if !hasMain {
 		template, ok := cg.templateManager.GetTemplate("main")
 		if !ok {
-			var result strings.Builder
-			result.Grow(allIncludes.Len() + forwardDecls.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
-			result.WriteString(allIncludes.String())
-			result.WriteString("\n\n")
-			result.WriteString(forwardDecls.String())
-			result.WriteByte('\n')
-			result.WriteString(typeCode.String())
-			result.WriteByte('\n')
-			result.WriteString(functionCode.String())
-			result.WriteString("\n\nint main() {\n    ")
-			result.WriteString(mainCode.String())
-			result.WriteString("\n    return 0;\n}\n")
-			return result.String()
+			var resultBuilder strings.Builder
+			resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
+			resultBuilder.WriteString(allIncludes.String())
+			resultBuilder.WriteString("\n\n")
+			resultBuilder.WriteString(forwardDecls.String())
+			resultBuilder.WriteByte('\n')
+
+			typeOffset = strings.Count(allIncludes.String(), "\n") + 3 + strings.Count(forwardDecls.String(), "\n") + 1
+
+			resultBuilder.WriteString(typeCode.String())
+			resultBuilder.WriteByte('\n')
+
+			globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1
+
+			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
+			resultBuilder.WriteString(functionCode.String())
+
+			mainHeader := "\n\nint main() {\n    "
+			mainOffset = funcOffset + strings.Count(functionCode.String(), "\n") + strings.Count(mainHeader, "\n")
+			resultBuilder.WriteString(mainHeader)
+			resultBuilder.WriteString(mainCode.String())
+			resultBuilder.WriteString("\n    return 0;\n}\n")
+			result = resultBuilder.String()
+		} else {
+			result = template
+			result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
+			result = strings.ReplaceAll(result, "{{forward_decls}}", forwardDecls.String())
+			result = strings.ReplaceAll(result, "{{global_vars}}", globalVars.String())
+			result = strings.ReplaceAll(result, "{{type_code}}", typeCode.String())
+			result = strings.ReplaceAll(result, "{{function_code}}", functionCode.String())
+			result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
+			result = strings.ReplaceAll(result, "{{code}}", "")
+
+			idxIncludes := strings.Index(result, allIncludes.String())
+			idxForward := strings.Index(result, forwardDecls.String())
+			idxType := strings.Index(result, typeCode.String())
+			idxGlobal := strings.Index(result, globalVars.String())
+			idxFunc := strings.Index(result, functionCode.String())
+			idxMain := strings.Index(result, mainCode.String())
+
+			typeOffset = strings.Count(result[:idxType], "\n") + 1
+			globalOffset = strings.Count(result[:idxGlobal], "\n") + 1
+			funcOffset = strings.Count(result[:idxFunc], "\n") + 1
+			mainOffset = strings.Count(result[:idxMain], "\n") + 1
+			_ = idxIncludes
+			_ = idxForward
 		}
-
-		result := template
-		result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
-		result = strings.ReplaceAll(result, "{{forward_decls}}", forwardDecls.String())
-		result = strings.ReplaceAll(result, "{{global_vars}}", globalVars.String())
-		result = strings.ReplaceAll(result, "{{type_code}}", typeCode.String())
-		result = strings.ReplaceAll(result, "{{function_code}}", functionCode.String())
-		result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
-		result = strings.ReplaceAll(result, "{{code}}", "")
-
-		return result
 	} else {
-		var result strings.Builder
-		result.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + 16)
-		result.WriteString(allIncludes.String())
-		result.WriteString("\n")
-		result.WriteString(forwardDecls.String())
-		result.WriteString("\n")
-		result.WriteString(globalVars.String())
-		result.WriteString("\n")
-		result.WriteString(typeCode.String())
-		result.WriteString(functionCode.String())
-		return result.String()
+		var resultBuilder strings.Builder
+		resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + 16)
+		resultBuilder.WriteString(allIncludes.String())
+		resultBuilder.WriteString("\n")
+		resultBuilder.WriteString(forwardDecls.String())
+		resultBuilder.WriteString("\n")
+
+		globalOffset = strings.Count(allIncludes.String(), "\n") + 2 + strings.Count(forwardDecls.String(), "\n") + 1
+		resultBuilder.WriteString(globalVars.String())
+		resultBuilder.WriteString("\n")
+
+		typeOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
+		resultBuilder.WriteString(typeCode.String())
+
+		funcOffset = typeOffset + strings.Count(typeCode.String(), "\n")
+		resultBuilder.WriteString(functionCode.String())
+		result = resultBuilder.String()
 	}
+
+	cg.sourceMap = NewSourceMap(cg.sourceFile, "")
+	for _, e := range rawEntries {
+		var genLine int
+		switch e.section {
+		case "type":
+			genLine = typeOffset + e.relLine - 1
+		case "global":
+			genLine = globalOffset + e.relLine - 1
+		case "func":
+			genLine = funcOffset + e.relLine - 1
+		case "main":
+			genLine = mainOffset + e.relLine - 1
+		}
+		if genLine > 0 {
+			cg.sourceMap.AddEntry(genLine, cg.sourceFile, e.srcLine, e.srcCol, e.kind, e.symbol)
+		}
+	}
+
+	return result
 }
 
 func (cg *CodeGenerator) generateStatement(stmt ast.Statement) string {
@@ -615,4 +748,69 @@ func (cg *CodeGenerator) GetGenericCachedCode(funcName string, typeArgs []string
 		return cached.GeneratedCode, true
 	}
 	return "", false
+}
+
+func getStmtPos(stmt ast.Statement) *ast.Position {
+	if stmt == nil {
+		return nil
+	}
+	v := reflect.ValueOf(stmt)
+	if v.Kind() == reflect.Ptr && v.IsNil() {
+		return nil
+	}
+	switch s := stmt.(type) {
+	case *ast.IfStatement:
+		return &s.Pos
+	case *ast.WhileStatement:
+		return &s.Pos
+	case *ast.ForStatement:
+		return &s.Pos
+	case *ast.ReturnStatement:
+		return &s.Pos
+	case *ast.ExpressionStatement:
+		return &s.Pos
+	case *ast.VOStatement:
+		return &s.Pos
+	case *ast.SpendStatement:
+		return &s.Pos
+	case *ast.TaskStatement:
+		return &s.Pos
+	case *ast.PrefixStatement:
+		return &s.Pos
+	case *ast.TreeStatement:
+		return &s.Pos
+	case *ast.ObjectStatement:
+		return &s.Pos
+	case *ast.YeideStatement:
+		return &s.Pos
+	case *ast.ReleaseStatement:
+		return &s.Pos
+	case *ast.ExtractStatement:
+		return &s.Pos
+	case *ast.BreakStatement:
+		return &s.Pos
+	case *ast.ContinueStatement:
+		return &s.Pos
+	case *ast.VariableDeclaration:
+		return &s.Pos
+	case *ast.FunctionStatement:
+		return &s.Pos
+	case *ast.ClassStatement:
+		return &s.Pos
+	case *ast.InterfaceStatement:
+		return &s.Pos
+	case *ast.StructStatement:
+		return &s.Pos
+	case *ast.TypeAliasStatement:
+		return &s.Pos
+	case *ast.SwitchStatement:
+		return &s.Pos
+	case *ast.CallStatement:
+		return &s.Pos
+	case *ast.NonLocalStatement:
+		return &s.Pos
+	case *ast.BlockStatement:
+		return &s.Pos
+	}
+	return nil
 }

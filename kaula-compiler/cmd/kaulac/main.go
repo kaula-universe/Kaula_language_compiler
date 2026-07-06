@@ -231,35 +231,14 @@ func injectLocalCode(mainCode, localCode string) string {
 func main() {
 	totalStart := time.Now()
 
-	timeout.Init()
-	timeout.SetLimits(4096, 120)
-
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-
-		for !timeout.IsTimedOut() {
-			<-ticker.C
-			if err := timeout.CheckMemory("global"); err != nil {
-				fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
-				os.Exit(1)
-			}
-		}
-	}()
-
-	// 在加载配置之前先解析我们自己的参数（避免 flag.Parse() 冲突）
+	// 自定义参数（非 flag 参数，需在 flag.Parse 前手动提取）
 	inputFile := ""
 	cleanCache := false
 	purgeCache := false
 	showCacheStats := false
-	noCache := false
-	sorMode := false
-	releaseMode := false
-	optLevelOverride := "" // 用户手动指定的优化级别（O0/O1/O2/O3）
-	analyzePkg := ""
-	analyzePkgAll := false
+	initConfig := false
 
-	// 先处理我们的参数，过滤掉后再传递给 flag.Parse()
+	// 预扫描 os.Args，提取非 flag 参数和自定义 flag
 	customArgs := []string{}
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -271,80 +250,72 @@ func main() {
 			purgeCache = true
 		case arg == "--cache-stats":
 			showCacheStats = true
-		case arg == "--no-cache":
-			noCache = true
-		case arg == "--sor":
-			sorMode = true
-		case arg == "--release":
-			releaseMode = true
-		case arg == "--opt":
-			// 下一个参数是优化级别
-			if i+1 < len(args) {
-				optLevelOverride = args[i+1]
-				i++ // 跳过级别参数
-			} else {
-				fmt.Printf("Error: --opt requires an optimization level (O0/O1/O2/O3)\n")
-				os.Exit(1)
-			}
-		case arg == "--analyze-pkg-all":
-			analyzePkgAll = true
-		case arg == "--analyze-pkg":
-			// 下一个参数是包名
-			if i+1 < len(args) {
-				analyzePkg = args[i+1]
-				i++ // 跳过包名参数
-			} else {
-				fmt.Printf("Error: --analyze-pkg requires a package name\n")
-				os.Exit(1)
-			}
+		case arg == "--init":
+			initConfig = true
 		default:
-			// 非 flag 参数保留
+			customArgs = append(customArgs, arg)
 			if len(arg) > 0 && arg[0] != '-' {
 				inputFile = arg
 			}
-			customArgs = append(customArgs, arg)
 		}
 	}
 
-	// 处理 --analyze-pkg 命令
-	if analyzePkg != "" {
-		handleAnalyzePkg(analyzePkg)
-		return
-	}
-
-	// 处理 --analyze-pkg-all 命令
-	if analyzePkgAll {
-		handleAnalyzePkgAll()
+	// 处理 --init 命令
+	if initConfig {
+		if _, err := os.Stat("kaula.json"); err == nil {
+			fmt.Printf("kaula.json already exists. Use --init-force to overwrite.\n")
+			os.Exit(1)
+		}
+		if err := config.GenerateDefaultConfig("kaula.json"); err != nil {
+			fmt.Printf("Error: Failed to generate kaula.json: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Generated kaula.json with default configuration.")
 		return
 	}
 
 	// 处理命令行参数（允许仅使用缓存管理命令而不需要输入文件）
 	if len(os.Args) < 2 {
-		fmt.Printf("Usage: %s [options] <input file>\n", os.Args[0])
-		fmt.Printf("Options:\n")
-		fmt.Printf("  --clean-cache       Clean cache directory\n")
-		fmt.Printf("  --purge-cache       Purge all cache entries\n")
-		fmt.Printf("  --cache-stats       Show cache statistics\n")
-		fmt.Printf("  --no-cache          Disable incremental compilation\n")
-		fmt.Printf("  --sor               启用 SOR (Sub-structural Ownership) 编译时所有权分析（默认 -O3）\n")
-		fmt.Printf("  --release           使用 -O3 优化（普通模式默认 -O2，SOR/Release 默认 -O3）\n")
-		fmt.Printf("  --opt <level>       手动指定优化级别（O0/O1/O2/O3），覆盖所有默认值\n")
-		fmt.Printf("  --analyze-pkg <name>   手动分析指定包并生成/覆盖配置文件\n")
-		fmt.Printf("  --analyze-pkg-all      手动分析所有 pkglib 中的包并生成/覆盖配置文件\n")
+		printUsage(os.Args[0])
 		os.Exit(1)
 	}
 
-	// 临时修改 os.Args 以避免 flag.Parse() 报错
+	// 临时修改 os.Args 以供 flag.Parse() 使用
 	os.Args = append([]string{os.Args[0]}, customArgs...)
 
-	// 加载配置（会调用 flag.Parse()）
+	// 加载配置（kaula.json + 命令行 flag，会调用 flag.Parse()）
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		fmt.Printf("Warning: Failed to load config: %v, using default\n", err)
 	}
 
-	// 从自定义参数中同步 SOR 模式（因为 --sor 被提前消费了）
-	cfg.SOR = sorMode
+	// 处理 --analyze-pkg 命令
+	if cfg.AnalyzePkg != "" {
+		handleAnalyzePkg(cfg.AnalyzePkg)
+		return
+	}
+
+	// 处理 --analyze-pkg-all 命令
+	if cfg.AnalyzePkgAll {
+		handleAnalyzePkgAll()
+		return
+	}
+
+	// 初始化资源限制（从配置读取）
+	timeout.Init()
+	timeout.SetLimits(uint64(cfg.MemoryLimitMB), uint64(cfg.TimeoutSec))
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for !timeout.IsTimedOut() {
+			<-ticker.C
+			if err := timeout.CheckMemory("global"); err != nil {
+				fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}()
 
 	// 如果没有输入文件但有缓存管理命令，也允许执行
 	if inputFile == "" && !cleanCache && !purgeCache && !showCacheStats {
@@ -415,27 +386,8 @@ func main() {
 	inputBase := filepath.Base(inputFile)
 	inputName := inputBase[:len(inputBase)-3]
 
-	// 优化级别优先级：
-	//   1. --opt 手动指定（最高优先级）
-	//   2. --sor SOR 模式默认 -O3
-	//   3. --release 模式 -O3
-	//   4. 普通模式默认 -O2
-	optLevel := "-O2"
-	if sorMode {
-		optLevel = "-O3"
-	}
-	if releaseMode {
-		optLevel = "-O3"
-	}
-	if optLevelOverride != "" {
-		// 验证优化级别合法性
-		validOpts := map[string]bool{"O0": true, "O1": true, "O2": true, "O3": true}
-		if !validOpts[optLevelOverride] {
-			fmt.Printf("Error: Invalid optimization level '%s'. Must be O0, O1, O2, or O3\n", optLevelOverride)
-			os.Exit(1)
-		}
-		optLevel = "-" + optLevelOverride
-	}
+	// 解析优化级别（优先级：--opt > --sor > --release > 默认 O2）
+	optLevel := cfg.ResolveOptLevel(cfg.OptLevel)
 
 	fmt.Println("=== Concurrent Compilation Pipeline ===")
 	fmt.Printf("Starting at %v\n\n", totalStart.Format("15:04:05.000"))
@@ -538,6 +490,7 @@ func main() {
 	if sorResult != nil {
 		cg.SetSORResult(sorResult)
 	}
+	cg.SetSourceFile(inputFile)
 
 	// 多文件编译：预解析本地 .kl 文件 import，收集 pub 函数名
 	localImportFuncs, localImportCode := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
@@ -607,7 +560,7 @@ func main() {
 	var cacheFile string
 	var cacheHit bool
 	
-	if cacheManager != nil && !noCache {
+	if cacheManager != nil && !cfg.NoCache {
 		cacheKey := cacheManager.GetCacheKey(inputFile)
 		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
 		
@@ -635,8 +588,25 @@ func main() {
 		}
 	}
 
+	// 生成 source map
+	if cfg.SourceMap {
+		sm := cg.GetSourceMap()
+		if sm != nil {
+			sm.Target = cacheFile
+			mapPath := filepath.Join(cacheDir, inputName+".map.json")
+			mapJSON, err := sm.ToJSON()
+			if err == nil {
+				if err := os.WriteFile(mapPath, []byte(mapJSON), 0644); err != nil {
+					fmt.Printf("Warning: Failed to write source map: %v\n", err)
+				} else {
+					fmt.Printf("[SourceMap] Generated: %s\n", mapPath)
+				}
+			}
+		}
+	}
+
 	// Concurrent C compilation
-	compileResult := concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity)
+	compileResult := concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity, cfg)
 	stage3Time := time.Since(stage3Start)
 	fmt.Printf("[Stage 3] Code Gen + Compilation completed in %v\n", stage3Time)
 
@@ -673,7 +643,7 @@ type compileResult_t struct {
 }
 
 // concurrentCompile 并发保存缓存并编译 C 代码
-func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int) *compileResult_t {
+func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) *compileResult_t {
 	result := &compileResult_t{}
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -703,7 +673,7 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 			outputExe = filepath.Join(inputDir, inputName)
 		}
 
-		if err := compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity); err != nil {
+		if err := compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity, cfg); err != nil {
 			result.Error = err
 			return
 		}
@@ -877,7 +847,7 @@ func resolveModuleDependencies(usedModules []string, validStdPaths []string) []s
 	return resolved
 }
 
-func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCodeInMemory string, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int) error {
+func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCodeInMemory string, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) error {
 	clangPath, err := exec.LookPath("clang")
 	if err != nil {
 		return fmt.Errorf("clang not found in PATH")
@@ -1267,6 +1237,19 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 
+	// 添加用户自定义的 C 编译器参数
+	if cfg != nil {
+		for _, flag := range cfg.CFlags {
+			clangArgs = append(clangArgs, flag)
+		}
+		for _, define := range cfg.CDefines {
+			clangArgs = append(clangArgs, "-D"+define)
+		}
+		for _, lib := range cfg.CLibs {
+			clangArgs = append(clangArgs, "-l"+lib)
+		}
+	}
+
 	cmd := exec.Command(clangPath, clangArgs...)
 
 	// 通过 stdin pipe 将 C 代码传递给 clang（内存编译，避免磁盘 I/O）
@@ -1309,6 +1292,37 @@ func findPkglibPath() string {
 		}
 	}
 	return ""
+}
+
+func printUsage(exe string) {
+	fmt.Printf("Usage: %s [options] <input file>\n\n", exe)
+	fmt.Printf("Options:\n")
+	fmt.Printf("  --init                  生成默认 kaula.json 配置文件\n")
+	fmt.Printf("  --clean-cache           清理过期缓存 (7 天以上)\n")
+	fmt.Printf("  --purge-cache           清空所有缓存\n")
+	fmt.Printf("  --cache-stats           显示缓存统计信息\n")
+	fmt.Printf("  --no-cache              禁用增量编译缓存\n")
+	fmt.Printf("  --sor                   启用 SOR 编译时所有权分析（默认 -O3）\n")
+	fmt.Printf("  --release               Release 模式 (-O3)\n")
+	fmt.Printf("  --opt <level>           优化级别 (O0/O1/O2/O3)，覆盖所有默认值\n")
+	fmt.Printf("  --sourcemap             生成源码映射文件 (.kl.map.json)\n")
+	fmt.Printf("  --memory-limit <MB>     内存限制 (默认 4096 MB)\n")
+	fmt.Printf("  --timeout <sec>         编译超时限制 (默认 120 秒)\n")
+	fmt.Printf("  --template <path>       代码生成模板路径\n")
+	fmt.Printf("  --include <path>        C 头文件包含路径\n")
+	fmt.Printf("  --stdlib <path>         标准库路径\n")
+	fmt.Printf("  --pkglib <path>         第三方库路径\n")
+	fmt.Printf("  --output-dir <dir>      输出目录\n")
+	fmt.Printf("  --target <lang>         目标语言 (默认 c)\n")
+	fmt.Printf("  --cflags <flags>        额外的 C 编译器参数\n")
+	fmt.Printf("  --defines <macros>      额外的 C 宏定义 (逗号分隔)\n")
+	fmt.Printf("  --libs <libs>           额外的链接库 (逗号分隔)\n")
+	fmt.Printf("  --analyze-pkg <name>    分析指定包并生成配置文件\n")
+	fmt.Printf("  --analyze-pkg-all       分析所有 pkglib 中的包\n")
+	fmt.Printf("\nConfiguration File (kaula.json):\n")
+	fmt.Printf("  在项目根目录创建 kaula.json 文件配置编译参数。\n")
+	fmt.Printf("  命令行参数优先级高于配置文件。\n")
+	fmt.Printf("  使用 --init 生成默认配置文件。\n")
 }
 
 // handleAnalyzePkg 处理 --analyze-pkg 命令，手动分析指定包

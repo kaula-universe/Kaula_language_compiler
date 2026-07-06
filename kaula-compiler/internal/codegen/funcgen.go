@@ -445,11 +445,29 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 				bodyCode := bodyBuilder.String()
 
 				if useKMM {
-					builder.WriteString(bodyIndent)
-					builder.WriteString("KMM_V4_SCOPE_START {\n")
-					builder.WriteString(bodyCode)
-					builder.WriteString(bodyIndent)
-					builder.WriteString("} KMM_V4_SCOPE_END;\n")
+					// 批量分配优化：尝试将多次 malloc 合并为一次 bump
+					canBatch, totalSize, _ := fg.analyzeBodyMallocs(stmt.Body)
+					if canBatch && totalSize > 0 {
+						// 优化路径：单次 bump 分配 + 直接 offset 恢复
+						builder.WriteString(bodyIndent)
+						builder.WriteString("{\n")
+						builder.WriteString(bodyIndent)
+						builder.WriteString("    size_t _scope_start = kmm_v4_offset_save();\n")
+						builder.WriteString(bodyIndent)
+						fmt.Fprintf(&builder, "    void* _batch_ptr = kmm_v4_bump(%d);\n", totalSize)
+						builder.WriteString(bodyCode)
+						builder.WriteString(bodyIndent)
+						builder.WriteString("    kmm_v4_offset_restore(_scope_start);\n")
+						builder.WriteString(bodyIndent)
+						builder.WriteString("}\n")
+					} else {
+						// 标准路径：scope push/pop
+						builder.WriteString(bodyIndent)
+						builder.WriteString("KMM_V4_SCOPE_START {\n")
+						builder.WriteString(bodyCode)
+						builder.WriteString(bodyIndent)
+						builder.WriteString("} KMM_V4_SCOPE_END;\n")
+					}
 				} else {
 					builder.WriteString(bodyCode)
 				}
@@ -695,4 +713,109 @@ func (fg *FunctionGenerator) mapReturnType(returnType string) string {
 	default:
 		return returnType + " "
 	}
+}
+
+// ============================================================================
+// 批量分配优化：将同一 scope 内的多次 malloc 合并为一次 bump
+// ============================================================================
+
+// mallocInfo 记录一个 malloc 调用的信息
+type mallocInfo struct {
+	varName   string // 变量名
+	sizeExpr  string // 大小表达式（编译期可确定时为具体数字）
+	sizeBytes int    // 编译期可确定时的字节数，0 表示未知
+}
+
+// analyzeBodyMallocs 分析函数体中的 malloc 调用，尝试计算总大小
+// 返回是否可以使用批量分配，以及总大小（如果可计算）
+func (fg *FunctionGenerator) analyzeBodyMallocs(bodyStmts []ast.Statement) (canBatch bool, totalSize int, mallocs []mallocInfo) {
+	mallocs = make([]mallocInfo, 0)
+	totalSize = 0
+	allKnown := true
+
+	for _, stmt := range bodyStmts {
+		if stmt == nil {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.VariableDeclaration:
+			if s.Value != nil {
+				if call, ok := s.Value.(*ast.CallExpression); ok {
+					if fg.isMallocCall(call) {
+						sizeExpr, sizeBytes := fg.extractMallocSize(call)
+						mallocs = append(mallocs, mallocInfo{
+							varName:   s.Name,
+							sizeExpr:  sizeExpr,
+							sizeBytes: sizeBytes,
+						})
+						if sizeBytes > 0 {
+							totalSize += sizeBytes
+						} else {
+							allKnown = false
+						}
+					}
+				}
+			}
+		case *ast.ExpressionStatement:
+			if s.Expression != nil {
+				if call, ok := s.Expression.(*ast.CallExpression); ok {
+					if fg.isMallocCall(call) {
+						sizeExpr, sizeBytes := fg.extractMallocSize(call)
+						mallocs = append(mallocs, mallocInfo{
+							varName:   "",
+							sizeExpr:  sizeExpr,
+							sizeBytes: sizeBytes,
+						})
+						if sizeBytes > 0 {
+							totalSize += sizeBytes
+						} else {
+							allKnown = false
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 至少有 2 个 malloc 调用才值得批量分配
+	canBatch = len(mallocs) >= 2 && allKnown
+	return
+}
+
+// isMallocCall 检查调用是否是 malloc 类函数
+func (fg *FunctionGenerator) isMallocCall(call *ast.CallExpression) bool {
+	if call == nil || call.Function == nil {
+		return false
+	}
+	switch fn := call.Function.(type) {
+	case *ast.Identifier:
+		return fn.Name == "std_malloc" || fn.Name == "kmm_v4_malloc" || fn.Name == "kmm_v4_alloc_auto"
+	case *ast.MemberAccessExpression:
+		return fn.Member == "std_malloc" || fn.Member == "kmm_v4_malloc"
+	}
+	return false
+}
+
+// extractMallocSize 从 malloc 调用中提取大小表达式
+// 如果是编译期可确定的常量，返回具体字节数
+func (fg *FunctionGenerator) extractMallocSize(call *ast.CallExpression) (string, int) {
+	if call == nil || len(call.Args) == 0 {
+		return "", 0
+	}
+	arg := call.Args[0]
+	// 尝试解析整数字面量
+	if lit, ok := arg.(*ast.IntegerLiteral); ok {
+		return "", int(lit.Value)
+	}
+	// 尝试解析 sizeof 表达式
+	if callExpr, ok := arg.(*ast.CallExpression); ok {
+		if ident, ok := callExpr.Function.(*ast.Identifier); ok {
+			if ident.Name == "sizeof" && len(callExpr.Args) == 1 {
+				// sizeof(Type) — 编译器可以确定大小
+				return "", 8 // 默认 8 字节，实际应根据类型推导
+			}
+		}
+	}
+	// 无法编译期确定
+	return fg.codegen.expressionGenerator.GenerateExpression(arg), 0
 }

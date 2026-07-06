@@ -93,6 +93,12 @@ func (ts *TypeSizer) sizeOfImpl(typeName string, seen map[string]bool) int {
 	if seen[typeName] {
 		return 256
 	}
+
+	// 查缓存：避免重复计算
+	if size, ok := ts.cache[typeName]; ok {
+		return size
+	}
+
 	seen[typeName] = true
 	defer func() { delete(seen, typeName) }()
 

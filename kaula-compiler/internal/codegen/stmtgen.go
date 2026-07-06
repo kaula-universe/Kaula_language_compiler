@@ -1446,14 +1446,36 @@ func (sg *StatementGenerator) generateNonLocalStatement(stmt *ast.NonLocalStatem
 func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) string {
 	// 进入块作用域
 	sg.codegen.EnterScope("block")
-	
-	// 插入KMM作用域开始
+
+	indent := sg.codegen.indentString()
+
+	// 批量分配优化：检测块内是否有多个 malloc 调用
+	canBatch, totalSize, _ := sg.analyzeBlockMallocs(stmt.Statements)
+
+	if canBatch && totalSize > 0 {
+		// 优化路径：单次 bump + 直接 offset 恢复
+		code := "{\n"
+		sg.codegen.indent++
+		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString()
+		code += fmt.Sprintf("void* _batch_ptr = kmm_v4_bump(%d);\n", totalSize)
+		for _, bodyStmt := range stmt.Statements {
+			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
+		sg.codegen.indent--
+		code += indent + "}\n"
+		sg.codegen.ExitScope()
+		return code
+	}
+
+	// 标准路径：scope push/pop
 	code := "KMM_V4_SCOPE_START {\n"
 	sg.codegen.indent++
 	for _, bodyStmt := range stmt.Statements {
 		code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
 	}
-	
+
 	// 生成内存释放代码
 	code += sg.codegen.indentString() + "// Free allocated memory\n"
 	for name, symbol := range sg.codegen.currentScope.GetAllSymbols() {
@@ -1464,13 +1486,85 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 			}
 		}
 	}
-	
+
 	sg.codegen.indent--
-	code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
-	
+	code += indent + "} KMM_V4_SCOPE_END;\n"
+
 	// 退出块作用域
 	sg.codegen.ExitScope()
 	return code
+}
+
+// analyzeBlockMallocs 分析块语句中的 malloc 调用，判断是否可以批量分配
+func (sg *StatementGenerator) analyzeBlockMallocs(stmts []ast.Statement) (canBatch bool, totalSize int, count int) {
+	count = 0
+	totalSize = 0
+	allKnown := true
+
+	for _, stmt := range stmts {
+		if stmt == nil {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.VariableDeclaration:
+			if s.Value != nil {
+				if call, ok := s.Value.(*ast.CallExpression); ok {
+					if sg.isMallocCallExpr(call) {
+						sizeBytes := sg.extractMallocSizeBytes(call)
+						count++
+						if sizeBytes > 0 {
+							totalSize += sizeBytes
+						} else {
+							allKnown = false
+						}
+					}
+				}
+			}
+		case *ast.ExpressionStatement:
+			if s.Expression != nil {
+				if call, ok := s.Expression.(*ast.CallExpression); ok {
+					if sg.isMallocCallExpr(call) {
+						sizeBytes := sg.extractMallocSizeBytes(call)
+						count++
+						if sizeBytes > 0 {
+							totalSize += sizeBytes
+						} else {
+							allKnown = false
+						}
+					}
+				}
+			}
+		}
+	}
+
+	canBatch = count >= 2 && allKnown
+	return
+}
+
+// isMallocCallExpr 检查表达式是否是 malloc 类调用
+func (sg *StatementGenerator) isMallocCallExpr(call *ast.CallExpression) bool {
+	if call == nil || call.Function == nil {
+		return false
+	}
+	switch fn := call.Function.(type) {
+	case *ast.Identifier:
+		return fn.Name == "std_malloc" || fn.Name == "kmm_v4_malloc" || fn.Name == "kmm_v4_alloc_auto"
+	case *ast.MemberAccessExpression:
+		return fn.Member == "std_malloc" || fn.Member == "kmm_v4_malloc"
+	}
+	return false
+}
+
+// extractMallocSizeBytes 从 malloc 调用中提取编译期可确定的大小
+func (sg *StatementGenerator) extractMallocSizeBytes(call *ast.CallExpression) int {
+	if call == nil || len(call.Args) == 0 {
+		return 0
+	}
+	arg := call.Args[0]
+	if lit, ok := arg.(*ast.IntegerLiteral); ok {
+		return int(lit.Value)
+	}
+	return 0
 }
 
 // generateYeideStatement 生成 yeide 语句代码

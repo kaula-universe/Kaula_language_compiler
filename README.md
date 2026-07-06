@@ -133,6 +133,8 @@ Kaula 编译器使用 **Go 1.21+** 实现，包含以下核心组件：
 
 **内存与超时控制**：内置内存监控和超时保护，防止编译器资源耗尽
 
+> 📚 **编译器详细文档**：查看 [docs/](docs/) 目录了解各组件的实现细节
+
 ### 2. 运行时系统
 
 运行时使用 **C 语言** 实现，提供以下核心功能：
@@ -230,11 +232,20 @@ spend(component1, component2):
 # 基本用法
 kaulac.exe [选项] <源文件.kl>
 
+# 初始化项目配置
+kaulac.exe --init
+
 # 编译单个文件
 kaulac.exe program.kl
 
-# 编译并启用增量编译缓存
-kaulac.exe program.kl
+# 使用 Release 模式编译
+kaulac.exe --release program.kl
+
+# 启用 SOR 所有权分析
+kaulac.exe --sor program.kl
+
+# 指定优化级别
+kaulac.exe --opt O0 program.kl
 
 # 禁用缓存强制重新编译
 kaulac.exe --no-cache program.kl
@@ -247,22 +258,48 @@ kaulac.exe --clean-cache
 
 # 清空所有缓存
 kaulac.exe --purge-cache
+
+# 生成源码映射
+kaulac.exe --sourcemap program.kl
+
+# 自定义内存和超时限制
+kaulac.exe --memory-limit 8192 --timeout 300 program.kl
+
+# 额外 C 编译器参数
+kaulac.exe --cflags "-Wall -Werror" --defines "DEBUG=1" program.kl
 ```
 
 ### 命令行选项
 
 | 选项 | 说明 |
 |------|------|
+| `--init` | 生成默认 `kaula.json` 配置文件 |
 | `--no-cache` | 禁用增量编译，强制重新编译 |
 | `--cache-stats` | 显示缓存统计信息（条目数、大小、时间范围） |
 | `--clean-cache` | 清理过期缓存条目（7 天以上） |
 | `--purge-cache` | 清空所有缓存 |
-| `-template <path>` | 指定代码生成模板路径（默认：templates） |
-| `-include <path>` | 指定 C 头文件包含路径（默认：../std） |
-| `-target <lang>` | 指定目标语言（默认：c） |
-| `-vo-cache <size>` | 设置 VO 缓存大小（默认：2048） |
-| `-queue <size>` | 设置队列大小（默认：100） |
-| `-spendable <size>` | 设置可花费组件大小（默认：10） |
+| `--sor` | 启用 SOR 编译时所有权分析（默认 -O3） |
+| `--release` | Release 模式（-O3 优化） |
+| `--opt <level>` | 优化级别（O0/O1/O2/O3），覆盖所有默认值 |
+| `--sourcemap` | 生成源码映射文件 |
+| `--memory-limit <MB>` | 内存限制（默认 4096 MB） |
+| `--timeout <sec>` | 编译超时限制（默认 120 秒） |
+| `--template <path>` | 代码生成模板路径（默认：templates） |
+| `--include <path>` | C 头文件包含路径（默认：../std） |
+| `--stdlib <path>` | 标准库路径（自动检测） |
+| `--pkglib <path>` | 第三方库路径（自动检测） |
+| `--target <lang>` | 目标语言（默认：c） |
+| `--output-dir <dir>` | 输出目录 |
+| `--vo-cache <size>` | VO 缓存大小（默认：2048） |
+| `--queue <size>` | 队列大小（默认：100） |
+| `--spendable <size>` | 可花费组件大小（默认：10） |
+| `--cflags <flags>` | 额外的 C 编译器参数 |
+| `--defines <macros>` | 额外的 C 宏定义（逗号分隔） |
+| `--libs <libs>` | 额外的链接库（逗号分隔） |
+| `--analyze-pkg <name>` | 分析指定包并生成配置文件 |
+| `--analyze-pkg-all` | 分析所有 pkglib 中的包 |
+
+> 📋 所有参数均可通过 `kaula.json` 配置文件设置，命令行参数优先级更高。详见 [编译配置文件](docs/build-config.md)。
 
 ### 编译流程
 
@@ -529,6 +566,27 @@ GOOS=linux GOARCH=amd64 go build -o kaulac
 # macOS
 GOOS=darwin GOARCH=amd64 go build -o kaulac
 ```
+
+### 编译器开发文档
+
+编译器各组件的详细文档位于 [docs/](docs/) 目录：
+
+| 组件 | 文档 | 说明 |
+|------|------|------|
+| 架构 | [编译器架构](docs/compiler-architecture.md) | 整体架构、编译流程、目录结构 |
+| 配置 | [编译配置文件](docs/build-config.md) | kaula.json 配置系统、所有参数说明 |
+| 词法分析 | [词法分析器](docs/lexer.md) | Token 类型、扫描策略、UTF-8 支持 |
+| 语法分析 | [语法分析器](docs/parser.md) | 语法规则、递归下降解析、错误恢复 |
+| AST | [抽象语法树](docs/ast.md) | 节点类型、层次结构、遍历机制 |
+| 语义分析 | [语义分析](docs/semantic-analysis.md) | 两遍分析、类型检查、泛型约束 |
+| 代码生成 | [代码生成器](docs/code-generation.md) | 模块化生成、模板系统、SOR 集成 |
+| 符号表 | [符号表](docs/symbol-table.md) | 层次化作用域、泛型支持 |
+| 缓存 | [增量编译缓存](docs/cache-system.md) | SHA-256 验证、原子写入 |
+| 错误处理 | [错误处理](docs/error-handling.md) | 错误类型、源码上下文、修复建议 |
+| SOR | [SOR 子结构所有权](docs/sor-system.md) | 所有权原语、分析流程 |
+| 标准库 | [标准库集成](docs/stdlib-integration.md) | 配置驱动、自动发现 |
+| 运行时 | [核心运行时特性](docs/core-runtime.md) | VO 系统、前缀系统、任务调度 |
+| 资源控制 | [超时与内存控制](docs/timeout-memory.md) | 资源监控、阶段统计 |
 
 ### 项目结构最佳实践
 

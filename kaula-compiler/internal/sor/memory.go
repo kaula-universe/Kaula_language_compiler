@@ -3,6 +3,7 @@ package sor
 import (
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -281,6 +282,17 @@ func AnalyzeASTWithMemory(program interface {
 	return sorErrors, decisions, analyzer.GetExecLog()
 }
 
+// PoolCapacityBreakdown 池容量分步计算明细
+// 用于诊断输出，展示每步优化的效果
+type PoolCapacityBreakdown struct {
+	RawSum            int // 原始求和（所有对象简单相加）
+	SharingAdjusted   int // 指针共享调整后（排除 release holder 重复计算）
+	ScopeTreeOptimized int // 作用域树优化后（分支互斥 + 循环复用）
+	DynamicAlloc      int // 动态分配估算
+	FinalWithMargin   int // 加安全余量后
+	Clamped           int // 边界限制后（最终值）
+}
+
 // FullAnalysisResult 完整分析结果
 type FullAnalysisResult struct {
 	SORErrors    []SORError
@@ -290,9 +302,12 @@ type FullAnalysisResult struct {
 	InterProc    *InterProcResult
 	Sizes        map[string]int
 	ExecLog      []string
+	Stmts        []Stmt
 	// PoolCapacity 基于静态分析估算的 KMM V4 池容量（字节）
 	// 0 表示使用默认值
 	PoolCapacity int
+	// PoolBreakdown 池容量分步计算明细（用于诊断）
+	PoolBreakdown *PoolCapacityBreakdown
 }
 
 // EstimatePoolCapacityFromAST 非 SOR 模式下仅基于 AST 扫描估算池容量
@@ -336,6 +351,7 @@ func AnalyzeFullWithAST(program interface {
 	// 第一阶段：标准 SOR 安全分析
 	analyzer := NewSORAnalyzer()
 	stmts := program.GetStmts()
+	result.Stmts = stmts
 	result.SORErrors = analyzer.Analyze(stmts)
 	result.ExecLog = analyzer.GetExecLog()
 	tracker := analyzer.GetTracker()
@@ -394,46 +410,144 @@ func AnalyzeFullWithAST(program interface {
 
 // estimatePoolCapacityWithAST 结合 SOR 决策和 AST 动态分配扫描估算池容量
 // 补充 SOR 不追踪的 kmm_v4_malloc/std_malloc 调用
+// 采用分步优化策略：
+//   rawSum → sharingAdjusted → scopeTreeOptimized → +dynamicAlloc → +safetyMargin → clamp
 func estimatePoolCapacityWithAST(result *FullAnalysisResult, astProgram *ast.Program) int {
 	const (
-		minCapacity   = 256 * 1024        // 256 KB
-		maxCapacity   = 256 * 1024 * 1024 // 256 MB
-		safetyMargin  = 1.5               // 50% 安全余量
-		defaultDynSize = 1024             // 无法估算的动态分配默认 1KB
+		minCapacity    = 256 * 1024        // 256 KB
+		maxCapacity    = 256 * 1024 * 1024 // 256 MB
+		safetyMargin   = 1.5               // 50% 安全余量
+		defaultDynSize = 1024              // 无法估算的动态分配默认 1KB
 	)
 
-	// 1. SOR 追踪对象的总大小
-	sorTotal := 0
+	breakdown := &PoolCapacityBreakdown{}
+
+	// ===== 步骤 1: 原始求和（SOR 追踪对象） =====
+	rawSORTotal := 0
 	for _, d := range result.Decisions {
 		switch d.AllocKind {
 		case AllocBumpPool, AllocArenaTiny, AllocArenaSmall, AllocArenaMedium:
 			if size, ok := result.Sizes[d.ObjID]; ok && size > 0 {
-				sorTotal += size
+				rawSORTotal += size
 			} else {
-				sorTotal += 256
+				rawSORTotal += defaultDynSize
 			}
 		}
 	}
+	breakdown.RawSum = rawSORTotal
 
-	// 2. AST 扫描动态分配调用（kmm_v4_malloc / std_malloc）
+	// ===== 步骤 2: 指针共享调整 =====
+	// release holder 与 source 共享同一数据，不重复计算
+	sharingAdjusted := rawSORTotal
+	if tracker := findTrackerFromResult(result); tracker != nil {
+		pts := BuildPointsToSet(tracker)
+		adjustment := pts.EstimatePoolAdjustment(result.Sizes)
+		sharingAdjusted = rawSORTotal + adjustment
+		if sharingAdjusted < 0 {
+			sharingAdjusted = 0
+		}
+	}
+	breakdown.SharingAdjusted = sharingAdjusted
+
+	// ===== 步骤 3: 作用域树优化（分支互斥 + 循环复用） =====
+	scopeTreeOptimized := sharingAdjusted
+	if stmts := findStmtsFromResult(result); len(stmts) > 0 {
+		if tracker := findTrackerFromResult(result); tracker != nil {
+			sta := NewScopeTreeAnalyzer()
+			sta.BuildScopeTree(stmts)
+			scopeTreeOptimized = sta.EstimatePoolCapacity(result.Sizes, tracker)
+			if scopeTreeOptimized <= 0 {
+				scopeTreeOptimized = sharingAdjusted
+			}
+		}
+	}
+	breakdown.ScopeTreeOptimized = scopeTreeOptimized
+
+	// ===== 步骤 4: 动态分配估算 =====
 	dynTotal := 0
 	if astProgram != nil {
 		dynTotal = scanDynamicAllocations(astProgram)
 	}
+	breakdown.DynamicAlloc = dynTotal
 
-	// 3. 合计 + 安全余量
-	total := sorTotal + dynTotal
-	estimated := int(float64(total) * safetyMargin)
+	// ===== 步骤 5: 合计 + 安全余量 =====
+	total := scopeTreeOptimized + dynTotal
+	withMargin := int(float64(total) * safetyMargin)
+	breakdown.FinalWithMargin = withMargin
 
-	// 4. 边界限制
-	if estimated < minCapacity {
-		estimated = minCapacity
+	// ===== 步骤 6: 边界限制 =====
+	clamped := withMargin
+	if clamped < minCapacity {
+		clamped = minCapacity
 	}
-	if estimated > maxCapacity {
-		estimated = maxCapacity
+	if clamped > maxCapacity {
+		clamped = maxCapacity
 	}
+	breakdown.Clamped = clamped
 
-	return estimated
+	result.PoolBreakdown = breakdown
+	return clamped
+}
+
+// findTrackerFromResult 从 FullAnalysisResult 中重建 OwnershipTracker
+// 由于 result 中没有直接存储 tracker，我们通过 decisions 反向构建一个简化版
+func findTrackerFromResult(result *FullAnalysisResult) *OwnershipTracker {
+	if result == nil || len(result.Decisions) == 0 {
+		return nil
+	}
+	tracker := NewOwnershipTracker()
+	// 收集所有作用域
+	scopeSet := make(map[int]bool)
+	for _, d := range result.Decisions {
+		if d == nil {
+			continue
+		}
+		scopeSet[d.ScopeID] = true
+	}
+	// 按作用域 ID 排序并初始化 scopeObjects 和 scopeStack
+	scopeIDs := make([]int, 0, len(scopeSet))
+	for sid := range scopeSet {
+		scopeIDs = append(scopeIDs, sid)
+	}
+	// 简单起见，把所有对象放在 scope 0
+	if len(scopeIDs) == 0 {
+		scopeIDs = append(scopeIDs, 0)
+	}
+	tracker.scopeObjects = make(map[int][]string)
+	for _, sid := range scopeIDs {
+		tracker.scopeObjects[sid] = make([]string, 0)
+	}
+	tracker.scopeStack = []int{0}
+	tracker.currentScope = 0
+	// 添加所有对象
+	for _, d := range result.Decisions {
+		if d == nil {
+			continue
+		}
+		obj := &SORObject{
+			ID:          d.ObjID,
+			Name:        d.VarName,
+			TypeName:    "",
+			State:       d.FinalState,
+			ScopeID:     d.ScopeID,
+			IsComposite: d.IsComposite,
+		}
+		tracker.objects[d.ObjID] = obj
+		// 添加到对应的作用域
+		if _, ok := tracker.scopeObjects[d.ScopeID]; !ok {
+			tracker.scopeObjects[d.ScopeID] = make([]string, 0)
+		}
+		tracker.scopeObjects[d.ScopeID] = append(tracker.scopeObjects[d.ScopeID], d.ObjID)
+	}
+	return tracker
+}
+
+// findStmtsFromResult 从 FullAnalysisResult 中获取语句列表
+func findStmtsFromResult(result *FullAnalysisResult) []Stmt {
+	if result == nil {
+		return nil
+	}
+	return result.Stmts
 }
 
 // scanDynamicAllocations 扫描 AST 中的 kmm_v4_malloc/std_malloc 调用
@@ -449,6 +563,15 @@ func scanDynamicAllocations(program *ast.Program) int {
 	return total
 }
 
+// isNilStmt 检测语句接口是否为 nil（包括接口内包裹的 nil 指针）
+func isNilStmt(stmt ast.Statement) bool {
+	if stmt == nil {
+		return true
+	}
+	v := reflect.ValueOf(stmt)
+	return v.Kind() == reflect.Ptr && v.IsNil()
+}
+
 // scanDynamicAllocInStmt 递归扫描语句中的动态分配调用
 func scanDynamicAllocInStmt(stmt ast.Statement) int {
 	if isNilStmt(stmt) {
@@ -457,22 +580,18 @@ func scanDynamicAllocInStmt(stmt ast.Statement) int {
 	total := 0
 	switch s := stmt.(type) {
 	case *ast.FunctionStatement:
-		if s == nil { return 0 }
 		for _, bodyStmt := range s.Body {
 			total += scanDynamicAllocInStmt(bodyStmt)
 		}
 	case *ast.VariableDeclaration:
-		if s == nil { return 0 }
 		if s.Value != nil {
 			total += scanDynamicAllocInExpr(s.Value)
 		}
 	case *ast.ExpressionStatement:
-		if s == nil { return 0 }
 		if s.Expression != nil {
 			total += scanDynamicAllocInExpr(s.Expression)
 		}
 	case *ast.IfStatement:
-		if s == nil { return 0 }
 		if s.Condition != nil {
 			total += scanDynamicAllocInExpr(s.Condition)
 		}
@@ -483,7 +602,6 @@ func scanDynamicAllocInStmt(stmt ast.Statement) int {
 			total += scanDynamicAllocInStmt(bs)
 		}
 	case *ast.WhileStatement:
-		if s == nil { return 0 }
 		if s.Condition != nil {
 			total += scanDynamicAllocInExpr(s.Condition)
 		}
@@ -491,7 +609,6 @@ func scanDynamicAllocInStmt(stmt ast.Statement) int {
 			total += scanDynamicAllocInStmt(bs)
 		}
 	case *ast.ForStatement:
-		if s == nil { return 0 }
 		if s.Condition != nil {
 			total += scanDynamicAllocInExpr(s.Condition)
 		}
@@ -499,54 +616,15 @@ func scanDynamicAllocInStmt(stmt ast.Statement) int {
 			total += scanDynamicAllocInStmt(bs)
 		}
 	case *ast.BlockStatement:
-		if s == nil { return 0 }
 		for _, bs := range s.Statements {
 			total += scanDynamicAllocInStmt(bs)
 		}
 	case *ast.ReturnStatement:
-		if s == nil { return 0 }
 		if s.Value != nil {
 			total += scanDynamicAllocInExpr(s.Value)
 		}
 	}
 	return total
-}
-
-// isNilStmt 检测语句接口是否为 nil（包括非空接口包含 nil 指针的情况）
-func isNilStmt(stmt ast.Statement) bool {
-	if stmt == nil {
-		return true
-	}
-	switch s := stmt.(type) {
-	case *ast.FunctionStatement: return s == nil
-	case *ast.VariableDeclaration: return s == nil
-	case *ast.ExpressionStatement: return s == nil
-	case *ast.IfStatement: return s == nil
-	case *ast.WhileStatement: return s == nil
-	case *ast.ForStatement: return s == nil
-	case *ast.BlockStatement: return s == nil
-	case *ast.ReturnStatement: return s == nil
-	case *ast.ImportStatement: return s == nil
-	case *ast.SwitchStatement: return s == nil
-	case *ast.CaseStatement: return s == nil
-	case *ast.StructStatement: return s == nil
-	case *ast.ClassStatement: return s == nil
-	case *ast.MethodStatement: return s == nil
-	case *ast.ConstructorStatement: return s == nil
-	case *ast.PrefixStatement: return s == nil
-	case *ast.ObjectStatement: return s == nil
-	case *ast.InterfaceStatement: return s == nil
-	case *ast.YeideStatement: return s == nil
-	case *ast.ReleaseStatement: return s == nil
-	case *ast.ExtractStatement: return s == nil
-	case *ast.CallStatement: return s == nil
-	case *ast.SpendStatement: return s == nil
-	case *ast.TaskStatement: return s == nil
-	case *ast.NonLocalStatement: return s == nil
-	case *ast.VOStatement: return s == nil
-	case *ast.TreeStatement: return s == nil
-	}
-	return false
 }
 
 // scanDynamicAllocInExpr 扫描表达式中的 malloc 调用
@@ -616,7 +694,7 @@ func isKMMV4MallocCall(fn ast.Expression) bool {
 // estimateExprSize 尝试估算字面量表达式的大小
 // 对 Identifier 返回保守的元素数量代表值，使 size*size*8 这类表达式可估算
 func estimateExprSize(expr ast.Expression) int {
-	const identDefault = 512 // Identifier 的保守元素数量代表值（用于 n/2 等除法估算）
+	const identDefault = 512 // Identifier 的保守元素数量代表值
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
 		if e.Value > 0 {
@@ -624,10 +702,8 @@ func estimateExprSize(expr ast.Expression) int {
 		}
 	case *ast.Identifier:
 		// 变量实际值未知，给合理的保守代表值
-		// 1000 对应典型批量分配场景（如 n*8 → 8KB），
-		// 选择 1000 而非 identDefault(512) 是因为乘法场景下
-		// 1000 * small_const 能产生更合理的池大小估算
-		return 1000
+		// 512 是典型的批量分配元素数量
+		return identDefault
 	case *ast.BinaryExpression:
 		left := estimateExprSize(e.Left)
 		right := estimateExprSize(e.Right)

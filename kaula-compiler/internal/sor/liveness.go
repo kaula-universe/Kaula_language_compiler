@@ -20,6 +20,7 @@ type LastUseInfo struct {
 	LastUseKind  string   // 使用类型: "read", "yeide-src", "release-src", "extract-src", "call-arg"
 	IsYeideSrc   bool     // 是否作为 yeide 源（转移后失效，无需释放）
 	IsExtractSrc bool     // 是否作为 extract 源（部分失效，hollow 清理）
+	IsInLoop     bool     // 是否在循环体内声明（用于循环感知的池容量计算）
 }
 
 func (info *LastUseInfo) String() string {
@@ -31,6 +32,9 @@ func (info *LastUseInfo) String() string {
 	}
 	if info.IsExtractSrc {
 		b.WriteString(" extract-src")
+	}
+	if info.IsInLoop {
+		b.WriteString(" in-loop")
 	}
 	b.WriteString("]")
 	return b.String()
@@ -105,11 +109,13 @@ func (lr *LivenessResult) FormatLivenessSummary() string {
 // ============================================================================
 
 // LivenessAnalyzer 活跃性分析器
-// 遍历所有 Stmt，记录每个变量的最后使用位置和类型。
+// 遍历所有 Stmt，记录每个变量的最后使用位置。
 type LivenessAnalyzer struct {
 	lastUses     map[string]*LastUseInfo // varName -> 最后使用信息
 	scopeObjects map[int][]string        // scopeID -> 在此作用域中创建的对象名
 	scopeStack   []int                   // 当前作用域嵌套栈
+	loopDepth    int                     // 当前循环嵌套深度
+	loopVars     map[int][]string        // loopDepth -> 在该循环层级内声明的变量
 }
 
 // NewLivenessAnalyzer 创建活跃性分析器
@@ -118,6 +124,8 @@ func NewLivenessAnalyzer() *LivenessAnalyzer {
 		lastUses:     make(map[string]*LastUseInfo),
 		scopeObjects: make(map[int][]string),
 		scopeStack:   make([]int, 0, 8),
+		loopDepth:    0,
+		loopVars:     make(map[int][]string),
 	}
 }
 
@@ -253,10 +261,32 @@ func (la *LivenessAnalyzer) AnalyzeLiveness(stmts []Stmt) *LivenessResult {
 func (la *LivenessAnalyzer) analyzeStmt(stmt Stmt) {
 	switch stmt.Kind {
 
+	case StmtLoopEnter:
+		// 进入循环，记录循环深度
+		la.loopDepth++
+		la.loopVars[la.loopDepth] = make([]string, 0)
+
+	case StmtLoopExit:
+		// 退出循环
+		if la.loopDepth > 0 {
+			delete(la.loopVars, la.loopDepth)
+			la.loopDepth--
+		}
+
+	case StmtBranchEnter, StmtBranchElse, StmtBranchExit:
+		// 分支标记，不影响活跃性分析
+
 	case StmtLet:
 		// 变量创建：注册到当前作用域
 		la.addScopeObject(stmt.VarName)
 		la.recordUse(stmt.VarName, stmt.VarName, stmt.Line, "let")
+		// 如果在循环体内，记录为循环变量并标记 IsInLoop
+		if la.loopDepth > 0 {
+			la.loopVars[la.loopDepth] = append(la.loopVars[la.loopDepth], stmt.VarName)
+			if info, ok := la.lastUses[stmt.VarName]; ok {
+				info.IsInLoop = true
+			}
+		}
 
 	case StmtYeide:
 		// yeide: SrcName 转移所有权给 VarName（目标）

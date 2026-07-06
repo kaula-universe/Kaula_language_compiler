@@ -1,0 +1,159 @@
+import std.io
+import std.string
+import std.net
+
+// ==================== HTTP Server ====================
+
+// 静态文件根目录
+char* static_root = "."
+
+// ==================== HTTP 解析工具 ====================
+
+// 从请求中提取方法
+fn get_method(char* request) char* {
+    char* p = request
+    while *p != ' ' && *p != '\0' {
+        p++
+    }
+    size_t len = p - request
+    char* method = (char*)(malloc(len + 1))
+    memcpy(method, request, len)
+    method[len] = '\0'
+    return method
+}
+
+// 从请求中提取路径
+fn get_path(char* request) char* {
+    char* p = request
+    while *p != ' ' && *p != '\0' {
+        p++
+    }
+    p++
+    char* start = p
+    while *p != ' ' && *p != '\r' && *p != '\n' && *p != '\0' {
+        p++
+    }
+    size_t len = p - start
+    char* path = (char*)(malloc(len + 1))
+    memcpy(path, start, len)
+    path[len] = '\0'
+    return path
+}
+
+// 检查路径前缀
+fn path_starts_with(char* path, char* prefix) bool {
+    return strstr(path, prefix) == path
+}
+
+// ==================== 路由处理 ====================
+
+fn handle_index() char* {
+    return "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+<!DOCTYPE html>\n<html>\n<head><title>Kaula HTTP Server</title></head>\n<body>\n\
+<h1>Kaula HTTP Server</h1>\n\
+<p>A high-performance HTTP server built with Kaula.</p>\n\
+<h2>Routes:</h2>\n<ul>\n\
+<li><a href=\"/\">/</a> - Home page</li>\n\
+<li><a href=\"/hello\">/hello</a> - Hello world</li>\n\
+<li><a href=\"/api/info\">/api/info</a> - Server info (JSON)</li>\n\
+<li><a href=\"/health\">/health</a> - Health check</li>\n\
+</ul>\n</body>\n</html>"
+}
+
+fn handle_hello() char* {
+    return "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello from Kaula!"
+}
+
+fn handle_api_info() char* {
+    return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
+{\"server\":\"Kaula HTTP\",\"version\":\"1.0\",\"lang\":\"Kaula\",\"runtime\":\"C\"}"
+}
+
+fn handle_health() char* {
+    return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"healthy\"}"
+}
+
+fn handle_not_found() char* {
+    return "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+<html><body><h1>404 Not Found</h1><p>The requested page was not found.</p></body></html>"
+}
+
+// ==================== 路由匹配 ====================
+
+fn route_request(char* method, char* path) char* {
+    if string_equals(path, "/") {
+        return handle_index()
+    }
+    if string_equals(path, "/hello") {
+        return handle_hello()
+    }
+    if string_equals(path, "/api/info") {
+        return handle_api_info()
+    }
+    if string_equals(path, "/health") {
+        return handle_health()
+    }
+    if path_starts_with(path, "/static/") {
+        return "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nStatic file serving: path received"
+    }
+    return handle_not_found()
+}
+
+// ==================== 客户端处理 ====================
+
+fn handle_client(Socket* client) {
+    u8[8192] buffer
+    size_t received = tcp_receive(client, buffer, 8192)
+
+    if received > 0 {
+        char* request = (cstring)(buffer)
+        char* method = get_method(request)
+        char* path = get_path(request)
+
+        print("[")
+        print(method)
+        print("] ")
+        println(path)
+
+        char* response = route_request(method, path)
+        tcp_send(client, (u8*)(response), string_length(response))
+    }
+
+    socket_close(client)
+}
+
+// ==================== 主函数 ====================
+
+fn main() {
+    println("========================================")
+    println("  Kaula HTTP Server v1.0")
+    println("  Listening on http://0.0.0.0:8080")
+    println("========================================")
+    println("")
+    println("Routes:")
+    println("  GET /          - Home page")
+    println("  GET /hello     - Hello world")
+    println("  GET /api/info  - Server info (JSON)")
+    println("  GET /health    - Health check")
+    println("  GET /static/*  - Static files")
+    println("")
+    println("Press Ctrl+C to stop.")
+    println("")
+
+    Socket* server = tcp_server_create("0.0.0.0", 8080)
+
+    if server == null {
+        println("ERROR: Failed to create server on port 8080")
+        return
+    }
+
+    println("[OK] Server started successfully")
+    println("")
+
+    while true {
+        Socket* client = socket_accept(server)
+        if client != null {
+            handle_client(client)
+        }
+    }
+}
