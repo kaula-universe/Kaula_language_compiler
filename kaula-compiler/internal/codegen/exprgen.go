@@ -1,7 +1,9 @@
 package codegen
 
 import (
+	"fmt"
 	"kaula-compiler/internal/ast"
+	"kaula-compiler/internal/comptime"
 	"regexp"
 	"strconv"
 	"strings"
@@ -108,6 +110,7 @@ func isIntegerLiteral(s string) bool {
 type ExpressionGenerator struct {
 	codegen   *CodeGenerator
 	typeCache map[ast.Expression]string // 表达式 → 推导类型缓存
+	comptime  *comptime.Evaluator
 }
 
 // NewExpressionGenerator 创建一个新的表达式生成器
@@ -115,6 +118,7 @@ func NewExpressionGenerator(cg *CodeGenerator) *ExpressionGenerator {
 	return &ExpressionGenerator{
 		codegen:   cg,
 		typeCache: make(map[ast.Expression]string),
+		comptime:  comptime.NewEvaluator(),
 	}
 }
 
@@ -155,6 +159,33 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.generateTypeCastExpression(e)
 	case *ast.UnaryExpression:
 		return eg.generateUnaryExpression(e)
+	case *ast.SizeOfExpression:
+		return eg.generateSizeOfExpression(e)
+	case *ast.AlignOfExpression:
+		return eg.generateAlignOfExpression(e)
+	case *ast.OffsetOfExpression:
+		return eg.generateOffsetOfExpression(e)
+	case *ast.ComptimeExpression:
+		return eg.generateComptimeExpression(e)
+	case *ast.TypeNameExpression:
+		return eg.generateTypeNameExpression(e)
+	case *ast.FieldCountExpression:
+		return eg.generateFieldCountExpression(e)
+	case *ast.FieldNameExpression:
+		return eg.generateFieldNameExpression(e)
+	case *ast.FieldTypeExpression:
+		return eg.generateFieldTypeExpression(e)
+	case *ast.TypeKindExpression:
+		return eg.generateTypeKindExpression(e)
+	case *ast.ParenExpression:
+		return "(" + eg.GenerateExpression(e.Inner) + ")"
+	case *ast.ConditionalExpression:
+		cond := eg.GenerateExpression(e.Condition)
+		trueExpr := eg.GenerateExpression(e.TrueExpr)
+		falseExpr := eg.GenerateExpression(e.FalseExpr)
+		return "(" + cond + " ? " + trueExpr + " : " + falseExpr + ")"
+	case *ast.ArrayLiteral:
+		return eg.generateArrayLiteral(e)
 	default:
 		return "0"
 	}
@@ -956,6 +987,174 @@ func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpress
 // mapTypeToC 将 Kaula 类型映射到 C 类型
 func (eg *ExpressionGenerator) mapTypeToC(kaulaType string) string {
 	return MapKaulaTypeToC(kaulaType)
+}
+
+func (eg *ExpressionGenerator) generateSizeOfExpression(e *ast.SizeOfExpression) string {
+	cType := eg.mapTypeToC(e.TargetType)
+	return "sizeof(" + cType + ")"
+}
+
+func (eg *ExpressionGenerator) generateAlignOfExpression(e *ast.AlignOfExpression) string {
+	cType := eg.mapTypeToC(e.TargetType)
+	return "_Alignof(" + cType + ")"
+}
+
+func (eg *ExpressionGenerator) generateOffsetOfExpression(e *ast.OffsetOfExpression) string {
+	cType := eg.mapTypeToC(e.TargetType)
+	return "offsetof(" + cType + ", " + e.FieldName + ")"
+}
+
+func (eg *ExpressionGenerator) generateArrayLiteral(e *ast.ArrayLiteral) string {
+	elems := make([]string, len(e.Elements))
+	for i, elem := range e.Elements {
+		elems[i] = eg.GenerateExpression(elem)
+	}
+	return "((int[]){ " + strings.Join(elems, ", ") + " })"
+}
+
+func (eg *ExpressionGenerator) generateComptimeExpression(e *ast.ComptimeExpression) string {
+	val, err := eg.comptime.Eval(e)
+	if err == nil {
+		return eg.comptimeValueToC(val)
+	}
+	return eg.GenerateExpression(e.Inner)
+}
+
+func (eg *ExpressionGenerator) comptimeValueToC(val *comptime.Value) string {
+	switch val.Kind {
+	case comptime.KindInt:
+		return fmt.Sprintf("%d", val.IntVal)
+	case comptime.KindFloat:
+		return fmt.Sprintf("%f", val.FloatVal)
+	case comptime.KindBool:
+		if val.BoolVal {
+			return "true"
+		}
+		return "false"
+	case comptime.KindString:
+		return "\"" + escapeCString(val.StringVal) + "\""
+	default:
+		return "NULL"
+	}
+}
+
+func (eg *ExpressionGenerator) generateTypeNameExpression(e *ast.TypeNameExpression) string {
+	return "\"" + escapeCString(e.TargetType) + "\""
+}
+
+func (eg *ExpressionGenerator) generateFieldCountExpression(e *ast.FieldCountExpression) string {
+	count := eg.getStructFieldCount(e.TargetType)
+	return fmt.Sprintf("%d", count)
+}
+
+func (eg *ExpressionGenerator) generateFieldNameExpression(e *ast.FieldNameExpression) string {
+	idx := eg.evalIntExpr(e.Index)
+	if idx < 0 {
+		return "\"\""
+	}
+	name := eg.getStructFieldName(e.TargetType, idx)
+	return "\"" + escapeCString(name) + "\""
+}
+
+func (eg *ExpressionGenerator) generateFieldTypeExpression(e *ast.FieldTypeExpression) string {
+	idx := eg.evalIntExpr(e.Index)
+	if idx < 0 {
+		return "\"\""
+	}
+	typ := eg.getStructFieldType(e.TargetType, idx)
+	return "\"" + escapeCString(typ) + "\""
+}
+
+func (eg *ExpressionGenerator) generateTypeKindExpression(e *ast.TypeKindExpression) string {
+	kind := eg.getTypeKind(e.TargetType)
+	return "\"" + escapeCString(kind) + "\""
+}
+
+func (eg *ExpressionGenerator) getStructFieldCount(typeName string) int {
+	if eg.codegen.program == nil {
+		return 0
+	}
+	for _, stmt := range eg.codegen.program.Statements {
+		if structStmt, ok := stmt.(*ast.StructStatement); ok {
+			if structStmt.Name == typeName {
+				return len(structStmt.Fields)
+			}
+		}
+	}
+	return 0
+}
+
+func (eg *ExpressionGenerator) getStructFieldName(typeName string, idx int) string {
+	if eg.codegen.program == nil {
+		return ""
+	}
+	for _, stmt := range eg.codegen.program.Statements {
+		if structStmt, ok := stmt.(*ast.StructStatement); ok {
+			if structStmt.Name == typeName {
+				if idx >= 0 && idx < len(structStmt.Fields) {
+					return structStmt.Fields[idx].Name
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
+func (eg *ExpressionGenerator) getStructFieldType(typeName string, idx int) string {
+	if eg.codegen.program == nil {
+		return ""
+	}
+	for _, stmt := range eg.codegen.program.Statements {
+		if structStmt, ok := stmt.(*ast.StructStatement); ok {
+			if structStmt.Name == typeName {
+				if idx >= 0 && idx < len(structStmt.Fields) {
+					return structStmt.Fields[idx].Type
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
+func (eg *ExpressionGenerator) getTypeKind(typeName string) string {
+	switch typeName {
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "int":
+		return "int"
+	case "f32", "f64", "float", "double":
+		return "float"
+	case "bool":
+		return "bool"
+	case "char":
+		return "char"
+	case "string":
+		return "string"
+	case "void":
+		return "void"
+	default:
+		if eg.codegen.program != nil {
+			for _, stmt := range eg.codegen.program.Statements {
+				if structStmt, ok := stmt.(*ast.StructStatement); ok {
+					if structStmt.Name == typeName {
+						return "struct"
+					}
+				}
+			}
+		}
+		return "unknown"
+	}
+}
+
+func (eg *ExpressionGenerator) evalIntExpr(expr ast.Expression) int {
+	if intLit, ok := expr.(*ast.IntegerLiteral); ok {
+		return int(intLit.Value)
+	}
+	val, err := eg.comptime.Eval(expr)
+	if err == nil && val.Kind == comptime.KindInt {
+		return int(val.IntVal)
+	}
+	return -1
 }
 
 // generateUnaryExpression 生成一元表达式代码

@@ -2104,3 +2104,96 @@ func (e *ExtractStatement) statementNode() {}
 func (e *ExtractStatement) String() string { return "ExtractStatement" }
 func (e *ExtractStatement) GetPosition() Position { return e.Pos }
 func (e *ExtractStatement) SetPosition(pos Position) { e.Pos = pos }
+
+type SizeOfExpression struct {
+	TargetType string
+	Pos        Position
+}
+
+func (s *SizeOfExpression) expressionNode() {}
+func (s *SizeOfExpression) String() string { return "SizeOfExpression" }
+func (s *SizeOfExpression) GetPosition() Position { return s.Pos }
+func (s *SizeOfExpression) SetPosition(pos Position) { s.Pos = pos }
+
+type AlignOfExpression struct {
+	TargetType string
+	Pos        Position
+}
+
+func (a *AlignOfExpression) expressionNode() {}
+func (a *AlignOfExpression) String() string { return "AlignOfExpression" }
+func (a *AlignOfExpression) GetPosition() Position { return a.Pos }
+func (a *AlignOfExpression) SetPosition(pos Position) { a.Pos = pos }
+
+type OffsetOfExpression struct {
+	TargetType string
+	FieldName  string
+	Pos        Position
+}
+
+func (o *OffsetOfExpression) expressionNode() {}
+func (o *OffsetOfExpression) String() string { return "OffsetOfExpression" }
+func (o *OffsetOfExpression) GetPosition() Position { return o.Pos }
+func (o *OffsetOfExpression) SetPosition(pos Position) { o.Pos = pos }
+
+type ComptimeExpression struct {
+	Inner Expression
+	Pos   Position
+}
+
+func (c *ComptimeExpression) expressionNode() {}
+func (c *ComptimeExpression) String() string { return "ComptimeExpression" }
+func (c *ComptimeExpression) GetPosition() Position { return c.Pos }
+func (c *ComptimeExpression) SetPosition(pos Position) { c.Pos = pos }
+
+type TypeNameExpression struct {
+	TargetType string
+	Pos        Position
+}
+
+func (t *TypeNameExpression) expressionNode() {}
+func (t *TypeNameExpression) String() string { return "TypeNameExpression" }
+func (t *TypeNameExpression) GetPosition() Position { return t.Pos }
+func (t *TypeNameExpression) SetPosition(pos Position) { t.Pos = pos }
+
+type FieldCountExpression struct {
+	TargetType string
+	Pos        Position
+}
+
+func (f *FieldCountExpression) expressionNode() {}
+func (f *FieldCountExpression) String() string { return "FieldCountExpression" }
+func (f *FieldCountExpression) GetPosition() Position { return f.Pos }
+func (f *FieldCountExpression) SetPosition(pos Position) { f.Pos = pos }
+
+type FieldNameExpression struct {
+	TargetType string
+	Index      Expression
+	Pos        Position
+}
+
+func (f *FieldNameExpression) expressionNode() {}
+func (f *FieldNameExpression) String() string { return "FieldNameExpression" }
+func (f *FieldNameExpression) GetPosition() Position { return f.Pos }
+func (f *FieldNameExpression) SetPosition(pos Position) { f.Pos = pos }
+
+type FieldTypeExpression struct {
+	TargetType string
+	Index      Expression
+	Pos        Position
+}
+
+func (f *FieldTypeExpression) expressionNode() {}
+func (f *FieldTypeExpression) String() string { return "FieldTypeExpression" }
+func (f *FieldTypeExpression) GetPosition() Position { return f.Pos }
+func (f *FieldTypeExpression) SetPosition(pos Position) { f.Pos = pos }
+
+type TypeKindExpression struct {
+	TargetType string
+	Pos        Position
+}
+
+func (t *TypeKindExpression) expressionNode() {}
+func (t *TypeKindExpression) String() string { return "TypeKindExpression" }
+func (t *TypeKindExpression) GetPosition() Position { return t.Pos }
+func (t *TypeKindExpression) SetPosition(pos Position) { t.Pos = pos }

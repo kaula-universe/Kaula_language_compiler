@@ -307,6 +307,9 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			addEntry("type", typeStmt.Pos.Line, typeStmt.Pos.Column, "type", typeStmt.Name, lines)
 			typeCode.WriteString(code)
 		} else if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
+			if varDecl == nil {
+				continue
+			}
 			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
 			initValue := cg.generateExpression(varDecl.Value)
 			if varDecl.IsAuto {
@@ -335,7 +338,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 
 	var allIncludes strings.Builder
 	allIncludes.Grow(2048)
-	allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
+	allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
 
 	if cg.stdlibConfig != nil {
 		for moduleName := range importedModules {

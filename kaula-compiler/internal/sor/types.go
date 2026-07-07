@@ -99,6 +99,14 @@ type SORObject struct {
 	// IsUnion 表示该对象是否通过 union release 分发。
 	// 为 true 时，编译期选举决定 elected writer。
 	IsUnion bool
+
+	// IsResource 表示该对象是否是资源类型（需要显式释放）。
+	// 资源类型在作用域结束时必须被释放或转移所有权，否则报资源泄漏错误。
+	IsResource bool
+
+	// ResourceKind 表示资源种类（如 "file", "socket", "lock", "memory" 等）。
+	// 用于错误信息和资源特定的处理逻辑。
+	ResourceKind string
 }
 
 // ============================================================================
@@ -166,6 +174,9 @@ const (
 
 	// ErrDoubleRelease 重复 release 同一对象。
 	ErrDoubleRelease
+
+	// ErrResourceLeak 资源泄漏：作用域结束时资源仍处于 Owned 状态，未被释放或转移。
+	ErrResourceLeak
 )
 
 // SORError 表示 SOR 编译时验证发现的错误。
@@ -226,6 +237,8 @@ func (k ErrorKind) String() string {
 		return "Null-Dereference"
 	case ErrDoubleRelease:
 		return "Double-Release"
+	case ErrResourceLeak:
+		return "Resource-Leak"
 	default:
 		return fmt.Sprintf("Unknown(%d)", int(k))
 	}

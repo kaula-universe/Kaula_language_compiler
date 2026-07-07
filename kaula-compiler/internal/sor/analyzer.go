@@ -139,15 +139,43 @@ type SORAnalyzer struct {
 
 	// 执行日志（用于调试和展示）。
 	execLog []string
+
+	// resources 是资源类型注册表。
+	resources *ResourceRegistry
+
+	// comptime 是编译期计算结果反馈，用于优化内存分配。
+	comptime *ComptimeFeedback
 }
 
 // NewSORAnalyzer 创建一个新的 SOR 分析器。
 func NewSORAnalyzer() *SORAnalyzer {
 	return &SORAnalyzer{
-		tracker: NewOwnershipTracker(),
-		errors:  make([]SORError, 0),
-		execLog: make([]string, 0),
+		tracker:   NewOwnershipTracker(),
+		errors:    make([]SORError, 0),
+		execLog:   make([]string, 0),
+		resources: NewResourceRegistry(),
+		comptime:  NewComptimeFeedback(),
 	}
+}
+
+// GetResourceRegistry 获取资源类型注册表。
+func (a *SORAnalyzer) GetResourceRegistry() *ResourceRegistry {
+	return a.resources
+}
+
+// RegisterResource 注册一个资源类型。
+func (a *SORAnalyzer) RegisterResource(info *ResourceTypeInfo) {
+	a.resources.Register(info)
+}
+
+// GetComptimeFeedback 获取编译期反馈对象。
+func (a *SORAnalyzer) GetComptimeFeedback() *ComptimeFeedback {
+	return a.comptime
+}
+
+// SetComptimeFeedback 设置编译期反馈对象。
+func (a *SORAnalyzer) SetComptimeFeedback(cf *ComptimeFeedback) {
+	a.comptime = cf
 }
 
 // Analyze 分析一组语句，返回所有 SOR 错误。
@@ -158,6 +186,9 @@ func (a *SORAnalyzer) Analyze(stmts []Stmt) []SORError {
 	a.tracker = NewOwnershipTracker()
 
 	a.log("=== SOR 分析开始 ===")
+	if a.comptime != nil {
+		a.log(fmt.Sprintf("  [编译期反馈] %s", a.comptime.Summary()))
+	}
 	a.executeStmts(stmts)
 	a.log("=== SOR 分析结束 ===")
 
@@ -217,6 +248,12 @@ func (a *SORAnalyzer) executeStmt(stmt Stmt) {
 func (a *SORAnalyzer) execLet(stmt Stmt) {
 	objID := a.tracker.NewObject(stmt.VarName, stmt.TypeName, stmt.IsComposite, stmt.Line)
 	a.log(fmt.Sprintf("  -> 创建对象 %s, 状态: %s", stmt.VarName, StateOwned))
+
+	// 检查是否是资源类型，如果是则标记为资源
+	if resourceInfo, ok := a.resources.GetResourceInfo(stmt.TypeName); ok {
+		a.tracker.MarkAsResource(objID, resourceInfo.Kind)
+		a.log(fmt.Sprintf("  -> 标记为资源类型: %s (种类: %s)", stmt.TypeName, resourceInfo.Kind))
+	}
 
 	// 如果是复合类型且有子语句（表示初始化子元素），处理子元素
 	if stmt.IsComposite && len(stmt.Children) > 0 {

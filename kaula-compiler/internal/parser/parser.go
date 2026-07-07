@@ -2583,6 +2583,51 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			Value: false,
 			Pos:   pos,
 		}
+	case lexer.TOKEN_SIZEOF:
+		if expr := p.parseSizeOfExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_ALIGNOF:
+		if expr := p.parseAlignOfExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_OFFSETOF:
+		if expr := p.parseOffsetOfExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_COMPTIME:
+		if expr := p.parseComptimeExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_TYPE_NAME:
+		if expr := p.parseTypeNameExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_FIELD_COUNT:
+		if expr := p.parseFieldCountExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_FIELD_NAME:
+		if expr := p.parseFieldNameExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_FIELD_TYPE:
+		if expr := p.parseFieldTypeExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
+	case lexer.TOKEN_TYPE_KIND:
+		if expr := p.parseTypeKindExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
 	case lexer.TOKEN_RBRACE, lexer.TOKEN_LBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT, lexer.TOKEN_LSHIFT, lexer.TOKEN_RSHIFT, lexer.TOKEN_RPAREN, lexer.TOKEN_COMMA:
 		return nil
 	default:
@@ -3377,6 +3422,282 @@ func (p *Parser) Validate(program *ast.Program) {
 		p.log("验证完成，发现验证错误")
 	} else {
 		p.log("验证完成，未发现错误")
+	}
+}
+
+func (p *Parser) parseSizeOfExpressionIterative() *ast.SizeOfExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("sizeof 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("sizeof 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("sizeof 类型后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.SizeOfExpression{
+		TargetType: targetType,
+		Pos:        pos,
+	}
+}
+
+func (p *Parser) parseAlignOfExpressionIterative() *ast.AlignOfExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("alignof 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("alignof 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("alignof 类型后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.AlignOfExpression{
+		TargetType: targetType,
+		Pos:        pos,
+	}
+}
+
+func (p *Parser) parseOffsetOfExpressionIterative() *ast.OffsetOfExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("offsetof 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("offsetof 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_COMMA {
+		p.error("offsetof 中类型后应该跟 , 字段名")
+		return nil
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_IDENT {
+		p.error("offsetof 中 , 后应该跟字段名")
+		return nil
+	}
+	fieldName := p.curTok.Value
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("offsetof 后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.OffsetOfExpression{
+		TargetType: targetType,
+		FieldName:  fieldName,
+		Pos:        pos,
+	}
+}
+
+func (p *Parser) parseComptimeExpressionIterative() *ast.ComptimeExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	inner := p.parseExpressionIterative()
+	if inner == nil {
+		p.error("comptime 后应该跟表达式")
+		return nil
+	}
+	return &ast.ComptimeExpression{
+		Inner: inner,
+		Pos:   pos,
+	}
+}
+
+func (p *Parser) parseTypeNameExpressionIterative() *ast.TypeNameExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("type_name 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("type_name 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("type_name 类型后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.TypeNameExpression{
+		TargetType: targetType,
+		Pos:        pos,
+	}
+}
+
+func (p *Parser) parseFieldCountExpressionIterative() *ast.FieldCountExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("field_count 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("field_count 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("field_count 类型后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.FieldCountExpression{
+		TargetType: targetType,
+		Pos:        pos,
+	}
+}
+
+func (p *Parser) parseFieldNameExpressionIterative() *ast.FieldNameExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("field_name 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("field_name 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_COMMA {
+		p.error("field_name 中类型后应该跟 , 索引")
+		return nil
+	}
+	p.nextToken()
+	index := p.parseExpressionIterative()
+	if index == nil {
+		p.error("field_name 中缺少索引")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("field_name 后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.FieldNameExpression{
+		TargetType: targetType,
+		Index:      index,
+		Pos:        pos,
+	}
+}
+
+func (p *Parser) parseFieldTypeExpressionIterative() *ast.FieldTypeExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("field_type 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("field_type 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_COMMA {
+		p.error("field_type 中类型后应该跟 , 索引")
+		return nil
+	}
+	p.nextToken()
+	index := p.parseExpressionIterative()
+	if index == nil {
+		p.error("field_type 中缺少索引")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("field_type 后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.FieldTypeExpression{
+		TargetType: targetType,
+		Index:      index,
+		Pos:        pos,
+	}
+}
+
+func (p *Parser) parseTypeKindExpressionIterative() *ast.TypeKindExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("type_kind 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	targetType := p.parseTypeString()
+	if targetType == "" {
+		p.error("type_kind 中缺少类型")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("type_kind 类型后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.TypeKindExpression{
+		TargetType: targetType,
+		Pos:        pos,
 	}
 }
 

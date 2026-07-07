@@ -117,6 +117,18 @@ func (t *OwnershipTracker) GetObjectByName(name string) string {
 	return ""
 }
 
+// MarkAsResource 将对象标记为资源类型。
+// 资源类型在作用域结束时必须被显式释放或转移所有权，否则报资源泄漏错误。
+func (t *OwnershipTracker) MarkAsResource(objID string, resourceKind string) bool {
+	obj := t.objects[objID]
+	if obj == nil {
+		return false
+	}
+	obj.IsResource = true
+	obj.ResourceKind = resourceKind
+	return true
+}
+
 // ----------------------------------------------------------------------------
 // 作用域管理
 // ----------------------------------------------------------------------------
@@ -132,6 +144,7 @@ func (t *OwnershipTracker) EnterScope() {
 // ExitScope 退出当前作用域。
 // 检查该作用域中创建的独占所有权对象是否都已正确处理（yeide 或释放）。
 // 注意：release 状态的对象在作用域结束时自动失效。
+// 资源类型（IsResource=true）如果在作用域结束时仍为 Owned 状态，报资源泄漏错误。
 func (t *OwnershipTracker) ExitScope(sourceLine int) {
 	if len(t.scopeStack) <= 1 {
 		return // 不能退出全局作用域
@@ -146,9 +159,19 @@ func (t *OwnershipTracker) ExitScope(sourceLine int) {
 			continue
 		}
 
-		// 如果对象仍是 Owned 状态，标记为 Moved（作用域结束，对象销毁）
-		// 这模拟了 Rust 中 drop 的语义
+		// 如果对象仍是 Owned 状态
 		if obj.State == StateOwned {
+			// 如果是资源类型，报资源泄漏错误
+			if obj.IsResource {
+				t.addError(SORError{
+					Kind:       ErrResourceLeak,
+					Message:    fmt.Sprintf("资源 '%s'（类型: %s, 种类: %s）在作用域结束时仍被持有，可能导致资源泄漏", obj.Name, obj.TypeName, obj.ResourceKind),
+					SourceLine: sourceLine,
+					ObjectID:   objID,
+					Details:    "请在作用域结束前释放资源（调用释放函数）或转移所有权（yeide）",
+				})
+			}
+			// 标记为 Moved（作用域结束，对象销毁）
 			obj.State = StateMoved
 		}
 	}
@@ -229,6 +252,12 @@ func (t *OwnershipTracker) Yeide(srcID, dstName string, sourceLine int) string {
 		for k, v := range src.Children {
 			dst.Children[k] = v
 		}
+	}
+
+	// 复制资源属性
+	if src.IsResource {
+		dst.IsResource = true
+		dst.ResourceKind = src.ResourceKind
 	}
 
 	// 源对象标记为已转移

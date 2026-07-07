@@ -1,0 +1,119 @@
+// ============================================================
+// Kaula 新特性综合示例
+// 展示 sizeof/alignof/offsetof、comptime、编译期反射、SOR 资源安全
+// ============================================================
+
+// ------------------------------------------------------------
+// 1. sizeof / alignof / offsetof - 编译期内存布局查询
+// ------------------------------------------------------------
+
+struct Point {
+    x int
+    y int
+}
+
+struct Header {
+    magic    [4]byte
+    version  int
+    checksum uint32
+}
+
+fn memory_layout_demo() {
+    // 编译期计算类型大小
+    const point_size = sizeof(Point)
+    const int_size = sizeof(int)
+    const header_size = sizeof(Header)
+
+    // 编译期计算对齐要求
+    const point_align = alignof(Point)
+    const int_align = alignof(int)
+
+    // 编译期计算字段偏移量
+    const point_y_offset = offsetof(Point, y)
+    const header_version_offset = offsetof(Header, version)
+    const header_checksum_offset = offsetof(Header, checksum)
+}
+
+// ------------------------------------------------------------
+// 2. comptime - 编译期执行
+// ------------------------------------------------------------
+
+fn comptime_demo() {
+    // 编译期计算常量
+    const buffer_size = comptime 1024 * 4
+    const max_items = comptime (1 << 10) - 1
+
+    // 编译期算术运算
+    const total = comptime 100 + 200 * 3
+    const is_valid = comptime total > 500
+
+    // 编译期字符串（配合反射使用）
+    const type_name_str = type_name(Point)
+}
+
+// ------------------------------------------------------------
+// 3. 编译期反射 - 类型信息查询
+// ------------------------------------------------------------
+
+fn reflection_demo() {
+    // 获取类型名称
+    const point_type = type_name(Point)
+
+    // 获取类型种类
+    const point_kind = type_kind(Point)
+    const int_kind = type_kind(int)
+
+    // 获取结构体字段数量
+    const point_fields = field_count(Point)
+    const header_fields = field_count(Header)
+
+    // 获取字段名（按索引）
+    const point_field_0 = field_name(Point, 0)  // "x"
+    const point_field_1 = field_name(Point, 1)  // "y"
+
+    // 获取字段类型（按索引）
+    const point_field_0_type = field_type(Point, 0)  // "int"
+    const point_field_1_type = field_type(Point, 1)  // "int"
+}
+
+// ------------------------------------------------------------
+// 4. SOR 资源安全 - 资源生命周期管理
+// ------------------------------------------------------------
+// （以下为概念示例，实际 SOR 检查在编译期进行）
+
+// 概念：File 是一个资源类型，需要显式释放
+// 编译期会检查：所有 File 类型的变量在作用域结束前必须被释放或转移
+
+fn resource_demo() {
+    // 假设 f 是一个文件资源
+    // f = open_file("data.txt")
+
+    // 使用文件...
+
+    // 正确：必须在作用域结束前关闭文件
+    // close_file(f)
+
+    // 或者：yeide 转移所有权给其他变量/函数
+    // yeide f -> other_var
+}
+
+// ------------------------------------------------------------
+// 5. SOR + comptime 协同优化
+// ------------------------------------------------------------
+
+fn optimized_demo() {
+    // 编译期计算数组大小
+    const chunk_size = comptime 4096
+
+    // SOR 分析器可以利用编译期已知的 chunk_size
+    // 来精确预分配内存池，避免运行时动态分配
+    // var buffer [chunk_size]byte
+}
+
+fn main() {
+    memory_layout_demo()
+    comptime_demo()
+    reflection_demo()
+    resource_demo()
+    optimized_demo()
+}

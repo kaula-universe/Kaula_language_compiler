@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"kaula-compiler/internal/comptime"
 	"kaula-compiler/internal/core"
 	"kaula-compiler/internal/errors"
 	"kaula-compiler/internal/symbol"
@@ -30,6 +31,7 @@ type SemanticAnalyzer struct {
 	source          string // 源码用于错误上下文
 	prefixSymbolTables map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
 	currentPrefixTable *symbol.SymbolTable             // 当前 @前缀块 的符号表
+	comptime *comptime.Evaluator                        // 编译期表达式评估器
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -89,6 +91,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		prefixManager:   core.NewPrefixManager(),
 		rootTreeFound:   false,
 		prefixSymbolTables: make(map[string]*symbol.SymbolTable),
+		comptime:          nil,
 	}
 }
 
@@ -101,6 +104,8 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 	if program != nil {
 		sa.source = program.Source
 	}
+
+	sa.comptime = comptime.NewEvaluator()
 
 	// 第一遍：将所有函数和变量添加到符号表（不分析函数体）
 	for _, stmt := range program.Statements {
@@ -923,6 +928,16 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 		}
 	case *ast.PrefixCallExpression:
 		// 前缀调用表达式已在 analyzePrefixCallExpression 中处理
+	case *ast.SizeOfExpression, *ast.AlignOfExpression, *ast.OffsetOfExpression:
+		// 编译期内建函数，类型检查在 inferExpressionType 中处理
+	case *ast.ComptimeExpression:
+		sa.analyzeExpression(e.Inner)
+	case *ast.TypeNameExpression, *ast.FieldCountExpression, *ast.TypeKindExpression:
+		// 编译期反射函数，不需要额外分析
+	case *ast.FieldNameExpression:
+		sa.analyzeExpression(e.Index)
+	case *ast.FieldTypeExpression:
+		sa.analyzeExpression(e.Index)
 	}
 }
 
@@ -1168,6 +1183,14 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 			return trueType
 		}
 		return falseType
+	case *ast.SizeOfExpression, *ast.AlignOfExpression, *ast.OffsetOfExpression:
+		return "u64"
+	case *ast.ComptimeExpression:
+		return sa.inferExpressionType(e.Inner)
+	case *ast.TypeNameExpression, *ast.FieldNameExpression, *ast.FieldTypeExpression, *ast.TypeKindExpression:
+		return "string"
+	case *ast.FieldCountExpression:
+		return "u64"
 	default:
 		return ""
 	}

@@ -49,6 +49,15 @@ const (
 	TOKEN_RELEASE
 	TOKEN_EXTRACT
 	TOKEN_TYPE
+	TOKEN_SIZEOF
+	TOKEN_ALIGNOF
+	TOKEN_OFFSETOF
+	TOKEN_COMPTIME
+	TOKEN_TYPE_NAME
+	TOKEN_FIELD_COUNT
+	TOKEN_FIELD_NAME
+	TOKEN_FIELD_TYPE
+	TOKEN_TYPE_KIND
 	// 类型关键字
 	TOKEN_TYPE_INT
 	TOKEN_TYPE_FLOAT
@@ -495,6 +504,24 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_EXTRACT
 	case "type":
 		tokenType = TOKEN_TYPE
+	case "sizeof":
+		tokenType = TOKEN_SIZEOF
+	case "alignof":
+		tokenType = TOKEN_ALIGNOF
+	case "offsetof":
+		tokenType = TOKEN_OFFSETOF
+	case "comptime":
+		tokenType = TOKEN_COMPTIME
+	case "type_name":
+		tokenType = TOKEN_TYPE_NAME
+	case "field_count":
+		tokenType = TOKEN_FIELD_COUNT
+	case "field_name":
+		tokenType = TOKEN_FIELD_NAME
+	case "field_type":
+		tokenType = TOKEN_FIELD_TYPE
+	case "type_kind":
+		tokenType = TOKEN_TYPE_KIND
 	case "this":
 		tokenType = TOKEN_IDENT
 	case "true":
@@ -815,6 +842,24 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "RELEASE"
 	case TOKEN_EXTRACT:
 		return "EXTRACT"
+	case TOKEN_SIZEOF:
+		return "SIZEOF"
+	case TOKEN_ALIGNOF:
+		return "ALIGNOF"
+	case TOKEN_OFFSETOF:
+		return "OFFSETOF"
+	case TOKEN_COMPTIME:
+		return "COMPTIME"
+	case TOKEN_TYPE_NAME:
+		return "TYPE_NAME"
+	case TOKEN_FIELD_COUNT:
+		return "FIELD_COUNT"
+	case TOKEN_FIELD_NAME:
+		return "FIELD_NAME"
+	case TOKEN_FIELD_TYPE:
+		return "FIELD_TYPE"
+	case TOKEN_TYPE_KIND:
+		return "TYPE_KIND"
 	case TOKEN_IDENT:
 		return "IDENT"
 	case TOKEN_LITERAL_INT:
