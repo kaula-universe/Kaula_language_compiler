@@ -86,36 +86,36 @@ func (fg *FunctionGenerator) bodyHasAllocationCall(bodyStmts []ast.Statement) bo
 		}
 		switch s := stmt.(type) {
 		case *ast.ExpressionStatement:
-			if s.Expression != nil {
+			if s != nil && s.Expression != nil {
 				if fg.exprHasAllocCall(s.Expression) {
 					return true
 				}
 			}
 		case *ast.VariableDeclaration:
-			if s.Value != nil {
+			if s != nil && s.Value != nil {
 				if fg.exprHasAllocCall(s.Value) {
 					return true
 				}
 			}
 		case *ast.ReturnStatement:
-			if s.Value != nil {
+			if s != nil && s.Value != nil {
 				if fg.exprHasAllocCall(s.Value) {
 					return true
 				}
 			}
 		case *ast.IfStatement:
-			if fg.bodyHasAllocationCall(s.Body) {
+			if s != nil && fg.bodyHasAllocationCall(s.Body) {
 				return true
 			}
-			if s.Else != nil && fg.bodyHasAllocationCall(s.Else) {
+			if s != nil && s.Else != nil && fg.bodyHasAllocationCall(s.Else) {
 				return true
 			}
 		case *ast.WhileStatement:
-			if fg.bodyHasAllocationCall(s.Body) {
+			if s != nil && fg.bodyHasAllocationCall(s.Body) {
 				return true
 			}
 		case *ast.ForStatement:
-			if fg.bodyHasAllocationCall(s.Body) {
+			if s != nil && fg.bodyHasAllocationCall(s.Body) {
 				return true
 			}
 		}

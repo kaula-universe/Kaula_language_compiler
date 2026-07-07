@@ -32,6 +32,7 @@ type SemanticAnalyzer struct {
 	prefixSymbolTables map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
 	currentPrefixTable *symbol.SymbolTable             // 当前 @前缀块 的符号表
 	comptime *comptime.Evaluator                        // 编译期表达式评估器
+	importedModules map[string]bool                     // 记录实际导入的模块
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -92,6 +93,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		rootTreeFound:   false,
 		prefixSymbolTables: make(map[string]*symbol.SymbolTable),
 		comptime:          nil,
+		importedModules:   make(map[string]bool),
 	}
 }
 
@@ -257,6 +259,9 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 	moduleName := stmt.Module
 	sa.symbolTable.AddSymbol(moduleName, "module", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	
+	// 记录实际导入的模块
+	sa.importedModules[moduleName] = true
 
 	if sa.stdlibConfig != nil {
 		// 检查是否是标准库模块
@@ -265,6 +270,9 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 		if !strings.HasPrefix(stdlibKey, "std.") {
 			stdlibKey = "std." + moduleName
 		}
+		
+		// 记录标准库模块名
+		sa.importedModules[stdlibKey] = true
 
 		if mod, ok := sa.stdlibConfig.Modules[stdlibKey]; ok {
 			for funcName := range mod.Functions {
@@ -1039,9 +1047,45 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 	if expr == nil {
 		return
 	}
+	
+	// 检查是否是标准库函数调用，验证是否已导入对应模块
+	if memberAccess, ok := expr.Function.(*ast.MemberAccessExpression); ok {
+		sa.checkStdlibImport(memberAccess, expr.Pos)
+	}
+	
 	sa.analyzeExpression(expr.Function)
 	for _, arg := range expr.Args {
 		sa.analyzeExpression(arg)
+	}
+}
+
+// checkStdlibImport 检查标准库模块是否已导入
+func (sa *SemanticAnalyzer) checkStdlibImport(memberAccess *ast.MemberAccessExpression, pos ast.Position) {
+	// 解析模块路径：std.module.function -> module
+	var moduleName string
+	
+	// 检查是否是 std.module.function 形式
+	if nestedMember, ok := memberAccess.Object.(*ast.MemberAccessExpression); ok {
+		if innerIdent, ok := nestedMember.Object.(*ast.Identifier); ok && innerIdent.Name == "std" {
+			moduleName = nestedMember.Member
+		}
+	}
+	
+	// 如果没有找到模块名，不是标准库调用
+	if moduleName == "" {
+		return
+	}
+	
+	// 检查模块是否已导入（使用 importedModules 而不是符号表）
+	stdlibKey := "std." + moduleName
+	if !sa.importedModules[moduleName] && !sa.importedModules[stdlibKey] {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("标准库模块 '%s' 未导入，请添加 'import std.%s;' 语句", moduleName, moduleName),
+			pos.Line,
+			pos.Column,
+			"missing_import",
+			fmt.Sprintf("在文件顶部添加: import std.%s;", moduleName),
+		)
 	}
 }
 

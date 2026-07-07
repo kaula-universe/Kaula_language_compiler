@@ -35,6 +35,7 @@ type CodeGenerator struct {
 	currentScope    *symbol.SymbolTable
 	errors          []string
 	usedModules     []string
+	trackedModules  map[string]bool
 
 	typeGenerator       *TypeGenerator
 	functionGenerator   *FunctionGenerator
@@ -130,6 +131,17 @@ func (cg *CodeGenerator) MarkGenericInstantiated(name string) {
 
 func (cg *CodeGenerator) GetUsedModules() []string {
 	return cg.usedModules
+}
+
+// trackModuleUsage 自动追踪模块使用（无需显式 import）
+func (cg *CodeGenerator) trackModuleUsage(moduleName string) {
+	if cg.trackedModules == nil {
+		cg.trackedModules = make(map[string]bool)
+	}
+	if !cg.trackedModules[moduleName] {
+		cg.trackedModules[moduleName] = true
+		cg.usedModules = append(cg.usedModules, moduleName)
+	}
 }
 
 // SetLocalImportFuncs 注册本地导入的 pub 函数名
@@ -341,6 +353,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
 
 	if cg.stdlibConfig != nil {
+		// 只为显式导入的模块生成 #include
 		for moduleName := range importedModules {
 			module, ok := cg.stdlibConfig.Modules[moduleName]
 			if ok {

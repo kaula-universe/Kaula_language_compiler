@@ -546,7 +546,7 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 			if methodName == "println" && len(args) > 1 {
 				return eg.generatePrintlnMulti(args)
 			}
-			
+
 			// 检查 stdlib.json 中是否有这个函数
 			if _, funcExists := module.Functions[methodName]; funcExists {
 				// 追踪第三方库的使用

@@ -5,12 +5,14 @@
 // 线程安全：使用原子偏移量实现无锁分配（轻量实时）
 // 确保 KMM_V4_DEFINE_GLOBALS 被定义，以便定义全局变量
 #define KMM_V4_DEFINE_GLOBALS
+#define KMM_V4_STATIC_POOL
 #ifdef KMM_V4_DEFINE_GLOBALS
     #define KMM_V4_GLOBALS
     #include "kmm_scoped_allocator_v4.h"
     
     __attribute__((aligned(KMM_V4_ALIGNMENT)))
     uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE];
+    size_t g_kmm_v4_pool_capacity = KMM_V4_POOL_SIZE;
     
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     KMM_ATOMIC_TYPE g_kmm_v4_offset = 0;  // 原子操作，无锁CAS
@@ -24,9 +26,9 @@
     #endif
     
     // Kaula scope pointer (required by kmm_union_auto_alloc_fn)
-    __thread kmm_context_t* g_kaula_scope = NULL;
+    KMM_TLS kmm_context_t* g_kaula_scope = NULL;
     
-    __thread kmm_scope_stack_t g_kmm_v4_scope_stack = {{0}, 0};
+    KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack = {{0}, 0};
 
     
 #else
@@ -35,7 +37,7 @@
     // Kaula scope pointer (required by kmm_union_auto_alloc_fn)
     // Define if not already defined by the header
     #ifndef KMM_V4_GLOBALS
-    __thread kmm_context_t* g_kaula_scope = NULL;
+    KMM_TLS kmm_context_t* g_kaula_scope = NULL;
     #endif
 #endif
 #include <stdio.h>
@@ -126,9 +128,7 @@ typedef struct {
 
 // ==================== KMM 上下文结构（使用头文件中的定义）====================
 // kmm_context_t 已在 kmm_scoped_allocator_v4.h 中定义
-
-// 全局上下文（用于统计）
-kmm_context_t g_kmm_ctx = {0};
+// g_kmm_ctx 已在 kmm_scoped_allocator_v4.c 中定义，此处不再重复定义
 
 // ==================== 联合域全局变量（V3 特色，线程安全优化） ====================
 // 轻量实时模式：联合域使用TLS隔离，每个线程独立管理
@@ -229,36 +229,15 @@ static inline int kmm_arena_ensure_initialized(kmm_arena_t* arena, size_t min_si
     return 0;
 }
 
+// kmm_arena_expand: 已废弃
+// 在 bump allocator 模型中，arena buffer 从 bump pool 分配
+// 但 kmm_v4_free 是 no-op，expand 会导致旧 buffer 永久泄漏
+// 修复方案：arena 不 expand，满了就返回 NULL，让调用方路由到下一级
 static inline int kmm_arena_expand(kmm_arena_t* arena, size_t additional_size) {
-    size_t new_capacity = arena->capacity * 2;
-    
-    while (new_capacity < arena->offset + additional_size) {
-        new_capacity *= 2;
-    }
-    
-    if (new_capacity > arena->max_capacity) {
-        new_capacity = arena->max_capacity;
-    }
-    
-    if (arena->offset + additional_size > new_capacity) {
-        return -1;
-    }
-    
-    uint8_t* new_buffer = (uint8_t*)kmm_v4_malloc(new_capacity);
-    if (!new_buffer) return -1;
-    
-    if (arena->buffer && arena->offset > 0) {
-        memcpy(new_buffer, arena->buffer, arena->offset);
-    }
-    
-    if (arena->buffer) {
-        kmm_v4_free(arena->buffer);
-    }
-    
-    arena->buffer = new_buffer;
-    arena->capacity = new_capacity;
-    
-    return 0;
+    (void)arena;
+    (void)additional_size;
+    // 不再 expand，返回 -1 让调用方处理
+    return -1;
 }
 
 static inline void* kmm_arena_alloc(kmm_arena_t* arena, size_t size, size_t min_capacity, size_t max_capacity) {
@@ -482,7 +461,7 @@ typedef struct {
 } kmm_union_auto_scope_t;
 
 // 外部作用域指针（定义在 memory.c 中）
-extern __thread kmm_context_t* g_kaula_scope;
+extern KMM_TLS kmm_context_t* g_kaula_scope;
 
 // 前向声明
 static inline void kmm_init_union_pool(void);
@@ -651,51 +630,21 @@ static inline kmm_union_node_t* kmm_find_node_by_pointer(void* ptr) {
     return NULL;
 }
 
+// kmm_union_auto_detect_dependencies: 已废弃
+// 编译器已在编译期通过 UnionAnalyzer（union.go）完成依赖分析
+// 运行时不再需要指针扫描，依赖关系由编译器生成的代码直接设置
+// 此函数保留为空实现以兼容旧接口
 static inline void kmm_union_auto_detect_dependencies(kmm_union_node_t* node) {
-    if (!node || !node->object) return;
-    
-    void** ptr = (void**)node->object;
-    size_t word_count = node->object_size / sizeof(void*);
-    
-    for (size_t i = 0; i < word_count; i++) {
-        void* potential_ptr = ptr[i];
-        if (potential_ptr && (uintptr_t)potential_ptr > 0x1000) {
-            kmm_union_node_t* target = kmm_find_node_by_pointer(potential_ptr);
-            if (target && target != node && !kmm_union_has_dependency(node, target)) {
-                if (!node->dependencies) {
-                    node->dependencies = (kmm_union_node_t**)kmm_v4_malloc(sizeof(kmm_union_node_t*) * KMM_MAX_DEPENDENCIES);
-                    if (!node->dependencies) return;
-                }
-                if (node->dependency_count < KMM_MAX_DEPENDENCIES) {
-                    node->dependencies[node->dependency_count++] = target;
-                }
-            }
-        }
-    }
+    (void)node;
+    // 依赖关系由编译器在编译期确定，运行时不扫描指针
 }
 
+// kmm_union_detect_cycle: 已废弃
+// 编译器已在编译期通过 DAGChecker 完成环检测
+// 运行时不再需要环检测，此函数保留为空实现以兼容旧接口
 static inline bool kmm_union_detect_cycle(kmm_union_node_t* node) {
-    if (node->scope_depth == 0) {
-        return false;
-    }
-    
-    kmm_union_node_t* current = node->parent;
-    size_t depth = 0;
-    
-    while (current) {
-        depth++;
-        
-        if (depth > KMM_MAX_UNION_DEPTH) {
-            return true;
-        }
-        
-        if (kmm_union_has_dependency(node, current)) {
-            return true;
-        }
-        
-        current = current->parent;
-    }
-    
+    (void)node;
+    // 环检测由编译器在编译期完成，运行时不检测
     return false;
 }
 

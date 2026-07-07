@@ -1806,18 +1806,13 @@ func (p *Parser) parseStructStatementIterative() *ast.StructStatement {
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
-			prevTok := p.curTok
-			
 			if field := p.parseFieldDeclarationIterative(); field != nil {
 				stmt.Fields = append(stmt.Fields, field)
 			} else if p.curTok.Type == lexer.TOKEN_SEMICOLON {
 				p.nextToken()
 			} else {
+				// 跳过无法识别的 token，继续解析
 				p.nextToken()
-				// 如果 nextToken 后 token 没变，说明无法解析，跳出循环避免死循环
-				if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
-					break
-				}
 			}
 		}
 	}
@@ -1994,70 +1989,90 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	
+
 	if p.curTok.Type != lexer.TOKEN_IDENT {
 		return nil
 	}
-	
+
 	savedCurTok := p.curTok
 	savedPeekTok := p.peekTok
-	
-	// 尝试解析 "字段名：类型，" 语法（类 C 风格）
+
+	// 解析字段名
 	fieldName := p.curTok.Value
 	p.nextToken()
-	
-	// 检查下一个 token 是否是冒号
-	if p.curTok.Type != lexer.TOKEN_COLON {
-		// 不是字段声明，恢复 token 位置
-		p.curTok = savedCurTok
-		p.peekTok = savedPeekTok
-		return nil
-	}
-	
-	// 跳过冒号
-	p.nextToken()
-	
-	// 解析类型
-	isTypeKeyword := false
-	switch p.curTok.Type {
-	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
-		 lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
-		 lexer.TOKEN_TYPE_VOID, lexer.TOKEN_IDENT:
-		isTypeKeyword = true
-	}
-	
-	if !isTypeKeyword {
-		p.curTok = savedCurTok
-		p.peekTok = savedPeekTok
-		return nil
-	}
-	
-	typeName := p.curTok.Value
-	p.nextToken()
-	
-	// 检查是否是逗号、分号或指针后缀
-	if p.curTok.Type != lexer.TOKEN_COMMA && p.curTok.Type != lexer.TOKEN_SEMICOLON && p.curTok.Type != lexer.TOKEN_MULTIPLY {
-		p.curTok = savedCurTok
-		p.peekTok = savedPeekTok
-		return nil
-	}
-	
-	// 处理指针后缀（如 ListNode* → "ListNode*"）
-	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
-		typeName = typeName + "*"
+
+	// 检查下一个 token 是否是冒号（name: type 语法）
+	if p.curTok.Type == lexer.TOKEN_COLON {
 		p.nextToken()
 	}
-	
-	// 检查是否是逗号或分号（指针后缀之后）
-	if p.curTok.Type != lexer.TOKEN_COMMA && p.curTok.Type != lexer.TOKEN_SEMICOLON {
-		p.curTok = savedCurTok
-		p.peekTok = savedPeekTok
-		return nil
+
+	// 解析类型（支持 [N]byte 数组语法和普通类型）
+	typeName := ""
+
+	// 检查是否是数组类型 [N]type
+	if p.curTok.Type == lexer.TOKEN_LBRACKET {
+		p.nextToken()
+		// 解析数组大小
+		arraySize := ""
+		if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+			arraySize = p.curTok.Value
+			p.nextToken()
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACKET {
+			p.nextToken()
+		}
+		// 解析元素类型（byte 是 IDENT，不是关键字）
+		elemType := ""
+		isElemType := false
+		switch p.curTok.Type {
+		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+			lexer.TOKEN_TYPE_VOID:
+			elemType = p.curTok.Value
+			isElemType = true
+		case lexer.TOKEN_IDENT:
+			elemType = p.curTok.Value
+			isElemType = true
+		}
+		if !isElemType {
+			p.curTok = savedCurTok
+			p.peekTok = savedPeekTok
+			return nil
+		}
+		p.nextToken()
+		typeName = "[" + arraySize + "]" + elemType
+	} else {
+		// 普通类型
+		isTypeKeyword := false
+		switch p.curTok.Type {
+		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+			lexer.TOKEN_TYPE_VOID, lexer.TOKEN_IDENT:
+			isTypeKeyword = true
+		}
+
+		if !isTypeKeyword {
+			p.curTok = savedCurTok
+			p.peekTok = savedPeekTok
+			return nil
+		}
+
+		typeName = p.curTok.Value
+		p.nextToken()
+
+		// 处理指针后缀（如 ListNode* → "ListNode*"）
+		if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			typeName = typeName + "*"
+			p.nextToken()
+		}
 	}
-	
-	// 跳过分隔符
-	p.nextToken()
-	
+
+	// 字段结束后可以是分号、逗号、} 或下一个字段名
+	// 不强制要求分隔符
+	if p.curTok.Type == lexer.TOKEN_SEMICOLON || p.curTok.Type == lexer.TOKEN_COMMA {
+		p.nextToken()
+	}
+
 	field := &ast.FieldDeclaration{
 		Name:     fieldName,
 		Type:     typeName,

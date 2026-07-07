@@ -182,6 +182,9 @@ void time_destroy(TimeModule* tm);
 // 包含 std/time/time.h 以获取 time_now 和 time_sleep 函数
 #include "../std/time/time.h"
 
+// 包含 std/io/io.h 以获取 println, print_int 等函数
+#include "../std/io/io.h"
+
 // ==================== Fast Allocator ====================
 typedef struct FastAllocator {
     uint8_t* base;

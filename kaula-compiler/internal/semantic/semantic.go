@@ -7,9 +7,10 @@ import (
 
 // Analyzer 表示语义分析器
 type Analyzer struct {
-	errorCollector *errors.ErrorCollector
-	currentScope   *Scope
-	rootScope      *Scope
+	errorCollector  *errors.ErrorCollector
+	currentScope    *Scope
+	rootScope       *Scope
+	importedModules map[string]bool // 记录已导入的模块
 }
 
 // Scope 表示作用域
@@ -33,9 +34,10 @@ type Symbol struct {
 func NewAnalyzer(errorCollector *errors.ErrorCollector) *Analyzer {
 	rootScope := NewScope("global", nil)
 	return &Analyzer{
-		errorCollector: errorCollector,
-		currentScope:   rootScope,
-		rootScope:      rootScope,
+		errorCollector:  errorCollector,
+		currentScope:    rootScope,
+		rootScope:       rootScope,
+		importedModules: make(map[string]bool),
 	}
 }
 
@@ -98,7 +100,14 @@ func (a *Analyzer) HasSymbol(name string) bool {
 
 // Analyze 分析程序的语义
 func (a *Analyzer) Analyze(program *ast.Program) bool {
-	// 分析所有语句
+	// 第一遍：收集所有导入的模块
+	for _, stmt := range program.Statements {
+		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
+			a.importedModules[importStmt.Module] = true
+		}
+	}
+	
+	// 第二遍：分析所有语句
 	for _, stmt := range program.Statements {
 		a.analyzeStatement(stmt)
 	}
@@ -309,6 +318,29 @@ func (a *Analyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) {
 
 // analyzeCallExpression 分析函数调用表达式的语义
 func (a *Analyzer) analyzeCallExpression(expr *ast.CallExpression) {
+	// 检查是否是标准库函数调用，如果是，验证是否已导入
+	// std.io.println 的结构：CallExpression.Function = MemberAccess(Member="println", Object=MemberAccess(Member="io", Object=Identifier("std")))
+	if memberAccess, ok := expr.Function.(*ast.MemberAccessExpression); ok {
+		// 检查 Object 是否是 MemberAccess（即 std.module.function 形式）
+		if nestedMember, ok := memberAccess.Object.(*ast.MemberAccessExpression); ok {
+			// 检查是否是 std.module.function 形式
+			if innerIdent, ok := nestedMember.Object.(*ast.Identifier); ok && innerIdent.Name == "std" {
+				moduleName := "std." + nestedMember.Member
+				// 检查是否已导入对应的模块（支持 "std.io" 或 "io" 两种形式）
+				if !a.importedModules[moduleName] && !a.importedModules[nestedMember.Member] {
+					a.errorCollector.AddError(
+						errors.ErrorSemantic,
+						"Standard library module '"+nestedMember.Member+"' is used but not imported. Add 'import std."+nestedMember.Member+";' at the top of the file",
+						expr.Pos.Line,
+						expr.Pos.Column,
+						"",
+						"Import the required standard library module before using it",
+					)
+				}
+			}
+		}
+	}
+	
 	// 分析函数表达式
 	a.analyzeExpression(expr.Function)
 	

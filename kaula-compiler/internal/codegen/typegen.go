@@ -74,6 +74,16 @@ func MapKaulaTypeToC(kaulaType string) string {
 	if cType, ok := globalTypeMap[typeLower]; ok {
 		return cType
 	}
+	// 处理固定大小数组类型 [N]type → 转换为 C 的 "elemType[N]" 格式
+	if len(typeLower) > 0 && typeLower[0] == '[' {
+		closeBracket := strings.Index(typeLower, "]")
+		if closeBracket > 0 {
+			arraySize := typeLower[1:closeBracket]
+			elemType := typeLower[closeBracket+1:]
+			cElemType := MapKaulaTypeToC(elemType)
+			return cElemType + "[" + arraySize + "]"
+		}
+	}
 	if strings.HasPrefix(typeLower, "[]") {
 		innerType := typeLower[2:]
 		if innerType == "string" || innerType == "str" || innerType == "cstring" {
@@ -504,7 +514,15 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 				fieldType = "struct " + fieldType
 			}
 		}
-		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		// 处理数组字段：C 语法为 "elemType name[N]"，而非 "elemType[N] name"
+		if strings.Contains(fieldType, "[") && !strings.HasSuffix(fieldType, "*") {
+			openBracket := strings.Index(fieldType, "[")
+			cElemType := fieldType[:openBracket]
+			arrayPart := fieldType[openBracket:]
+			code.WriteString(fmt.Sprintf("    %s %s%s;\n", cElemType, field.Name, arrayPart))
+		} else {
+			code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		}
 	}
 	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
 	

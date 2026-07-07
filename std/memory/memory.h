@@ -23,6 +23,10 @@ void* kmm_v4_strdup(const char* s);
 void kmm_v4_scope_push(void);
 void kmm_v4_scope_pop(void);
 
+// 别名：兼容 stdlib 中的命名
+#define kmm_v4_scope_enter kmm_v4_scope_push
+#define kmm_v4_scope_exit kmm_v4_scope_pop
+
 // 初始化/销毁
 void kmm_v4_init_pool(size_t initial_size);
 void kmm_v4_destroy_pool(void);
