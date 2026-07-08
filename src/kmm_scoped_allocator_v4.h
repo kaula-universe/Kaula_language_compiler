@@ -115,6 +115,23 @@ typedef enum {
 #define KMM_V4_MAX_SCOPE_DEPTH 64
 #endif
 
+// ==================== 空闲链表配置 ====================
+// Size-class free list 用于快速复用已释放的小对象
+// 改善逐次分配释放场景的性能
+
+// Size class 数量（8, 16, 32, 64, 128, 256 字节）
+#ifndef KMM_FREE_LIST_CLASSES
+#define KMM_FREE_LIST_CLASSES 6
+#endif
+
+// 每个 size class 的最大空闲块数量
+#ifndef KMM_FREE_LIST_MAX_PER_CLASS
+#define KMM_FREE_LIST_MAX_PER_CLASS 1024
+#endif
+
+// Size class 大小定义
+static const size_t KMM_FREE_LIST_SIZES[KMM_FREE_LIST_CLASSES] = {8, 16, 32, 64, 128, 256};
+
 // ==================== 结构体定义 ====================
 // Arena 结构（用于分级内存管理）
 struct kmm_arena {
@@ -137,6 +154,18 @@ typedef struct {
     size_t tlab_remainings[KMM_V4_MAX_SCOPE_DEPTH];
     size_t depth;
 } kmm_scope_stack_t;
+
+// 空闲链表节点
+typedef struct kmm_free_node {
+    struct kmm_free_node* next;
+} kmm_free_node_t;
+
+// Size-class 空闲链表
+typedef struct {
+    kmm_free_node_t* free_lists[KMM_FREE_LIST_CLASSES];
+    size_t free_counts[KMM_FREE_LIST_CLASSES];
+    bool enabled;
+} kmm_free_list_t;
 
 // 清理节点
 struct kmm_cleanup_node {
@@ -316,6 +345,17 @@ struct kmm_union_domain {
         #define KMM_TLS __thread
     #endif
 #endif
+
+// ==================== Scope 栈扁平化优化（深度 <= 2）====================
+// 当嵌套深度 <= 2 时，使用独立变量代替数组索引，减少内存访问开销
+// 这是单对象场景最常见的嵌套深度，优化后可显著提升性能
+static KMM_TLS size_t g_kmm_v4_scope_offset_0 = 0;
+static KMM_TLS uint8_t* g_kmm_v4_scope_tlab_buffer_0 = NULL;
+static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_0 = 0;
+
+static KMM_TLS size_t g_kmm_v4_scope_offset_1 = 0;
+static KMM_TLS uint8_t* g_kmm_v4_scope_tlab_buffer_1 = NULL;
+static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 
 // ==================== 第 3 层：CPU 架构检测 ====================
 
@@ -897,15 +937,44 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
 // kmm_v4_scope_pop: 退出作用域，恢复到本层开始时的 offset + TLAB 状态
 // 注意：定义必须放在头文件中，因为 static inline 函数具有内部链接，
 // 跨编译单元不可见。将定义放在 .c 文件中会导致链接错误。
+//
+// 优化：Scope 栈扁平化（深度 <= 2）
+// 当嵌套深度 <= 2 时，使用独立 TLS变量代替数组索引，减少内存访问开销
+// 这是单对象场景最常见的嵌套深度，优化后可显著提升性能
 static inline void kmm_v4_scope_push(void) {
     kmm_scope_stack_t* stack = &g_kmm_v4_scope_stack;
-    if (KMM_V4_UNLIKELY(stack->depth >= KMM_V4_MAX_SCOPE_DEPTH)) {
+    size_t depth = stack->depth;
+    
+    // 快速路径：深度 <= 2 时使用扁平化变量（零数组索引开销）
+    if (KMM_V4_LIKELY(depth <= 1)) {
+        #if KMM_THREAD_SAFETY_LEVEL >= 1
+        size_t current_offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+        #else
+        size_t current_offset = g_kmm_v4_offset;
+        #endif
+        
+        if (depth == 0) {
+            g_kmm_v4_scope_offset_0 = current_offset;
+            g_kmm_v4_scope_tlab_buffer_0 = g_kmm_v4_tls_buffer.buffer;
+            g_kmm_v4_scope_tlab_remaining_0 = g_kmm_v4_tls_buffer.remaining;
+        } else { // depth == 1
+            g_kmm_v4_scope_offset_1 = current_offset;
+            g_kmm_v4_scope_tlab_buffer_1 = g_kmm_v4_tls_buffer.buffer;
+            g_kmm_v4_scope_tlab_remaining_1 = g_kmm_v4_tls_buffer.remaining;
+        }
+        stack->depth++;
+        return;
+    }
+    
+    // 慢路径：深度 > 2 时使用数组索引
+    if (KMM_V4_UNLIKELY(depth >= KMM_V4_MAX_SCOPE_DEPTH)) {
         #ifdef KMM_V4_DEBUG
         fprintf(stderr, "KMM ERROR: Scope stack overflow (max depth: %d)\n", KMM_V4_MAX_SCOPE_DEPTH);
         #endif
         return;
     }
-    size_t idx = stack->depth++;
+    size_t idx = depth;
+    stack->depth++;
     #if KMM_THREAD_SAFETY_LEVEL >= 1
     stack->offsets[idx] = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
     #else
@@ -924,8 +993,39 @@ static inline void kmm_v4_scope_pop(void) {
         #endif
         return;
     }
-    stack->depth--;
-    size_t idx = stack->depth;
+    
+    size_t new_depth = stack->depth - 1;
+    stack->depth = new_depth;
+    
+    // 快速路径：深度 <= 2 时使用扁平化变量（零数组索引开销）
+    if (KMM_V4_LIKELY(new_depth <= 1)) {
+        size_t saved_offset;
+        uint8_t* saved_tlab_buffer;
+        size_t saved_tlab_remaining;
+        
+        if (new_depth == 0) {
+            saved_offset = g_kmm_v4_scope_offset_0;
+            saved_tlab_buffer = g_kmm_v4_scope_tlab_buffer_0;
+            saved_tlab_remaining = g_kmm_v4_scope_tlab_remaining_0;
+        } else { // new_depth == 1
+            saved_offset = g_kmm_v4_scope_offset_1;
+            saved_tlab_buffer = g_kmm_v4_scope_tlab_buffer_1;
+            saved_tlab_remaining = g_kmm_v4_scope_tlab_remaining_1;
+        }
+        
+        #if KMM_THREAD_SAFETY_LEVEL >= 1
+        KMM_ATOMIC_STORE(g_kmm_v4_offset, saved_offset);
+        #else
+        g_kmm_v4_offset = saved_offset;
+        #endif
+        // 恢复 TLAB 状态（确保 scope_pop 后 TLS 快速路径仍然正确）
+        g_kmm_v4_tls_buffer.buffer = saved_tlab_buffer;
+        g_kmm_v4_tls_buffer.remaining = saved_tlab_remaining;
+        return;
+    }
+    
+    // 慢路径：深度 > 2 时使用数组索引
+    size_t idx = new_depth;
     size_t saved_offset = stack->offsets[idx];
     #if KMM_THREAD_SAFETY_LEVEL >= 1
     KMM_ATOMIC_STORE(g_kmm_v4_offset, saved_offset);

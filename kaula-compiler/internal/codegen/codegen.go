@@ -56,6 +56,7 @@ type CodeGenerator struct {
 	sorAdapter *SORCodeGenAdapter
 
 	kmmScopeDepth int
+	offsetScopeDepth int // 跟踪 offset_save/restore scope 嵌套深度，用于相邻 scope 合并优化
 
 	sourceMap *SourceMap
 	sourceFile string
@@ -112,6 +113,24 @@ func (cg *CodeGenerator) ExitKMMScope() {
 	if cg.kmmScopeDepth > 0 {
 		cg.kmmScopeDepth--
 	}
+}
+
+// EnterOffsetScope 进入 offset_save/restore 作用域
+// 用于相邻 scope 合并优化：当外层已有 offset scope 时，内层 BlockStatement 跳过重复包裹
+func (cg *CodeGenerator) EnterOffsetScope() {
+	cg.offsetScopeDepth++
+}
+
+// ExitOffsetScope 退出 offset_save/restore 作用域
+func (cg *CodeGenerator) ExitOffsetScope() {
+	if cg.offsetScopeDepth > 0 {
+		cg.offsetScopeDepth--
+	}
+}
+
+// IsInOffsetScope 当前是否在 offset_save/restore 作用域内
+func (cg *CodeGenerator) IsInOffsetScope() bool {
+	return cg.offsetScopeDepth > 0
 }
 
 func (cg *CodeGenerator) GetStdlibConfig() *stdlib.StdlibConfig {

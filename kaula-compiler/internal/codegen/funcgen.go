@@ -777,8 +777,10 @@ func (fg *FunctionGenerator) analyzeBodyMallocs(bodyStmts []ast.Statement) (canB
 		}
 	}
 
-	// 至少有 2 个 malloc 调用才值得批量分配
-	canBatch = len(mallocs) >= 2 && allKnown
+	// 优化策略（激进触发）：
+	// 1. 单个 malloc 且大小已知 -> 直接 bump + offset_restore (零 scope 栈开销)
+	// 2. 多个 malloc 且大小都已知 -> 批量 bump + offset_restore (单次 bump)
+	canBatch = len(mallocs) >= 1 && allKnown
 	return
 }
 

@@ -42,6 +42,62 @@ static size_t g_committed_bytes = 0;
 // 只有当 TLS 缓冲区耗尽时才回退到全局 CAS
 KMM_TLS kmm_tls_buffer_t g_kmm_v4_tls_buffer = { NULL, 0, 0 };
 
+// ==================== Size-class 空闲链表 ====================
+// 用于快速复用已释放的小对象，改善逐次分配释放场景
+static kmm_free_list_t g_kmm_free_list = {
+    .free_lists = {NULL},
+    .free_counts = {0},
+    .enabled = true
+};
+
+// 获取 size class 索引（返回 -1 表示不在 size class 范围内）
+static inline int kmm_get_size_class(size_t size) {
+    for (int i = 0; i < KMM_FREE_LIST_CLASSES; i++) {
+        if (size <= KMM_FREE_LIST_SIZES[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// 从空闲链表分配
+static void* kmm_free_list_alloc(size_t size) {
+    if (!g_kmm_free_list.enabled) return NULL;
+    
+    int class_idx = kmm_get_size_class(size);
+    if (class_idx < 0) return NULL;
+    
+    if (g_kmm_free_list.free_lists[class_idx] == NULL) {
+        return NULL;
+    }
+    
+    // 从链表头取出一个节点
+    kmm_free_node_t* node = g_kmm_free_list.free_lists[class_idx];
+    g_kmm_free_list.free_lists[class_idx] = node->next;
+    g_kmm_free_list.free_counts[class_idx]--;
+    
+    return (void*)node;
+}
+
+// 将内存块归还到空闲链表
+static void kmm_free_list_free(void* ptr, size_t size) {
+    if (!g_kmm_free_list.enabled || ptr == NULL) return;
+    
+    int class_idx = kmm_get_size_class(size);
+    if (class_idx < 0) return;
+    
+    // 检查是否超过每个 class 的最大空闲数量
+    if (g_kmm_free_list.free_counts[class_idx] >= KMM_FREE_LIST_MAX_PER_CLASS) {
+        return; // 直接丢弃，让 bump allocator 回收
+    }
+    
+    // 插入到链表头
+    kmm_free_node_t* node = (kmm_free_node_t*)ptr;
+    node->next = g_kmm_free_list.free_lists[class_idx];
+    g_kmm_free_list.free_lists[class_idx] = node;
+    g_kmm_free_list.free_counts[class_idx]++;
+}
+
 // ==================== 平台虚拟内存 ====================
 
 static void pool_ensure_init(void) {
@@ -146,15 +202,13 @@ void* kmm_v4_malloc(size_t size);
 
 // ==================== 核心分配 ====================
 
-// kmm_v4_malloc: 优化版本，使用 TLAB 快速路径
-__attribute__((used))
-void* kmm_v4_malloc(size_t size) {
-    pool_ensure_init();
-    if (!g_kmm_v4_pool) return NULL;
+// 分配块 header（用于记录大小，支持 free 归还到空闲链表）
+typedef struct {
+    size_t size;  // 分配的大小（对齐后）
+} kmm_alloc_header_t;
 
-    const size_t mask = KMM_V4_ALIGNMENT - 1;
-    size_t aligned = (size + mask) & ~mask;
-
+// 内部分配函数（不写 header，用于空闲链表和 TLAB）
+static void* kmm_v4_alloc_internal(size_t aligned) {
     // 快速路径：尝试从 TLAB 分配（无原子操作）
     if (KMM_V4_LIKELY(aligned <= KMM_TLS_BUFFER_SIZE / 4)) {
         if (KMM_V4_LIKELY(g_kmm_v4_tls_buffer.remaining >= aligned)) {
@@ -183,7 +237,7 @@ void* kmm_v4_malloc(size_t size) {
         new_off = off + aligned;
         if (KMM_V4_UNLIKELY(new_off > g_kmm_v4_pool_capacity)) {
             #if KMM_V4_ENABLE_FALLBACK
-                return malloc(size);
+                return malloc(aligned);
             #else
                 return NULL;
             #endif
@@ -197,7 +251,7 @@ void* kmm_v4_malloc(size_t size) {
     size_t new_off = off + aligned;
     if (KMM_V4_UNLIKELY(new_off > g_kmm_v4_pool_capacity)) {
         #if KMM_V4_ENABLE_FALLBACK
-            return malloc(size);
+            return malloc(aligned);
         #else
             return NULL;
         #endif
@@ -209,9 +263,47 @@ void* kmm_v4_malloc(size_t size) {
 #endif
 }
 
+// kmm_v4_malloc: 优化版本，使用空闲链表 + TLAB 快速路径
+__attribute__((used))
+void* kmm_v4_malloc(size_t size) {
+    pool_ensure_init();
+    if (!g_kmm_v4_pool) return NULL;
+
+    const size_t mask = KMM_V4_ALIGNMENT - 1;
+    size_t aligned = (size + mask) & ~mask;
+    size_t total_size = aligned + sizeof(kmm_alloc_header_t);
+
+    // 最快路径：尝试从空闲链表分配（零开销复用）
+    void* free_ptr = kmm_free_list_alloc(total_size);
+    if (KMM_V4_LIKELY(free_ptr != NULL)) {
+        // 空闲链表返回的是 header 位置
+        kmm_alloc_header_t* header = (kmm_alloc_header_t*)free_ptr;
+        header->size = aligned;  // 更新大小
+        return (void*)(header + 1);  // 返回 header 后的位置
+    }
+
+    // 分配包含 header 的总大小
+    void* raw_ptr = kmm_v4_alloc_internal(total_size);
+    if (!raw_ptr) return NULL;
+
+    // 写入 header
+    kmm_alloc_header_t* header = (kmm_alloc_header_t*)raw_ptr;
+    header->size = aligned;
+
+    // 返回 header 后的位置
+    return (void*)(header + 1);
+}
+
 __attribute__((used))
 void kmm_v4_free(void* ptr) {
-    (void)ptr;
+    if (!ptr) return;
+    
+    // 读取 header 获取大小
+    kmm_alloc_header_t* header = ((kmm_alloc_header_t*)ptr) - 1;
+    size_t size = header->size;
+    
+    // 归还到空闲链表（归还整个块，包括 header）
+    kmm_free_list_free(header, size + sizeof(kmm_alloc_header_t));
 }
 
 // ==================== 兼容接口 ====================

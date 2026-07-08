@@ -700,69 +700,94 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 	condCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
 	code += condCode
 	code += ") {\n"
-	
+
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("if_body")
-	
+
 	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
+	// 相邻 scope 合并优化：如果 body 包含分配调用，使用 offset_save/restore 代替 scope_push/pop
+	useOffset := !useKMM && bodyContainsAllocation(stmt.Body)
+
 	if useKMM {
 		sg.codegen.EnterKMMScope()
 	}
-	
+	if useOffset {
+		sg.codegen.EnterOffsetScope()
+	}
+
 	var bodyCode strings.Builder
 	for _, bodyStmt := range stmt.Body {
 		bodyCode.WriteString(sg.codegen.indentString())
 		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
 	}
-	
+
+	if useOffset {
+		sg.codegen.ExitOffsetScope()
+	}
 	if useKMM {
 		sg.codegen.ExitKMMScope()
 	}
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
-	
-	if useKMM {
+
+	if useOffset {
+		code += sg.codegen.indentString() + "size_t _if_scope_start = kmm_v4_offset_save();\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_if_scope_start);\n"
+	} else if useKMM {
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
 	} else {
 		code += bodyCode.String()
 	}
-	
+
 	code += sg.codegen.indentString() + "}"
-	
+
 	if len(stmt.Else) > 0 {
 		code += " else {\n"
-		
+
 		sg.codegen.indent++
 		sg.codegen.EnterScope("else_body")
-		
+
 		useKMMElse := sg.shouldUseKMMScopeForBody(stmt.Else)
+		useOffsetElse := !useKMMElse && bodyContainsAllocation(stmt.Else)
+
 		if useKMMElse {
 			sg.codegen.EnterKMMScope()
 		}
-		
+		if useOffsetElse {
+			sg.codegen.EnterOffsetScope()
+		}
+
 		var elseCode strings.Builder
 		for _, elseStmt := range stmt.Else {
 			elseCode.WriteString(sg.codegen.indentString())
 			elseCode.WriteString(sg.codegen.generateStatement(elseStmt))
 		}
-		
+
+		if useOffsetElse {
+			sg.codegen.ExitOffsetScope()
+		}
 		if useKMMElse {
 			sg.codegen.ExitKMMScope()
 		}
 		sg.codegen.ExitScope()
 		sg.codegen.indent--
-		
-		if useKMMElse {
+
+		if useOffsetElse {
+			code += sg.codegen.indentString() + "size_t _else_scope_start = kmm_v4_offset_save();\n"
+			code += elseCode.String()
+			code += sg.codegen.indentString() + "kmm_v4_offset_restore(_else_scope_start);\n"
+		} else if useKMMElse {
 			code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 			code += elseCode.String()
 			code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
 		} else {
 			code += elseCode.String()
 		}
-		
+
 		code += sg.codegen.indentString() + "}"
 	}
 	code += "\n"
@@ -774,36 +799,50 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	code := "while ("
 	code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
 	code += ") {\n"
-	
+
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("while_body")
-	
+
 	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
+	// 相邻 scope 合并优化：如果循环体包含分配调用，使用 offset_save/restore 代替 scope_push/pop
+	useOffset := !useKMM && bodyContainsAllocation(stmt.Body)
+
 	if useKMM {
 		sg.codegen.EnterKMMScope()
 	}
-	
+	if useOffset {
+		sg.codegen.EnterOffsetScope()
+	}
+
 	var bodyCode strings.Builder
 	for _, bodyStmt := range stmt.Body {
 		bodyCode.WriteString(sg.codegen.indentString())
 		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
 	}
-	
+
+	if useOffset {
+		sg.codegen.ExitOffsetScope()
+	}
 	if useKMM {
 		sg.codegen.ExitKMMScope()
 	}
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
-	
-	if useKMM {
+
+	if useOffset {
+		// offset_save/restore 路径：轻量级，无 scope 栈操作
+		code += sg.codegen.indentString() + "size_t _loop_scope_start = kmm_v4_offset_save();\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_loop_scope_start);\n"
+	} else if useKMM {
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
 	} else {
 		code += bodyCode.String()
 	}
-	
+
 	code += sg.codegen.indentString() + "}\n"
 	return code
 }
@@ -1263,36 +1302,50 @@ func (sg *StatementGenerator) generateForStatement(stmt *ast.ForStatement) strin
 		code += ""
 	}
 	code += ") {\n"
-	
+
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("for_body")
-	
+
 	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
+	// 相邻 scope 合并优化：如果循环体包含分配调用，使用 offset_save/restore 代替 scope_push/pop
+	useOffset := !useKMM && bodyContainsAllocation(stmt.Body)
+
 	if useKMM {
 		sg.codegen.EnterKMMScope()
 	}
-	
+	if useOffset {
+		sg.codegen.EnterOffsetScope()
+	}
+
 	var bodyCode strings.Builder
 	for _, bodyStmt := range stmt.Body {
 		bodyCode.WriteString(sg.codegen.indentString())
 		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
 	}
-	
+
+	if useOffset {
+		sg.codegen.ExitOffsetScope()
+	}
 	if useKMM {
 		sg.codegen.ExitKMMScope()
 	}
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
-	
-	if useKMM {
+
+	if useOffset {
+		// offset_save/restore 路径：轻量级，无 scope 栈操作
+		code += sg.codegen.indentString() + "size_t _loop_scope_start = kmm_v4_offset_save();\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_loop_scope_start);\n"
+	} else if useKMM {
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
 	} else {
 		code += bodyCode.String()
 	}
-	
+
 	code += sg.codegen.indentString() + "}\n"
 	return code
 }
@@ -1449,13 +1502,21 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 
 	indent := sg.codegen.indentString()
 
-	// 批量分配优化：检测块内是否有多个 malloc 调用
-	canBatch, totalSize, _ := sg.analyzeBlockMallocs(stmt.Statements)
+	// 分析块内的 malloc 调用
+	canBatch, totalSize, mallocCount := sg.analyzeBlockMallocs(stmt.Statements)
 
-	if canBatch && totalSize > 0 {
-		// 优化路径：单次 bump + 直接 offset 恢复
+	// 优化策略（激进触发，让单对象场景也能走最快路径）：
+	// 1. 单个 malloc 且大小已知 -> 直接 bump + offset_restore (零 scope 栈开销)
+	// 2. 多个 malloc 且大小都已知 -> 批量 bump + offset_restore (单次 bump 分配)
+	// 3. 有 malloc 但大小未知 -> offset_save/restore (比 scope_push/pop 快)
+	// 4. 无 malloc -> scope_push/pop (标准路径)
+	if canBatch && totalSize > 0 && mallocCount >= 1 {
+		// 批量/单对象分配优化：单次 bump + 直接 offset 恢复
+		// 当 mallocCount == 1 时，totalSize 就是该 malloc 的大小
+		// 当 mallocCount >= 2 时，totalSize 是所有 malloc 大小之和
 		code := "{\n"
 		sg.codegen.indent++
+		sg.codegen.EnterOffsetScope()
 		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
 		code += sg.codegen.indentString()
 		code += fmt.Sprintf("void* _batch_ptr = kmm_v4_bump(%d);\n", totalSize)
@@ -1463,13 +1524,45 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
 		}
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
+		sg.codegen.ExitOffsetScope()
 		sg.codegen.indent--
 		code += indent + "}\n"
 		sg.codegen.ExitScope()
 		return code
 	}
 
-	// 标准路径：scope push/pop
+	if mallocCount >= 1 {
+		// 有 malloc 但大小未知 -> offset_save/restore (轻量级，无 scope 栈操作)
+		code := "{\n"
+		sg.codegen.indent++
+		sg.codegen.EnterOffsetScope()
+		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
+		for _, bodyStmt := range stmt.Statements {
+			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
+		sg.codegen.ExitOffsetScope()
+		sg.codegen.indent--
+		code += indent + "}\n"
+		sg.codegen.ExitScope()
+		return code
+	}
+
+	// 标准路径：scope push/pop (无 malloc 时)
+	// 相邻 scope 合并优化：如果已在 offset scope 内，跳过 KMM scope 包裹，直接内联
+	if sg.codegen.IsInOffsetScope() {
+		// 已在 offset scope 内，直接内联块内容，避免重复 scope 开销
+		code := "{\n"
+		sg.codegen.indent++
+		for _, bodyStmt := range stmt.Statements {
+			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		sg.codegen.indent--
+		code += indent + "}\n"
+		sg.codegen.ExitScope()
+		return code
+	}
+
 	code := "KMM_V4_SCOPE_START {\n"
 	sg.codegen.indent++
 	for _, bodyStmt := range stmt.Statements {
@@ -1495,50 +1588,88 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	return code
 }
 
+// mallocAnalysis 分析结果结构
+type mallocAnalysis struct {
+	count       int   // malloc 调用总数
+	totalSize   int   // 所有 malloc 大小之和（仅计算已知大小）
+	allKnown    bool  // 是否所有 malloc 大小都已知
+	sizes       []int // 每个 malloc 的大小（0 表示未知）
+	isContiguous bool // malloc 是否连续出现（中间无其他语句）
+}
+
 // analyzeBlockMallocs 分析块语句中的 malloc 调用，判断是否可以批量分配
+// 返回更详细的分配信息以支持激进的单对象优化
 func (sg *StatementGenerator) analyzeBlockMallocs(stmts []ast.Statement) (canBatch bool, totalSize int, count int) {
-	count = 0
-	totalSize = 0
-	allKnown := true
+	analysis := sg.analyzeBlockMallocsDetailed(stmts)
+	return analysis.allKnown && analysis.count >= 1, analysis.totalSize, analysis.count
+}
+
+// analyzeBlockMallocsDetailed 返回详细的 malloc 分析结果
+func (sg *StatementGenerator) analyzeBlockMallocsDetailed(stmts []ast.Statement) mallocAnalysis {
+	result := mallocAnalysis{
+		count:       0,
+		totalSize:   0,
+		allKnown:    true,
+		sizes:       make([]int, 0),
+		isContiguous: true,
+	}
+
+	lastWasMalloc := false
+	hasOtherStmts := false
 
 	for _, stmt := range stmts {
 		if stmt == nil {
 			continue
 		}
+		
+		isMalloc := false
+		sizeBytes := 0
+		
 		switch s := stmt.(type) {
 		case *ast.VariableDeclaration:
 			if s.Value != nil {
+				// 检查是否是 malloc 类调用（包括 std.memory.kmm_v4_malloc）
 				if call, ok := s.Value.(*ast.CallExpression); ok {
 					if sg.isMallocCallExpr(call) {
-						sizeBytes := sg.extractMallocSizeBytes(call)
-						count++
-						if sizeBytes > 0 {
-							totalSize += sizeBytes
-						} else {
-							allKnown = false
-						}
+						isMalloc = true
+						sizeBytes = sg.extractMallocSizeBytes(call)
 					}
 				}
 			}
 		case *ast.ExpressionStatement:
 			if s.Expression != nil {
+				// 检查是否是 malloc 类调用（包括 std.memory.kmm_v4_malloc）
 				if call, ok := s.Expression.(*ast.CallExpression); ok {
 					if sg.isMallocCallExpr(call) {
-						sizeBytes := sg.extractMallocSizeBytes(call)
-						count++
-						if sizeBytes > 0 {
-							totalSize += sizeBytes
-						} else {
-							allKnown = false
-						}
+						isMalloc = true
+						sizeBytes = sg.extractMallocSizeBytes(call)
 					}
 				}
 			}
 		}
+		
+		if isMalloc {
+			result.count++
+			result.sizes = append(result.sizes, sizeBytes)
+			if sizeBytes > 0 {
+				result.totalSize += sizeBytes
+			} else {
+				result.allKnown = false
+			}
+			
+			// 检查连续性：如果之前有非 malloc 语句，则不连续
+			if hasOtherStmts && !lastWasMalloc {
+				result.isContiguous = false
+			}
+			lastWasMalloc = true
+			hasOtherStmts = false
+		} else {
+			hasOtherStmts = true
+			lastWasMalloc = false
+		}
 	}
 
-	canBatch = count >= 2 && allKnown
-	return
+	return result
 }
 
 // isMallocCallExpr 检查表达式是否是 malloc 类调用
@@ -1561,9 +1692,22 @@ func (sg *StatementGenerator) extractMallocSizeBytes(call *ast.CallExpression) i
 		return 0
 	}
 	arg := call.Args[0]
+	
+	// 整数字面量：直接返回
 	if lit, ok := arg.(*ast.IntegerLiteral); ok {
 		return int(lit.Value)
 	}
+	
+	// sizeof 表达式：尝试从类型系统获取大小
+	if sizeOf, ok := arg.(*ast.SizeOfExpression); ok {
+		// 使用 TypeGenerator 获取类型大小
+		if size, ok := sg.codegen.typeGenerator.GetTypeSize(sizeOf.TargetType); ok {
+			return size
+		}
+		// 如果无法确定大小，返回 0（让优化走 offset_save/restore 路径）
+		return 0
+	}
+	
 	return 0
 }
 

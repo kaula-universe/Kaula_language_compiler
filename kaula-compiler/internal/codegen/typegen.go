@@ -692,14 +692,78 @@ func (tg *TypeGenerator) convertType(kaulaType string, nullable bool) string {
 		}
 		return cType
 	}
-	
+
 	cType := MapKaulaTypeToC(kaulaType)
-	
+
 	if nullable && !strings.HasSuffix(cType, "*") {
 		cType += "*"
 	}
-	
+
 	return cType
+}
+
+// GetTypeSize 获取 Kaula 类型的大小（字节数）
+// 用于编译期优化：当 sizeof 表达式用于 malloc 参数时，尝试在编译期确定大小
+// 返回 (size, true) 如果能确定大小，否则返回 (0, false)
+func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
+	if kaulaType == "" {
+		return 0, false
+	}
+
+	// 基本类型大小映射
+	basicTypeSizes := map[string]int{
+		"i8": 1, "int8": 1, "sbyte": 1, "byte": 1, "uint8": 1, "u8": 1, "char": 1, "bool": 1, "boolean": 1,
+		"i16": 2, "int16": 2, "short": 2, "ushort": 2, "uint16": 2, "u16": 2,
+		"i32": 4, "int32": 4, "int": 4, "integer": 4, "float": 4, "f32": 4, "single": 4,
+		"i64": 8, "int64": 8, "long": 8, "uint": 8, "uint64": 8, "u64": 8,
+		"double": 8, "f64": 8, "real": 8,
+	}
+
+	typeLower := strings.ToLower(kaulaType)
+	if size, ok := basicTypeSizes[typeLower]; ok {
+		return size, true
+	}
+
+	// 指针类型：所有指针大小相同（8 字节，64 位系统）
+	if strings.HasPrefix(typeLower, "*") || strings.HasSuffix(typeLower, "*") {
+		return 8, true
+	}
+
+	// 字符串类型：char* 指针大小
+	if typeLower == "string" || typeLower == "str" || typeLower == "cstring" {
+		return 8, true
+	}
+
+	// 数组类型：[N]type -> N * sizeof(type)
+	if len(typeLower) > 0 && typeLower[0] == '[' {
+		closeBracket := strings.Index(typeLower, "]")
+		if closeBracket > 0 {
+			arraySizeStr := typeLower[1:closeBracket]
+			elemType := typeLower[closeBracket+1:]
+			arraySize := 0
+			for _, ch := range arraySizeStr {
+				if ch >= '0' && ch <= '9' {
+					arraySize = arraySize*10 + int(ch-'0')
+				} else {
+					return 0, false // 非数字数组大小，无法编译期确定
+				}
+			}
+			elemSize, ok := tg.GetTypeSize(elemType)
+			if ok {
+				return arraySize * elemSize, true
+			}
+		}
+	}
+
+	// 动态数组 []type -> 指针大小（数组描述符）
+	if strings.HasPrefix(typeLower, "[]") {
+		return 8, true // 简化为指针大小
+	}
+
+	// 用户定义的类型（struct/class）：尝试从已生成的类型中查找
+	// 这里简化处理，返回 false 让优化走 offset_save/restore 路径
+	// 实际可以通过查询符号表或类型定义来获取大小
+	return 0, false
 }
 
 func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
