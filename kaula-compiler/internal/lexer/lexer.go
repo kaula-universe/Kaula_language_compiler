@@ -58,6 +58,12 @@ const (
 	TOKEN_FIELD_NAME
 	TOKEN_FIELD_TYPE
 	TOKEN_TYPE_KIND
+	TOKEN_ENUM
+	TOKEN_MATCH
+	TOKEN_ARROW
+	TOKEN_EXTERN
+	TOKEN_STATIC
+	TOKEN_CONST
 	// 类型关键字
 	TOKEN_TYPE_INT
 	TOKEN_TYPE_FLOAT
@@ -250,6 +256,10 @@ func (l *Lexer) Next() Token {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_EQ, Value: "==", Line: l.line, Column: l.column}
+			} else if l.peek() == '>' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_ARROW, Value: "=>", Line: l.line, Column: l.column}
 			} else {
 				l.next()
 				return Token{Type: TOKEN_ASSIGN, Value: "=", Line: l.line, Column: l.column}
@@ -522,6 +532,16 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_FIELD_TYPE
 	case "type_kind":
 		tokenType = TOKEN_TYPE_KIND
+	case "enum":
+		tokenType = TOKEN_ENUM
+	case "match":
+		tokenType = TOKEN_MATCH
+	case "extern":
+		tokenType = TOKEN_EXTERN
+	case "static":
+		tokenType = TOKEN_STATIC
+	case "const":
+		tokenType = TOKEN_CONST
 	case "this":
 		tokenType = TOKEN_IDENT
 	case "true":
@@ -755,6 +775,27 @@ func (l *Lexer) GetSource() string {
 	return l.source
 }
 
+// GetPosition 获取当前位置
+func (l *Lexer) GetPosition() int {
+	return l.pos
+}
+
+// SetPosition 设置当前位置
+func (l *Lexer) SetPosition(pos int) {
+	l.pos = pos
+}
+
+// ScanUntilRbrace 扫描直到遇到 '}'，返回扫描的内容（不包括 '}'）
+// 用于 #[asm] 函数体的原始内容透传
+func (l *Lexer) ScanUntilRbrace() string {
+	result := ""
+	for l.pos < l.inputLen && l.input[l.pos] != '}' {
+		result += string(l.input[l.pos])
+		l.next()
+	}
+	return result
+}
+
 // TokenTypeToString 将token类型转换为字符串
 func TokenTypeToString(tokenType TokenType) string {
 	switch tokenType {
@@ -860,6 +901,18 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "FIELD_TYPE"
 	case TOKEN_TYPE_KIND:
 		return "TYPE_KIND"
+	case TOKEN_ENUM:
+		return "ENUM"
+	case TOKEN_MATCH:
+		return "MATCH"
+	case TOKEN_ARROW:
+		return "ARROW"
+	case TOKEN_EXTERN:
+		return "EXTERN"
+	case TOKEN_STATIC:
+		return "STATIC"
+	case TOKEN_CONST:
+		return "CONST"
 	case TOKEN_IDENT:
 		return "IDENT"
 	case TOKEN_LITERAL_INT:

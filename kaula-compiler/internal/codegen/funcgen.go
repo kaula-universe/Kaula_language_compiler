@@ -276,6 +276,10 @@ func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStatement) string {
 	fg.codegen.EnterScope("function_" + stmt.Name)
 
+	if stmt.IsAsm {
+		return fg.generateAsmFunction(stmt)
+	}
+
 	annotation := stmt.GetAnnotation()
 
 	if annotation == ast.TreeAnnotationPrefix || annotation == ast.TreeAnnotationPrefixTree {
@@ -300,8 +304,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	var builder strings.Builder
 	builder.Grow(1024)
 
-	if stmt.Inline {
-		builder.WriteString("__attribute__((always_inline)) ")
+	// 生成函数属性前缀
+	attrPrefix := generateFuncAttributes(stmt)
+	if attrPrefix != "" {
+		builder.WriteString(attrPrefix)
+		builder.WriteByte(' ')
 	}
 	
 	safeName := stmt.Name
@@ -621,11 +628,56 @@ func isVoidType(typeName string) bool {
 	return typeName == "void" || typeName == "Void"
 }
 
+// generateFuncAttributes 将函数属性转换为 C 的 __attribute__ 前缀
+// #[inline] → __attribute__((always_inline))
+// #[naked] → __attribute__((naked))
+// #[section(".text.boot")] → __attribute__((section(".text.boot")))
+// #[weak] → __attribute__((weak))
+// #[deprecated] → __attribute__((deprecated))
+func generateFuncAttributes(stmt *ast.FunctionStatement) string {
+	var parts []string
+
+	// 兼容旧字段
+	if stmt.Inline {
+		parts = append(parts, "__attribute__((always_inline))")
+	}
+
+	// 从统一属性列表中读取新属性
+	for _, attr := range stmt.Attributes {
+		switch attr.Name {
+		case "inline":
+			// 已通过旧字段处理，跳过
+		case "asm":
+			// asm 是语义标记，由 generateAsmFunction 单独处理，不映射到 C __attribute__
+		case "no_kmm", "sor", "prefix", "tree", "root":
+			// 这些是语义注解，不映射到 C __attribute__，跳过
+		case "naked":
+			parts = append(parts, "__attribute__((naked))")
+		case "section":
+			if len(attr.Args) > 0 {
+				parts = append(parts, fmt.Sprintf("__attribute__((section(%s)))", attr.Args[0]))
+			}
+		case "weak":
+			parts = append(parts, "__attribute__((weak))")
+		case "deprecated":
+			if len(attr.Args) > 0 {
+				parts = append(parts, fmt.Sprintf("__attribute__((deprecated(%s)))", attr.Args[0]))
+			} else {
+				parts = append(parts, "__attribute__((deprecated))")
+			}
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
 func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) string {
 	var code strings.Builder
 	code.Grow(2048)
-	if stmt.Inline {
-		code.WriteString("__attribute__((always_inline)) ")
+	attrPrefix := generateFuncAttributes(stmt)
+	if attrPrefix != "" {
+		code.WriteString(attrPrefix)
+		code.WriteByte(' ')
 	}
 	code.WriteString("int main() {\n")
 	fg.codegen.indent++
@@ -820,4 +872,49 @@ func (fg *FunctionGenerator) extractMallocSize(call *ast.CallExpression) (string
 	}
 	// 无法编译期确定
 	return fg.codegen.expressionGenerator.GenerateExpression(arg), 0
+}
+
+func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) string {
+	var builder strings.Builder
+	builder.Grow(1024)
+
+	// 生成函数属性前缀（naked, section, inline, weak 等）
+	// #[asm] 本身是语义标记，不映射到 C __attribute__，
+	// 但 #[naked]/#[section(...)]/#[inline] 等需要透传给 Clang
+	// 这对裸机/系统级代码至关重要：asm 函数通常需要 naked 省略 prologue/epilogue，
+	// 需要 section 控制放置位置（如 .text.boot）
+	attrPrefix := generateFuncAttributes(stmt)
+	if attrPrefix != "" {
+		builder.WriteString(attrPrefix)
+		builder.WriteByte(' ')
+	}
+
+	safeName := stmt.Name
+	if safeName == "max" || safeName == "min" || safeName == "abs" {
+		safeName = "kaula_" + safeName
+	}
+
+	returnType := fg.mapReturnType(stmt.ReturnType)
+	builder.WriteString(returnType)
+	builder.WriteString(safeName)
+	builder.WriteString("(")
+	for i, param := range stmt.Params {
+		if i > 0 {
+			builder.WriteString(", ")
+		}
+		paramType := "int64_t"
+		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
+		}
+		builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
+	}
+	if len(stmt.Params) == 0 {
+		builder.WriteString("void")
+	}
+	builder.WriteString(") {\n")
+	builder.WriteString(stmt.AsmBody)
+	builder.WriteString("}\n")
+
+	fg.codegen.ExitScope()
+	return builder.String()
 }

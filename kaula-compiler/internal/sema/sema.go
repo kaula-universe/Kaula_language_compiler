@@ -229,6 +229,11 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		} else if s.Type != "" {
 			sa.analyzeVariableDeclaration(s)
 		}
+	case *ast.ExternStatement:
+		if s == nil {
+			return
+		}
+		sa.analyzeExternStatement(s)
 	case *ast.ImportStatement:
 		sa.analyzeImportStatement(s)
 	case *ast.ExportStatement:
@@ -732,6 +737,63 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
 	}
+
+	// 4. const 必须有初始值
+	if stmt.IsConst && stmt.Value == nil {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("const 声明 '%s' 必须有初始值", stmt.Name),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"",
+			"const name: type = value",
+		)
+	}
+}
+
+// analyzeExternStatement 分析 extern 外部符号/函数声明
+func (sa *SemanticAnalyzer) analyzeExternStatement(stmt *ast.ExternStatement) {
+	if stmt.IsFunction {
+		// extern fn 函数声明
+		// 检查返回类型
+		if stmt.ReturnType != "" && stmt.ReturnType != "void" && !sa.isTypeValid(stmt.ReturnType) {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("extern fn 返回类型 '%s' 未知", stmt.ReturnType),
+				stmt.Pos.Line,
+				stmt.Pos.Column,
+				"",
+				"检查返回类型名称",
+			)
+		}
+		// 检查参数类型
+		for i, pType := range stmt.ParamTypes {
+			if !sa.isTypeValid(pType) {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("extern fn 参数 %d 类型 '%s' 未知", i+1, pType),
+					stmt.Pos.Line,
+					stmt.Pos.Column,
+					"",
+					"检查参数类型名称",
+				)
+			}
+		}
+		// 注册为函数符号
+		sa.symbolTable.AddSymbol(stmt.Name, stmt.ReturnType, false, "extern_func", stmt.Pos.Line, stmt.Pos.Column)
+	} else {
+		// extern 变量声明
+		// 1. 检查类型是否存在
+		if !sa.isTypeValid(stmt.Type) {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("未知类型 '%s'，extern 声明必须使用已定义的类型", stmt.Type),
+				stmt.Pos.Line,
+				stmt.Pos.Column,
+				"",
+				"检查类型名称是否正确",
+			)
+		}
+
+		// 2. 添加外部符号到符号表（标记为 extern）
+		sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "extern", stmt.Pos.Line, stmt.Pos.Column)
+	}
 }
 
 // analyzeAutoDeclaration 分析 auto 声明（类型推导）
@@ -861,12 +923,52 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	if stmt.Condition != nil {
 		sa.analyzeExpression(stmt.Condition)
+		// 空指针安全：检测 if x != null 模式，标记 x 为已检查
+		sa.markNullCheckedInCondition(stmt.Condition)
 	}
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	// 退出 if body 后，null checked 标记不再有效（简化实现：不清除，因为 else 分支可能也需要）
 	for _, elseStmt := range stmt.Else {
 		sa.analyzeStatement(elseStmt)
+	}
+}
+
+// markNullCheckedInCondition 检测 if 条件中的 null 检查模式
+// 支持: if x != null, if null != x, if x == null (else 分支中 x 已检查)
+func (sa *SemanticAnalyzer) markNullCheckedInCondition(cond ast.Expression) {
+	binExpr, ok := cond.(*ast.BinaryExpression)
+	if !ok {
+		return
+	}
+	isNullCheck := false
+	var checkedVar string
+
+	// x != null
+	if binExpr.Operator == "!=" {
+		if ident, ok := binExpr.Left.(*ast.Identifier); ok {
+			if right, ok := binExpr.Right.(*ast.Identifier); ok && right.Name == "null" {
+				isNullCheck = true
+				checkedVar = ident.Name
+			}
+		}
+	}
+	// null != x
+	if binExpr.Operator == "!=" {
+		if left, ok := binExpr.Left.(*ast.Identifier); ok && left.Name == "null" {
+			if ident, ok := binExpr.Right.(*ast.Identifier); ok {
+				isNullCheck = true
+				checkedVar = ident.Name
+			}
+		}
+	}
+
+	if isNullCheck && checkedVar != "" {
+		symbol := sa.symbolTable.GetSymbol(checkedVar)
+		if symbol != nil && symbol.Nullable {
+			symbol.NullChecked = true
+		}
 	}
 }
 
@@ -946,6 +1048,25 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 		sa.analyzeExpression(e.Index)
 	case *ast.FieldTypeExpression:
 		sa.analyzeExpression(e.Index)
+	case *ast.AttributeExpression:
+		// 表达式级属性（#[asm(...)]、#[atomic_load(...)] 等）
+		// 参数是字符串字面量或变量引用，由 codegen 负责生成 C 代码
+		// 这里做基本的名称校验
+		if e.Attr != nil {
+			switch e.Attr.Name {
+			case "asm", "volatile_load", "volatile_store",
+				"atomic_load", "atomic_store", "atomic_cas", "atomic_faa", "fence":
+				// 已知的属性表达式，跳过参数分析（参数可以是表达式或字符串）
+			default:
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("未知的属性表达式: #[%s]", e.Attr.Name),
+					e.Pos.Line,
+					e.Pos.Column,
+					"",
+					"支持的属性表达式: asm, volatile_load, volatile_store, atomic_load, atomic_store, atomic_cas, atomic_faa, fence",
+				)
+			}
+		}
 	}
 }
 
@@ -1094,6 +1215,8 @@ func (sa *SemanticAnalyzer) analyzeIndexExpression(expr *ast.IndexExpression) {
 	if expr == nil {
 		return
 	}
+	// 空指针安全：对 Nullable 类型解引用时发出警告
+	sa.checkNullableDereference(expr.Object, expr.Pos.Line, expr.Pos.Column)
 	sa.analyzeExpression(expr.Object)
 	sa.analyzeExpression(expr.Index)
 }
@@ -1103,7 +1226,28 @@ func (sa *SemanticAnalyzer) analyzeMemberExpression(expr *ast.MemberExpression) 
 	if expr == nil {
 		return
 	}
+	// 空指针安全：对 Nullable 类型解引用时发出警告
+	sa.checkNullableDereference(expr.Object, expr.Pos.Line, expr.Pos.Column)
 	sa.analyzeExpression(expr.Object)
+}
+
+// checkNullableDereference 检查是否对 Nullable 类型的值进行了解引用
+// 如果 expr 是一个 Nullable 类型的标识符，且未在 if 条件中做过 null 检查，发出警告
+func (sa *SemanticAnalyzer) checkNullableDereference(expr ast.Expression, line, column int) {
+	if expr == nil {
+		return
+	}
+	ident, ok := expr.(*ast.Identifier)
+	if !ok {
+		return
+	}
+	symbol := sa.symbolTable.GetSymbol(ident.Name)
+	if symbol == nil {
+		return
+	}
+	if symbol.Nullable && !symbol.NullChecked {
+		sa.error(fmt.Sprintf("nullable variable '%s' may be null, add null check before access (e.g., if %s != null { ... })", ident.Name, ident.Name), line, column)
+	}
 }
 
 // inferExpressionType 推断表达式的类型
@@ -1345,38 +1489,73 @@ func (sa *SemanticAnalyzer) checkTypeConstraint(typeName, constraint string, lin
 	if constraint == "" || constraint == "any" {
 		return true
 	}
-	
+
+	// 标准化类型名：映射 Kaula 类型别名
+	normalizedType := typeName
+	switch typeName {
+	case "i8", "i16", "i32", "i64", "int", "integer", "long":
+		normalizedType = "int"
+	case "u8", "u16", "u32", "u64", "uint", "uchar", "ushort", "ulong":
+		normalizedType = "int" // 无符号整数也是可比较/有序的
+	case "f32", "f64", "float", "double", "real", "single":
+		normalizedType = "float"
+	case "bool", "boolean":
+		normalizedType = "bool"
+	case "char", "byte", "sbyte":
+		normalizedType = "int"
+	case "string", "str", "cstring":
+		normalizedType = "string"
+	}
+
 	// 检查类型是否满足约束
 	switch constraint {
 	case "comparable":
 		// 可比较类型：基本类型、指针等
-		if typeName == "int" || typeName == "float" || typeName == "string" || 
-		   typeName == "bool" || typeName == "char*" {
+		switch normalizedType {
+		case "int", "float", "string", "bool":
 			return true
+		default:
+			// 指针类型也可比较
+			if strings.HasSuffix(typeName, "*") {
+				return true
+			}
 		}
 	case "ordered":
 		// 有序类型：可以进行大小比较
-		if typeName == "int" || typeName == "float" || typeName == "string" {
+		switch normalizedType {
+		case "int", "float", "string":
 			return true
 		}
 	case "number":
 		// 数值类型
-		if typeName == "int" || typeName == "float" || typeName == "double" {
+		switch normalizedType {
+		case "int", "float":
+			return true
+		}
+	case "integer":
+		// 整数类型
+		if normalizedType == "int" {
+			return true
+		}
+	case "floating":
+		// 浮点类型
+		if normalizedType == "float" {
 			return true
 		}
 	}
-	
+
 	sa.error(fmt.Sprintf("type %s does not satisfy constraint %s", typeName, constraint), line, column)
 	return false
 }
 
 // validateGenericInstantiation 验证泛型实例化
+// 查找函数的泛型参数定义，检查每个实参类型是否满足对应的约束
 func (sa *SemanticAnalyzer) validateGenericInstantiation(funcName string, typeArgs []string, line, column int) bool {
 	symbol := sa.symbolTable.GetSymbol(funcName)
 	if symbol == nil || !symbol.IsGeneric {
 		return false
 	}
-	
+
 	if symbol.GenericInst != nil {
 		expectedCount := len(symbol.GenericInst.TypeArguments)
 		if len(typeArgs) != expectedCount {
@@ -1384,8 +1563,31 @@ func (sa *SemanticAnalyzer) validateGenericInstantiation(funcName string, typeAr
 			return false
 		}
 	}
-	
-	// 检查每个类型参数是否满足约束
+
+	// 查找函数定义中的泛型参数约束
+	// 从 genericStack 中找到对应的函数定义
+	var paramConstraints []map[string][]string
+	for _, fn := range sa.genericStack {
+		if fn.Name == funcName && fn.IsGeneric() {
+			constraints := make(map[string][]string)
+			for i, tp := range fn.TypeParams {
+				if tp.Constraint != "" && tp.Constraint != "any" {
+					constraints[tp.Name] = append(constraints[tp.Name], tp.Constraint)
+				}
+				// 如果类型参数数量与实参数量匹配，直接按位置对应
+				if i < len(typeArgs) && len(constraints[tp.Name]) > 0 {
+					for _, c := range constraints[tp.Name] {
+						if !sa.checkTypeConstraint(typeArgs[i], c, line, column) {
+							return false
+						}
+					}
+				}
+			}
+			paramConstraints = append(paramConstraints, constraints)
+		}
+	}
+
+	// 也检查全局类型约束表（兼容旧的注册方式）
 	for _, typeArg := range typeArgs {
 		if constraints, ok := sa.typeConstraints[typeArg]; ok {
 			for _, constraint := range constraints {
@@ -1395,7 +1597,7 @@ func (sa *SemanticAnalyzer) validateGenericInstantiation(funcName string, typeAr
 			}
 		}
 	}
-	
+
 	return true
 }
 

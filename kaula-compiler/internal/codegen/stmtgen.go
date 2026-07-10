@@ -53,6 +53,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.codegen.typeGenerator.GenerateInterfaceStatement(s)
 	case *ast.StructStatement:
 		return sg.codegen.typeGenerator.GenerateStructStatement(s)
+	case *ast.EnumStatement:
+		return sg.codegen.typeGenerator.GenerateEnumStatement(s)
 	case *ast.TypeAliasStatement:
 		return sg.codegen.typeGenerator.GenerateTypeAliasStatement(s)
 	case *ast.IfStatement:
@@ -80,6 +82,11 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 			return ""
 		}
 		return sg.generateVariableDeclaration(s)
+	case *ast.ExternStatement:
+		if s == nil {
+			return ""
+		}
+		return sg.generateExternStatement(s)
 	case *ast.ExpressionStatement:
 		if s == nil || s.Expression == nil {
 			return ""
@@ -167,6 +174,25 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		}
 	}
 
+	// 生成属性前缀（#[volatile], #[section("...")], #[aligned(N)] 等）
+	attrPrefix := generateVarAttributes(stmt.Attributes)
+
+	builder.WriteString(attrPrefix)
+
+	// static 存储修饰符
+	if stmt.IsStatic {
+		builder.WriteString("static ")
+	}
+
+	// const 常量修饰符
+	if stmt.IsConst {
+		builder.WriteString("const ")
+		// 局部 const 也加入常量表，支持编译期常量求值
+		if evaluated := sg.codegen.tryEvalConstExpr(stmt.Value); evaluated != "" {
+			sg.codegen.constTable[stmt.Name] = evaluated
+		}
+	}
+
 	builder.WriteString(cType)
 	builder.WriteByte(' ')
 	builder.WriteString(stmt.Name)
@@ -204,6 +230,53 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 	}
 	builder.WriteString(";\n")
+	return builder.String()
+}
+
+// generateExternStatement 生成 extern 外部符号/函数声明
+// 变量: extern name: type → extern type name;
+// 函数: extern fn name(params) -> ret → extern ret name(param_types);
+func (sg *StatementGenerator) generateExternStatement(stmt *ast.ExternStatement) string {
+	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "extern", stmt.Pos.Line, stmt.Pos.Column)
+
+	var builder strings.Builder
+	builder.Grow(256)
+
+	if stmt.IsFunction {
+		// extern 函数声明
+		returnType := sg.codegen.typeGenerator.convertType(stmt.ReturnType, false)
+		if returnType == "" {
+			returnType = "void"
+		}
+		builder.WriteString("extern ")
+		builder.WriteString(returnType)
+		builder.WriteByte(' ')
+		builder.WriteString(stmt.Name)
+		builder.WriteByte('(')
+		if len(stmt.ParamTypes) == 0 {
+			builder.WriteString("void")
+		} else {
+			for i, pType := range stmt.ParamTypes {
+				if i > 0 {
+					builder.WriteString(", ")
+				}
+				cType := sg.codegen.typeGenerator.convertType(pType, false)
+				if cType == "" {
+					cType = "void*"
+				}
+				builder.WriteString(cType)
+			}
+		}
+		builder.WriteString(");\n")
+	} else {
+		// extern 变量声明
+		cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
+		builder.WriteString("extern ")
+		builder.WriteString(cType)
+		builder.WriteByte(' ')
+		builder.WriteString(stmt.Name)
+		builder.WriteString(";\n")
+	}
 	return builder.String()
 }
 
@@ -1736,6 +1809,48 @@ func (sg *StatementGenerator) generateYeideStatement(stmt *ast.YeideStatement) s
 	b.WriteString(srcCode)
 	b.WriteString(" = 0; /* SOR: ownership moved */\n")
 	return b.String()
+}
+
+// generateVarAttributes 将变量属性转换为 C 声明前缀
+// #[volatile] i32 x → volatile int64_t x
+// #[section(".bss")] → __attribute__((section(".bss")))
+// #[aligned(16)] → __attribute__((aligned(16)))
+func generateVarAttributes(attrs []*ast.Attribute) string {
+	if len(attrs) == 0 {
+		return ""
+	}
+	var prefix strings.Builder
+	var suffixParts []string
+	for _, attr := range attrs {
+		switch attr.Name {
+		case "volatile":
+			prefix.WriteString("volatile ")
+		case "section":
+			if len(attr.Args) > 0 {
+				suffixParts = append(suffixParts, fmt.Sprintf("__attribute__((section(%s)))", attr.Args[0]))
+			}
+		case "aligned":
+			if len(attr.Args) > 0 {
+				suffixParts = append(suffixParts, fmt.Sprintf("__attribute__((aligned(%s)))", attr.Args[0]))
+			} else {
+				suffixParts = append(suffixParts, "__attribute__((aligned))")
+			}
+		case "weak":
+			suffixParts = append(suffixParts, "__attribute__((weak))")
+		case "deprecated":
+			if len(attr.Args) > 0 {
+				suffixParts = append(suffixParts, fmt.Sprintf("__attribute__((deprecated(%s)))", attr.Args[0]))
+			} else {
+				suffixParts = append(suffixParts, "__attribute__((deprecated))")
+			}
+		}
+	}
+	// __attribute__ 放在类型前面，volatile 也放在类型前面
+	if len(suffixParts) > 0 {
+		prefix.WriteString(strings.Join(suffixParts, " "))
+		prefix.WriteByte(' ')
+	}
+	return prefix.String()
 }
 
 // generateReleaseStatement 生成 release 语句代码

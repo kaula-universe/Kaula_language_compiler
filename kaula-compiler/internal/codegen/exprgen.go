@@ -186,6 +186,12 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return "(" + cond + " ? " + trueExpr + " : " + falseExpr + ")"
 	case *ast.ArrayLiteral:
 		return eg.generateArrayLiteral(e)
+	case *ast.LambdaExpression:
+		return eg.GenerateLambdaExpression(e)
+	case *ast.MatchExpression:
+		return eg.generateMatchExpression(e)
+	case *ast.AttributeExpression:
+		return eg.generateAttributeExpression(e)
 	default:
 		return "0"
 	}
@@ -196,6 +202,12 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 	// 检查是否是 null 关键字
 	if e.Name == "null" {
 		return "NULL"
+	}
+
+	// 编译期常量内联：如果在常量表中找到，直接返回字面量
+	// 这实现了真正的编译期常量求值，const 变量引用会被替换为求值后的字面量
+	if val, ok := eg.codegen.constTable[e.Name]; ok {
+		return val
 	}
 
 	// 检查是否是前缀变量（以 $ 开头）
@@ -1169,5 +1181,326 @@ func (eg *ExpressionGenerator) generateUnaryExpression(e *ast.UnaryExpression) s
 		return "-" + right
 	default:
 		return e.Operator + right
+	}
+}
+
+// GenerateLambdaExpression 生成 lambda/闭包表达式的 C 代码
+// 无捕获 lambda 在 C 中就是普通的静态函数指针
+func (eg *ExpressionGenerator) GenerateLambdaExpression(expr *ast.LambdaExpression) string {
+	// 为 lambda 生成唯一名称
+	lambdaName := fmt.Sprintf("_kaula_lambda_%d", eg.codegen.lambdaCounter)
+	eg.codegen.lambdaCounter++
+
+	// 生成参数类型列表
+	var cParamTypes []string
+	for i, param := range expr.Params {
+		paramType := "int64_t" // 默认类型
+		if i < len(expr.ParamTypes) && expr.ParamTypes[i] != "auto" && expr.ParamTypes[i] != "" {
+			paramType = eg.codegen.typeGenerator.convertType(expr.ParamTypes[i], false)
+		}
+		cParamTypes = append(cParamTypes, fmt.Sprintf("%s %s", paramType, param))
+	}
+
+	// 生成返回类型
+	returnType := "void"
+	if expr.ReturnType != "" {
+		returnType = eg.codegen.typeGenerator.convertType(expr.ReturnType, false)
+	}
+
+	// 生成函数体
+	var bodyCode strings.Builder
+	for _, stmt := range expr.Body {
+		bodyCode.WriteString(eg.codegen.statementGenerator.GenerateStatement(stmt))
+	}
+
+	// 构建完整函数定义，存入延迟输出队列
+	var funcDef strings.Builder
+	funcDef.WriteString(fmt.Sprintf("static %s %s(%s) {\n", returnType, lambdaName, strings.Join(cParamTypes, ", ")))
+	funcDef.WriteString(bodyCode.String())
+	funcDef.WriteString("}\n")
+
+	// 存入 lambda 定义队列（在生成的 C 文件中函数定义之前输出）
+	eg.codegen.lambdaDefinitions = append(eg.codegen.lambdaDefinitions, funcDef.String())
+
+	// 返回函数指针
+	return lambdaName
+}
+
+// generateMatchExpression 生成 match 表达式的 C 代码
+// match 编译为 C 的 switch + 变体数据绑定
+//
+//	match(result) {
+//	    Ok(value) => println(value)
+//	    Err(msg) => println(msg)
+//	}
+//
+// 编译为:
+//
+//	switch (result.kind) {
+//	    case Result_Kind_Ok: {
+//	        auto_type value = result.data.Ok_val;
+//	        println(value);
+//	        break;
+//	    }
+//	    case Result_Kind_Err: {
+//	        auto_type msg = result.data.Err_val;
+//	        println(msg);
+//	        break;
+//	    }
+//	}
+func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) string {
+	targetCode := eg.GenerateExpression(e.Target)
+
+	var code strings.Builder
+	code.WriteString("switch (")
+	code.WriteString(targetCode)
+	code.WriteString(".kind) {\n")
+
+	// 尝试从目标表达式推断枚举类型名
+	enumName := eg.inferEnumName(e.Target)
+
+	for _, arm := range e.Arms {
+		if arm.Pattern == nil {
+			continue
+		}
+
+		switch arm.Pattern.Kind {
+		case ast.PatternWildcard:
+			// _ 通配符 → default
+			code.WriteString("    default:\n")
+			code.WriteString("    {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("        break;\n")
+			code.WriteString("    }\n")
+
+		case ast.PatternVariant:
+			// VariantName(x, y) → case Enum_Kind_VariantName: { auto_type x = ...; ... break; }
+			caseLabel := "    case "
+			if enumName != "" {
+				caseLabel += enumName + "_Kind_"
+			}
+			caseLabel += arm.Pattern.VariantName + ":\n"
+			code.WriteString(caseLabel)
+			code.WriteString("    {\n")
+
+			// 生成绑定变量
+			if len(arm.Pattern.Bindings) > 0 {
+				// 查找枚举变体的字段类型
+				variant := eg.findEnumVariant(enumName, arm.Pattern.VariantName)
+				for i, binding := range arm.Pattern.Bindings {
+					fieldAccess := targetCode + ".data." + arm.Pattern.VariantName + "_val"
+					if variant != nil && len(variant.FieldTypes) > 1 {
+						// 多字段时使用具体字段名
+						if i < len(variant.FieldNames) && variant.FieldNames[i] != "" {
+							fieldAccess = targetCode + ".data." + variant.FieldNames[i]
+						} else {
+							// 多字段但无字段名时，使用 _val0, _val1 格式
+							fieldAccess = fmt.Sprintf("%s.data.%s_val%d", targetCode, arm.Pattern.VariantName, i)
+						}
+					}
+					code.WriteString(fmt.Sprintf("        auto_type %s = %s;\n", binding, fieldAccess))
+				}
+			}
+
+			// 生成分支体
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("        break;\n")
+			code.WriteString("    }\n")
+
+		case ast.PatternInteger:
+			// 整数字面量模式
+			code.WriteString(fmt.Sprintf("    case %d:\n", arm.Pattern.IntValue))
+			code.WriteString("    {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("        break;\n")
+			code.WriteString("    }\n")
+
+		case ast.PatternString:
+			// 字符串字面量模式 - 在 C 中不能直接 switch 字符串，生成 if-else
+			// 这里简单处理，在 switch 外面用 if 包裹
+			code.WriteString("    /* string pattern: ")
+			code.WriteString(arm.Pattern.StrValue)
+			code.WriteString(" */\n")
+
+		case ast.PatternBoolean:
+			// true/false 模式
+			code.WriteString("    case ")
+			if arm.Pattern.VariantName == "true" {
+				code.WriteString("1")
+			} else {
+				code.WriteString("0")
+			}
+			code.WriteString(":\n")
+			code.WriteString("    {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("        break;\n")
+			code.WriteString("    }\n")
+
+		case ast.PatternVariable:
+			// 变量绑定 - 在 switch 中无法直接处理，生成注释
+			code.WriteString("    /* variable pattern: ")
+			code.WriteString(strings.Join(arm.Pattern.Bindings, ", "))
+			code.WriteString(" */\n")
+		}
+	}
+
+	code.WriteString("}\n")
+	return code.String()
+}
+
+// inferEnumName 从目标表达式推断枚举类型名
+func (eg *ExpressionGenerator) inferEnumName(expr ast.Expression) string {
+	if ident, ok := expr.(*ast.Identifier); ok {
+		// 从符号表查找变量类型
+		sym := eg.codegen.GetSymbol(ident.Name)
+		if sym != nil {
+			// 检查类型是否是已定义的枚举
+			if eg.codegen.program != nil {
+				if enumStmt := eg.codegen.program.FindEnum(sym.Type); enumStmt != nil {
+					return enumStmt.Name
+				}
+			}
+			return sym.Type
+		}
+	}
+	return ""
+}
+
+// findEnumVariant 查找枚举变体信息
+func (eg *ExpressionGenerator) findEnumVariant(enumName, variantName string) *ast.EnumVariant {
+	if eg.codegen.program == nil {
+		return nil
+	}
+	enumStmt := eg.codegen.program.FindEnum(enumName)
+	if enumStmt == nil {
+		return nil
+	}
+	for _, v := range enumStmt.Variants {
+		if v.Name == variantName {
+			return v
+		}
+	}
+	return nil
+}
+
+// generateAttributeExpression 生成表达式级属性的 C 代码
+// 这是 Kaula 特殊操作的统一语法：asm/volatile/atomic/fence 等都通过此机制实现
+// 语法: #[name(arg1, arg2, ...)]
+// 支持的属性:
+//   - #[asm("template", output, input, clobbers) ]: 内联汇编（GCC extended asm 风格）
+//   - #[volatile_load(ptr)]: volatile 加载
+//   - #[volatile_store(ptr, val)]: volatile 存储
+//   - #[atomic_load(ptr)]: 原子加载
+//   - #[atomic_store(ptr, val)]: 原子存储
+//   - #[atomic_cas(ptr, expected, new)]: 原子比较交换，返回旧值
+//   - #[atomic_faa(ptr, val)]: 原子 fetch-and-add，返回旧值
+//   - #[fence()]: 内存屏障（全屏障）
+func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeExpression) string {
+	if expr.Attr == nil {
+		return "0"
+	}
+
+	attr := expr.Attr
+	args := attr.Args
+
+	switch attr.Name {
+	case "asm":
+		// #[asm("template")] 或 #[asm("template", "output", "input", "clobbers")]
+		// 简化版：直接生成 __asm__ __volatile__("...")
+		if len(args) == 0 {
+			eg.codegen.error("asm attribute requires at least a template string")
+			return "0"
+		}
+		if len(args) == 1 {
+			// 简单形式: #[asm("mov %cr3, %rax")]
+			return fmt.Sprintf("__asm__ __volatile__(%s)", args[0])
+		}
+		// 扩展形式: 有输出/输入/破坏列表
+		template := args[0]
+		output := ""
+		input := ""
+		clobbers := ""
+		if len(args) > 1 {
+			output = args[1]
+		}
+		if len(args) > 2 {
+			input = args[2]
+		}
+		if len(args) > 3 {
+			clobbers = args[3]
+		}
+		// GCC extended asm 格式: asm volatile (template : output : input : clobbers)
+		return fmt.Sprintf("({ __asm__ __volatile__(%s : %s : %s : %s); })",
+			template, output, input, clobbers)
+
+	case "volatile_load":
+		// #[volatile_load(ptr)] - volatile 指针解引用读
+		if len(args) < 1 {
+			eg.codegen.error("volatile_load requires a pointer argument")
+			return "0"
+		}
+		return fmt.Sprintf("(*(volatile typeof(*%s)*)(%s))", args[0], args[0])
+
+	case "volatile_store":
+		// #[volatile_store(ptr, val)] - volatile 指针解引用写
+		if len(args) < 2 {
+			eg.codegen.error("volatile_store requires pointer and value arguments")
+			return "0"
+		}
+		return fmt.Sprintf("(*(volatile typeof(*%s)*)(%s) = (%s))", args[0], args[0], args[1])
+
+	case "atomic_load":
+		// #[atomic_load(ptr)] - 原子加载（seq_cst）
+		if len(args) < 1 {
+			eg.codegen.error("atomic_load requires a pointer argument")
+			return "0"
+		}
+		return fmt.Sprintf("__atomic_load_n((%s), __ATOMIC_SEQ_CST)", args[0])
+
+	case "atomic_store":
+		// #[atomic_store(ptr, val)] - 原子存储（seq_cst）
+		if len(args) < 2 {
+			eg.codegen.error("atomic_store requires pointer and value arguments")
+			return "0"
+		}
+		return fmt.Sprintf("(__atomic_store_n((%s), (%s), __ATOMIC_SEQ_CST), (%s))", args[0], args[1], args[1])
+
+	case "atomic_cas":
+		// #[atomic_cas(ptr, expected, new)] - 原子比较交换
+		// 返回布尔值：true 表示成功
+		if len(args) < 3 {
+			eg.codegen.error("atomic_cas requires pointer, expected, and new arguments")
+			return "0"
+		}
+		return fmt.Sprintf("__atomic_compare_exchange_n((%s), &(%s), (%s), 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)",
+			args[0], args[1], args[2])
+
+	case "atomic_faa":
+		// #[atomic_faa(ptr, val)] - 原子 fetch-and-add，返回旧值
+		if len(args) < 2 {
+			eg.codegen.error("atomic_faa requires pointer and value arguments")
+			return "0"
+		}
+		return fmt.Sprintf("__atomic_fetch_add((%s), (%s), __ATOMIC_SEQ_CST)", args[0], args[1])
+
+	case "fence":
+		// #[fence()] - 全内存屏障
+		return "__atomic_thread_fence(__ATOMIC_SEQ_CST)"
+
+	default:
+		eg.codegen.error(fmt.Sprintf("unknown attribute expression: #[%s]", attr.Name))
+		return "0"
 	}
 }

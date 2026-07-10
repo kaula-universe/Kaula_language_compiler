@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -60,6 +61,13 @@ type CodeGenerator struct {
 
 	sourceMap *SourceMap
 	sourceFile string
+
+	lambdaCounter     int
+	lambdaDefinitions []string
+
+	// 编译期常量表：const 变量名 → 求值后的字面量
+	// 用于在 codegen 阶段将 const 引用内联为字面量，实现编译期常量求值
+	constTable map[string]string
 }
 
 func (cg *CodeGenerator) error(message string) {
@@ -172,6 +180,9 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	tm := NewTemplateManager()
 	templatePath := filepath.Join(cfg.TemplatePath, "main.c.tmpl")
 	tm.LoadTemplate("main", templatePath)
+	// 加载 freestanding 裸机入口模板（用于 --freestanding 模式）
+	freestandingPath := filepath.Join(cfg.TemplatePath, "freestanding.c.tmpl")
+	tm.LoadTemplate("freestanding", freestandingPath)
 
 	pm := NewPluginManager()
 
@@ -214,6 +225,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		genericCache:       make(map[string]*GenericInstanceCache),
 		genericInstantiated: make(map[string]bool),
 		sourceMap:          NewSourceMap("", ""),
+		constTable:          make(map[string]string),
 	}
 	
 	cg.typeGenerator = NewTypeGenerator(cg)
@@ -227,6 +239,8 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.program = program
 	cg.usedThirdPartyLibs = make(map[string]bool)
+	cg.lambdaCounter = 0
+	cg.lambdaDefinitions = nil
 
 	type rawEntry struct {
 		section   string
@@ -332,6 +346,11 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			lines := strings.Count(code, "\n")
 			addEntry("type", structStmt.Pos.Line, structStmt.Pos.Column, "struct", structStmt.Name, lines)
 			typeCode.WriteString(code)
+		} else if enumStmt, ok := stmt.(*ast.EnumStatement); ok {
+			code := cg.generateStatement(stmt) + "\n"
+			lines := strings.Count(code, "\n")
+			addEntry("type", enumStmt.Pos.Line, enumStmt.Pos.Column, "enum", enumStmt.Name, lines)
+			typeCode.WriteString(code)
 		} else if typeStmt, ok := stmt.(*ast.TypeAliasStatement); ok {
 			code := cg.generateStatement(stmt) + "\n"
 			lines := strings.Count(code, "\n")
@@ -346,9 +365,69 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if varDecl.IsAuto {
 				cType = "auto"
 			}
-			code := fmt.Sprintf("%s %s = %s;\n", cType, varDecl.Name, initValue)
+			// const 变量：尝试编译期求值并存入常量表
+			// 后续引用此变量时，在 codegen 阶段直接内联为字面量
+			if varDecl.IsConst {
+				if evaluated := cg.tryEvalConstExpr(varDecl.Value); evaluated != "" {
+					cg.constTable[varDecl.Name] = evaluated
+				}
+			}
+			// 全局变量：支持属性、static、const
+			var varPrefix strings.Builder
+			if len(varDecl.Attributes) > 0 {
+				varPrefix.WriteString(generateVarAttributes(varDecl.Attributes))
+			}
+			if varDecl.IsStatic {
+				varPrefix.WriteString("static ")
+			}
+			if varDecl.IsConst {
+				varPrefix.WriteString("const ")
+			}
+			prefix := varPrefix.String()
+			if prefix != "" {
+				code := fmt.Sprintf("%s%s %s = %s;\n", prefix, cType, varDecl.Name, initValue)
+				lines := strings.Count(code, "\n")
+				addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
+				globalVars.WriteString(code)
+			} else {
+				code := fmt.Sprintf("%s %s = %s;\n", cType, varDecl.Name, initValue)
+				lines := strings.Count(code, "\n")
+				addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
+				globalVars.WriteString(code)
+			}
+		} else if externStmt, ok := stmt.(*ast.ExternStatement); ok {
+			if externStmt == nil {
+				continue
+			}
+			var code string
+			if externStmt.IsFunction {
+				// extern 函数声明：生成完整原型
+				returnType := cg.typeGenerator.convertType(externStmt.ReturnType, false)
+				if returnType == "" {
+					returnType = "void"
+				}
+				var params strings.Builder
+				if len(externStmt.ParamTypes) == 0 {
+					params.WriteString("void")
+				} else {
+					for i, pType := range externStmt.ParamTypes {
+						if i > 0 {
+							params.WriteString(", ")
+						}
+						cType := cg.typeGenerator.convertType(pType, false)
+						if cType == "" {
+							cType = "void*"
+						}
+						params.WriteString(cType)
+					}
+				}
+				code = fmt.Sprintf("extern %s %s(%s);\n", returnType, externStmt.Name, params.String())
+			} else {
+				cType := cg.typeGenerator.convertType(externStmt.Type, externStmt.Nullable)
+				code = fmt.Sprintf("extern %s %s;\n", cType, externStmt.Name)
+			}
 			lines := strings.Count(code, "\n")
-			addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
+			addEntry("global", externStmt.Pos.Line, externStmt.Pos.Column, "extern", externStmt.Name, lines)
 			globalVars.WriteString(code)
 		} else {
 			code := cg.indentString() + cg.generateStatement(stmt)
@@ -367,9 +446,27 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		cg.usedModules = append(cg.usedModules, moduleName)
 	}
 
+	// 将 lambda 定义插入到 functionCode 之前
+	var lambdaCode strings.Builder
+	for _, def := range cg.lambdaDefinitions {
+		lambdaCode.WriteString(def)
+	}
+	// 将 lambda 定义合并到 functionCode 前面
+	if lambdaCode.Len() > 0 {
+		combined := lambdaCode.String() + functionCode.String()
+		functionCode.Reset()
+		functionCode.WriteString(combined)
+	}
+
 	var allIncludes strings.Builder
 	allIncludes.Grow(2048)
-	allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
+	if cg.config != nil && cg.config.Freestanding {
+		// freestanding 模式：只包含 freestanding 安全的头文件
+		// 不包含 <stdio.h>/<stdlib.h>，它们在裸机下不存在
+		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <string.h>\n#include \"kaula.h\"\n")
+	} else {
+		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
+	}
 
 	if cg.stdlibConfig != nil {
 		// 只为显式导入的模块生成 #include
@@ -441,8 +538,15 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	var result string
 	var typeOffset, globalOffset, funcOffset, mainOffset int
 
-	if !hasMain {
-		template, ok := cg.templateManager.GetTemplate("main")
+	// freestanding 模式：始终使用裸机入口模板，无论是否存在 main 函数
+	useFreestanding := cg.config != nil && cg.config.Freestanding
+
+	if useFreestanding || !hasMain {
+		templateName := "main"
+		if useFreestanding {
+			templateName = "freestanding"
+		}
+		template, ok := cg.templateManager.GetTemplate(templateName)
 		if !ok {
 			var resultBuilder strings.Builder
 			resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
@@ -487,7 +591,12 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			typeOffset = strings.Count(result[:idxType], "\n") + 1
 			globalOffset = strings.Count(result[:idxGlobal], "\n") + 1
 			funcOffset = strings.Count(result[:idxFunc], "\n") + 1
-			mainOffset = strings.Count(result[:idxMain], "\n") + 1
+			// freestanding 模板无 {{main_code}} 占位符，idxMain 可能为 -1
+			if idxMain >= 0 {
+				mainOffset = strings.Count(result[:idxMain], "\n") + 1
+			} else {
+				mainOffset = funcOffset + strings.Count(functionCode.String(), "\n")
+			}
 			_ = idxIncludes
 			_ = idxForward
 		}
@@ -768,6 +877,21 @@ func (cg *CodeGenerator) IsStructType(name string) bool {
 	return false
 }
 
+// IsEnumType 检查指定名称是否是已定义的枚举类型
+func (cg *CodeGenerator) IsEnumType(name string) bool {
+	if cg.program == nil {
+		return false
+	}
+	for _, stmt := range cg.program.Statements {
+		if enumStmt, ok := stmt.(*ast.EnumStatement); ok {
+			if enumStmt.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // GetGenericCachedCode 获取缓存的泛型代码
 func (cg *CodeGenerator) GetGenericCachedCode(funcName string, typeArgs []string) (string, bool) {
 	cacheKey := funcName + "<"
@@ -836,6 +960,8 @@ func getStmtPos(stmt ast.Statement) *ast.Position {
 		return &s.Pos
 	case *ast.StructStatement:
 		return &s.Pos
+	case *ast.EnumStatement:
+		return &s.Pos
 	case *ast.TypeAliasStatement:
 		return &s.Pos
 	case *ast.SwitchStatement:
@@ -848,4 +974,96 @@ func getStmtPos(stmt ast.Statement) *ast.Position {
 		return &s.Pos
 	}
 	return nil
+}
+
+// tryEvalConstExpr 尝试在编译期求值常量表达式
+// 支持：整数/浮点字面量、其他 const 引用、基本算术运算（+ - * / % << >> & | ^）
+// 返回求值后的字面量字符串，无法求值时返回空字符串
+func (cg *CodeGenerator) tryEvalConstExpr(expr ast.Expression) string {
+	if expr == nil {
+		return ""
+	}
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral:
+		return strconv.FormatInt(e.Value, 10)
+	case *ast.FloatLiteral:
+		return strconv.FormatFloat(e.Value, 'f', -1, 64)
+	case *ast.BooleanLiteral:
+		if e.Value {
+			return "1"
+		}
+		return "0"
+	case *ast.Identifier:
+		// 引用其他 const 变量
+		if val, ok := cg.constTable[e.Name]; ok {
+			return val
+		}
+		return ""
+	case *ast.BinaryExpression:
+		left := cg.tryEvalConstExpr(e.Left)
+		right := cg.tryEvalConstExpr(e.Right)
+		if left == "" || right == "" {
+			return ""
+		}
+		return cg.evalBinaryOp(e.Operator, left, right)
+	case *ast.ParenExpression:
+		return cg.tryEvalConstExpr(e.Inner)
+	}
+	return ""
+}
+
+// evalBinaryOp 执行编译期二元运算
+func (cg *CodeGenerator) evalBinaryOp(op, left, right string) string {
+	// 尝试整数运算
+	lval, lerr := strconv.ParseInt(left, 0, 64)
+	rval, rerr := strconv.ParseInt(right, 0, 64)
+	if lerr == nil && rerr == nil {
+		switch op {
+		case "+":
+			return strconv.FormatInt(lval+rval, 10)
+		case "-":
+			return strconv.FormatInt(lval-rval, 10)
+		case "*":
+			return strconv.FormatInt(lval*rval, 10)
+		case "/":
+			if rval == 0 {
+				return ""
+			}
+			return strconv.FormatInt(lval/rval, 10)
+		case "%":
+			if rval == 0 {
+				return ""
+			}
+			return strconv.FormatInt(lval%rval, 10)
+		case "<<":
+			return strconv.FormatInt(lval<<uint(rval), 10)
+		case ">>":
+			return strconv.FormatInt(lval>>uint(rval), 10)
+		case "&":
+			return strconv.FormatInt(lval&rval, 10)
+		case "|":
+			return strconv.FormatInt(lval|rval, 10)
+		case "^":
+			return strconv.FormatInt(lval^rval, 10)
+		}
+	}
+	// 浮点运算
+	lf, lfErr := strconv.ParseFloat(left, 64)
+	rf, rfErr := strconv.ParseFloat(right, 64)
+	if lfErr == nil && rfErr == nil {
+		switch op {
+		case "+":
+			return strconv.FormatFloat(lf+rf, 'f', -1, 64)
+		case "-":
+			return strconv.FormatFloat(lf-rf, 'f', -1, 64)
+		case "*":
+			return strconv.FormatFloat(lf*rf, 'f', -1, 64)
+		case "/":
+			if rf == 0 {
+				return ""
+			}
+			return strconv.FormatFloat(lf/rf, 'f', -1, 64)
+		}
+	}
+	return ""
 }

@@ -3,6 +3,7 @@ package ast
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Node 表示AST节点的接口
@@ -114,6 +115,16 @@ func (p *Program) FindStruct(name string) *StructStatement {
 	for _, stmt := range p.Statements {
 		if structStmt, ok := stmt.(*StructStatement); ok && structStmt.Name == name {
 			return structStmt
+		}
+	}
+	return nil
+}
+
+// FindEnum 查找枚举声明
+func (p *Program) FindEnum(name string) *EnumStatement {
+	for _, stmt := range p.Statements {
+		if enumStmt, ok := stmt.(*EnumStatement); ok && enumStmt.Name == name {
+			return enumStmt
 		}
 	}
 	return nil
@@ -349,6 +360,10 @@ func traverseNode(node Node, visitor func(Node)) {
 		for _, field := range n.Fields {
 			traverseNode(field, visitor)
 		}
+	case *LambdaExpression:
+		for _, stmt := range n.Body {
+			traverseNode(stmt, visitor)
+		}
 	case *MemberAccessExpression:
 		if n.Object != nil {
 			traverseNode(n.Object, visitor)
@@ -371,6 +386,24 @@ func traverseNode(node Node, visitor func(Node)) {
 		}
 		if n.Index != nil {
 			traverseNode(n.Index, visitor)
+		}
+	case *EnumStatement:
+		for _, variant := range n.Variants {
+			visitor(variant)
+		}
+	case *MatchExpression:
+		if n.Target != nil {
+			traverseNode(n.Target, visitor)
+		}
+		for _, arm := range n.Arms {
+			traverseNode(arm, visitor)
+		}
+	case *MatchArm:
+		if n.Pattern != nil {
+			visitor(n.Pattern)
+		}
+		for _, stmt := range n.Body {
+			traverseNode(stmt, visitor)
 		}
 	}
 }
@@ -723,16 +756,19 @@ type FunctionStatement struct {
 	Params        []string         // 参数名称列表
 	ParamTypes    []string         // 参数类型列表
 	Body          []Statement
+	AsmBody       string           // asm 函数的原始函数体内容
 	ReturnType    string
 	Generic       bool      // 是否是泛型函数
-	NoKMM         bool      // 是否禁用 KMM 内存管理
-	Inline        bool      // 是否内联函数
+	NoKMM         bool      // 是否禁用 KMM 内存管理（兼容旧 #[no_kmm]）
+	Inline        bool      // 是否内联函数（兼容旧 #[inline]）
 	Annotation    TreeAnnotationType // 函数注解 (prefix,tree, root,tree)
-	SOREnabled    bool      // 函数级 SOR 启用（#[sor] 注解）
+	SOREnabled    bool      // 函数级 SOR 启用（兼容旧 #[sor] 注解）
+	Attributes    []*Attribute // 统一属性列表（新）
 	IsPublic      bool      // pub 修饰符：导出给其他 .kl 文件
 	PrefixName    string    // 如果使用prefix，记录prefix名称
 	TaskParams    []*TaskParam // 任务参数列表（如 task(1)）
 	AsyncParams   []*AsyncParam // 异步参数列表（如 async(value)）
+	IsAsm         bool      // 是否是 asm 函数（#[asm] 注解）
 	Pos           Position
 }
 
@@ -1153,13 +1189,16 @@ func (n *NonLocalStatement) SetPosition(pos Position) {
 
 // VariableDeclaration 表示变量声明语句
 type VariableDeclaration struct {
-	Type     string
-	Name     string
-	Value    Expression
-	Nullable bool
-	IsAuto   bool
-	IsPublic bool // pub 修饰符
-	Pos      Position
+	Type       string
+	Name       string
+	Value      Expression
+	Nullable   bool
+	IsAuto     bool
+	IsPublic   bool // pub 修饰符
+	IsStatic   bool // static 修饰符：函数内静态变量，生命周期为整个程序
+	IsConst    bool // const 修饰符：编译期常量，不可修改
+	Attributes []*Attribute // 声明注解：#[volatile], #[section("...")], #[aligned(N)] 等
+	Pos        Position
 }
 
 // statementNode 实现Statement接口
@@ -1674,6 +1713,7 @@ type FieldDeclaration struct {
 	Name     string
 	Type     string
 	Nullable bool
+	BitWidth int    // 位域宽度（0=普通字段，>0=位域，如 flags: u32 : 5 → BitWidth=5）
 	Pos      Position
 }
 
@@ -1853,6 +1893,7 @@ type StructStatement struct {
 	TypeParams []*TypeParameter // 泛型类型参数
 	Fields     []*FieldDeclaration
 	Generic    bool // 是否是泛型结构体
+	Attributes []*Attribute // 声明注解：#[packed], #[aligned(N)] 等
 	Pos        Position
 }
 
@@ -2036,6 +2077,22 @@ func (c *ConditionalExpression) SetPosition(pos Position) {
 	c.Pos = pos
 }
 
+// LambdaExpression 表示 lambda/闭包表达式
+// 语法: fn(参数列表) { 函数体 } 或 fn(参数列表) -> 返回类型 { 函数体 }
+type LambdaExpression struct {
+	Params     []string   // 参数名列表
+	ParamTypes []string   // 参数类型列表
+	ReturnType string     // 返回类型（空=void）
+	Body       []Statement
+	Captures   []string   // 捕获的外部变量名（由语义分析填充）
+	Pos        Position
+}
+
+func (l *LambdaExpression) expressionNode() {}
+func (l *LambdaExpression) String() string  { return "LambdaExpression" }
+func (l *LambdaExpression) GetPosition() Position { return l.Pos }
+func (l *LambdaExpression) SetPosition(pos Position) { l.Pos = pos }
+
 // ArrayLiteral 表示数组字面量
 type ArrayLiteral struct {
 	Elements []Expression
@@ -2197,3 +2254,316 @@ func (t *TypeKindExpression) expressionNode() {}
 func (t *TypeKindExpression) String() string { return "TypeKindExpression" }
 func (t *TypeKindExpression) GetPosition() Position { return t.Pos }
 func (t *TypeKindExpression) SetPosition(pos Position) { t.Pos = pos }
+
+// ==================== 属性注解系统 ====================
+
+// Attribute 表示声明注解
+// 语法: #[name] 或 #[name(arg1, arg2)]
+// 用途: 修饰紧随其后的声明（fn/struct/var/type 等）
+type Attribute struct {
+	Name  string   // 属性名："packed", "aligned", "volatile", "section", "naked", "inline", "deprecated", "weak", "no_kmm", "sor"
+	Args  []string // 参数列表：#[section(".isr_vector")] → [".isr_vector"]，#[aligned(16)] → ["16"]
+	Pos   Position
+}
+
+func (a *Attribute) String() string {
+	if len(a.Args) > 0 {
+		return fmt.Sprintf("Attribute(%s, args=%v)", a.Name, a.Args)
+	}
+	return fmt.Sprintf("Attribute(%s)", a.Name)
+}
+
+func (a *Attribute) GetPosition() Position { return a.Pos }
+func (a *Attribute) SetPosition(pos Position) { a.Pos = pos }
+
+// ParseAttributeString 解析属性内容字符串
+// 输入: "packed" → Attribute{Name:"packed"}
+// 输入: "aligned(16)" → Attribute{Name:"aligned", Args:["16"]}
+// 输入: "section(\".isr_vector\")" → Attribute{Name:"section", Args:[".isr_vector"]}
+func ParseAttributeString(content string) *Attribute {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+
+	attr := &Attribute{}
+
+	// 检查是否有参数括号
+	parenIdx := strings.Index(content, "(")
+	if parenIdx < 0 {
+		// 无参数: #[packed]
+		attr.Name = content
+		return attr
+	}
+
+	// 有参数: #[aligned(16)] 或 #[section(".isr_vector")]
+	attr.Name = strings.TrimSpace(content[:parenIdx])
+
+	// 提取括号内的参数
+	rest := content[parenIdx+1:]
+	// 找到匹配的右括号
+	depth := 1
+	i := 0
+	for i < len(rest) && depth > 0 {
+		if rest[i] == '(' {
+			depth++
+		} else if rest[i] == ')' {
+			depth--
+		}
+		i++
+	}
+	argsStr := strings.TrimSpace(rest[:i-1]) // 去掉尾部的 )
+
+	if argsStr != "" {
+		// 分割参数，注意处理带引号的字符串参数
+		attr.Args = parseAttributeArgs(argsStr)
+	}
+
+	return attr
+}
+
+// parseAttributeArgs 解析属性参数列表
+// "16" → ["16"]
+// ".isr_vector" → [".isr_vector"]
+// "4, 2" → ["4", "2"]
+func parseAttributeArgs(argsStr string) []string {
+	var args []string
+	var current strings.Builder
+	inQuotes := false
+	quoteChar := byte(0)
+
+	for i := 0; i < len(argsStr); i++ {
+		c := argsStr[i]
+		if inQuotes {
+			current.WriteByte(c)
+			if c == quoteChar {
+				inQuotes = false
+			}
+		} else if c == '"' || c == '\'' {
+			inQuotes = true
+			quoteChar = c
+			current.WriteByte(c)
+		} else if c == ',' {
+			arg := strings.TrimSpace(current.String())
+			if arg != "" {
+				args = append(args, arg)
+			}
+			current.Reset()
+		} else {
+			current.WriteByte(c)
+		}
+	}
+
+	arg := strings.TrimSpace(current.String())
+	if arg != "" {
+		args = append(args, arg)
+	}
+
+	return args
+}
+
+// ParseAttributeList 解析 #[attr1, attr2(arg)] 格式的属性列表
+func ParseAttributeList(content string) []*Attribute {
+	var attrs []*Attribute
+
+	// 逐个分割，注意不要在括号内分割
+	depth := 0
+	start := 0
+	for i := 0; i < len(content); i++ {
+		c := content[i]
+		if c == '(' {
+			depth++
+		} else if c == ')' {
+			depth--
+		} else if c == ',' && depth == 0 {
+			part := strings.TrimSpace(content[start:i])
+			if part != "" {
+				if attr := ParseAttributeString(part); attr != nil {
+					attrs = append(attrs, attr)
+				}
+			}
+			start = i + 1
+		}
+	}
+	// 最后一个
+	part := strings.TrimSpace(content[start:])
+	if part != "" {
+		if attr := ParseAttributeString(part); attr != nil {
+			attrs = append(attrs, attr)
+		}
+	}
+
+	return attrs
+}
+
+// HasAttribute 检查属性列表中是否有指定名称的属性
+func HasAttribute(attrs []*Attribute, name string) bool {
+	for _, a := range attrs {
+		if a.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// GetAttribute 获取指定名称的属性
+func GetAttribute(attrs []*Attribute, name string) *Attribute {
+	for _, a := range attrs {
+		if a.Name == name {
+			return a
+		}
+	}
+	return nil
+}
+
+// ==================== 表达式级属性（Attribute Expression） ====================
+// 特殊操作统一使用 #[name(args)] 作为表达式嵌入，避免为每个操作发明新语法
+// 示例:
+//   let cr3 = #[asm("mov %cr3, %rax")]
+//   let val = #[volatile_load(ptr)]
+//   let old = #[atomic_cas(ptr, expected, new)]
+//   #[fence()]
+type AttributeExpression struct {
+	Attr *Attribute  // 属性定义（名称 + 参数列表）
+	Pos  Position
+}
+
+func (a *AttributeExpression) expressionNode() {}
+func (a *AttributeExpression) String() string {
+	if a.Attr != nil {
+		return "AttributeExpression(" + a.Attr.Name + ")"
+	}
+	return "AttributeExpression"
+}
+func (a *AttributeExpression) GetPosition() Position { return a.Pos }
+func (a *AttributeExpression) SetPosition(pos Position) { a.Pos = pos }
+
+// ==================== extern 外部符号声明 ====================
+// 变量语法: extern name: type
+// 函数语法: extern fn name(params) -> return_type
+// 用于声明链接脚本符号或外部 C/汇编函数，不分配存储
+// 示例:
+//   extern bss_start: u8
+//   extern stack_top: u64
+//   extern fn boot_main() -> void
+//   extern fn memset(dst: *u8, c: i32, n: usize) -> *u8
+type ExternStatement struct {
+	Name        string
+	Type        string   // 变量类型（函数时为返回类型）
+	Nullable    bool
+	IsFunction  bool     // 是否是函数声明
+	Params      []string // 参数名列表（函数时有效）
+	ParamTypes  []string // 参数类型列表（函数时有效）
+	ReturnType  string   // 返回类型（函数时有效）
+	Pos         Position
+}
+
+func (e *ExternStatement) statementNode() {}
+func (e *ExternStatement) String() string { return "ExternStatement(" + e.Name + ": " + e.Type + ")" }
+func (e *ExternStatement) GetPosition() Position { return e.Pos }
+func (e *ExternStatement) SetPosition(pos Position) { e.Pos = pos }
+
+// ==================== ADT（代数数据类型）+ match（模式匹配） ====================
+
+// EnumStatement 表示带数据的枚举定义（代数数据类型）
+// 语法: enum Name { Variant1, Variant2(Type), Variant3(Type1, Type2) }
+type EnumStatement struct {
+	Name       string          // 枚举名
+	Variants   []*EnumVariant  // 变体列表
+	TypeParams []*TypeParameter // 泛型类型参数（如 enum Result<T, E>）
+	Generic    bool
+	Attributes []*Attribute
+	Pos        Position
+}
+
+// EnumVariant 表示枚举变体
+type EnumVariant struct {
+	Name       string     // 变体名
+	FieldTypes []string   // 关联数据的类型列表（空=无数据变体）
+	FieldNames []string   // 关联数据的字段名（可选）
+}
+
+func (e *EnumStatement) statementNode() {}
+func (e *EnumStatement) String() string { return "EnumStatement(" + e.Name + ")" }
+func (e *EnumStatement) GetPosition() Position { return e.Pos }
+func (e *EnumStatement) SetPosition(pos Position) { e.Pos = pos }
+
+func (v *EnumVariant) String() string {
+	if len(v.FieldTypes) == 0 {
+		return "EnumVariant(" + v.Name + ")"
+	}
+	return "EnumVariant(" + v.Name + "(" + strings.Join(v.FieldTypes, ", ") + "))"
+}
+func (v *EnumVariant) GetPosition() Position { return Position{} }
+func (v *EnumVariant) SetPosition(pos Position) {}
+
+// MatchExpression 表示模式匹配表达式
+// 语法: match(expr) { Pattern1 => body1, Pattern2(x) => body2, _ => default_body }
+type MatchExpression struct {
+	Target    Expression      // 被匹配的表达式
+	Arms      []*MatchArm     // 匹配分支
+	Pos       Position
+}
+
+// MatchArm 表示模式匹配的一个分支
+type MatchArm struct {
+	Pattern   *MatchPattern   // 模式
+	Body      []Statement     // 匹配后执行的语句
+	Pos       Position
+}
+
+// MatchPattern 表示模式匹配的模式
+type MatchPattern struct {
+	Kind      MatchPatternKind // 模式类型
+	VariantName string         // 变体名（Kind=Variant 时有效）
+	Bindings []string          // 绑定的变量名（Kind=Variant/Variable 时有效）
+	IntValue int64             // 整数字面量值（Kind=Integer 时有效）
+	StrValue string            // 字符串字面量值（Kind=String 时有效）
+	Pos      Position
+}
+
+// MatchPatternKind 模式类型
+type MatchPatternKind int
+
+const (
+	PatternWildcard  MatchPatternKind = iota // _ 通配符
+	PatternVariant                            // EnumVariant(x, y)
+	PatternInteger                            // 整数字面量
+	PatternString                             // 字符串字面量
+	PatternVariable                           // 变量绑定
+	PatternBoolean                            // true/false
+)
+
+func (e *MatchExpression) expressionNode() {}
+func (e *MatchExpression) String() string { return "MatchExpression" }
+func (e *MatchExpression) GetPosition() Position { return e.Pos }
+func (e *MatchExpression) SetPosition(pos Position) { e.Pos = pos }
+
+func (a *MatchArm) statementNode() {}
+func (a *MatchArm) String() string { return "MatchArm" }
+func (a *MatchArm) GetPosition() Position { return a.Pos }
+func (a *MatchArm) SetPosition(pos Position) { a.Pos = pos }
+
+func (p *MatchPattern) String() string {
+	switch p.Kind {
+	case PatternWildcard:
+		return "PatternWildcard(_)"
+	case PatternVariant:
+		if len(p.Bindings) > 0 {
+			return "PatternVariant(" + p.VariantName + "(" + strings.Join(p.Bindings, ", ") + "))"
+		}
+		return "PatternVariant(" + p.VariantName + ")"
+	case PatternInteger:
+		return fmt.Sprintf("PatternInteger(%d)", p.IntValue)
+	case PatternString:
+		return "PatternString(" + p.StrValue + ")"
+	case PatternVariable:
+		return "PatternVariable(" + strings.Join(p.Bindings, ", ") + ")"
+	case PatternBoolean:
+		return "PatternBoolean"
+	default:
+		return "PatternUnknown"
+	}
+}
+func (p *MatchPattern) GetPosition() Position { return p.Pos }
+func (p *MatchPattern) SetPosition(pos Position) { p.Pos = pos }

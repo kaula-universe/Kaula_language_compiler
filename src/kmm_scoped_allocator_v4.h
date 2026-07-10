@@ -5,7 +5,11 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
+
+#ifndef KAULA_FREESTANDING
+// hosted 模式下包含 stdio.h（用于 debug 输出）
 #include <stdio.h>
+#endif
 
 // 原子操作支持（轻量实时线程安全）
 #if KMM_THREAD_SAFETY_LEVEL >= 1

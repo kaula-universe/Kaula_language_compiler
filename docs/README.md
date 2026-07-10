@@ -26,6 +26,7 @@
 - [标准库集成](stdlib-integration.md) - 配置驱动、自动发现、第三方库
 - [核心运行时特性](core-runtime.md) - VO 系统、前缀系统、任务调度
 - [超时与内存控制](timeout-memory.md) - 资源监控、阶段统计、调试输出
+- [裸机开发指南](bare-metal.md) - freestanding 模式、内联汇编、原子操作、位域、extern 声明
 
 ## 快速导航
 
@@ -44,6 +45,10 @@
 ### 想了解如何扩展编译器？
 
 查看 [代码生成器 (Codegen)](code-generation.md) 中的插件系统部分。
+
+### 想做裸机/系统级开发？
+
+查看 [裸机开发指南](bare-metal.md)，了解 freestanding 模式、内联汇编、原子操作、位域、extern 声明等特性。
 
 ## 文档约定
 

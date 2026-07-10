@@ -5,6 +5,7 @@ type Symbol struct {
 	Name        string
 	Type        string
 	Nullable    bool
+	NullChecked bool   // 是否已通过 if x != null 检查（空指针安全）
 	Scope       string
 	Line        int
 	Column      int

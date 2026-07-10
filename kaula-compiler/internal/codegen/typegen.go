@@ -514,18 +514,162 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 				fieldType = "struct " + fieldType
 			}
 		}
+		// 位域: fieldName: type : width → type fieldName : width;
+		bitSuffix := ""
+		if field.BitWidth > 0 {
+			bitSuffix = fmt.Sprintf(" : %d", field.BitWidth)
+		}
 		// 处理数组字段：C 语法为 "elemType name[N]"，而非 "elemType[N] name"
 		if strings.Contains(fieldType, "[") && !strings.HasSuffix(fieldType, "*") {
 			openBracket := strings.Index(fieldType, "[")
 			cElemType := fieldType[:openBracket]
 			arrayPart := fieldType[openBracket:]
-			code.WriteString(fmt.Sprintf("    %s %s%s;\n", cElemType, field.Name, arrayPart))
+			code.WriteString(fmt.Sprintf("    %s %s%s%s;\n", cElemType, field.Name, arrayPart, bitSuffix))
 		} else {
-			code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+			code.WriteString(fmt.Sprintf("    %s %s%s;\n", fieldType, field.Name, bitSuffix))
 		}
 	}
-	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+
+	// 生成属性对应的 __attribute__
+	attrStr := generateStructAttributes(stmt.Attributes)
+	if attrStr != "" {
+		code.WriteString(fmt.Sprintf("} %s %s;\n\n", attrStr, stmt.Name))
+	} else {
+		code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+	}
 	
+	return code.String()
+}
+
+// generateStructAttributes 将 Kaula 属性转换为 C 的 __attribute__ 语法
+// 放在 struct 定义的 } 和类型名之间
+func generateStructAttributes(attrs []*ast.Attribute) string {
+	if len(attrs) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, attr := range attrs {
+		switch attr.Name {
+		case "packed":
+			parts = append(parts, "__attribute__((packed))")
+		case "aligned":
+			if len(attr.Args) > 0 {
+				parts = append(parts, fmt.Sprintf("__attribute__((aligned(%s)))", attr.Args[0]))
+			} else {
+				parts = append(parts, "__attribute__((aligned))")
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// GenerateEnumStatement 生成枚举（ADT/tagged union）的 C 代码
+// 编译为 C 的 tagged union:
+//
+//	enum Result<T, E> { Ok(T), Err(E) }
+//
+// 编译为:
+//
+//	typedef enum { Result_Kind_Ok, Result_Kind_Err } Result_Kind;
+//	typedef struct Result { Result_Kind kind; union { struct { T Ok_val; }; struct { E Err_val; }; } data; } Result;
+func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Enum: %s (ADT/Tagged Union, Generic=%v)\n", stmt.Name, stmt.Generic))
+
+	if stmt.Generic {
+		return tg.GenerateGenericEnumStatement(stmt)
+	}
+
+	// 生成 kind 枚举
+	code.WriteString(fmt.Sprintf("typedef enum {\n"))
+	for i, variant := range stmt.Variants {
+		code.WriteString(fmt.Sprintf("    %s_Kind_%s", stmt.Name, variant.Name))
+		if i < len(stmt.Variants)-1 {
+			code.WriteString(",")
+		}
+		code.WriteString("\n")
+	}
+	code.WriteString(fmt.Sprintf("} %s_Kind;\n\n", stmt.Name))
+
+	// 生成 tagged union 结构体
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("    %s_Kind kind;\n", stmt.Name))
+	code.WriteString("    union {\n")
+	for _, variant := range stmt.Variants {
+		if len(variant.FieldTypes) > 0 {
+			code.WriteString("        struct { ")
+			for j, fieldType := range variant.FieldTypes {
+				cType := MapKaulaTypeToC(fieldType)
+				fieldName := variant.Name + "_val"
+				if len(variant.FieldNames) > j && variant.FieldNames[j] != "" {
+					fieldName = variant.FieldNames[j]
+				}
+				if j > 0 {
+					code.WriteString("; ")
+				}
+				code.WriteString(fmt.Sprintf("%s %s", cType, fieldName))
+			}
+			code.WriteString("; };\n")
+		}
+	}
+	code.WriteString("    } data;\n")
+	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+
+	return code.String()
+}
+
+// GenerateGenericEnumStatement 生成泛型枚举的 C 代码（类型擦除为 void*）
+func (tg *TypeGenerator) GenerateGenericEnumStatement(stmt *ast.EnumStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Enum: %s", stmt.Name))
+
+	if len(stmt.TypeParams) > 0 {
+		code.WriteString("<")
+		for i, tp := range stmt.TypeParams {
+			if i > 0 {
+				code.WriteString(", ")
+			}
+			code.WriteString(tp.Name)
+		}
+		code.WriteString(">")
+	}
+	code.WriteString("\n")
+
+	// 生成 kind 枚举
+	code.WriteString(fmt.Sprintf("typedef enum {\n"))
+	for i, variant := range stmt.Variants {
+		code.WriteString(fmt.Sprintf("    %s_Kind_%s", stmt.Name, variant.Name))
+		if i < len(stmt.Variants)-1 {
+			code.WriteString(",")
+		}
+		code.WriteString("\n")
+	}
+	code.WriteString(fmt.Sprintf("} %s_Kind;\n\n", stmt.Name))
+
+	// 生成 tagged union（泛型类型擦除为 void*）
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("    %s_Kind kind;\n", stmt.Name))
+	code.WriteString("    union {\n")
+	for _, variant := range stmt.Variants {
+		if len(variant.FieldTypes) > 0 {
+			code.WriteString("        struct { ")
+			for j, fieldType := range variant.FieldTypes {
+				cType := tg.eraseGenericType(fieldType)
+				fieldName := variant.Name + "_val"
+				if len(variant.FieldNames) > j && variant.FieldNames[j] != "" {
+					fieldName = variant.FieldNames[j]
+				}
+				if j > 0 {
+					code.WriteString("; ")
+				}
+				code.WriteString(fmt.Sprintf("%s %s", cType, fieldName))
+			}
+			code.WriteString("; };\n")
+		}
+	}
+	code.WriteString("    } data;\n")
+	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+
 	return code.String()
 }
 
@@ -559,7 +703,12 @@ func (tg *TypeGenerator) GenerateGenericStructStatement(stmt *ast.StructStatemen
 				fieldType = "struct " + fieldType
 			}
 		}
-		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		// 位域支持
+		bitSuffix := ""
+		if field.BitWidth > 0 {
+			bitSuffix = fmt.Sprintf(" : %d", field.BitWidth)
+		}
+		code.WriteString(fmt.Sprintf("    %s %s%s;\n", fieldType, field.Name, bitSuffix))
 	}
 	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
 	

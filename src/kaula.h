@@ -8,6 +8,14 @@
 // ==================== 跨平台支持 ====================
 // platform.h will be included after configuration constants to avoid circular dependency
 
+#ifdef KAULA_FREESTANDING
+// 裸机模式：不检测平台，不包含 hosted 头文件
+// 用户通过链接脚本和 -DKAULA_FREESTANDING 编译选项启用
+#define KAULA_PLATFORM_WINDOWS 0
+#define KAULA_PLATFORM_UNIX 0
+#define KAULA_PLATFORM_LINUX 0
+#define KAULA_PLATFORM_MACOS 0
+#else
 // 平台检测
 #if defined(_WIN32) || defined(_WIN64)
     #define KAULA_PLATFORM_WINDOWS 1
@@ -27,6 +35,7 @@
 #else
     #error "Unsupported platform"
 #endif
+#endif // KAULA_FREESTANDING
 
 // 编译器检测
 #if defined(__GNUC__) || defined(__clang__)
@@ -179,11 +188,13 @@ void time_destroy(TimeModule* tm);
 // double time_now(TimeModule* tm);  // 已移至 std/time/time.h
 // void time_sleep(TimeModule* tm, double seconds);  // 已移至 std/time/time.h
 
+#ifndef KAULA_FREESTANDING
 // 包含 std/time/time.h 以获取 time_now 和 time_sleep 函数
 #include "../std/time/time.h"
 
 // 包含 std/io/io.h 以获取 println, print_int 等函数
 #include "../std/io/io.h"
+#endif // KAULA_FREESTANDING
 
 // ==================== Fast Allocator ====================
 typedef struct FastAllocator {

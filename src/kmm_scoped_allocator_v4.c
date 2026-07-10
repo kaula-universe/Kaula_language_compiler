@@ -1,7 +1,9 @@
 #include "kmm_scoped_allocator_v4.h"
 
+#ifndef KMM_V4_STATIC_POOL
 #ifdef _WIN32
 #include <windows.h>
+#endif
 #endif
 #include <string.h>
 
@@ -11,8 +13,14 @@
 
 #define BATCH_COMMIT_SIZE (4 * 1024 * 1024)  // 4MB 批量提交粒度
 
+#ifdef KMM_V4_STATIC_POOL
+// freestanding 模式：静态数组池，由链接脚本或编译器在 BSS 段分配
+uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE];
+size_t g_kmm_v4_pool_capacity = KMM_V4_POOL_SIZE;
+#else
 uint8_t* g_kmm_v4_pool = NULL;
 size_t g_kmm_v4_pool_capacity = 0;
+#endif
 
 #if KMM_THREAD_SAFETY_LEVEL >= 1
 KMM_ATOMIC_TYPE g_kmm_v4_offset = 0;
@@ -101,6 +109,14 @@ static void kmm_free_list_free(void* ptr, size_t size) {
 // ==================== 平台虚拟内存 ====================
 
 static void pool_ensure_init(void) {
+#ifdef KMM_V4_STATIC_POOL
+    // freestanding 模式：池已在 BSS 段静态分配，无需 OS 调用
+    // 只需确保 offset 和 committed 状态初始化
+    if (g_committed_bytes == 0) {
+        g_committed_bytes = 0; // 静态池按需"提交"（实际是 no-op）
+        g_kmm_v4_offset = 0;
+    }
+#else
     if (g_kmm_v4_pool) return;
     size_t reserve_size = 256 * 1024 * (size_t)1024; // 256MB 虚拟地址
 #ifdef _WIN32
@@ -113,12 +129,18 @@ static void pool_ensure_init(void) {
         g_kmm_v4_pool_capacity = reserve_size;
         g_committed_bytes = 0;
     }
+#endif
 }
 
 // 提交从 base+committed 到 base+needed 之间的页面
 // 优化：使用批量提交粒度（4MB），减少 VirtualAlloc 调用频率
 static void pool_commit_up_to(size_t needed) {
     if (needed <= g_committed_bytes) return;
+#ifdef KMM_V4_STATIC_POOL
+    // freestanding 模式：静态池已全部"提交"，直接更新计数
+    if (needed > g_kmm_v4_pool_capacity) needed = g_kmm_v4_pool_capacity;
+    g_committed_bytes = needed;
+#else
     // 对齐到 BATCH_COMMIT_SIZE 边界（批量提交，减少系统调用）
     size_t commit_end = (needed + BATCH_COMMIT_SIZE - 1) & ~(BATCH_COMMIT_SIZE - 1);
     if (commit_end > g_kmm_v4_pool_capacity) commit_end = g_kmm_v4_pool_capacity;
@@ -131,6 +153,7 @@ static void pool_commit_up_to(size_t needed) {
 #else
     // Linux: mmap pages are automatically committed on first access
     g_committed_bytes = commit_end;
+#endif
 #endif
 }
 
@@ -434,6 +457,12 @@ void kmm_v4_init_pool(size_t initial_size) {
 }
 
 void kmm_v4_destroy_pool(void) {
+#ifdef KMM_V4_STATIC_POOL
+    // freestanding 模式：静态池无法释放，只重置状态
+    g_committed_bytes = 0;
+    g_kmm_v4_offset = 0;
+    kmm_v4_tlab_invalidate();
+#else
     if (g_kmm_v4_pool) {
 #ifdef _WIN32
         VirtualFree(g_kmm_v4_pool, 0, MEM_RELEASE);
@@ -444,7 +473,7 @@ void kmm_v4_destroy_pool(void) {
         g_kmm_v4_pool_capacity = 0;
         g_committed_bytes = 0;
         g_kmm_v4_offset = 0;
-        // 失效当前线程的 TLAB
         kmm_v4_tlab_invalidate();
     }
+#endif
 }

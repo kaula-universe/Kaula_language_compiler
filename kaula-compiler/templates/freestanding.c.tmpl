@@ -1,0 +1,41 @@
+{{includes}}
+{{forward_decls}}
+{{global_vars}}
+{{type_code}}
+{{function_code}}
+
+// ==================== 裸机入口 ====================
+// 入口函数名由 kaulac --entry 指定（默认 _start）
+// 链接脚本应将此函数放置在 .text.boot 或类似段
+// 入口职责：
+//   1. 设置栈指针（通常由 boot.S 或链接脚本完成）
+//   2. 清零 BSS 段（如 boot.S 未完成）
+//   3. 调用 kaula_main（Kaula 程序的 main 函数）
+//   4. 停机（hlt/wfi/无限循环）
+
+// Kaula 程序的 main 函数前向声明
+extern int kaula_main(void);
+
+// 裸机入口：不返回
+// 用户可通过 #[section(".text.boot")] 属性控制放置位置
+__attribute__((noreturn))
+void _kaula_entry(void) {
+    // BSS 清零（如 boot.S 未完成，可在此补充）
+    // extern uint8_t __bss_start[], __bss_end[];
+    // for (uint8_t* p = __bss_start; p < __bss_end; ) *p++ = 0;
+
+    // 初始化 KMM 池（静态池模式下只需重置 offset）
+    // KMM_V4_STATIC_POOL 模式下池已在 BSS 段，无需 OS 调用
+
+    // 调用 Kaula 程序入口
+    (void)kaula_main();
+
+    // 停机：永不返回
+    // x86: hlt; ARM: wfi; 通用: 无限循环
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("hlt");
+#else
+    __asm__ __volatile__("wfi");
+#endif
+    while (1) { }
+}

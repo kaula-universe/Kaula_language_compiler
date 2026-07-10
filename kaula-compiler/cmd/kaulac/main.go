@@ -1199,8 +1199,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 
-	// 添加 Windows 系统库链接
-	if runtime.GOOS == "windows" {
+	// 添加 Windows 系统库链接（裸机模式跳过）
+	if runtime.GOOS == "windows" && (cfg == nil || !cfg.Freestanding) {
 		clangArgs = append(clangArgs, "-lws2_32")
 		clangArgs = append(clangArgs, "-lwininet")
 		clangArgs = append(clangArgs, "-lgdi32")
@@ -1248,6 +1248,56 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		for _, lib := range cfg.CLibs {
 			clangArgs = append(clangArgs, "-l"+lib)
 		}
+
+		// ====== 裸机/交叉编译模式 ======
+		if cfg.Freestanding {
+			clangArgs = append(clangArgs,
+				"-ffreestanding",
+				"-nostdlib",
+				"-nostartfiles",
+				"-DKMM_V4_STATIC_POOL",
+				"-DKAULA_FREESTANDING",
+			)
+			// 链接 freestanding runtime：提供 memset/memcpy/memmove/memcmp/strlen
+			// LLVM 在 size 未知时会将对 builtin 的调用 lower 为符号调用，裸机下必须自提供
+			if kaulaSrcPath != "" {
+				runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
+				if _, err := os.Stat(runtimeSrc); err == nil {
+					clangArgs = append(clangArgs, "-x", "none", runtimeSrc)
+					fmt.Printf("[Compile] Freestanding: linked runtime %s\n", runtimeSrc)
+				} else {
+					fmt.Printf("[Warning] Freestanding runtime not found: %s\n", runtimeSrc)
+				}
+			}
+			// 裸机模式下禁用 Windows 系统库
+			// （已添加的需要移除，但为简单起见，freestanding 优先跳过上面的 Windows 库添加）
+		}
+		if cfg.TargetTriple != "" {
+			clangArgs = append(clangArgs, "-target", cfg.TargetTriple)
+		}
+		if cfg.LinkScript != "" {
+			clangArgs = append(clangArgs, "-T", cfg.LinkScript)
+		}
+		if cfg.Entry != "" {
+			clangArgs = append(clangArgs, "-e", cfg.Entry)
+		}
+		if cfg.OutputFormat != "" && cfg.OutputFormat != "elf" {
+			switch cfg.OutputFormat {
+			case "bin":
+				// raw binary 输出：让链接器直接输出 binary 格式
+				// 裸机内核、镜像文件常用格式
+				clangArgs = append(clangArgs, "-Wl,--oformat=binary")
+			case "obj":
+				// 仅编译不链接，生成 .o 目标文件
+				// 用于后续手工链接或集成到其他构建系统
+				clangArgs = append(clangArgs, "-c")
+				// obj 模式下不输出可执行文件，输出文件改为 .o 后缀
+				// （由调用方通过 -o 控制，这里仅确保不链接）
+			default:
+				fmt.Printf("[Warning] Unknown output format: %s, using default (elf)\n", cfg.OutputFormat)
+			}
+		}
+		// elf 格式：clang 默认行为，无需额外参数
 	}
 
 	cmd := exec.Command(clangPath, clangArgs...)

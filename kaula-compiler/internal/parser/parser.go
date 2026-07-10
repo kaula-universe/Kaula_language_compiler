@@ -139,9 +139,28 @@ func (p *Parser) parseProgram() *ast.Program {
 
 // parseStatementIterative 迭代解析语句
 func (p *Parser) parseStatementIterative() ast.Statement {
-	// 检查是否有函数注解
-	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE && p.peekTok.Type == lexer.TOKEN_FUNC {
-		return p.parseFunctionStatementIterative()
+	// 检查是否有属性注解，如果有则解析后分发给对应的声明
+	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
+		// 预读属性后面的 token 类型来决定分发
+		switch p.peekTok.Type {
+		case lexer.TOKEN_FUNC:
+			return p.parseFunctionStatementIterative()
+		case lexer.TOKEN_STRUCT:
+			return p.parseStructStatementIterative()
+		case lexer.TOKEN_ENUM:
+			return p.parseEnumStatementIterative()
+		case lexer.TOKEN_TYPE:
+			return p.parseTypeStatementIterative()
+		case lexer.TOKEN_AUTO:
+			return p.parseAutoDeclarationIterative()
+		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+			lexer.TOKEN_TYPE_VOID, lexer.TOKEN_IDENT, lexer.TOKEN_MULTIPLY:
+			// #[volatile] i32 x 或 #[section(".bss")] MyType obj
+			return p.parseVariableDeclarationIterative()
+		}
+		// 属性后面不是已知声明关键字，按原逻辑处理（tree 等）
+		return p.parseTreeStatementIterative()
 	}
 	
 	switch p.curTok.Type {
@@ -169,6 +188,8 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 		return p.parseInterfaceStatementIterative()
 	case lexer.TOKEN_STRUCT:
 		return p.parseStructStatementIterative()
+	case lexer.TOKEN_ENUM:
+		return p.parseEnumStatementIterative()
 	case lexer.TOKEN_TYPE:
 		return p.parseTypeStatementIterative()
 	case lexer.TOKEN_AUTO:
@@ -201,6 +222,12 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 		return p.parsePackageStatementIterative()
 	case lexer.TOKEN_PUB:
 		return p.parsePubStatementIterative()
+	case lexer.TOKEN_EXTERN:
+		return p.parseExternStatementIterative()
+	case lexer.TOKEN_STATIC:
+		return p.parseStaticDeclarationIterative()
+	case lexer.TOKEN_CONST:
+		return p.parseConstDeclarationIterative()
 	case lexer.TOKEN_NONLOCAL:
 		return p.parseNonLocalStatementIterative()
 	case lexer.TOKEN_PRINTLN:
@@ -250,6 +277,12 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 // 例如：int x = 10  或者  int x
 func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 	stmt := &ast.VariableDeclaration{}
+
+	// 解析属性注解（如 #[volatile], #[section("...")], #[aligned(N)] 等）
+	attrs := p.parseAttributes()
+	if attrs != nil {
+		stmt.Attributes = attrs
+	}
 	
 	// 首先检查是否有类型关键字
 	var typeName string
@@ -347,11 +380,165 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 	return stmt
 }
 
+// parseExternStatementIterative 解析 extern 外部符号/函数声明
+// 变量语法: extern name: type
+// 函数语法: extern fn name(params) -> return_type
+// 示例:
+//   extern bss_start: u8
+//   extern fn boot_main() -> void
+func (p *Parser) parseExternStatementIterative() *ast.ExternStatement {
+	stmt := &ast.ExternStatement{
+		Pos: ast.Position{Line: p.curTok.Line, Column: p.curTok.Column},
+	}
+
+	p.nextToken() // 跳过 extern
+
+	// 检查是否是函数声明: extern fn name(...)
+	if p.curTok.Type == lexer.TOKEN_FUNC {
+		return p.parseExternFunctionIterative(stmt)
+	}
+
+	// 变量声明: extern name: type
+	if p.curTok.Type != lexer.TOKEN_IDENT {
+		p.error("extern 后应该跟符号名或 fn")
+		return nil
+	}
+	stmt.Name = p.curTok.Value
+	p.nextToken()
+
+	// extern 符号名后必须跟 : type
+	if p.curTok.Type != lexer.TOKEN_COLON {
+		p.error("extern 声明需要 : type 语法，如 extern name: type")
+		return nil
+	}
+	p.nextToken() // 跳过 :
+
+	// 解析类型
+	typeName := p.parseTypeString()
+	if typeName == "" {
+		p.error("extern 声明需要有效的类型")
+		return nil
+	}
+	stmt.Type = typeName
+
+	return stmt
+}
+
+// parseExternFunctionIterative 解析 extern fn 函数声明
+// 语法: extern fn name(param1: type1, param2: type2) -> return_type
+func (p *Parser) parseExternFunctionIterative(stmt *ast.ExternStatement) *ast.ExternStatement {
+	stmt.IsFunction = true
+	p.nextToken() // 跳过 fn
+
+	if p.curTok.Type != lexer.TOKEN_IDENT {
+		p.error("extern fn 后应该跟函数名")
+		return nil
+	}
+	stmt.Name = p.curTok.Value
+	p.nextToken()
+
+	// 解析参数列表
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("extern fn 声明需要参数列表 (")
+		return nil
+	}
+	p.nextToken() // 跳过 (
+
+	for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+		// 解析参数: name: type
+		if p.curTok.Type != lexer.TOKEN_IDENT {
+			p.error("extern fn 参数需要名称")
+			return nil
+		}
+		paramName := p.curTok.Value
+		p.nextToken()
+
+		if p.curTok.Type != lexer.TOKEN_COLON {
+			p.error("extern fn 参数需要 : type 语法")
+			return nil
+		}
+		p.nextToken() // 跳过 :
+
+		paramType := p.parseTypeString()
+		if paramType == "" {
+			p.error("extern fn 参数需要有效的类型")
+			return nil
+		}
+
+		stmt.Params = append(stmt.Params, paramName)
+		stmt.ParamTypes = append(stmt.ParamTypes, paramType)
+
+		if p.curTok.Type == lexer.TOKEN_COMMA {
+			p.nextToken()
+		}
+	}
+
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("extern fn 参数列表需要 )")
+		return nil
+	}
+	p.nextToken() // 跳过 )
+
+	// 解析返回类型: -> type
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		p.nextToken()
+		returnType := p.parseTypeString()
+		if returnType == "" {
+			p.error("extern fn 返回类型无效")
+			return nil
+		}
+		stmt.ReturnType = returnType
+		stmt.Type = returnType
+	} else {
+		// 无返回类型默认 void
+		stmt.ReturnType = "void"
+		stmt.Type = "void"
+	}
+
+	return stmt
+}
+
+// parseStaticDeclarationIterative 解析 static 静态变量声明
+// 语法: static name: type = value  或  static type name = value
+// 函数内的静态变量，生命周期为整个程序，只初始化一次
+// 全局作用域等价于普通变量（C 的 static 链接语义不同，这里只做存储期语义）
+func (p *Parser) parseStaticDeclarationIterative() *ast.VariableDeclaration {
+	p.nextToken() // 跳过 static
+	stmt := p.parseVariableDeclarationIterative()
+	if stmt != nil {
+		stmt.IsStatic = true
+	}
+	return stmt
+}
+
+// parseConstDeclarationIterative 解析 const 编译期常量声明
+// 语法: const name: type = value  或  const type name = value
+// 编译期常量，不可修改
+func (p *Parser) parseConstDeclarationIterative() *ast.VariableDeclaration {
+	p.nextToken() // 跳过 const
+	stmt := p.parseVariableDeclarationIterative()
+	if stmt != nil {
+		stmt.IsConst = true
+		if stmt.Value == nil {
+			p.error("const 声明必须有初始值")
+			return nil
+		}
+	}
+	return stmt
+}
+
 // parseAutoDeclarationIterative 解析 auto 声明
 // 语法: auto name = expression
+// 支持属性: #[volatile] auto ptr = ...
 func (p *Parser) parseAutoDeclarationIterative() *ast.VariableDeclaration {
 	stmt := &ast.VariableDeclaration{
 		IsAuto: true,
+	}
+
+	// 解析属性注解（如 #[volatile], #[section("...")] 等）
+	attrs := p.parseAttributes()
+	if attrs != nil {
+		stmt.Attributes = attrs
 	}
 	
 	p.nextToken()
@@ -750,15 +937,13 @@ func (p *Parser) parseTreeStatementIterative() *ast.TreeStatement {
 	}
 
 	// 检查是否有注解
-	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
-		annotationValue := p.curTok.Value
-		annotationContent := strings.TrimPrefix(annotationValue, "#[")
-		annotationContent = strings.TrimSuffix(annotationContent, "]")
-
-		stmt.Annotation = ast.ParseTreeAnnotation(annotationContent)
-
-		p.log("解析 tree 注解：%s -> annotation=%v", annotationContent, stmt.Annotation)
-		p.nextToken()
+	attrs := p.parseAttributes()
+	if attrs != nil {
+		// tree 注解只用第一个属性名
+		if len(attrs) > 0 {
+			stmt.Annotation = ast.ParseTreeAnnotation(attrs[0].Name)
+		}
+		p.log("解析 tree 注解：annotation=%v", stmt.Annotation)
 	}
 
 	p.nextToken()
@@ -867,47 +1052,64 @@ func (p *Parser) parseObjectStatementIterative() *ast.ObjectStatement {
 	return stmt
 }
 
-// parseFunctionAnnotations 解析函数注解
-func (p *Parser) parseFunctionAnnotations(stmt *ast.FunctionStatement) *ast.FunctionStatement {
-	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
-		annotationValue := p.curTok.Value
-		annotationContent := strings.TrimPrefix(annotationValue, "#[")
-		annotationContent = strings.TrimSuffix(annotationContent, "]")
-
-		annotations := strings.Split(annotationContent, ",")
-		for _, ann := range annotations {
-			ann = strings.TrimSpace(ann)
-			switch ann {
-			case "no_kmm":
-				stmt.NoKMM = true
-			case "inline":
-				stmt.Inline = true
-			case "sor":
-				stmt.SOREnabled = true
-			case "prefix":
-				stmt.Annotation = ast.TreeAnnotationPrefix
-			case "tree":
-				if stmt.Annotation == ast.TreeAnnotationPrefix {
-					stmt.Annotation = ast.TreeAnnotationPrefixTree
-				} else {
-					stmt.Annotation = ast.TreeAnnotationTree
-				}
-			case "root":
-				stmt.Annotation = ast.TreeAnnotationRoot
-			default:
-				parsed := ast.ParseTreeAnnotation(ann)
-				if parsed != ast.TreeAnnotationNone {
-					stmt.Annotation = parsed
-				}
-			}
-		}
-
-		p.log("解析函数注解：%s -> annotation=%v, no_kmm=%v, inline=%v", annotationContent, stmt.Annotation, stmt.NoKMM, stmt.Inline)
-
-		p.nextToken()
+// parseAttributes 解析 #[attr1, attr2(arg)] 格式的属性列表
+// 返回解析出的属性切片，如果当前 token 不是 TOKEN_ATTRIBUTE 则返回 nil
+func (p *Parser) parseAttributes() []*ast.Attribute {
+	if p.curTok.Type != lexer.TOKEN_ATTRIBUTE {
+		return nil
 	}
 
-	return stmt
+	annotationValue := p.curTok.Value
+	annotationContent := strings.TrimPrefix(annotationValue, "#[")
+	annotationContent = strings.TrimSuffix(annotationContent, "]")
+
+	attrs := ast.ParseAttributeList(annotationContent)
+
+	p.log("解析属性：%s -> %d 个属性", annotationContent, len(attrs))
+
+	p.nextToken()
+	return attrs
+}
+
+// applyFunctionAttributes 将属性列表应用到函数声明
+// 同时设置兼容旧字段（NoKMM/Inline/SOREnabled/Annotation）
+func applyFunctionAttributes(stmt *ast.FunctionStatement, attrs []*ast.Attribute) {
+	stmt.Attributes = attrs
+	for _, attr := range attrs {
+		switch attr.Name {
+		case "no_kmm":
+			stmt.NoKMM = true
+		case "inline":
+			stmt.Inline = true
+		case "sor":
+			stmt.SOREnabled = true
+		case "naked":
+			// 新属性，通过 Attributes 列表访问
+		case "section":
+			// 新属性，通过 Attributes 列表访问
+		case "weak":
+			// 新属性，通过 Attributes 列表访问
+		case "deprecated":
+			// 新属性，通过 Attributes 列表访问
+		case "asm":
+			stmt.IsAsm = true
+		case "prefix":
+			stmt.Annotation = ast.TreeAnnotationPrefix
+		case "tree":
+			if stmt.Annotation == ast.TreeAnnotationPrefix {
+				stmt.Annotation = ast.TreeAnnotationPrefixTree
+			} else {
+				stmt.Annotation = ast.TreeAnnotationTree
+			}
+		case "root":
+			stmt.Annotation = ast.TreeAnnotationRoot
+		default:
+			parsed := ast.ParseTreeAnnotation(attr.Name)
+			if parsed != ast.TreeAnnotationNone {
+				stmt.Annotation = parsed
+			}
+		}
+	}
 }
 
 // parseFunctionStatementIterative 迭代解析函数语句
@@ -927,7 +1129,10 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	}
 	
 	// 解析函数注解（如果存在）
-	stmt = p.parseFunctionAnnotations(stmt)
+	attrs := p.parseAttributes()
+	if attrs != nil {
+		applyFunctionAttributes(stmt, attrs)
+	}
 	
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
@@ -1076,21 +1281,50 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		return stmt
 	}
 	
-	p.nextToken()
-	maxStatements := 10000
-	statementCount := 0
-	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
-		bodyStmt := p.parseStatementIterative()
-		if bodyStmt != nil {
-			stmt.Body = append(stmt.Body, bodyStmt)
-			statementCount++
-			if statementCount > maxStatements {
-				break
+	if stmt.IsAsm {
+		source := p.lexer.GetSource()
+		pos := p.lexer.GetPosition()
+		for pos > 0 && source[pos] != '{' {
+			pos--
+		}
+		if pos < len(source) && source[pos] == '{' {
+			pos++
+			startPos := pos
+			braceCount := 1
+			for pos < len(source) && braceCount > 0 {
+				if source[pos] == '{' {
+					braceCount++
+				} else if source[pos] == '}' {
+					braceCount--
+				}
+				pos++
 			}
-		} else {
-			p.nextToken()
+			if braceCount == 0 && pos > startPos {
+				stmt.AsmBody = source[startPos : pos-1]
+			}
+		}
+		p.lexer.SetPosition(pos)
+		p.curTok = p.lexer.Next()
+		p.peekTok = p.lexer.Next()
+		return stmt
+	} else {
+		p.nextToken()
+		maxStatements := 10000
+		statementCount := 0
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			bodyStmt := p.parseStatementIterative()
+			if bodyStmt != nil {
+				stmt.Body = append(stmt.Body, bodyStmt)
+				statementCount++
+				if statementCount > maxStatements {
+					break
+				}
+			} else {
+				p.nextToken()
+			}
 		}
 	}
+	
 	if p.curTok.Type == lexer.TOKEN_RBRACE {
 		p.nextToken()
 	} else {
@@ -1781,6 +2015,14 @@ func (p *Parser) parseStructStatementIterative() *ast.StructStatement {
 		Fields: make([]*ast.FieldDeclaration, 0, 16),
 		Pos:    pos,
 	}
+
+	// 解析属性注解（如 #[packed], #[aligned(16)] 等）
+	attrs := p.parseAttributes()
+	if attrs != nil {
+		stmt.Attributes = attrs
+		p.log("结构体属性：%s, 属性数：%d", stmt.Name, len(attrs))
+	}
+
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -2069,6 +2311,24 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 
 	// 字段结束后可以是分号、逗号、} 或下一个字段名
 	// 不强制要求分隔符
+
+	// 检查位域语法: 类型后 : N 位宽
+	bitWidth := 0
+	if p.curTok.Type == lexer.TOKEN_COLON {
+		p.nextToken() // 跳过 :
+		if p.curTok.Type == lexer.TOKEN_LITERAL_INT {
+			widthVal, err := strconv.Atoi(p.curTok.Value)
+			if err == nil && widthVal > 0 {
+				bitWidth = widthVal
+			}
+			p.nextToken()
+		} else {
+			p.error("bitfield width must be a positive integer")
+		}
+	}
+
+	// 字段结束后可以是分号、逗号、} 或下一个字段名
+	// 不强制要求分隔符
 	if p.curTok.Type == lexer.TOKEN_SEMICOLON || p.curTok.Type == lexer.TOKEN_COMMA {
 		p.nextToken()
 	}
@@ -2077,6 +2337,7 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 		Name:     fieldName,
 		Type:     typeName,
 		Nullable: false,
+		BitWidth: bitWidth,
 		Pos:      pos,
 	}
 	return field
@@ -2496,6 +2757,10 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		return p.parseGroupedExpressionIterative()
 	case lexer.TOKEN_LBRACKET:
 		return p.parseIndexExpressionIterative()
+	case lexer.TOKEN_ATTRIBUTE:
+		// 表达式级属性：#[name(args)] 作为特殊操作表达式
+		// 这是统一的"表达式级特殊操作"语法，可扩展 asm/volatile/atomic/fence 等
+		return p.parseAttributeExpressionIterative()
 	case lexer.TOKEN_AMPERSAND:
 		// 取地址操作符 &x
 		p.nextToken()
@@ -2642,6 +2907,15 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		if expr := p.parseTypeKindExpressionIterative(); expr != nil {
 			return expr
 		}
+		return nil
+	case lexer.TOKEN_MATCH:
+		return p.parseMatchExpressionIterative()
+	case lexer.TOKEN_FUNC:
+		// fn 后面跟 ( 是 lambda，跟 标识符是函数声明
+		if p.peekTok.Type == lexer.TOKEN_LPAREN {
+			return p.parseLambdaExpression()
+		}
+		// 否则忽略（函数声明不是表达式）
 		return nil
 	case lexer.TOKEN_RBRACE, lexer.TOKEN_LBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT, lexer.TOKEN_LSHIFT, lexer.TOKEN_RSHIFT, lexer.TOKEN_RPAREN, lexer.TOKEN_COMMA:
 		return nil
@@ -2881,6 +3155,39 @@ func (p *Parser) parseGroupedExpressionIterative() ast.Expression {
 		p.error(fmt.Sprintf("expected ')', got %s", lexer.TokenTypeToString(p.curTok.Type)))
 	}
 	return expr
+}
+
+// parseAttributeExpressionIterative 解析表达式级属性 #[name(args)]
+// 这是 Kaula 特殊操作的统一语法：asm/volatile/atomic/fence 等都通过此机制实现
+// 示例:
+//
+//   let cr3 = #[asm("mov %cr3, %rax")]
+//   let val = #[volatile_load(ptr)]
+//   #[fence()]
+func (p *Parser) parseAttributeExpressionIterative() ast.Expression {
+	if p.curTok.Type != lexer.TOKEN_ATTRIBUTE {
+		return nil
+	}
+
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column}
+
+	annotationValue := p.curTok.Value
+	annotationContent := strings.TrimPrefix(annotationValue, "#[")
+	annotationContent = strings.TrimSuffix(annotationContent, "]")
+
+	attrs := ast.ParseAttributeList(annotationContent)
+	p.nextToken()
+
+	if len(attrs) == 0 {
+		p.error("empty attribute expression")
+		return nil
+	}
+
+	// 表达式级属性只取第一个（与声明级不同）
+	return &ast.AttributeExpression{
+		Attr: attrs[0],
+		Pos:  pos,
+	}
 }
 
 // parseCallExpressionIterative 迭代解析函数调用表达式
@@ -3719,4 +4026,402 @@ func (p *Parser) parseTypeKindExpressionIterative() *ast.TypeKindExpression {
 // peekNextTokenType 获取下一个 token 的类型
 func (p *Parser) peekNextTokenType() lexer.TokenType {
 	return p.peekTok.Type
+}
+
+// parseLambdaExpression 解析 lambda/闭包表达式
+// 语法: fn(参数列表) { 函数体 } 或 fn(参数列表) -> 返回类型 { 函数体 }
+func (p *Parser) parseLambdaExpression() *ast.LambdaExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	expr := &ast.LambdaExpression{
+		Params:     []string{},
+		ParamTypes: []string{},
+		Body:       []ast.Statement{},
+		Captures:   []string{},
+		Pos:        pos,
+	}
+
+	p.nextToken() // 跳过 fn
+
+	// 解析参数 (param1: type1, param2: type2)
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+			if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+				// 可能是 "Type name" 或 "name" 两种形式
+				firstToken := p.curTok.Value
+				firstIsType := p.isTypeToken(p.curTok.Type)
+				p.nextToken()
+
+				if p.curTok.Type == lexer.TOKEN_IDENT {
+					// "Type name" 形式
+					paramType := firstToken
+					paramName := p.curTok.Value
+					expr.Params = append(expr.Params, paramName)
+					expr.ParamTypes = append(expr.ParamTypes, paramType)
+					p.nextToken()
+				} else if firstIsType {
+					// 类型关键字后没有标识符，跳过
+				} else {
+					// "name" 形式（无类型注解）
+					expr.Params = append(expr.Params, firstToken)
+					expr.ParamTypes = append(expr.ParamTypes, "auto")
+				}
+
+				// 可选的冒号类型注解: name: type
+				if p.curTok.Type == lexer.TOKEN_COLON {
+					p.nextToken()
+					if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+						// 更新最后一个参数的类型
+						if len(expr.ParamTypes) > 0 && expr.ParamTypes[len(expr.ParamTypes)-1] == "auto" {
+							expr.ParamTypes[len(expr.ParamTypes)-1] = p.curTok.Value
+						}
+						p.nextToken()
+					}
+				}
+			} else {
+				p.nextToken()
+			}
+
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken()
+		}
+	}
+
+	// 可选的返回类型 fn(...) -> type
+	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+		p.nextToken() // -
+		p.nextToken() // >
+		if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+			expr.ReturnType = p.curTok.Value
+			p.nextToken()
+		}
+	}
+
+	// 解析函数体
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			if stmt := p.parseStatementIterative(); stmt != nil {
+				expr.Body = append(expr.Body, stmt)
+			} else {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+
+	return expr
+}
+
+// parseEnumStatementIterative 迭代解析 enum 语句
+// 语法: enum Name { Variant1, Variant2(Type), Variant3(Type1, Type2) }
+// 或:   enum Name<T, E> { Variant1(T), Variant2(E) }
+func (p *Parser) parseEnumStatementIterative() ast.Statement {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	stmt := &ast.EnumStatement{
+		Variants: make([]*ast.EnumVariant, 0, 8),
+		Pos:      pos,
+	}
+
+	// 解析属性注解
+	attrs := p.parseAttributes()
+	if attrs != nil {
+		stmt.Attributes = attrs
+	}
+
+	p.nextToken() // 跳过 enum
+
+	// 解析枚举名
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		stmt.Name = p.curTok.Value
+		p.nextToken()
+	}
+
+	// 解析泛型参数（如果存在）
+	if p.curTok.Type == lexer.TOKEN_LT {
+		p.nextToken()
+		for p.curTok.Type == lexer.TOKEN_IDENT {
+			stmt.TypeParams = append(stmt.TypeParams, &ast.TypeParameter{Name: p.curTok.Value})
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			} else if p.curTok.Type == lexer.TOKEN_GT {
+				break
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_GT {
+			p.nextToken()
+		}
+		stmt.Generic = true
+	}
+
+	// 解析 { 变体列表 }
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			if p.curTok.Type != lexer.TOKEN_IDENT {
+				p.nextToken()
+				continue
+			}
+
+			variant := &ast.EnumVariant{
+				Name: p.curTok.Value,
+			}
+			p.nextToken()
+
+			// 解析变体参数 Variant(Type1, Type2) 或 Variant(name: Type, name2: Type2)
+			if p.curTok.Type == lexer.TOKEN_LPAREN {
+				p.nextToken()
+				for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+					// 检查是否是命名参数形式: name: Type
+					if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
+						fieldName := p.curTok.Value
+						p.nextToken() // 跳过标识符
+						p.nextToken() // 跳过冒号
+						if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+							variant.FieldTypes = append(variant.FieldTypes, p.curTok.Value)
+							variant.FieldNames = append(variant.FieldNames, fieldName)
+							p.nextToken()
+						}
+					} else if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+						variant.FieldTypes = append(variant.FieldTypes, p.curTok.Value)
+						p.nextToken()
+					} else {
+						p.nextToken()
+					}
+
+					if p.curTok.Type == lexer.TOKEN_COMMA {
+						p.nextToken()
+					}
+				}
+				if p.curTok.Type == lexer.TOKEN_RPAREN {
+					p.nextToken()
+				}
+			}
+
+			stmt.Variants = append(stmt.Variants, variant)
+
+			// 跳过逗号分隔符
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+
+	p.log("枚举解析完成：%s, 变体数：%d", stmt.Name, len(stmt.Variants))
+	return stmt
+}
+
+// parseMatchExpressionIterative 迭代解析 match 表达式
+// 语法: match(expr) { Pattern1 => stmt1, Pattern2(x) => stmt2, _ => default }
+func (p *Parser) parseMatchExpressionIterative() ast.Expression {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	expr := &ast.MatchExpression{
+		Pos: pos,
+	}
+
+	p.nextToken() // 跳过 match
+
+	// 解析 ( 目标表达式 )
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken()
+		expr.Target = p.parseExpressionIterative()
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken()
+		}
+	}
+
+	// 解析 { 匹配分支列表 }
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			arm := p.parseMatchArm()
+			if arm != nil {
+				expr.Arms = append(expr.Arms, arm)
+			} else {
+				// 跳过无法识别的 token
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+
+	return expr
+}
+
+// parseMatchArm 解析一个匹配分支
+func (p *Parser) parseMatchArm() *ast.MatchArm {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	arm := &ast.MatchArm{
+		Pos: pos,
+	}
+
+	// 解析模式
+	arm.Pattern = p.parseMatchPattern()
+	if arm.Pattern == nil {
+		return nil
+	}
+
+	// 期望 =>
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		p.nextToken()
+	} else {
+		p.error(fmt.Sprintf("match arm: expected '=>', got %s", lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
+
+	// 解析分支体（语句列表，以逗号或 } 分隔）
+	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		// 如果遇到下一个模式的开始（标识符后跟 => 或 _ 后跟 =>），停止解析当前分支体
+		if p.isNextArmStart() {
+			break
+		}
+		stmt := p.parseStatementIterative()
+		if stmt != nil {
+			arm.Body = append(arm.Body, stmt)
+		} else {
+			break
+		}
+		// 跳过逗号分隔符
+		if p.curTok.Type == lexer.TOKEN_COMMA {
+			p.nextToken()
+			break // 逗号也表示分支结束
+		}
+	}
+
+	return arm
+}
+
+// isNextArmStart 检查当前位置是否是下一个匹配分支的开始
+func (p *Parser) isNextArmStart() bool {
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ARROW {
+		return true
+	}
+	if p.curTok.Type == lexer.TOKEN_LITERAL_INT && p.peekTok.Type == lexer.TOKEN_ARROW {
+		return true
+	}
+	if p.curTok.Type == lexer.TOKEN_STRING && p.peekTok.Type == lexer.TOKEN_ARROW {
+		return true
+	}
+	if p.curTok.Type == lexer.TOKEN_TRUE && p.peekTok.Type == lexer.TOKEN_ARROW {
+		return true
+	}
+	if p.curTok.Type == lexer.TOKEN_FALSE && p.peekTok.Type == lexer.TOKEN_ARROW {
+		return true
+	}
+	return false
+}
+
+// parseMatchPattern 解析模式匹配的模式
+func (p *Parser) parseMatchPattern() *ast.MatchPattern {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+
+	switch p.curTok.Type {
+	case lexer.TOKEN_IDENT:
+		name := p.curTok.Value
+		// 特殊处理 _ 通配符
+		if name == "_" {
+			p.nextToken()
+			return &ast.MatchPattern{
+				Kind: ast.PatternWildcard,
+				Pos:  pos,
+			}
+		}
+		p.nextToken()
+
+		// 检查是否有 ( 表示带数据的变体模式
+		if p.curTok.Type == lexer.TOKEN_LPAREN {
+			p.nextToken()
+			pattern := &ast.MatchPattern{
+				Kind:        ast.PatternVariant,
+				VariantName: name,
+				Pos:         pos,
+			}
+			// 解析绑定变量列表
+			for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+				if p.curTok.Type == lexer.TOKEN_IDENT {
+					pattern.Bindings = append(pattern.Bindings, p.curTok.Value)
+					p.nextToken()
+				} else {
+					p.nextToken()
+				}
+				if p.curTok.Type == lexer.TOKEN_COMMA {
+					p.nextToken()
+				}
+			}
+			if p.curTok.Type == lexer.TOKEN_RPAREN {
+				p.nextToken()
+			}
+			return pattern
+		}
+
+		// 无参数标识符：可能是变体名或变量绑定
+		// 如果首字母大写，视为变体名；否则视为变量绑定
+		if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
+			return &ast.MatchPattern{
+				Kind:        ast.PatternVariant,
+				VariantName: name,
+				Pos:         pos,
+			}
+		}
+		return &ast.MatchPattern{
+			Kind:     ast.PatternVariable,
+			Bindings: []string{name},
+			Pos:      pos,
+		}
+
+	case lexer.TOKEN_LITERAL_INT:
+		value := p.curTok.Value
+		p.nextToken()
+		intVal, _ := strconv.ParseInt(value, 10, 64)
+		return &ast.MatchPattern{
+			Kind:     ast.PatternInteger,
+			IntValue: intVal,
+			Pos:      pos,
+		}
+
+	case lexer.TOKEN_STRING:
+		value := p.curTok.Value
+		p.nextToken()
+		return &ast.MatchPattern{
+			Kind:     ast.PatternString,
+			StrValue: value,
+			Pos:      pos,
+		}
+
+	case lexer.TOKEN_TRUE:
+		p.nextToken()
+		return &ast.MatchPattern{
+			Kind:        ast.PatternBoolean,
+			VariantName: "true",
+			Pos:         pos,
+		}
+
+	case lexer.TOKEN_FALSE:
+		p.nextToken()
+		return &ast.MatchPattern{
+			Kind:        ast.PatternBoolean,
+			VariantName: "false",
+			Pos:         pos,
+		}
+
+	default:
+		p.error(fmt.Sprintf("match pattern: unexpected token %s", lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
 }

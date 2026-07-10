@@ -97,6 +97,16 @@ kaulac.exe --sor main.kl
 | `c_defines` | string[] | `[]` | 额外的 C 宏定义 |
 | `c_libs` | string[] | `[]` | 额外的链接库 |
 
+### 裸机/交叉编译
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `freestanding` | bool | `false` | 裸机模式（`-ffreestanding -nostdlib -nostartfiles`） |
+| `target_triple` | string | `""` | 目标三元组（如 `x86_64-unknown-elf`、`aarch64-none-elf`） |
+| `link_script` | string | `""` | 链接脚本路径（`.lds`） |
+| `entry` | string | `""` | 入口函数名（默认 `main`，裸机可为 `_start`） |
+| `output_format` | string | `""` | 输出格式：`elf`（默认）/ `bin` / `obj` |
+
 ### 其他
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -170,6 +180,11 @@ kaulac.exe --sor main.kl              # SOR 模式，默认 O3
 | `--defines <macros>` | `c_defines` | C 宏定义 |
 | `--libs <libs>` | `c_libs` | 链接库 |
 | `--sourcemap` | `sourcemap` | 源码映射 |
+| `--freestanding` | `freestanding` | 裸机模式 |
+| `--target-triple <triple>` | `target_triple` | 目标三元组 |
+| `--link-script <path>` | `link_script` | 链接脚本路径 |
+| `--entry <name>` | `entry` | 入口函数名 |
+| `--output-format <fmt>` | `output_format` | 输出格式：elf/bin/obj |
 
 ## 场景示例
 
@@ -217,6 +232,20 @@ kaulac.exe --sor main.kl              # SOR 模式，默认 O3
   "c_libs": ["pthread"]
 }
 ```
+
+### 裸机/系统级开发
+
+```json
+{
+  "freestanding": true,
+  "target_triple": "x86_64-unknown-elf",
+  "link_script": "linker.ld",
+  "entry": "_start",
+  "output_format": "bin"
+}
+```
+
+详见 [裸机开发指南](bare-metal.md)。
 
 ## 配置文件位置
 
