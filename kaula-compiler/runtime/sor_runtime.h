@@ -1,5 +1,5 @@
 /**
- * sor_runtime.h - SOR (Sub-structural Ownership) Runtime
+ * sor_runtime.h - SOR (Sub-Ownership Release) Runtime
  *
  * Design Philosophy: Zero overhead in release mode.
  *   - All safety checks done at compile-time by SOR analyzer (Stage 2.5)

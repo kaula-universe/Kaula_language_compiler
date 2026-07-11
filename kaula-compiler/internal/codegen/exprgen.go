@@ -133,7 +133,7 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	case *ast.Identifier:
 		return eg.generateIdentifier(e)
 	case *ast.IntegerLiteral:
-		return strconv.FormatInt(e.Value, 10)
+		return strconv.FormatUint(e.Value, 10)
 	case *ast.FloatLiteral:
 		return strconv.FormatFloat(e.Value, 'f', -1, 64)
 	case *ast.StringLiteral:
@@ -1179,6 +1179,13 @@ func (eg *ExpressionGenerator) generateUnaryExpression(e *ast.UnaryExpression) s
 		return "!" + right
 	case "-":
 		return "-" + right
+	case "*":
+		// 解引用：如果右侧是二元表达式，需要加括号避免优先级错误
+		// 例如 *(s + i) 不能生成为 *s + i
+		if _, isBinary := e.Right.(*ast.BinaryExpression); isBinary {
+			return "*(" + right + ")"
+		}
+		return "*" + right
 	default:
 		return e.Operator + right
 	}
@@ -1451,7 +1458,7 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 			eg.codegen.error("volatile_load requires a pointer argument")
 			return "0"
 		}
-		return fmt.Sprintf("(*(volatile typeof(*%s)*)(%s))", args[0], args[0])
+		return fmt.Sprintf("(*(volatile uint8_t*)(%s))", args[0])
 
 	case "volatile_store":
 		// #[volatile_store(ptr, val)] - volatile 指针解引用写
@@ -1459,7 +1466,7 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 			eg.codegen.error("volatile_store requires pointer and value arguments")
 			return "0"
 		}
-		return fmt.Sprintf("(*(volatile typeof(*%s)*)(%s) = (%s))", args[0], args[0], args[1])
+		return fmt.Sprintf("(*(volatile uint8_t*)(%s) = (%s))", args[0], args[1])
 
 	case "atomic_load":
 		// #[atomic_load(ptr)] - 原子加载（seq_cst）

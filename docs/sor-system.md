@@ -1,6 +1,6 @@
-# SOR 子结构所有权系统
+# SOR 子所有权释放系统
 
-SOR（Sub-structural Ownership）是 Kaula 的编译期所有权验证系统，类似 Rust 但更轻量。实现位于 `internal/sor/` 目录。
+SOR（Sub-Ownership Release）是 Kaula 的编译期所有权验证系统，类似 Rust 但更轻量。实现位于 `internal/sor/` 目录。
 
 ## 设计理念
 

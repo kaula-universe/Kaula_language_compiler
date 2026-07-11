@@ -64,7 +64,7 @@ kaula/
 │   │   └── timeout/         # 超时控制（内存、时间限制）
 │   ├── templates/           # 代码生成模板
 │   │   └── main.c.tmpl
-│   ├── stdlib.json          # 标准库函数签名定义（25 个模块）
+│   ├── stdlib.json          # 标准库函数签名定义（43 个模块）
 │   └── go.mod
 ├── pkglib/                  # 第三方库自动加载
 │   ├── stb_image/
@@ -81,32 +81,54 @@ kaula/
 │   ├── queue.c              # 优先级队列
 │   ├── prefix_system.c      # 前缀系统
 │   └── tree_system.c        # 树系统
-└── std/                     # 标准库（C 实现，25 个模块）
+└── std/                     # 标准库（C 实现，53 个模块）
+    ├── algorithm/           # 算法（排序、查找、遍历、比较）
     ├── async/               # 异步操作（事件循环、协程、I/O、定时器管理）
     ├── base/                # 基础类型转换与比较
+    ├── cli/                 # 命令行参数解析
+    ├── compress/            # 压缩算法（Deflate、Gzip）
     ├── concurrent/          # 并发原语（线程、锁、原子操作、线程池、Channel、Future/Promise）
     ├── container/           # 容器（Vector、LinkedList、HashMap、Stack）
     ├── crypto/              # 加密算法（MD5、SHA256、Base64、CRC32、HMAC）
+    ├── db/                  # 数据库接口
+    ├── encoding/            # 编码转换（Base64、Hex、URL 编码）
     ├── error/               # 错误处理
     ├── format/              # 格式化（printf、FormatBuilder）
+    ├── fs/                  # 文件系统操作（文件树遍历、路径操作）
     ├── gui/                 # GUI 支持（Nuklear 绑定）
     ├── i18n/                # 国际化（多语言、编码转换、UTF-8、RTL 支持）
     ├── io/                  # I/O 操作（控制台、文件、路径处理）
     ├── json/                # JSON 解析与序列化
     ├── logging/             # 日志系统
     ├── math/                # 数学函数（标准数学库、三角函数、随机数）
-    ├── memory/              # 内存管理
+    ├── memory/              # 内存管理（KMM V4、对齐分配、批量分配、Offset 管理）
     ├── net/                 # 网络编程（TCP/UDP、DNS 解析）
+    ├── option/              # Option/Result 类型
+    ├── path/                # 路径处理（规范化、连接、扩展名、文件名操作）
     ├── prefix/              # 前缀系统接口
+    ├── regex/               # 正则表达式（NFA 实现）
+    ├── serialize/           # 序列化（二进制、文本）
     ├── string/              # 字符串处理（含正则表达式）
     ├── system/              # 系统调用（进程、文件、环境、网络）
     ├── task/                # 任务调度（优先级队列）
     ├── testing/             # 单元测试框架
     ├── time/                # 时间测量
     ├── toml/                # TOML 配置解析
+    ├── traits/              # 类型特征
+    ├── unicode/             # Unicode 支持（UTF-8/UTF-16 转换、字符属性）
     ├── vo/                  # VO 系统接口
     ├── web/                 # HTTP 服务器/客户端、URL 处理
-    └── xml/                 # XML 解析
+    ├── xml/                 # XML 解析
+    ├── graph/               # 图数据结构（BFS、DFS、Dijkstra、Bellman-Ford、拓扑排序）
+    ├── heap/                # 堆数据结构（最小堆、堆排序、合并、K路合并）
+    ├── trie/                # 前缀树（Trie）数据结构（插入、查找、前缀搜索）
+    ├── datetime/            # 日期时间处理（时间戳转换、ISO 8601、时区支持）
+    ├── calendar/            # 日历操作（闰年检测、星期计算、日期加减）
+    ├── protobuf/            # Protocol Buffers 二进制序列化（Varint 编码）
+    ├── msgpack/             # MessagePack 二进制序列化（动态类型）
+    ├── parallel/            # 并行计算（并行 for、并行 reduce、并行排序）
+    ├── tls/                 # TLS 加密协议（连接、握手、加密读写）
+    └── ssh/                 # SSH 协议（会话管理、通道操作、远程执行）
 ```
 
 ---
@@ -190,12 +212,12 @@ spend(component1, component2):
 
 ### 3. 标准库
 
-提供超过 **500+** 个标准函数，包括：
+提供超过 **700+** 个标准函数，包括：
 
 | 模块 | 功能 |
 |------|------|
 | **base** | 类型转换、比较、类型判断 |
-| **memory** | KMM V4、快速分配器、内存池 |
+| **memory** | KMM V4、快速分配器、内存池、对齐分配、批量分配 |
 | **string** | 字符串创建、操作、搜索、替换、正则表达式 |
 | **io** | 控制台 I/O、文件操作、路径处理 |
 | **math** | 数学函数、三角函数、随机数 |
@@ -221,6 +243,18 @@ spend(component1, component2):
 | **testing** | 单元测试框架 |
 | **windows** | Windows 特定功能（注册表、进程信息） |
 | **syscall** | 系统调用接口 |
+| **algorithm** | 排序、查找、遍历、比较算法 |
+| **cli** | 命令行参数解析 |
+| **compress** | 压缩算法（Deflate、Gzip） |
+| **db** | 数据库接口 |
+| **encoding** | 编码转换（Base64、Hex、URL 编码） |
+| **fs** | 文件系统操作（文件树遍历、路径操作） |
+| **option** | Option/Result 类型 |
+| **path** | 路径处理（规范化、连接、扩展名、文件名操作） |
+| **regex** | 正则表达式（NFA 实现） |
+| **serialize** | 序列化（二进制、文本） |
+| **traits** | 类型特征 |
+| **unicode** | Unicode 支持（UTF-8/UTF-16 转换、字符属性）
 
 ---
 

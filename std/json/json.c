@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 static JsonValue* json_parse_value(const char** text, int* error);
 static String json_serialize_value(JsonValue* value, int indent_level, int pretty);

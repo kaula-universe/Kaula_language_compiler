@@ -1324,7 +1324,7 @@ func (i *Identifier) SetPosition(pos Position) {
 
 // IntegerLiteral 表示整数字面量
 type IntegerLiteral struct {
-	Value int64
+	Value uint64
 	Pos   Position
 }
 
@@ -1333,7 +1333,7 @@ func (i *IntegerLiteral) expressionNode() {}
 
 // String 实现Node接口
 func (i *IntegerLiteral) String() string {
-	return "IntegerLiteral(" + strconv.FormatInt(i.Value, 10) + ")"
+	return "IntegerLiteral(" + strconv.FormatUint(i.Value, 10) + ")"
 }
 
 // GetPosition 实现Node接口

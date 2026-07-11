@@ -416,6 +416,9 @@ func main() {
 	p := parser.NewParser(lex)
 	p.SetErrorCollector(errorCollector)
 	p.EnableLogging(false)
+	if cfg.Freestanding {
+		p.SetSkipMainCheck(true)
+	}
 
 	program := p.Parse()
 	stage1Time := time.Since(stage1Start)
@@ -1103,6 +1106,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）
+	// 裸机模式下跳过 std.lib（使用 -nostdlib，不需要标准库）
+	if cfg == nil || !cfg.Freestanding {
 	stdLibPath := filepath.Join(objectCacheDir, "std.lib")
 	// 计算当前模块集合的 hash，只有变化时才重新生成
 	libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4"
@@ -1198,6 +1203,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			fmt.Printf("[Compile] Using cached std.lib\n")
 		}
 	}
+	} // end if !cfg.Freestanding
 
 	// 添加 Windows 系统库链接（裸机模式跳过）
 	if runtime.GOOS == "windows" && (cfg == nil || !cfg.Freestanding) {

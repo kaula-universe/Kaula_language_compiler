@@ -137,6 +137,31 @@ func (p *Parser) parseProgram() *ast.Program {
 	return program
 }
 
+// isExpressionAttribute 检查属性名是否是表达式级属性
+// 表达式级属性作为语句出现时，不应被解析为声明
+func isExpressionAttribute(name string) bool {
+	switch name {
+	case "asm", "volatile_load", "volatile_store",
+		"atomic_load", "atomic_store", "atomic_cas", "atomic_faa",
+		"fence":
+		return true
+	}
+	return false
+}
+
+// getAttributeName 从 TOKEN_ATTRIBUTE 的 Value 中提取第一个属性名
+func (p *Parser) getAttributeName() string {
+	val := p.curTok.Value
+	val = strings.TrimPrefix(val, "#[")
+	val = strings.TrimSuffix(val, "]")
+	for i, ch := range val {
+		if ch == ',' || ch == '(' {
+			return strings.TrimSpace(val[:i])
+		}
+	}
+	return strings.TrimSpace(val)
+}
+
 // parseStatementIterative 迭代解析语句
 func (p *Parser) parseStatementIterative() ast.Statement {
 	// 检查是否有属性注解，如果有则解析后分发给对应的声明
@@ -153,14 +178,21 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 			return p.parseTypeStatementIterative()
 		case lexer.TOKEN_AUTO:
 			return p.parseAutoDeclarationIterative()
+		case lexer.TOKEN_TREE:
+			return p.parseTreeStatementIterative()
 		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
 			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
 			lexer.TOKEN_TYPE_VOID, lexer.TOKEN_IDENT, lexer.TOKEN_MULTIPLY:
-			// #[volatile] i32 x 或 #[section(".bss")] MyType obj
+			// 可能是变量声明（#[volatile] i32 x）或表达式级属性后跟标识符（#[volatile_store(...)] vga_x = ...）
+			// 通过属性名区分：表达式级属性按表达式语句处理
+			if isExpressionAttribute(p.getAttributeName()) {
+				return p.parseExpressionStatementIterative()
+			}
 			return p.parseVariableDeclarationIterative()
 		}
-		// 属性后面不是已知声明关键字，按原逻辑处理（tree 等）
-		return p.parseTreeStatementIterative()
+		// 属性后面不是已知声明关键字，作为表达式级属性语句处理
+		// 例如：#[asm("...")], #[volatile_store(addr, val)], #[fence()]
+		return p.parseExpressionStatementIterative()
 	}
 	
 	switch p.curTok.Type {
@@ -2785,6 +2817,18 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			Operator: "-",
 			Right:    right,
 		}
+	case lexer.TOKEN_MULTIPLY:
+		// 一元解引用 *x
+		p.nextToken()
+		right := p.parsePrimaryExpressionIterative()
+		if right == nil {
+			p.error("* 后应该跟表达式")
+			return nil
+		}
+		return &ast.UnaryExpression{
+			Operator: "*",
+			Right:    right,
+		}
 	case lexer.TOKEN_PREFIX_REF:
 		p.nextToken()
 		if p.curTok.Type == lexer.TOKEN_IDENT {
@@ -3016,7 +3060,7 @@ func (p *Parser) parseIntegerLiteralIterative() *ast.IntegerLiteral {
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	value, err := strconv.ParseInt(p.curTok.Value, 0, 64)
+	value, err := strconv.ParseUint(p.curTok.Value, 0, 64)
 	if err != nil {
 		p.error(fmt.Sprintf("invalid integer literal: %s", p.curTok.Value))
 		return &ast.IntegerLiteral{Value: 0, Pos: pos}

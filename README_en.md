@@ -64,7 +64,7 @@ kaula/
 │   │   └── timeout/         # Timeout control (memory, time limits)
 │   ├── templates/           # Code generation templates
 │   │   └── main.c.tmpl
-│   ├── stdlib.json          # Standard library function signature definitions (20 modules)
+│   ├── stdlib.json          # Standard library function signature definitions (43 modules)
 │   └── go.mod
 ├── pkglib/                  # Third-party library auto-loader
 │   ├── stb_image/
@@ -81,25 +81,54 @@ kaula/
 │   ├── queue.c              # Priority queue
 │   ├── prefix_system.c      # Prefix system
 │   └── tree_system.c        # Tree system
-└── std/                     # Standard library (implemented in C, 18 modules)
+└── std/                     # Standard library (implemented in C, 53 modules)
+    ├── algorithm/           # Algorithms (sorting, searching, traversal, comparison)
     ├── async/               # Async operations (event loop, coroutines, I/O)
     ├── base/                # Basic type conversion and comparison
+    ├── cli/                 # Command line argument parsing
+    ├── compress/            # Compression algorithms (Deflate, Gzip)
     ├── concurrent/          # Concurrency primitives (threads, locks, atomics, thread pool)
     ├── container/           # Containers (Vector, LinkedList, HashMap, Stack)
+    ├── crypto/              # Cryptography (MD5, SHA256, Base64, CRC32, HMAC)
+    ├── db/                  # Database interface
+    ├── encoding/            # Encoding conversion (Base64, Hex, URL encoding)
     ├── error/               # Error handling
     ├── format/              # Formatting (printf, FormatBuilder)
+    ├── fs/                  # File system operations (file tree traversal, path operations)
     ├── gui/                 # GUI support (Nuklear bindings)
     ├── i18n/                # Internationalization (multi-language, encoding conversion, UTF-8)
     ├── io/                  # I/O operations (console, files)
+    ├── json/                # JSON parsing and serialization
+    ├── logging/             # Logging system
     ├── math/                # Math functions (standard math library, random numbers)
-    ├── memory/              # Memory management
+    ├── memory/              # Memory management (KMM V4, aligned allocation, bulk allocation)
+    ├── net/                 # Network programming (TCP/UDP, DNS resolution)
+    ├── option/              # Option/Result types
+    ├── path/                # Path handling (normalization, joining, extension, filename operations)
     ├── prefix/              # Prefix system interface
+    ├── regex/               # Regular expressions (NFA implementation)
+    ├── serialize/           # Serialization (binary, text)
     ├── string/              # String processing
     ├── system/              # System calls (processes, files, environment, network)
     ├── task/                # Task scheduling (priority queue)
+    ├── testing/             # Unit testing framework
     ├── time/                # Time measurement
+    ├── toml/                # TOML configuration parsing
+    ├── traits/              # Type traits
+    ├── unicode/             # Unicode support (UTF-8/UTF-16 conversion, character properties)
     ├── vo/                  # VO system interface
-    └── web/                 # HTTP server/client, URL processing
+    ├── web/                 # HTTP server/client, URL processing
+    ├── xml/                 # XML parsing
+    ├── graph/               # Graph data structure (BFS, DFS, Dijkstra, Bellman-Ford, topological sort)
+    ├── heap/                # Heap data structure (min-heap, heap sort, merge, K-way merge)
+    ├── trie/                # Trie data structure (insert, search, prefix search)
+    ├── datetime/            # Date/time handling (timestamp conversion, ISO 8601, timezone support)
+    ├── calendar/            # Calendar operations (leap year detection, weekday calculation, date arithmetic)
+    ├── protobuf/            # Protocol Buffers binary serialization (Varint encoding)
+    ├── msgpack/             # MessagePack binary serialization (dynamic typing)
+    ├── parallel/            # Parallel computing (parallel for, parallel reduce, parallel sort)
+    ├── tls/                 # TLS encryption protocol (connection, handshake, encrypted I/O)
+    └── ssh/                 # SSH protocol (session management, channel operations, remote execution)
 ```
 
 ---
@@ -181,13 +210,13 @@ Task scheduling system:
 
 ### 3. Standard Library
 
-Provides over **400+** standard functions including:
+Provides over **700+** standard functions including:
 
 | Module | Features |
 |--------|----------|
 | **base** | Type conversion, comparison, type checking |
-| **memory** | KMM V4, fast allocator, memory pool |
-| **string** | String creation, manipulation, search, replacement |
+| **memory** | KMM V4, fast allocator, memory pool, aligned allocation, bulk allocation |
+| **string** | String creation, manipulation, search, replacement, regular expressions |
 | **io** | Console I/O, file operations, path handling |
 | **math** | Math functions, trigonometry, random numbers |
 | **container** | Vector, LinkedList, HashMap, Stack |
@@ -203,8 +232,27 @@ Provides over **400+** standard functions including:
 | **i18n** | Internationalization, multi-language support, encoding conversion |
 | **gui** | GUI support (Nuklear bindings) |
 | **web** | HTTP server/client, URL processing, MIME types |
+| **json** | JSON parsing, serialization, deserialization |
+| **crypto** | MD5, SHA256, Base64, CRC32, HMAC |
+| **net** | TCP/UDP sockets, DNS resolution |
+| **toml** | TOML configuration parsing |
+| **xml** | XML parsing |
+| **logging** | Logging system |
+| **testing** | Unit testing framework |
 | **windows** | Windows-specific features (registry, process info) |
 | **syscall** | System call interface |
+| **algorithm** | Sorting, searching, traversal, comparison algorithms |
+| **cli** | Command line argument parsing |
+| **compress** | Compression algorithms (Deflate, Gzip) |
+| **db** | Database interface |
+| **encoding** | Encoding conversion (Base64, Hex, URL encoding) |
+| **fs** | File system operations (file tree traversal, path operations) |
+| **option** | Option/Result types |
+| **path** | Path handling (normalization, joining, extension, filename operations) |
+| **regex** | Regular expressions (NFA implementation) |
+| **serialize** | Serialization (binary, text) |
+| **traits** | Type traits |
+| **unicode** | Unicode support (UTF-8/UTF-16 conversion, character properties)
 
 ---
 

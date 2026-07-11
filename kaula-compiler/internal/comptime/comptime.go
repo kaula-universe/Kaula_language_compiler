@@ -17,7 +17,7 @@ const (
 
 type Value struct {
 	Kind      ValueKind
-	IntVal    int64
+	IntVal    uint64
 	FloatVal  float64
 	BoolVal   bool
 	StringVal string
@@ -126,7 +126,7 @@ func (e *Evaluator) evalBinary(expr *ast.BinaryExpression) (*Value, error) {
 		return nil, err
 	}
 	if left.Kind == KindInt && right.Kind == KindInt {
-		return e.evalBinaryInt(left.IntVal, right.IntVal, expr.Operator)
+		return e.evalBinaryInt(uint64(left.IntVal), uint64(right.IntVal), expr.Operator)
 	}
 	if (left.Kind == KindFloat || right.Kind == KindFloat) &&
 		(left.Kind == KindInt || left.Kind == KindFloat) &&
@@ -162,7 +162,7 @@ func (e *Evaluator) evalBinary(expr *ast.BinaryExpression) (*Value, error) {
 		left.TypeName(), expr.Operator, right.TypeName())
 }
 
-func (e *Evaluator) evalBinaryInt(l, r int64, op string) (*Value, error) {
+func (e *Evaluator) evalBinaryInt(l, r uint64, op string) (*Value, error) {
 	switch op {
 	case "+":
 		return &Value{Kind: KindInt, IntVal: l + r}, nil
@@ -193,9 +193,9 @@ func (e *Evaluator) evalBinaryInt(l, r int64, op string) (*Value, error) {
 	case ">=":
 		return &Value{Kind: KindBool, BoolVal: l >= r}, nil
 	case "<<":
-		return &Value{Kind: KindInt, IntVal: l << uint64(r)}, nil
+		return &Value{Kind: KindInt, IntVal: l << r}, nil
 	case ">>":
-		return &Value{Kind: KindInt, IntVal: l >> uint64(r)}, nil
+		return &Value{Kind: KindInt, IntVal: l >> r}, nil
 	case "&":
 		return &Value{Kind: KindInt, IntVal: l & r}, nil
 	case "|":
@@ -264,7 +264,7 @@ func (e *Evaluator) evalUnary(expr *ast.UnaryExpression) (*Value, error) {
 	switch expr.Operator {
 	case "-":
 		if val.Kind == KindInt {
-			return &Value{Kind: KindInt, IntVal: -val.IntVal}, nil
+			return &Value{Kind: KindInt, IntVal: uint64(-int64(val.IntVal))}, nil
 		}
 		if val.Kind == KindFloat {
 			return &Value{Kind: KindFloat, FloatVal: -val.FloatVal}, nil
@@ -302,7 +302,7 @@ func (e *Evaluator) evalSizeOf(expr *ast.SizeOfExpression) (*Value, error) {
 	if size < 0 {
 		return nil, fmt.Errorf("unknown type for sizeof: %s", expr.TargetType)
 	}
-	return &Value{Kind: KindInt, IntVal: int64(size)}, nil
+	return &Value{Kind: KindInt, IntVal: uint64(size)}, nil
 }
 
 func (e *Evaluator) evalAlignOf(expr *ast.AlignOfExpression) (*Value, error) {
@@ -310,7 +310,7 @@ func (e *Evaluator) evalAlignOf(expr *ast.AlignOfExpression) (*Value, error) {
 	if align < 0 {
 		return nil, fmt.Errorf("unknown type for alignof: %s", expr.TargetType)
 	}
-	return &Value{Kind: KindInt, IntVal: int64(align)}, nil
+	return &Value{Kind: KindInt, IntVal: uint64(align)}, nil
 }
 
 func (e *Evaluator) isTruthy(v *Value) bool {

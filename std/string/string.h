@@ -12,8 +12,8 @@ extern String string_create_from_char(char c);
 extern String string_create_from_int(i64 value);
 extern String string_create_from_float(f64 value);
 extern String string_create_from_bool(bool value);
-extern String string_copy(const String str);
-extern String string_substring(const String str, size_t start, size_t length);
+extern String string_copy(const char* str);
+extern String string_substring(const char* str, size_t start, size_t length);
 
 // 字符串操作函数
 extern size_t string_length(const String str);

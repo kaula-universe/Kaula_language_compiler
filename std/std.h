@@ -85,4 +85,87 @@
 // 单元测试框架
 #include "testing/testing.h"
 
+// --- 扩展模块 ---
+
+// 算法库
+#include "algorithm/algorithm.h"
+
+// 正则表达式
+#include "regex/regex.h"
+
+// 路径处理
+#include "path/path.h"
+
+// 文件系统
+#include "fs/fs.h"
+
+// 命令行解析
+#include "cli/cli.h"
+
+// 数据库
+#include "db/db.h"
+
+// 编码转换
+#include "encoding/encoding.h"
+
+// 压缩算法
+#include "compress/compress.h"
+
+// 序列化
+#include "serialize/serialize.h"
+
+// Option/Result 类型
+#include "option/option.h"
+
+// Unicode 支持
+#include "unicode/unicode.h"
+
+// 类型特征
+#include "traits/traits.h"
+
+// 容器扩展
+#include "container/container_ext.h"
+
+// 哈希扩展
+#include "hash/hash_ext.h"
+
+// 测试框架扩展
+#include "testing/testing_ext.h"
+
+// TOML 扩展
+#include "toml/toml_ext.h"
+
+// XML 扩展
+#include "xml/xml_ext.h"
+
+// Windows 专用
+#if defined(_WIN32) || defined(_WIN64)
+#include "windows/windows.h"
+#endif
+
+// 系统调用
+#include "syscall/syscall.h"
+
+// --- 新增模块 ---
+
+// 数据结构
+#include "graph/graph.h"
+#include "heap/heap.h"
+#include "trie/trie.h"
+
+// 时间处理扩展
+#include "datetime/datetime.h"
+#include "calendar/calendar.h"
+
+// 二进制序列化
+#include "protobuf/protobuf.h"
+#include "msgpack/msgpack.h"
+
+// 并行计算
+#include "parallel/parallel.h"
+
+// 安全
+#include "tls/tls.h"
+#include "ssh/ssh.h"
+
 #endif // STD_H

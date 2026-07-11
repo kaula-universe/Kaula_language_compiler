@@ -3,6 +3,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 // 字符串创建函数
 String string_create(const char* str) {
@@ -44,11 +45,11 @@ String string_create_from_bool(bool value) {
     return string_create(value ? "true" : "false");
 }
 
-String string_copy(const String str) {
+String string_copy(const char* str) {
     return string_create(str);
 }
 
-String string_substring(const String str, size_t start, size_t length) {
+String string_substring(const char* str, size_t start, size_t length) {
     if (!str) return NULL;
     size_t str_len = strlen(str);
     if (start >= str_len) return string_create("");

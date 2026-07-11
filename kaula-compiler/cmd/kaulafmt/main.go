@@ -107,7 +107,7 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 	case *ast.Identifier:
 		f.buf.WriteString(e.Name)
 	case *ast.IntegerLiteral:
-		f.buf.WriteString(strconv.FormatInt(e.Value, 10))
+		f.buf.WriteString(strconv.FormatUint(e.Value, 10))
 	case *ast.FloatLiteral:
 		f.buf.WriteString(strconv.FormatFloat(e.Value, 'g', -1, 64))
 	case *ast.StringLiteral:

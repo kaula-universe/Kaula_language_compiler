@@ -21,8 +21,13 @@
 #endif
     
     #ifdef KMM_V4_DEBUG
+    #if KMM_THREAD_SAFETY_LEVEL >= 1
+    KMM_ATOMIC_TYPE g_kmm_v4_peak = 0;
+    KMM_ATOMIC_TYPE g_kmm_v4_alloc_count = 0;
+    #else
     size_t g_kmm_v4_peak = 0;
     size_t g_kmm_v4_alloc_count = 0;
+    #endif
     #endif
     
     // Kaula scope pointer (required by kmm_union_auto_alloc_fn)

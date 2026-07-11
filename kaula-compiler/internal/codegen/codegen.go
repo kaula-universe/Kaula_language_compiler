@@ -461,9 +461,11 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	var allIncludes strings.Builder
 	allIncludes.Grow(2048)
 	if cg.config != nil && cg.config.Freestanding {
-		// freestanding 模式：只包含 freestanding 安全的头文件
-		// 不包含 <stdio.h>/<stdlib.h>，它们在裸机下不存在
-		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <string.h>\n#include \"kaula.h\"\n")
+		// freestanding 模式：只包含 freestanding 安全的标准头文件
+		// 不包含 kaula.h（标准库运行时头，裸机环境不可用）
+		// 不包含 <stdio.h>/<stdlib.h>/<string.h>，它们在裸机下不存在
+		// memset/memcpy 等由 kaula_freestanding_runtime.c 提供
+		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n")
 	} else {
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
 	}
@@ -549,7 +551,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		template, ok := cg.templateManager.GetTemplate(templateName)
 		if !ok {
 			var resultBuilder strings.Builder
-			resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
+			resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
 			resultBuilder.WriteString(allIncludes.String())
 			resultBuilder.WriteString("\n\n")
 			resultBuilder.WriteString(forwardDecls.String())
@@ -562,15 +564,23 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 
 			globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1
 
+			resultBuilder.WriteString(globalVars.String())
+			resultBuilder.WriteByte('\n')
+
 			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
 			resultBuilder.WriteString(functionCode.String())
 
-			mainHeader := "\n\nint main() {\n    "
-			mainOffset = funcOffset + strings.Count(functionCode.String(), "\n") + strings.Count(mainHeader, "\n")
-			resultBuilder.WriteString(mainHeader)
-			resultBuilder.WriteString(mainCode.String())
-			resultBuilder.WriteString("\n    return 0;\n}\n")
-			result = resultBuilder.String()
+			if useFreestanding {
+				// freestanding 模式：不生成 main 函数，入口由 _start 或自定义 entry 提供
+				result = resultBuilder.String()
+			} else {
+				mainHeader := "\n\nint main() {\n    "
+				mainOffset = funcOffset + strings.Count(functionCode.String(), "\n") + strings.Count(mainHeader, "\n")
+				resultBuilder.WriteString(mainHeader)
+				resultBuilder.WriteString(mainCode.String())
+				resultBuilder.WriteString("\n    return 0;\n}\n")
+				result = resultBuilder.String()
+			}
 		} else {
 			result = template
 			result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
@@ -985,7 +995,7 @@ func (cg *CodeGenerator) tryEvalConstExpr(expr ast.Expression) string {
 	}
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
-		return strconv.FormatInt(e.Value, 10)
+		return strconv.FormatUint(e.Value, 10)
 	case *ast.FloatLiteral:
 		return strconv.FormatFloat(e.Value, 'f', -1, 64)
 	case *ast.BooleanLiteral:

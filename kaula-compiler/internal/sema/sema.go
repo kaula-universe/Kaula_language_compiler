@@ -1269,22 +1269,16 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		}
 		return ""
 	case *ast.IntegerLiteral:
-		if e.Value >= 0 && e.Value <= 255 {
+		if e.Value <= 255 {
 			return "u8"
 		}
-		if e.Value >= -128 && e.Value <= 127 {
-			return "i8"
-		}
-		if e.Value >= 0 && e.Value <= 65535 {
+		if e.Value <= 65535 {
 			return "u16"
 		}
-		if e.Value >= -32768 && e.Value <= 32767 {
-			return "i16"
+		if e.Value <= 4294967295 {
+			return "u32"
 		}
-		if e.Value >= 0 && e.Value <= 2147483647 {
-			return "i32"
-		}
-		return "i64"
+		return "u64"
 	case *ast.FloatLiteral:
 		return "f64"
 	case *ast.StringLiteral:

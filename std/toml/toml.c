@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 static void toml_skip_whitespace(const char** p) { while (**p && isspace((unsigned char)**p) && **p != '\n') (*p)++; }
 static void toml_skip_to_eol(const char** p) { while (**p && **p != '\n') (*p)++; if (**p == '\n') (*p)++; }

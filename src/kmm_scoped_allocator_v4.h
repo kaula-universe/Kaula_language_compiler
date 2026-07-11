@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 #ifndef KAULA_FREESTANDING
 // hosted 模式下包含 stdio.h（用于 debug 输出）
@@ -902,18 +903,24 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
 
 // ==================== 智能宏系统（零成本抽象） ====================
 // 类型安全分配宏（自动计算大小）
+#ifndef KMM_V4_ALLOC
 #define KMM_V4_ALLOC(type) \
     ((type*)kmm_v4_alloc_auto(sizeof(type)))
+#endif
 
 // 数组分配（自动计算元素大小和数量）
+#ifndef KMM_V4_ALLOC_ARRAY
 #define KMM_V4_ALLOC_ARRAY(type, count) \
     ((type*)kmm_v4_alloc_auto(sizeof(type) * (count)))
+#endif
 
 // 自动零初始化分配
+#ifndef KMM_V4_ALLOC_ZERO
 #define KMM_V4_ALLOC_ZERO(type) \
     ({ type* p = KMM_V4_ALLOC(type); \
        if(p) kmm_v4_zero_auto(p, sizeof(type)); \
        p; })
+#endif
 
 // 自动批量分配（类型安全）
 #define KMM_V4_ALLOC_BATCH(type, count) \
