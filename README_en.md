@@ -81,7 +81,7 @@ kaula/
 │   ├── queue.c              # Priority queue
 │   ├── prefix_system.c      # Prefix system
 │   └── tree_system.c        # Tree system
-└── std/                     # Standard library (implemented in C, 53 modules)
+└── std/                     # Standard library (implemented in C, 62 modules)
     ├── algorithm/           # Algorithms (sorting, searching, traversal, comparison)
     ├── async/               # Async operations (event loop, coroutines, I/O)
     ├── base/                # Basic type conversion and comparison
@@ -128,7 +128,16 @@ kaula/
     ├── msgpack/             # MessagePack binary serialization (dynamic typing)
     ├── parallel/            # Parallel computing (parallel for, parallel reduce, parallel sort)
     ├── tls/                 # TLS encryption protocol (connection, handshake, encrypted I/O)
-    └── ssh/                 # SSH protocol (session management, channel operations, remote execution)
+    ├── ssh/                 # SSH protocol (session management, channel operations, remote execution)
+    ├── random/              # Random number generator (XorShift128+, range random, UUID)
+    ├── cmath/               # Complex math operations (arithmetic, trigonometric, exponential, logarithmic)
+    ├── decimal/             # High-precision decimal (arbitrary precision, arithmetic, comparison)
+    ├── bitset/              # Bit set (bit operations, bitwise operations, bit search)
+    ├── deque/               # Double-ended queue (push/pop from both ends, random access)
+    ├── ipaddress/           # IP address handling (IPv4/IPv6, CIDR, network checking)
+    ├── subprocess/          # Subprocess management (creation, pipes, environment variables)
+    ├── archive/             # Archive handling (Tar/Zip, compression/decompression)
+    └── template/            # Template engine (variable substitution, filters)
 ```
 
 ---

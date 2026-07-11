@@ -81,7 +81,7 @@ kaula/
 │   ├── queue.c              # 优先级队列
 │   ├── prefix_system.c      # 前缀系统
 │   └── tree_system.c        # 树系统
-└── std/                     # 标准库（C 实现，53 个模块）
+└── std/                     # 标准库（C 实现，62 个模块）
     ├── algorithm/           # 算法（排序、查找、遍历、比较）
     ├── async/               # 异步操作（事件循环、协程、I/O、定时器管理）
     ├── base/                # 基础类型转换与比较
@@ -128,7 +128,16 @@ kaula/
     ├── msgpack/             # MessagePack 二进制序列化（动态类型）
     ├── parallel/            # 并行计算（并行 for、并行 reduce、并行排序）
     ├── tls/                 # TLS 加密协议（连接、握手、加密读写）
-    └── ssh/                 # SSH 协议（会话管理、通道操作、远程执行）
+    ├── ssh/                 # SSH 协议（会话管理、通道操作、远程执行）
+    ├── random/              # 随机数生成器（XorShift128+、范围随机、UUID）
+    ├── cmath/               # 复数运算（四则运算、三角函数、指数对数）
+    ├── decimal/             # 高精度小数（任意精度、四则运算、比较）
+    ├── bitset/              # 位向量（位操作、位运算、位查找）
+    ├── deque/               # 双端队列（两端插入/删除、随机访问）
+    ├── ipaddress/           # IP 地址处理（IPv4/IPv6、CIDR、网络判断）
+    ├── subprocess/          # 子进程管理（创建、管道、环境变量）
+    ├── archive/             # 归档处理（Tar/Zip、压缩/解压）
+    └── template/            # 模板引擎（变量替换、过滤器）
 ```
 
 ---

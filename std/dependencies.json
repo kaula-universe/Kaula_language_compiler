@@ -49,5 +49,14 @@
   "msgpack":   ["base", "string", "memory"],
   "parallel":  ["base", "memory", "concurrent", "algorithm"],
   "tls":       ["base", "string", "memory", "net", "crypto"],
-  "ssh":       ["base", "string", "memory", "crypto"]
+  "ssh":       ["base", "string", "memory", "crypto"],
+  "random":    ["base", "memory"],
+  "cmath":     ["base", "math"],
+  "decimal":   ["base", "string", "memory", "math"],
+  "bitset":    ["base", "memory"],
+  "deque":     ["base", "memory"],
+  "ipaddress": ["base", "string", "memory"],
+  "subprocess":["base", "string", "memory"],
+  "archive":   ["base", "string", "memory", "fs"],
+  "template":  ["base", "string", "memory", "fs"]
 }

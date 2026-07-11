@@ -60,3 +60,11 @@ Makefile
 nul/
 *.tmp
 *.log
+
+# IDE and editor files
+.mimocode/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

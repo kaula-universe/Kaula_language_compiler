@@ -168,4 +168,31 @@
 #include "tls/tls.h"
 #include "ssh/ssh.h"
 
+// 随机数
+#include "random/random.h"
+
+// 复数运算
+#include "cmath/cmath.h"
+
+// 高精度小数
+#include "decimal/decimal.h"
+
+// 位向量
+#include "bitset/bitset.h"
+
+// 双端队列
+#include "deque/deque.h"
+
+// IP地址处理
+#include "ipaddress/ipaddress.h"
+
+// 子进程管理
+#include "subprocess/subprocess.h"
+
+// 归档处理
+#include "archive/archive.h"
+
+// 模板引擎
+#include "template/template.h"
+
 #endif // STD_H
