@@ -2,12 +2,14 @@
 
 <div align="center">
 
+<img src="logo.png" alt="Kaula Logo" width="200">
+
 **高性能、系统级的编译型编程语言**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.21.0-00ADD8.svg?logo=go)](https://go.dev/)
 [![Language](https://img.shields.io/badge/language-C-C.svg?logo=c)](https://en.wikipedia.org/wiki/C_(programming_language))
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha-orange.svg)](https://github.com/yourusername/kaula/releases)
+[![Version](https://img.shields.io/badge/version-0.1--release-brightgreen.svg)](https://github.com/yourusername/kaula/releases)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 
 </div>
@@ -17,10 +19,6 @@
 ## 📖 项目概述
 
 Kaula 是一款静态类型的编译型编程语言，采用 **Go 语言实现的编译器** 和 **C 语言实现的运行时系统**。
-
-> ⚠️ **注意**：当前版本为 **Alpha 预览版**，主要支持 Windows 操作系统
-> 
-> 🎯 **发布状态**：v0.1.0-alpha - 核心功能已实现，仍在快速迭代中
 
 ---
 

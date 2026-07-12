@@ -2,6 +2,8 @@
 
 <div align="center">
 
+<img src="logo.png" alt="Kaula Logo" width="200">
+
 **High-performance, system-level compiled programming language**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
