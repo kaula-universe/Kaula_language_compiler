@@ -238,7 +238,7 @@ void std_free(void* ptr);
  * ============================================================================ */
 
 /**
- * std_yeide - 所有权转移（SOR 语义）
+ * std_yield - 所有权转移（SOR 语义）
  * @src: 源所有权指针
  * @dst: 目标指针
  *
@@ -247,7 +247,7 @@ void std_free(void* ptr);
  * 编译器在释放模式下展开为简单的赋值+清零
  * src 失效，dst 获得所有权
  */
-void* std_yeide(void* src, void* dst);
+void* std_yield(void* src, void* dst);
 
 /**
  * std_release - 所有权分发（SOR 语义）

@@ -211,7 +211,7 @@ void std_free(void* ptr) {
  * SOR 所有权操作（编译器展开，这里提供链接符号）
  * ============================================================================ */
 
-void* std_yeide(void* src, void* dst) {
+void* std_yield(void* src, void* dst) {
     if (src != NULL) {
         memcpy(dst, src, sizeof(void*));
         memset(src, 0, sizeof(void*));

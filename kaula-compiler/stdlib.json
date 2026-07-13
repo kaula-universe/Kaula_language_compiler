@@ -655,7 +655,7 @@
       ],
       "return": "void*"
     },
-    "std_yeide": {
+    "std_yield": {
       "args": [
         "void*",
         "void*"

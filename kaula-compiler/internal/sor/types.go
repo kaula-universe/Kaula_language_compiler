@@ -2,7 +2,7 @@
 // SOR 是一种纯编译时验证的安全范式，零运行时开销。
 //
 // 三大核心原语:
-//   - yeide:   显式所有权转移，原持有者变为无效
+//   - yield:   显式所有权转移，原持有者变为无效
 //   - extract: 从复合对象中提取子对象所有权，原位置留下 null 空洞
 //   - release: 所有权分发，多个持有者共享只读访问，必须构成 DAG
 package sor
@@ -27,7 +27,7 @@ const (
 	// （用于复合对象的子元素追踪）
 	StateExtracted
 
-	// StateMoved 表示已转移状态：yeide 后原持有者失效。
+	// StateMoved 表示已转移状态：yield 后原持有者失效。
 	StateMoved
 
 	// StateHollow 表示空洞状态：extract 后原位置为 null，需要空安全检查。
@@ -139,7 +139,7 @@ func (e ReleaseEdge) String() string {
 type ErrorKind int
 
 const (
-	// ErrUseAfterMove 使用了已转移（yeide）的变量。
+	// ErrUseAfterMove 使用了已转移（yield）的变量。
 	ErrUseAfterMove ErrorKind = iota
 
 	// ErrUseAfterExtract 使用了已提取（extract）的位置（null 安全违规）。
@@ -154,17 +154,17 @@ const (
 	// ErrExtractFromNonComposite 对非复合对象执行 extract。
 	ErrExtractFromNonComposite
 
-	// ErrYeideInvalidSource yeide 源对象无效（已转移/已提取）。
-	ErrYeideInvalidSource
+	// ErrYieldInvalidSource yield 源对象无效（已转移/已提取）。
+	ErrYieldInvalidSource
 
 	// ErrReleaseInvalidSource release 源对象无效。
 	ErrReleaseInvalidSource
 
-	// ErrCrossScopeYeide 跨作用域 yeide 违规（内层作用域变量不能 yeide 给外层）。
-	ErrCrossScopeYeide
+	// ErrCrossScopeYield 跨作用域 yield 违规（内层作用域变量不能 yield 给外层）。
+	ErrCrossScopeYield
 
-	// ErrCrossThreadYeide 跨线程所有权传递未显式 yeide。
-	ErrCrossThreadYeide
+	// ErrCrossThreadYield 跨线程所有权传递未显式 yield。
+	ErrCrossThreadYield
 
 	// ErrThreadWriteOnReleased 多线程中对 release 对象进行写操作。
 	ErrThreadWriteOnReleased
@@ -223,14 +223,14 @@ func (k ErrorKind) String() string {
 		return "Write-On-Released"
 	case ErrExtractFromNonComposite:
 		return "Extract-From-NonComposite"
-	case ErrYeideInvalidSource:
-		return "Yeide-Invalid-Source"
+	case ErrYieldInvalidSource:
+		return "Yield-Invalid-Source"
 	case ErrReleaseInvalidSource:
 		return "Release-Invalid-Source"
-	case ErrCrossScopeYeide:
-		return "Cross-Scope-Yeide"
-	case ErrCrossThreadYeide:
-		return "Cross-Thread-Yeide"
+	case ErrCrossScopeYield:
+		return "Cross-Scope-Yield"
+	case ErrCrossThreadYield:
+		return "Cross-Thread-Yield"
 	case ErrThreadWriteOnReleased:
 		return "Thread-Write-On-Released"
 	case ErrNullDereference:
@@ -258,7 +258,7 @@ const (
 	// AccessWrite 表示写访问。
 	AccessWrite
 
-	// AccessTake 表示取走所有权（yeide 源）。
+	// AccessTake 表示取走所有权（yield 源）。
 	AccessTake
 )
 

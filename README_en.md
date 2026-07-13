@@ -168,8 +168,8 @@ Kaula's core safety mechanism — SOR tracks resource ownership at compile time 
 fn process() {
     auto buf = std.memory.kmm_v4_alloc(1024)
 
-    # yeide: transfer ownership, original variable becomes inaccessible
-    yeide buf -> owner
+    # yield: transfer ownership, original variable becomes inaccessible
+    yield buf -> owner
 
     # extract: extract sub-structural ownership from a collection
     extract owner[0] -> first_byte
@@ -180,7 +180,7 @@ fn process() {
 ```
 
 Three primitives:
-- **yeide** — ownership transfer (move semantics)
+- **yield** — ownership transfer (move semantics)
 - **extract** — sub-structure extraction (partial ownership from composite types)
 - **release** — ownership distribution (split one resource among multiple holders)
 

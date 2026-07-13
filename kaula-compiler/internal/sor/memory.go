@@ -44,7 +44,7 @@ func (k AllocKind) String() string {
 type DropAction int
 
 const (
-	DropNone     DropAction = iota // 无需释放（已 yeide / 已 extract）
+	DropNone     DropAction = iota // 无需释放（已 yield / 已 extract）
 	DropScopeEnd                   // 作用域退出时自动释放
 	DropHollow                     // hollow 状态，释放残留外壳
 )

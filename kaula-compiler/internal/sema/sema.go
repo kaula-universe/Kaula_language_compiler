@@ -163,9 +163,9 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 	if sa.isFunctionSOR() {
 		if !sa.hasSORPrimitives(stmt.Body) {
 			sa.errorCollector.AddSemanticError(
-				fmt.Sprintf("函数 '%s' 在 SOR 模式下未使用任何 SOR 原语 (yeide/release/extract)", stmt.Name),
+				fmt.Sprintf("函数 '%s' 在 SOR 模式下未使用任何 SOR 原语 (yield/release/extract)", stmt.Name),
 				stmt.Pos.Line, stmt.Pos.Column, "",
-				"在函数体内使用 yeide/release/extract 原语，或使用 --no-sor 禁用 SOR 模式")
+				"在函数体内使用 yield/release/extract 原语，或使用 --no-sor 禁用 SOR 模式")
 		}
 	}
 
@@ -257,8 +257,8 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 			return
 		}
 		sa.analyzeExpression(s.Expression)
-	case *ast.YeideStatement:
-		sa.analyzeYeideStatement(s)
+	case *ast.YieldStatement:
+		sa.analyzeYieldStatement(s)
 	case *ast.ReleaseStatement:
 		sa.analyzeReleaseStatement(s)
 	case *ast.ExtractStatement:
@@ -1634,11 +1634,11 @@ func (sa *SemanticAnalyzer) HasErrors() bool {
 	return sa.errorCollector.HasErrors()
 }
 
-// analyzeYeideStatement 分析 yeide 语句
-func (sa *SemanticAnalyzer) analyzeYeideStatement(stmt *ast.YeideStatement) {
+// analyzeYieldStatement 分析 yield 语句
+func (sa *SemanticAnalyzer) analyzeYieldStatement(stmt *ast.YieldStatement) {
 	if !sa.isFunctionSOR() {
 		sa.errorCollector.AddSemanticError(
-			"未定义: 'yeide' 是 SOR 扩展的原语，需要使用 #[sor] 注解或 --sor 标志才能使用",
+			"未定义: 'yield' 是 SOR 扩展的原语，需要使用 #[sor] 注解或 --sor 标志才能使用",
 			stmt.Pos.Line, stmt.Pos.Column, "",
 			"在函数上添加 #[sor] 注解，或使用 'kaulac --sor <文件>' 编译")
 		return
@@ -1679,14 +1679,14 @@ func (sa *SemanticAnalyzer) analyzeExtractStatement(stmt *ast.ExtractStatement) 
 	}
 }
 
-// hasSORPrimitives 递归检查函数体中是否使用了 SOR 原语 (yeide/release/extract)
+// hasSORPrimitives 递归检查函数体中是否使用了 SOR 原语 (yield/release/extract)
 func (sa *SemanticAnalyzer) hasSORPrimitives(body []ast.Statement) bool {
 	for _, stmt := range body {
 		if stmt == nil {
 			continue
 		}
 		switch stmt.(type) {
-		case *ast.YeideStatement:
+		case *ast.YieldStatement:
 			return true
 		case *ast.ReleaseStatement:
 			return true

@@ -125,13 +125,13 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 		_ = typeName
 		*stmts = append(*stmts, LetStmt(stmt.Pos.Line, stmt.Name+" = ...", srcName, stmt.Type, isComposite))
 
-	case *ast.YeideStatement:
+	case *ast.YieldStatement:
 		if stmt == nil {
 			return
 		}
 		srcName := getExprName(stmt.Source)
-		*stmts = append(*stmts, YeideStmt(stmt.Pos.Line,
-			"yeide "+srcName+" -> "+stmt.Target, srcName, stmt.Target))
+		*stmts = append(*stmts, YieldStmt(stmt.Pos.Line,
+			"yield "+srcName+" -> "+stmt.Target, srcName, stmt.Target))
 
 	case *ast.ReleaseStatement:
 		if stmt == nil {
@@ -282,11 +282,11 @@ func extractCallExpr(expr *ast.CallExpression, stmts *[]Stmt) {
 
 	// 检查是否是 SOR 原语调用
 	switch funcName {
-	case "yeide":
+	case "yield":
 		if len(expr.Args) >= 2 {
 			if src, ok := expr.Args[0].(*ast.Identifier); ok {
 				if dst, ok := expr.Args[1].(*ast.Identifier); ok {
-					*stmts = append(*stmts, YeideStmt(expr.Pos.Line, "yeide "+src.Name+" -> "+dst.Name, src.Name, dst.Name))
+					*stmts = append(*stmts, YieldStmt(expr.Pos.Line, "yield "+src.Name+" -> "+dst.Name, src.Name, dst.Name))
 				}
 			}
 		}

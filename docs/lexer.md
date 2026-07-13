@@ -44,7 +44,7 @@
 | `TOKEN_CONSTRUCTOR` | `constructor` | 构造函数 |
 | `TOKEN_STRUCT` | `struct` | 结构体定义 |
 | `TOKEN_AUTO` | `auto` | 类型推导 |
-| `TOKEN_YEIDE` | `yeide` | 所有权转移 |
+| `TOKEN_YIELD` | `yield` | 所有权转移 |
 | `TOKEN_RELEASE` | `release` | 释放所有权 |
 | `TOKEN_EXTRACT` | `extract` | 提取所有权 |
 | `TOKEN_TYPE` | `type` | 类型别名 |

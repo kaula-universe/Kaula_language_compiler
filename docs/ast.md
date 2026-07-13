@@ -42,7 +42,7 @@ Node (接口)
 │   ├── PrefixStatement            // prefix 语句
 │   ├── TreeStatement              // tree 语句
 │   ├── ObjectStatement            // object 语句
-│   ├── YeideStatement             // yeide 语句
+│   ├── YieldStatement             // yield 语句
 │   ├── ReleaseStatement           // release 语句
 │   ├── ExtractStatement           // extract 语句
 │   ├── MethodStatement            // 方法声明

@@ -86,7 +86,7 @@ typedef struct {
     uint32_t           scope_top;
     uint32_t           scope_depth;
     uint32_t           next_id;
-    uint32_t           stat_yeide;
+    uint32_t           stat_yield;
     uint32_t           stat_release;
     uint32_t           stat_extract;
     uint32_t           stat_scope_enter;
@@ -99,12 +99,12 @@ typedef struct {
 SOR_WEAK void     sor_init(sor_ctx_t* ctx);
 SOR_WEAK void     sor_destroy(sor_ctx_t* ctx);
 SOR_WEAK uint32_t sor_alloc_id(sor_ctx_t* ctx);
-SOR_WEAK void     sor_yeide_mark(sor_ctx_t* ctx);
+SOR_WEAK void     sor_yield_mark(sor_ctx_t* ctx);
 SOR_WEAK void     sor_release_edge_add(sor_ctx_t* ctx, uint32_t source, uint32_t holder);
 SOR_WEAK void     sor_scope_enter(sor_ctx_t* ctx);
 SOR_WEAK void     sor_scope_exit(sor_ctx_t* ctx);
 SOR_WEAK void     sor_extract_mark(sor_ctx_t* ctx);
-SOR_WEAK void     sor_stats(const sor_ctx_t* ctx, uint32_t* yeide, uint32_t* release, uint32_t* extract, uint32_t* depth);
+SOR_WEAK void     sor_stats(const sor_ctx_t* ctx, uint32_t* yield, uint32_t* release, uint32_t* extract, uint32_t* depth);
 
 #else
 
@@ -116,10 +116,10 @@ typedef void sor_ctx_t;
 
 /* ============== Core Macros (ZERO function call overhead, always present) ============== */
 
-#define SOR_YEIDE(type, src, dst) \
+#define SOR_YIELD(type, src, dst) \
     do { (dst) = (src); (src) = (type)0; } while(0)
 
-#define SOR_YEIDE_PTR(src, dst) \
+#define SOR_YIELD_PTR(src, dst) \
     do { (dst) = (src); (src) = NULL; } while(0)
 
 #define SOR_EXTRACT(type, base, idx, target) \

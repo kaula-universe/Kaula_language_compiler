@@ -45,7 +45,7 @@ const (
 	TOKEN_CONSTRUCTOR
 	TOKEN_STRUCT
 	TOKEN_AUTO
-	TOKEN_YEIDE
+	TOKEN_YIELD
 	TOKEN_RELEASE
 	TOKEN_EXTRACT
 	TOKEN_TYPE
@@ -511,8 +511,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_STRUCT
 	case "auto":
 		tokenType = TOKEN_AUTO
-	case "yeide":
-		tokenType = TOKEN_YEIDE
+	case "yield":
+		tokenType = TOKEN_YIELD
 	case "release":
 		tokenType = TOKEN_RELEASE
 	case "extract":
@@ -882,8 +882,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "VOID"
 	case TOKEN_AUTO:
 		return "AUTO"
-	case TOKEN_YEIDE:
-		return "YEIDE"
+	case TOKEN_YIELD:
+		return "YIELD"
 	case TOKEN_RELEASE:
 		return "RELEASE"
 	case TOKEN_EXTRACT:

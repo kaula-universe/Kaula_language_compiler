@@ -5,7 +5,7 @@
  * In release mode, this file compiles to zero bytes.
  *
  * SOR guarantees compile-time safety:
- *   - yeide: ownership transfer (assignment + zeroing)
+ *   - yield: ownership transfer (assignment + zeroing)
  *   - release: read-only distribution (DAG verified at compile-time)
  *   - extract: sub-structure ownership (hollow state at compile-time)
  *
@@ -38,9 +38,9 @@ uint32_t sor_alloc_id(sor_ctx_t* ctx) {
     return ++ctx->next_id;
 }
 
-void sor_yeide_mark(sor_ctx_t* ctx) {
+void sor_yield_mark(sor_ctx_t* ctx) {
     if (!ctx || !ctx->inited) return;
-    ctx->stat_yeide++;
+    ctx->stat_yield++;
 }
 
 void sor_release_edge_add(sor_ctx_t* ctx, uint32_t source, uint32_t holder) {
@@ -95,10 +95,10 @@ void sor_extract_mark(sor_ctx_t* ctx) {
     ctx->stat_extract++;
 }
 
-void sor_stats(const sor_ctx_t* ctx, uint32_t* yeide, uint32_t* release,
+void sor_stats(const sor_ctx_t* ctx, uint32_t* yield, uint32_t* release,
                 uint32_t* extract, uint32_t* depth) {
     if (!ctx) return;
-    if (yeide)   *yeide   = ctx->stat_yeide;
+    if (yield)   *yield   = ctx->stat_yield;
     if (release) *release = ctx->stat_release;
     if (extract) *extract = ctx->stat_extract;
     if (depth)   *depth   = ctx->scope_depth;

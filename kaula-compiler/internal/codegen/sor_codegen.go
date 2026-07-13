@@ -244,7 +244,7 @@ func (a *SORCodeGenAdapter) NeedsKMMScope(scopeID int) bool {
 // NeedsKMMScopeByVars 判断一组变量是否需要 KMM scope
 // 如果其中任何一个变量需要 BumpPool/Arena 分配且需要作用域回收，则返回 true
 // 活跃性分析驱动的优化：
-// - DropNone：已 yeide/extract，所有权已转移，不需要 KMM 回收
+// - DropNone：已 yield/extract，所有权已转移，不需要 KMM 回收
 // - DropHollow：hollow 状态，所有权已转移只剩外壳，不需要 KMM 回收
 // - DropScopeEnd：作用域结束时需要回收，需要 KMM
 func (a *SORCodeGenAdapter) NeedsKMMScopeByVars(varNames []string) bool {

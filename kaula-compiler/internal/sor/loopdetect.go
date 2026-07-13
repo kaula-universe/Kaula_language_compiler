@@ -97,13 +97,13 @@ func (ld *LoopDetector) scanLoops(stmts []Stmt) {
 				}
 			}
 
-		case StmtYeide:
+		case StmtYield:
 			if depth > 0 && len(loopStack) > 0 {
 				currentLoop := loopStack[len(loopStack)-1]
 				if !containsString(currentLoop.BodyVars, stmt.SrcName) {
 					currentLoop.ExternalVars = appendUnique(currentLoop.ExternalVars, stmt.SrcName)
 				}
-				// yeide 目标也算作循环体变量
+				// yield 目标也算作循环体变量
 				currentLoop.BodyVars = append(currentLoop.BodyVars, stmt.VarName)
 			}
 

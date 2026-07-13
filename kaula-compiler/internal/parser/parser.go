@@ -230,8 +230,8 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 		return p.parseTypeStatementIterative()
 	case lexer.TOKEN_AUTO:
 		return p.parseAutoDeclarationIterative()
-	case lexer.TOKEN_YEIDE:
-		return p.parseYeideStatementIterative()
+	case lexer.TOKEN_YIELD:
+		return p.parseYieldStatementIterative()
 	case lexer.TOKEN_RELEASE:
 		return p.parseReleaseStatementIterative()
 	case lexer.TOKEN_EXTRACT:
@@ -3475,16 +3475,16 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 	return nil
 }
 
-// parseYeideStatementIterative 解析 yeide 语句
-// 语法: yeide source -> target
-func (p *Parser) parseYeideStatementIterative() ast.Statement {
+// parseYieldStatementIterative 解析 yield 语句
+// 语法: yield source -> target
+func (p *Parser) parseYieldStatementIterative() ast.Statement {
 	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
-	p.nextToken() // 跳过 yeide
+	p.nextToken() // 跳过 yield
 
 	// 解析 source 表达式（标识符或索引表达式）
 	source := p.parsePrimaryExpressionIterative()
 	if source == nil {
-		p.error("yeide: expected source expression")
+		p.error("yield: expected source expression")
 		return nil
 	}
 
@@ -3505,7 +3505,7 @@ func (p *Parser) parseYeideStatementIterative() ast.Statement {
 		p.nextToken()
 	}
 
-	return &ast.YeideStatement{
+	return &ast.YieldStatement{
 		Source: source,
 		Target: target,
 		Pos:    pos,

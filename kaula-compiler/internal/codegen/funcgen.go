@@ -78,7 +78,7 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement)
 }
 
 // bodyHasAllocationCall 扫描函数体是否包含内存分配调用
-// 纯计算函数（无 std_malloc/kmm_v4/yeide/release/extract）可跳过 scope 管理
+// 纯计算函数（无 std_malloc/kmm_v4/yield/release/extract）可跳过 scope 管理
 func (fg *FunctionGenerator) bodyHasAllocationCall(bodyStmts []ast.Statement) bool {
 	for _, stmt := range bodyStmts {
 		if stmt == nil {

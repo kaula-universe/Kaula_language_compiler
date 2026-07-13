@@ -79,8 +79,8 @@ class Box<T> {
 #### SOR 原语验证
 
 ```go
-// yeide - 所有权转移
-yeide(source)   // 将 source 的所有权转移
+// yield - 所有权转移
+yield(source)   // 将 source 的所有权转移
 
 // release - 释放所有权
 release(source) // 释放 source 的所有权

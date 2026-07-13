@@ -17,8 +17,8 @@ type LastUseInfo struct {
 	VarName      string   // 变量名
 	ObjID        string   // 关联的 SOR 对象 ID（使用 VarName 代替，因为 Stmt 无 ObjID 字段）
 	LastUseLine  int      // 最后一次使用的行号
-	LastUseKind  string   // 使用类型: "read", "yeide-src", "release-src", "extract-src", "call-arg"
-	IsYeideSrc   bool     // 是否作为 yeide 源（转移后失效，无需释放）
+	LastUseKind  string   // 使用类型: "read", "yield-src", "release-src", "extract-src", "call-arg"
+	IsYieldSrc   bool     // 是否作为 yield 源（转移后失效，无需释放）
 	IsExtractSrc bool     // 是否作为 extract 源（部分失效，hollow 清理）
 	IsInLoop     bool     // 是否在循环体内声明（用于循环感知的池容量计算）
 }
@@ -27,8 +27,8 @@ func (info *LastUseInfo) String() string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%s [obj=%s line=%d kind=%s",
 		info.VarName, info.ObjID, info.LastUseLine, info.LastUseKind))
-	if info.IsYeideSrc {
-		b.WriteString(" yeide-src")
+	if info.IsYieldSrc {
+		b.WriteString(" yield-src")
 	}
 	if info.IsExtractSrc {
 		b.WriteString(" extract-src")
@@ -154,11 +154,11 @@ func (la *LivenessAnalyzer) recordUse(varName, objID string, line int, kind stri
 	info.LastUseKind = kind
 }
 
-// recordYeideSrc 记录变量作为 yeide 源的使用（转移后失效）
-func (la *LivenessAnalyzer) recordYeideSrc(varName, objID string, line int) {
-	la.recordUse(varName, objID, line, "yeide-src")
+// recordYieldSrc 记录变量作为 yield 源的使用（转移后失效）
+func (la *LivenessAnalyzer) recordYieldSrc(varName, objID string, line int) {
+	la.recordUse(varName, objID, line, "yield-src")
 	if info, ok := la.lastUses[varName]; ok {
-		info.IsYeideSrc = true
+		info.IsYieldSrc = true
 	}
 }
 
@@ -241,8 +241,8 @@ func (la *LivenessAnalyzer) AnalyzeLiveness(stmts []Stmt) *LivenessResult {
 			if !ok {
 				continue
 			}
-			// yeide 后失效的变量无需释放
-			if info.IsYeideSrc {
+			// yield 后失效的变量无需释放
+			if info.IsYieldSrc {
 				continue
 			}
 			// 状态为 Moved 的变量无需释放（所有权已转移）
@@ -288,16 +288,16 @@ func (la *LivenessAnalyzer) analyzeStmt(stmt Stmt) {
 			}
 		}
 
-	case StmtYeide:
-		// yeide: SrcName 转移所有权给 VarName（目标）
-		// SrcName: 最后使用 = yeide 行（转移后失效）
+	case StmtYield:
+		// yield: SrcName 转移所有权给 VarName（目标）
+		// SrcName: 最后使用 = yield 行（转移后失效）
 		if stmt.SrcName != "" {
-			la.recordYeideSrc(stmt.SrcName, stmt.SrcName, stmt.Line)
+			la.recordYieldSrc(stmt.SrcName, stmt.SrcName, stmt.Line)
 		}
 		// VarName: 在此获得所有权
 		if stmt.VarName != "" {
 			la.addScopeObject(stmt.VarName)
-			la.recordUse(stmt.VarName, stmt.VarName, stmt.Line, "yeide-dst")
+			la.recordUse(stmt.VarName, stmt.VarName, stmt.Line, "yield-dst")
 		}
 
 	case StmtRelease:
@@ -407,7 +407,7 @@ func (la *LivenessAnalyzer) ComputeDropPoints(result *LivenessResult) map[int][]
 // GenerateScopeDrops 为指定作用域生成 drop 代码。
 // 对于 bump pool: 无需逐变量释放（KMM_V4_SCOPE_END 批量回收）。
 // 但需要为 hollow 变量生成标记清理。
-// 对于 yeide 后失效: 无需释放。
+// 对于 yield 后失效: 无需释放。
 //
 // 参数:
 //   - liveness: 活跃性分析结果
@@ -443,8 +443,8 @@ func GenerateScopeDrops(liveness *LivenessResult, scopeID int, decisions []*Memo
 
 		d := decisionMap[varName]
 
-		// yeide 后失效的变量无需释放
-		if info.IsYeideSrc {
+		// yield 后失效的变量无需释放
+		if info.IsYieldSrc {
 			continue
 		}
 
@@ -479,7 +479,7 @@ func GenerateScopeDrops(liveness *LivenessResult, scopeID int, decisions []*Memo
 				}
 
 			case DropNone:
-				// 无需释放（已 yeide / 已 extract / 已 moved）
+				// 无需释放（已 yield / 已 extract / 已 moved）
 				continue
 			}
 		} else {

@@ -66,7 +66,7 @@ func (ea *EscapeAnalyzer) AnalyzeEscape(stmts []Stmt) map[string]EscapeLevel {
 	// 第一遍：初始化
 	for _, stmt := range stmts {
 		switch stmt.Kind {
-		case StmtYeide:
+		case StmtYield:
 			ea.ensureResult(stmt.SrcName)
 			ea.ensureResult(stmt.VarName)
 		case StmtRelease:
@@ -87,8 +87,8 @@ func (ea *EscapeAnalyzer) AnalyzeEscape(stmts []Stmt) map[string]EscapeLevel {
 	// 第二遍：分析
 	for _, stmt := range stmts {
 		switch stmt.Kind {
-		case StmtYeide:
-			ea.analyzeYeide(stmt)
+		case StmtYield:
+			ea.analyzeYield(stmt)
 		case StmtRelease:
 			ea.analyzeRelease(stmt)
 		case StmtExtract:
@@ -130,9 +130,9 @@ func (ea *EscapeAnalyzer) promoteEscape(current, new EscapeLevel) EscapeLevel {
 	return current
 }
 
-func (ea *EscapeAnalyzer) analyzeYeide(stmt Stmt) {
+func (ea *EscapeAnalyzer) analyzeYield(stmt Stmt) {
 	ea.flowEdges = append(ea.flowEdges, FlowEdge{
-		From: stmt.SrcName, To: stmt.VarName, Kind: "yeide", Line: stmt.Line,
+		From: stmt.SrcName, To: stmt.VarName, Kind: "yield", Line: stmt.Line,
 	})
 	dstLevel := ea.getLevel(stmt.VarName)
 	srcLevel := ea.getLevel(stmt.SrcName)

@@ -69,7 +69,7 @@ func TestResourceLeakDetection(t *testing.T) {
 	}
 }
 
-func TestResourceYeide_TransferOwnership(t *testing.T) {
+func TestResourceYield_TransferOwnership(t *testing.T) {
 	analyzer := NewSORAnalyzer()
 
 	analyzer.RegisterResource(&ResourceTypeInfo{
@@ -78,19 +78,19 @@ func TestResourceYeide_TransferOwnership(t *testing.T) {
 		ReleaseFunc: "close_file",
 	})
 
-	// 测试场景：资源所有权从 f1 yeide 到 f2
-	// yeide 后 f1 不再拥有资源，f2 拥有资源
+	// 测试场景：资源所有权从 f1 yield 到 f2
+	// yield 后 f1 不再拥有资源，f2 拥有资源
 	stmts := []Stmt{
 		{Kind: StmtScopeEnter, Line: 1, ScopeName: "main"},
 		{Kind: StmtLet, Line: 2, VarName: "f1", TypeName: "File", IsComposite: false},
-		{Kind: StmtYeide, Line: 3, SrcName: "f1", VarName: "f2"},
+		{Kind: StmtYield, Line: 3, SrcName: "f1", VarName: "f2"},
 		{Kind: StmtRead, Line: 4, VarName: "f2"},
 		{Kind: StmtScopeExit, Line: 5, ScopeName: "main"},
 	}
 
 	errors := analyzer.Analyze(stmts)
 
-	// f1 被 yeide 了，不再拥有资源，所以不会泄漏
+	// f1 被 yield 了，不再拥有资源，所以不会泄漏
 	// f2 拥有资源，在作用域结束时应该报泄漏（因为没有释放）
 	leakCount := 0
 	for _, err := range errors {
@@ -100,7 +100,7 @@ func TestResourceYeide_TransferOwnership(t *testing.T) {
 		}
 	}
 
-	// 应该只有 f2 一个泄漏（f1 已经被 yeide 了）
+	// 应该只有 f2 一个泄漏（f1 已经被 yield 了）
 	if leakCount != 1 {
 		t.Errorf("期望 1 个资源泄漏，实际有 %d 个", leakCount)
 	}

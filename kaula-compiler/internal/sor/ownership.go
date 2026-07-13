@@ -142,7 +142,7 @@ func (t *OwnershipTracker) EnterScope() {
 }
 
 // ExitScope 退出当前作用域。
-// 检查该作用域中创建的独占所有权对象是否都已正确处理（yeide 或释放）。
+// 检查该作用域中创建的独占所有权对象是否都已正确处理（yield 或释放）。
 // 注意：release 状态的对象在作用域结束时自动失效。
 // 资源类型（IsResource=true）如果在作用域结束时仍为 Owned 状态，报资源泄漏错误。
 func (t *OwnershipTracker) ExitScope(sourceLine int) {
@@ -168,7 +168,7 @@ func (t *OwnershipTracker) ExitScope(sourceLine int) {
 					Message:    fmt.Sprintf("资源 '%s'（类型: %s, 种类: %s）在作用域结束时仍被持有，可能导致资源泄漏", obj.Name, obj.TypeName, obj.ResourceKind),
 					SourceLine: sourceLine,
 					ObjectID:   objID,
-					Details:    "请在作用域结束前释放资源（调用释放函数）或转移所有权（yeide）",
+					Details:    "请在作用域结束前释放资源（调用释放函数）或转移所有权（yield）",
 				})
 			}
 			// 标记为 Moved（作用域结束，对象销毁）
@@ -204,10 +204,10 @@ func (t *OwnershipTracker) GetThread() string {
 }
 
 // ----------------------------------------------------------------------------
-// 三大原语：yeide
+// 三大原语：yield
 // ----------------------------------------------------------------------------
 
-// Yeide 执行所有权转移：将 src 的所有权转移给 dst。
+// Yield 执行所有权转移：将 src 的所有权转移给 dst。
 // 转移后，src 的状态变为 Moved（已转移，失效），
 // dst 获得独占所有权（Owned 状态）。
 //
@@ -219,12 +219,12 @@ func (t *OwnershipTracker) GetThread() string {
 //   - sourceLine: 源码行号
 //
 // 返回: 目标对象的 ID，如果转移失败返回空字符串。
-func (t *OwnershipTracker) Yeide(srcID, dstName string, sourceLine int) string {
+func (t *OwnershipTracker) Yield(srcID, dstName string, sourceLine int) string {
 	src := t.objects[srcID]
 	if src == nil {
 		t.addError(SORError{
-			Kind:       ErrYeideInvalidSource,
-			Message:    fmt.Sprintf("yeide 失败：源对象 '%s' 不存在", srcID),
+			Kind:       ErrYieldInvalidSource,
+			Message:    fmt.Sprintf("yield 失败：源对象 '%s' 不存在", srcID),
 			SourceLine: sourceLine,
 			ObjectID:   srcID,
 		})
@@ -234,11 +234,11 @@ func (t *OwnershipTracker) Yeide(srcID, dstName string, sourceLine int) string {
 	// 检查源对象是否可以转移（必须是 Owned 状态）
 	if src.State != StateOwned {
 		t.addError(SORError{
-			Kind:       ErrYeideInvalidSource,
-			Message:    fmt.Sprintf("yeide 失败：源对象 '%s' 处于 %s 状态，无法转移所有权", src.Name, src.State),
+			Kind:       ErrYieldInvalidSource,
+			Message:    fmt.Sprintf("yield 失败：源对象 '%s' 处于 %s 状态，无法转移所有权", src.Name, src.State),
 			SourceLine: sourceLine,
 			ObjectID:   srcID,
-			Details:    "只有处于 Owned(独占) 状态的对象才能进行 yeide 操作",
+			Details:    "只有处于 Owned(独占) 状态的对象才能进行 yield 操作",
 		})
 		return ""
 	}
@@ -548,9 +548,9 @@ func (t *OwnershipTracker) CanWrite(objID string) bool {
 	return obj.State == StateOwned
 }
 
-// CanYeide 检查对象是否可以作为 yeide 的源。
+// CanYield 检查对象是否可以作为 yield 的源。
 // 只有 Owned 状态可以转移所有权。
-func (t *OwnershipTracker) CanYeide(objID string) bool {
+func (t *OwnershipTracker) CanYield(objID string) bool {
 	obj := t.objects[objID]
 	if obj == nil {
 		return false
@@ -583,10 +583,10 @@ func (t *OwnershipTracker) CheckAccess(objID string, access AccessType, sourceLi
 	if obj.State == StateMoved {
 		t.addError(SORError{
 			Kind:       ErrUseAfterMove,
-			Message:    fmt.Sprintf("use-after-move：'%s' 已通过 yeide 转移所有权，不能再使用", obj.Name),
+			Message:    fmt.Sprintf("use-after-move：'%s' 已通过 yield 转移所有权，不能再使用", obj.Name),
 			SourceLine: sourceLine,
 			ObjectID:   objID,
-			Details:    fmt.Sprintf("对象在第 %d 行被 yeide 转移", obj.SourceLine),
+			Details:    fmt.Sprintf("对象在第 %d 行被 yield 转移", obj.SourceLine),
 		})
 		return false
 	}
@@ -618,7 +618,7 @@ func (t *OwnershipTracker) CheckAccess(objID string, access AccessType, sourceLi
 	// 检查取走所有权权限
 	if access == AccessTake && obj.State != StateOwned {
 		t.addError(SORError{
-			Kind:       ErrYeideInvalidSource,
+			Kind:       ErrYieldInvalidSource,
 			Message:    fmt.Sprintf("无法取走所有权：'%s' 处于 %s 状态", obj.Name, obj.State),
 			SourceLine: sourceLine,
 			ObjectID:   objID,
@@ -642,10 +642,10 @@ func (t *OwnershipTracker) CheckUseAfterMove(objID string, sourceLine int) bool 
 	if obj.State == StateMoved {
 		t.addError(SORError{
 			Kind:       ErrUseAfterMove,
-			Message:    fmt.Sprintf("use-after-move：'%s' 已通过 yeide 转移所有权，不能再使用", obj.Name),
+			Message:    fmt.Sprintf("use-after-move：'%s' 已通过 yield 转移所有权，不能再使用", obj.Name),
 			SourceLine: sourceLine,
 			ObjectID:   objID,
-			Details:    fmt.Sprintf("对象在第 %d 行被 yeide 转移", obj.SourceLine),
+			Details:    fmt.Sprintf("对象在第 %d 行被 yield 转移", obj.SourceLine),
 		})
 		return true
 	}

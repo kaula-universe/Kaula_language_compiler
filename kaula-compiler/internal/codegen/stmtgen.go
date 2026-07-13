@@ -107,8 +107,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 	case *ast.BlockStatement:
 		return sg.generateBlockStatement(s)
-	case *ast.YeideStatement:
-		return sg.generateYeideStatement(s)
+	case *ast.YieldStatement:
+		return sg.generateYieldStatement(s)
 	case *ast.ReleaseStatement:
 		return sg.generateReleaseStatement(s)
 	case *ast.ExtractStatement:
@@ -1668,20 +1668,20 @@ func (sg *StatementGenerator) extractMallocSizeBytes(call *ast.CallExpression) i
 	return 0
 }
 
-// generateYeideStatement 生成 yeide 语句代码
-// 语法: yeide source -> target
-// 生成: /* SOR: yeide source -> target */ target = source; source = NULL;
-// 优化: 当源表达式是字面量 0 时，yeide 是纯死代码（target = 0, source = 0 → no-op），直接跳过
-func (sg *StatementGenerator) generateYeideStatement(stmt *ast.YeideStatement) string {
+// generateYieldStatement 生成 yield 语句代码
+// 语法: yield source -> target
+// 生成: /* SOR: yield source -> target */ target = source; source = NULL;
+// 优化: 当源表达式是字面量 0 时，yield 是纯死代码（target = 0, source = 0 → no-op），直接跳过
+func (sg *StatementGenerator) generateYieldStatement(stmt *ast.YieldStatement) string {
 	srcCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Source)
 
-	// 死代码消除：源为字面量 0 的 yeide 是无操作，跳过生成
+	// 死代码消除：源为字面量 0 的 yield 是无操作，跳过生成
 	if srcCode == "0" {
 		return ""
 	}
 
 	var b strings.Builder
-	b.WriteString("/* SOR: yeide ")
+	b.WriteString("/* SOR: yield ")
 	b.WriteString(srcCode)
 	b.WriteString(" -> ")
 	b.WriteString(stmt.Target)

@@ -17,8 +17,8 @@ const (
 	// StmtLet 变量声明：let x = value
 	StmtLet StmtKind = iota
 
-	// StmtYeide 所有权转移：yeide src -> dst
-	StmtYeide
+	// StmtYield 所有权转移：yield src -> dst
+	StmtYield
 
 	// StmtRelease 所有权分发：release src -> [a, b, c]
 	StmtRelease
@@ -70,7 +70,7 @@ type Stmt struct {
 	// Source 是原始源码文本（用于显示）。
 	Source string
 
-	// VarName 是主要变量名（let/yeide/extract 的目标，read/write 的对象等）。
+	// VarName 是主要变量名（let/yield/extract 的目标，read/write 的对象等）。
 	VarName string
 
 	// TypeName 是类型名（let 语句中使用）。
@@ -82,7 +82,7 @@ type Stmt struct {
 	// ChildPath 是子元素路径（extract 语句中使用，如 "[0]"）。
 	ChildPath string
 
-	// SrcName 是源变量名（yeide/release/extract 的源）。
+	// SrcName 是源变量名（yield/release/extract 的源）。
 	SrcName string
 
 	// HolderNames 是 release 持有者名称列表。
@@ -211,8 +211,8 @@ func (a *SORAnalyzer) executeStmt(stmt Stmt) {
 	switch stmt.Kind {
 	case StmtLet:
 		a.execLet(stmt)
-	case StmtYeide:
-		a.execYeide(stmt)
+	case StmtYield:
+		a.execYield(stmt)
 	case StmtRelease:
 		a.execRelease(stmt)
 	case StmtExtract:
@@ -271,14 +271,14 @@ func (a *SORAnalyzer) execLet(stmt Stmt) {
 	}
 }
 
-// execYeide 执行所有权转移语句。
-// yeide x -> y  -> x 失效，y 获得所有权
-func (a *SORAnalyzer) execYeide(stmt Stmt) {
+// execYield 执行所有权转移语句。
+// yield x -> y  -> x 失效，y 获得所有权
+func (a *SORAnalyzer) execYield(stmt Stmt) {
 	srcID := a.tracker.GetObjectByName(stmt.SrcName)
 	if srcID == "" {
 		a.tracker.addError(SORError{
-			Kind:       ErrYeideInvalidSource,
-			Message:    fmt.Sprintf("yeide 失败：变量 '%s' 未找到", stmt.SrcName),
+			Kind:       ErrYieldInvalidSource,
+			Message:    fmt.Sprintf("yield 失败：变量 '%s' 未找到", stmt.SrcName),
 			SourceLine: stmt.Line,
 		})
 		a.log(fmt.Sprintf("  [错误] 源变量 '%s' 未找到", stmt.SrcName))
@@ -291,9 +291,9 @@ func (a *SORAnalyzer) execYeide(stmt Stmt) {
 		return
 	}
 
-	dstID := a.tracker.Yeide(srcID, stmt.VarName, stmt.Line)
+	dstID := a.tracker.Yield(srcID, stmt.VarName, stmt.Line)
 	if dstID != "" {
-		a.log(fmt.Sprintf("  -> 所有权转移: %s --yeide--> %s", stmt.SrcName, stmt.VarName))
+		a.log(fmt.Sprintf("  -> 所有权转移: %s --yield--> %s", stmt.SrcName, stmt.VarName))
 		a.log(fmt.Sprintf("     %s 状态: %s, %s 状态: %s",
 			stmt.SrcName, StateMoved, stmt.VarName, StateOwned))
 	}
@@ -439,9 +439,9 @@ func (a *SORAnalyzer) execCall(stmt Stmt) {
 		if argObj.State == StateMoved {
 			a.tracker.addError(SORError{
 				Kind:       ErrUseAfterMove,
-				Message:    fmt.Sprintf("use-after-move：'%s' 已通过 yeide 转移所有权，不能再使用", argName),
+				Message:    fmt.Sprintf("use-after-move：'%s' 已通过 yield 转移所有权，不能再使用", argName),
 				SourceLine: stmt.Line,
-				Details:    "对象已通过 yeide 转移给其他变量",
+				Details:    "对象已通过 yield 转移给其他变量",
 			})
 			a.log(fmt.Sprintf("     [错误] 参数 %s: use-after-move", argName))
 			continue
@@ -462,7 +462,7 @@ func (a *SORAnalyzer) execCall(stmt Stmt) {
 			// 函数需要独占所有权：检查参数是否为 Owned
 			if argObj.State != StateOwned {
 				a.tracker.addError(SORError{
-					Kind:       ErrYeideInvalidSource,
+					Kind:       ErrYieldInvalidSource,
 					Message:    fmt.Sprintf("参数不匹配：函数 '%s' 第 %d 个参数需要 owned 所有权，但 '%s' 处于 %s 状态",
 						stmt.FuncName, i+1, argName, argObj.State),
 					SourceLine: stmt.Line,
@@ -514,7 +514,7 @@ func (a *SORAnalyzer) execScopeExit(stmt Stmt) {
 }
 
 // execThreadSpawn 创建新线程并执行其中的语句。
-// 在 SOR 中，跨线程传递所有权必须显式 yeide，
+// 在 SOR 中，跨线程传递所有权必须显式 yield，
 // release 对象跨线程只读。
 func (a *SORAnalyzer) execThreadSpawn(stmt Stmt) {
 	a.log(fmt.Sprintf("  -> 创建线程 '%s'", stmt.ThreadName))
@@ -576,10 +576,10 @@ func LetStmt(line int, source, name, typeName string, isComposite bool, children
 	}
 }
 
-// YeideStmt 创建一个 yeide 语句。
-func YeideStmt(line int, source, src, dst string) Stmt {
+// YieldStmt 创建一个 yield 语句。
+func YieldStmt(line int, source, src, dst string) Stmt {
 	return Stmt{
-		Kind:    StmtYeide,
+		Kind:    StmtYield,
 		Line:    line,
 		Source:  source,
 		SrcName: src,

@@ -6,7 +6,7 @@ SOR（Sub-Ownership Release）是 Kaula 的编译期所有权验证系统，类�
 
 SOR 通过三个原语管理资源所有权：
 
-1. **yeide** - 所有权转移（move）
+1. **yield** - 所有权转移（move）
 2. **release** - 释放所有权（share/read-only）
 3. **extract** - 提取所有权（extract sub-element）
 
@@ -43,11 +43,11 @@ type SORObject struct {
 
 ## 三大原语
 
-### yeide（所有权转移）
+### yield（所有权转移）
 
 ```kaula
 // 转移所有权
-yeide(source)
+yield(source)
 // source 的所有权转移到新位置
 // 原位置变为 Moved 状态
 ```
@@ -117,7 +117,7 @@ sor/
 ```go
 // adapter.go
 func ExtractSORStatements(program *ast.Program) []Stmt {
-    // 提取 yeide/release/extract 语句
+    // 提取 yield/release/extract 语句
     // 提取变量声明
     // 提取控制流
     // 提取函数调用
@@ -178,7 +178,7 @@ type OwnershipTracker struct {
 }
 
 // 三大操作
-func (ot *OwnershipTracker) Yeide(sourceID string) error
+func (ot *OwnershipTracker) Yield(sourceID string) error
 func (ot *OwnershipTracker) Release(sourceID string) error
 func (ot *OwnershipTracker) Extract(sourceID, index string) error
 ```
@@ -312,7 +312,7 @@ SOR Error: Use after move
   Object 'data' was moved at line 10
   but used again at line 15
   
-  10: yeide(data)
+  10: yield(data)
       ^^^^^^^^^^ moved here
   ...
   15: println(data)

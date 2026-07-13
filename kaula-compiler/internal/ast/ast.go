@@ -372,7 +372,7 @@ func traverseNode(node Node, visitor func(Node)) {
 		// 无子节点
 	case *Param:
 		// 无子节点
-	case *YeideStatement:
+	case *YieldStatement:
 		if n.Source != nil {
 			traverseNode(n.Source, visitor)
 		}
@@ -2122,18 +2122,18 @@ func (ta *TypeAliasStatement) IsGeneric() bool {
 	return ta.Generic || len(ta.TypeParams) > 0
 }
 
-// YeideStatement 表示 yeide（所有权转移）语句
-// 语法: yeide source -> target
-type YeideStatement struct {
+// YieldStatement 表示 yield（所有权转移）语句
+// 语法: yield source -> target
+type YieldStatement struct {
 	Source Expression // 被转移的对象
 	Target string    // 目标变量名
 	Pos    Position
 }
 
-func (y *YeideStatement) statementNode() {}
-func (y *YeideStatement) String() string { return "YeideStatement" }
-func (y *YeideStatement) GetPosition() Position { return y.Pos }
-func (y *YeideStatement) SetPosition(pos Position) { y.Pos = pos }
+func (y *YieldStatement) statementNode() {}
+func (y *YieldStatement) String() string { return "YieldStatement" }
+func (y *YieldStatement) GetPosition() Position { return y.Pos }
+func (y *YieldStatement) SetPosition(pos Position) { y.Pos = pos }
 
 // ReleaseStatement 表示 release（所有权分发）语句
 // 语法: release source -> [holder1, holder2, ...]

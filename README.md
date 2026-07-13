@@ -168,8 +168,8 @@ Kaula 的核心安全机制——SOR（Sub-structural Ownership）在编译期�
 fn process() {
     auto buf = std.memory.kmm_v4_alloc(1024)
 
-    # yeide: 转移所有权，原变量不可再访问
-    yeide buf -> owner
+    # yield: 转移所有权，原变量不可再访问
+    yield buf -> owner
 
     # extract: 从集合中提取子结构所有权
     extract owner[0] -> first_byte
@@ -180,7 +180,7 @@ fn process() {
 ```
 
 三大原语：
-- **yeide** — 所有权转移（move 语义）
+- **yield** — 所有权转移（move 语义）
 - **extract** — 子结构提取（从复合类型中取出部分所有权）
 - **release** — 所有权分发（将一个资源拆分给多个持有者）
 

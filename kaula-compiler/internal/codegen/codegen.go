@@ -1007,7 +1007,7 @@ func getStmtPos(stmt ast.Statement) *ast.Position {
 		return &s.Pos
 	case *ast.ObjectStatement:
 		return &s.Pos
-	case *ast.YeideStatement:
+	case *ast.YieldStatement:
 		return &s.Pos
 	case *ast.ReleaseStatement:
 		return &s.Pos
