@@ -27,6 +27,7 @@ dist/
 bin/
 obj/
 cache/
+temp/
 
 # Test and demo files
 test_*.kl

@@ -210,6 +210,8 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		sa.analyzeInterfaceStatement(s)
 	case *ast.StructStatement:
 		sa.analyzeStructStatement(s)
+	case *ast.EnumStatement:
+		sa.analyzeEnumStatement(s)
 	case *ast.IfStatement:
 		sa.analyzeIfStatement(s)
 	case *ast.WhileStatement:
@@ -226,9 +228,13 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		}
 		if s.IsAuto {
 			sa.analyzeAutoDeclaration(s)
+		} else if s.IsConst && s.Type == "" {
+			sa.analyzeAutoDeclaration(s)
 		} else if s.Type != "" {
 			sa.analyzeVariableDeclaration(s)
 		}
+	case *ast.TypeAliasStatement:
+		sa.analyzeTypeAliasStatement(s)
 	case *ast.ExternStatement:
 		if s == nil {
 			return
@@ -283,12 +289,16 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 			for funcName := range mod.Functions {
 				qualifiedName := fmt.Sprintf("%s.%s", stdlibKey, funcName)
 				sa.symbolTable.AddSymbol(qualifiedName, "stdlib_function", false, "global", 0, 0)
+				// 也注册无限定名，允许直接使用函数名
+				sa.symbolTable.AddSymbol(funcName, "stdlib_function", false, "global", 0, 0)
 			}
 		} else if lib := sa.stdlibConfig.GetThirdPartyLibrary(moduleName); lib != nil {
 			// 检查是否是第三方库
 			for funcName := range lib.Functions {
 				qualifiedName := fmt.Sprintf("%s.%s", moduleName, funcName)
 				sa.symbolTable.AddSymbol(qualifiedName, "third_party_function", false, "global", 0, 0)
+				// 也注册无限定名，允许直接使用函数名
+				sa.symbolTable.AddSymbol(funcName, "third_party_function", false, "global", 0, 0)
 			}
 		} else {
 			// 未找到库配置，尝试按需分析 pkglib 中的库
@@ -709,6 +719,14 @@ func (sa *SemanticAnalyzer) analyzeStructStatement(stmt *ast.StructStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, "struct", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 }
 
+func (sa *SemanticAnalyzer) analyzeEnumStatement(stmt *ast.EnumStatement) {
+	sa.symbolTable.AddSymbol(stmt.Name, "enum", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	// 注册枚举变体到符号表，存储父枚举名
+	for _, variant := range stmt.Variants {
+		sa.symbolTable.AddSymbol(variant.Name, "enum_variant:"+stmt.Name, false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	}
+}
+
 // analyzeNonLocalStatement 分析 nonlocal 语句
 func (sa *SemanticAnalyzer) analyzeNonLocalStatement(stmt *ast.NonLocalStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "nonlocal", stmt.Pos.Line, stmt.Pos.Column)
@@ -748,6 +766,11 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 			"const name: type = value",
 		)
 	}
+}
+
+// analyzeTypeAliasStatement 分析类型别名声明
+func (sa *SemanticAnalyzer) analyzeTypeAliasStatement(stmt *ast.TypeAliasStatement) {
+	sa.symbolTable.AddSymbol(stmt.Name, "type", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 }
 
 // analyzeExternStatement 分析 extern 外部符号/函数声明
@@ -904,9 +927,9 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 		return sa.isTypeValid(innerType)
 	}
 	
-	// 检查符号表中是否有该类型（类、结构体、接口等）
+	// 检查符号表中是否有该类型（类、结构体、枚举、接口等）
 	symbol := sa.symbolTable.GetSymbol(typeName)
-	if symbol != nil && (symbol.Type == "class" || symbol.Type == "struct" || symbol.Type == "interface" || symbol.Type == "type") {
+	if symbol != nil && (symbol.Type == "class" || symbol.Type == "struct" || symbol.Type == "enum" || symbol.Type == "interface" || symbol.Type == "type") {
 		return true
 	}
 	

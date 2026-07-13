@@ -1099,10 +1099,12 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	for _, ms := range moduleSources {
 		clangArgs = append(clangArgs, ms.objPath)
 	}
-	// 添加 kmm_v4.o（如果存在）
+	// 添加 kmm_v4.o（如果存在）— 裸机模式下跳过（kmm_v4 依赖 OS 调用）
 	kmmV4Obj := filepath.Join(objectCacheDir, "kmm_v4.o")
-	if _, err := os.Stat(kmmV4Obj); err == nil {
-		clangArgs = append(clangArgs, kmmV4Obj)
+	if cfg == nil || !cfg.Freestanding {
+		if _, err := os.Stat(kmmV4Obj); err == nil {
+			clangArgs = append(clangArgs, kmmV4Obj)
+		}
 	}
 
 	// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）

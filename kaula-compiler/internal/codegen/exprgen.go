@@ -33,33 +33,48 @@ var sortedOps = []string{
 }
 
 // wrapIfNeeded 如果表达式是低优先级的二元表达式，用括号包裹
+// side: "left" 表示左操作数，"right" 表示右操作数
 func wrapIfNeeded(expr string, op string, side string) string {
-	if side != "left" {
-		return expr
-	}
-	outerPrec := cOperatorPrecedence[op]
-	// 快速跳过：简单标识符/字面量不需要检查
 	if len(expr) == 0 {
 		return expr
 	}
-	lastChar := expr[len(expr)-1]
-	if (lastChar >= 'a' && lastChar <= 'z') || (lastChar >= 'A' && lastChar <= 'Z') ||
-		(lastChar >= '0' && lastChar <= '9') || lastChar == '_' || lastChar == ')' {
-		// 以标识符/数字/右括号结尾，可能包含运算符，需要检查
-	}
+	outerPrec := cOperatorPrecedence[op]
+	
 	// 以分号、换行等结尾，不太可能是表达式
+	lastChar := expr[len(expr)-1]
 	if lastChar == ';' || lastChar == '\n' {
 		return expr
 	}
+	
+	// 检查是否包含需要括号的运算符
 	for _, opChar := range sortedOps {
 		pattern := " " + opChar + " "
 		if strings.Contains(expr, pattern) {
-			if cOperatorPrecedence[opChar] < outerPrec {
-				return "(" + expr + ")"
+			innerPrec := cOperatorPrecedence[opChar]
+			if side == "left" {
+				if innerPrec < outerPrec {
+					return "(" + expr + ")"
+				}
+			} else {
+				if innerPrec <= outerPrec {
+					return "(" + expr + ")"
+				}
 			}
-			break // 找到最高优先级的运算符就够了
+			break
 		}
 	}
+	
+	// 右操作数特殊处理：如果外层是位运算(&, |, ^)，内层有一元运算符(~, !)或移位(<<, >>)
+	// 需要加括号，例如: value & ~(1 << bit)
+	if side == "right" {
+		if strings.Contains(expr, "~") || strings.Contains(expr, "<<") || strings.Contains(expr, ">>") {
+			// 位运算的右操作数如果包含 ~ 或移位，需要加括号
+			if op == "&" || op == "|" || op == "^" || op == "+" || op == "-" {
+				return "(" + expr + ")"
+			}
+		}
+	}
+	
 	return expr
 }
 func escapeCString(s string) string {
@@ -236,6 +251,12 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		return "self->" + e.Name
 	}
 
+	// 检查是否是枚举变体
+	if sym := eg.codegen.GetSymbol(e.Name); sym != nil && strings.HasPrefix(sym.Type, "enum_variant:") {
+		enumName := strings.TrimPrefix(sym.Type, "enum_variant:")
+		return enumName + "_Kind_" + e.Name
+	}
+
 	return e.Name
 }
 
@@ -358,41 +379,41 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	case "ASSIGN":
 		return left + " = " + right
 	case "PLUS", "+":
-		return wrapIfNeeded(left, "+", "left") + " + " + right
+		return wrapIfNeeded(left, "+", "left") + " + " + wrapIfNeeded(right, "+", "right")
 	case "MINUS", "-":
-		return wrapIfNeeded(left, "-", "left") + " - " + right
+		return wrapIfNeeded(left, "-", "left") + " - " + wrapIfNeeded(right, "-", "right")
 	case "MULTIPLY", "*":
-		return wrapIfNeeded(left, "*", "left") + " * " + right
+		return wrapIfNeeded(left, "*", "left") + " * " + wrapIfNeeded(right, "*", "right")
 	case "DIVIDE", "/":
-		return wrapIfNeeded(left, "/", "left") + " / " + right
+		return wrapIfNeeded(left, "/", "left") + " / " + wrapIfNeeded(right, "/", "right")
 	case "MOD", "%":
-		return wrapIfNeeded(left, "%", "left") + " % " + right
+		return wrapIfNeeded(left, "%", "left") + " % " + wrapIfNeeded(right, "%", "right")
 	case "EQ", "==":
-		return wrapIfNeeded(left, "==", "left") + " == " + right
+		return wrapIfNeeded(left, "==", "left") + " == " + wrapIfNeeded(right, "==", "right")
 	case "NE", "!=":
-		return wrapIfNeeded(left, "!=", "left") + " != " + right
+		return wrapIfNeeded(left, "!=", "left") + " != " + wrapIfNeeded(right, "!=", "right")
 	case "LT", "<":
-		return wrapIfNeeded(left, "<", "left") + " < " + right
+		return wrapIfNeeded(left, "<", "left") + " < " + wrapIfNeeded(right, "<", "right")
 	case "GT", ">":
-		return wrapIfNeeded(left, ">", "left") + " > " + right
+		return wrapIfNeeded(left, ">", "left") + " > " + wrapIfNeeded(right, ">", "right")
 	case "LE", "<=":
-		return wrapIfNeeded(left, "<=", "left") + " <= " + right
+		return wrapIfNeeded(left, "<=", "left") + " <= " + wrapIfNeeded(right, "<=", "right")
 	case "GE", ">=":
-		return wrapIfNeeded(left, ">=", "left") + " >= " + right
+		return wrapIfNeeded(left, ">=", "left") + " >= " + wrapIfNeeded(right, ">=", "right")
 	case "SHIFT_LEFT", "<<", "LSHIFT":
-		return wrapIfNeeded(left, "<<", "left") + " << " + right
+		return wrapIfNeeded(left, "<<", "left") + " << " + wrapIfNeeded(right, "<<", "right")
 	case "SHIFT_RIGHT", ">>", "RSHIFT":
-		return wrapIfNeeded(left, ">>", "left") + " >> " + right
+		return wrapIfNeeded(left, ">>", "left") + " >> " + wrapIfNeeded(right, ">>", "right")
 	case "AND", "&&":
-		return wrapIfNeeded(left, "&&", "left") + " && " + right
+		return wrapIfNeeded(left, "&&", "left") + " && " + wrapIfNeeded(right, "&&", "right")
 	case "OR", "||":
-		return wrapIfNeeded(left, "||", "left") + " || " + right
+		return wrapIfNeeded(left, "||", "left") + " || " + wrapIfNeeded(right, "||", "right")
 	case "BITWISE_AND", "AMPERSAND", "&":
-		return wrapIfNeeded(left, "&", "left") + " & " + right
+		return wrapIfNeeded(left, "&", "left") + " & " + wrapIfNeeded(right, "&", "right")
 	case "BITWISE_OR", "PIPE", "|":
-		return wrapIfNeeded(left, "|", "left") + " | " + right
+		return wrapIfNeeded(left, "|", "left") + " | " + wrapIfNeeded(right, "|", "right")
 	case "BITWISE_XOR", "CARET", "^", "XOR":
-		return wrapIfNeeded(left, "^", "left") + " ^ " + right
+		return wrapIfNeeded(left, "^", "left") + " ^ " + wrapIfNeeded(right, "^", "right")
 	case "BITWISE_NOT", "TILDE", "~":
 		return "~" + left
 	default:
@@ -503,6 +524,11 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	// 直接使用标准库中定义的 println 函数
 	if funcName == "println" {
 		return eg.generatePrintlnCall(e.Args)
+	}
+	
+	// print 函数（不换行）同样支持格式化
+	if funcName == "print" {
+		return eg.generatePrintCall(e.Args)
 	}
 	
 	// 根据参数数量选择不同的调用方式
@@ -702,9 +728,14 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 
 		if len(args) == 1 {
 			return "puts(\"" + strEscaped + "\")"
-		} else {
-			return eg.generatePrintlnMulti(args)
 		}
+
+		// 有格式字符串和参数时，使用 println 处理 %d/%s/%f 格式
+		if strings.Contains(str, "%") {
+			return eg.generatePrintlnWithFormat(args)
+		}
+
+		return eg.generatePrintlnMulti(args)
 	}
 
 	// 第一个参数不是字符串字面量，按普通方式处理
@@ -719,6 +750,85 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 	} else {
 		return eg.generatePrintlnMulti(args)
 	}
+}
+
+// generatePrintlnWithFormat 生成带格式字符串的 println 调用
+func (eg *ExpressionGenerator) generatePrintlnWithFormat(args []ast.Expression) string {
+	var b strings.Builder
+	b.WriteString("println(\"")
+
+	// 输出格式字符串
+	if strLit, ok := args[0].(*ast.StringLiteral); ok {
+		b.WriteString(escapeCString(strLit.Value))
+	}
+	b.WriteString("\"")
+
+	// 输出参数
+	for i := 1; i < len(args); i++ {
+		b.WriteString(", ")
+		b.WriteString(eg.GenerateExpression(args[i]))
+	}
+
+	b.WriteString(")")
+	return b.String()
+}
+
+// generatePrintCall 生成 print 调用代码（不换行）
+func (eg *ExpressionGenerator) generatePrintCall(args []ast.Expression) string {
+	if len(args) == 0 {
+		return ""
+	}
+
+	// 检查第一个参数是否是字符串字面量
+	if strLit, ok := args[0].(*ast.StringLiteral); ok {
+		str := strLit.Value
+		strEscaped := escapeCString(str)
+
+		if len(args) == 1 {
+			return "printf(\"" + strEscaped + "\")"
+		}
+
+		// 有格式字符串和参数时，使用 printf 处理格式
+		if strings.Contains(str, "%") {
+			var b strings.Builder
+			b.WriteString("printf(\"")
+			b.WriteString(strEscaped)
+			b.WriteString("\"")
+			for i := 1; i < len(args); i++ {
+				b.WriteString(", ")
+				b.WriteString(eg.GenerateExpression(args[i]))
+			}
+			b.WriteString(")")
+			return b.String()
+		}
+
+		return "printf(\"" + strEscaped + "\")"
+	}
+
+	// 第一个参数不是字符串字面量
+	if len(args) == 1 {
+		argCode := eg.GenerateExpression(args[0])
+		argType := eg.inferType(args[0])
+		return "printf(\"%" + argType + "\", " + argCode + ")"
+	}
+
+	// 多个参数
+	var b strings.Builder
+	b.WriteString("printf(\"")
+	for i, arg := range args {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		argType := eg.inferType(arg)
+		b.WriteString("%" + argType)
+	}
+	b.WriteString("\"")
+	for _, arg := range args {
+		b.WriteString(", ")
+		b.WriteString(eg.GenerateExpression(arg))
+	}
+	b.WriteString(")")
+	return b.String()
 }
 
 // generatePrintlnMulti 生成 println_multi 调用代码
@@ -830,6 +940,8 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 			return "d"
 		}
 		return operandType
+	case *ast.TypeNameExpression, *ast.FieldNameExpression, *ast.FieldTypeExpression:
+		return "s"
 	case *ast.CallExpression:
 		if ident, ok := e.Function.(*ast.Identifier); ok {
 			if eg.codegen.stdlibConfig != nil {
@@ -982,7 +1094,24 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 		return object + "->" + e.Member
 	}
 	
-	if _, ok := e.Object.(*ast.Identifier); ok {
+	// 检查是否是枚举常量引用（如 Color.Red）
+	if ident, ok := e.Object.(*ast.Identifier); ok {
+		if eg.codegen.IsEnumType(ident.Name) {
+			return ident.Name + "_Kind_" + e.Member
+		}
+	}
+	
+	isPtr := false
+	if ident, ok := e.Object.(*ast.Identifier); ok {
+		if sym := eg.codegen.GetSymbol(ident.Name); sym != nil {
+			typeStr := sym.Type
+			if strings.HasSuffix(typeStr, "*") || strings.HasPrefix(typeStr, "*") {
+				isPtr = true
+			}
+		}
+	}
+	
+	if isPtr {
 		return object + "->" + e.Member
 	}
 	
@@ -1176,16 +1305,25 @@ func (eg *ExpressionGenerator) generateUnaryExpression(e *ast.UnaryExpression) s
 	case "&":
 		return "&" + right
 	case "!":
+		if _, isBinary := e.Right.(*ast.BinaryExpression); isBinary {
+			return "!(" + right + ")"
+		}
 		return "!" + right
 	case "-":
+		if _, isBinary := e.Right.(*ast.BinaryExpression); isBinary {
+			return "(-" + right + ")"
+		}
 		return "-" + right
 	case "*":
-		// 解引用：如果右侧是二元表达式，需要加括号避免优先级错误
-		// 例如 *(s + i) 不能生成为 *s + i
 		if _, isBinary := e.Right.(*ast.BinaryExpression); isBinary {
 			return "*(" + right + ")"
 		}
 		return "*" + right
+	case "~":
+		if _, isBinary := e.Right.(*ast.BinaryExpression); isBinary {
+			return "~(" + right + ")"
+		}
+		return "~" + right
 	default:
 		return e.Operator + right
 	}
@@ -1215,10 +1353,14 @@ func (eg *ExpressionGenerator) GenerateLambdaExpression(expr *ast.LambdaExpressi
 	}
 
 	// 生成函数体
+	// 保存并设置当前函数返回类型，使 return 语句正确生成返回值
+	savedReturnType := eg.codegen.currentFunctionReturnType
+	eg.codegen.currentFunctionReturnType = expr.ReturnType
 	var bodyCode strings.Builder
 	for _, stmt := range expr.Body {
 		bodyCode.WriteString(eg.codegen.statementGenerator.GenerateStatement(stmt))
 	}
+	eg.codegen.currentFunctionReturnType = savedReturnType
 
 	// 构建完整函数定义，存入延迟输出队列
 	var funcDef strings.Builder
@@ -1259,12 +1401,37 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 	targetCode := eg.GenerateExpression(e.Target)
 
 	var code strings.Builder
-	code.WriteString("switch (")
-	code.WriteString(targetCode)
-	code.WriteString(".kind) {\n")
 
 	// 尝试从目标表达式推断枚举类型名
 	enumName := eg.inferEnumName(e.Target)
+	if enumName != "" {
+		// 检查枚举是否有数据变体
+		enumStmt := eg.codegen.program.FindEnum(enumName)
+		hasDataVariants := false
+		if enumStmt != nil {
+			for _, v := range enumStmt.Variants {
+				if len(v.FieldTypes) > 0 {
+					hasDataVariants = true
+					break
+				}
+			}
+		}
+		if hasDataVariants {
+			// 带数据的枚举，使用 .kind 访问
+			code.WriteString("switch (")
+			code.WriteString(targetCode)
+			code.WriteString(".kind) {\n")
+		} else {
+			// 简单枚举，直接使用值
+			code.WriteString("switch (")
+			code.WriteString(targetCode)
+			code.WriteString(") {\n")
+		}
+	} else {
+		code.WriteString("switch (")
+		code.WriteString(targetCode)
+		code.WriteString(") {\n")
+	}
 
 	for _, arm := range e.Arms {
 		if arm.Pattern == nil {
@@ -1372,14 +1539,11 @@ func (eg *ExpressionGenerator) inferEnumName(expr ast.Expression) string {
 	if ident, ok := expr.(*ast.Identifier); ok {
 		// 从符号表查找变量类型
 		sym := eg.codegen.GetSymbol(ident.Name)
-		if sym != nil {
+		if sym != nil && eg.codegen.program != nil {
 			// 检查类型是否是已定义的枚举
-			if eg.codegen.program != nil {
-				if enumStmt := eg.codegen.program.FindEnum(sym.Type); enumStmt != nil {
-					return enumStmt.Name
-				}
+			if enumStmt := eg.codegen.program.FindEnum(sym.Type); enumStmt != nil {
+				return enumStmt.Name
 			}
-			return sym.Type
 		}
 	}
 	return ""

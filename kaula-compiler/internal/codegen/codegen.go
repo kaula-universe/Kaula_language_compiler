@@ -48,6 +48,7 @@ type CodeGenerator struct {
 
 	genericCache       map[string]*GenericInstanceCache
 	genericInstantiated map[string]bool
+	genericFuncCode    strings.Builder // 泛型实例化函数代码
 	currentFuncTypeParams []*ast.TypeParameter
 
 	currentFunctionName string
@@ -347,6 +348,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			addEntry("type", structStmt.Pos.Line, structStmt.Pos.Column, "struct", structStmt.Name, lines)
 			typeCode.WriteString(code)
 		} else if enumStmt, ok := stmt.(*ast.EnumStatement); ok {
+			// 注册枚举变体到符号表
+			for _, variant := range enumStmt.Variants {
+				cg.symbolTable.AddSymbol(variant.Name, "enum_variant:"+enumStmt.Name, false, "global", enumStmt.Pos.Line, enumStmt.Pos.Column)
+			}
 			code := cg.generateStatement(stmt) + "\n"
 			lines := strings.Count(code, "\n")
 			addEntry("type", enumStmt.Pos.Line, enumStmt.Pos.Column, "enum", enumStmt.Name, lines)
@@ -458,6 +463,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		functionCode.WriteString(combined)
 	}
 
+	// 将泛型实例化代码注入到 functionCode 之前，
+	// 确保定义在 main 中调用之前
+	if cg.genericFuncCode.Len() > 0 {
+		combined := cg.genericFuncCode.String() + functionCode.String()
+		functionCode.Reset()
+		functionCode.WriteString(combined)
+	}
+
 	var allIncludes strings.Builder
 	allIncludes.Grow(2048)
 	if cg.config != nil && cg.config.Freestanding {
@@ -467,7 +480,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// memset/memcpy 等由 kaula_freestanding_runtime.c 提供
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n")
 	} else {
-		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n")
+		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n#include \"kaula_runtime.h\"\n")
 	}
 
 	if cg.stdlibConfig != nil {
@@ -791,6 +804,12 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	// 生成代码
 	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
 	
+	// 写入泛型实例化代码缓冲区，稍后插入到 functionCode 之前
+	if code != "" {
+		cg.genericFuncCode.WriteString(code)
+		cg.genericFuncCode.WriteByte('\n')
+	}
+	
 	// 添加到缓存
 	cg.genericCache[cacheKey] = &GenericInstanceCache{
 		OriginalName:   funcName,
@@ -831,8 +850,17 @@ func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatemen
 		Annotation: fnStmt.Annotation,
 	}
 	
-	// 复制参数（不需要替换，因为参数名不变，只是类型在返回类型中体现）
+	// 复制参数名
 	copy(instFunc.Params, fnStmt.Params)
+	
+	// 映射参数类型
+	instFunc.ParamTypes = make([]string, len(fnStmt.ParamTypes))
+	for i, pt := range fnStmt.ParamTypes {
+		instFunc.ParamTypes[i] = pt
+		if mappedType, ok := typeMap[pt]; ok {
+			instFunc.ParamTypes[i] = mappedType
+		}
+	}
 	
 	return instFunc
 }
@@ -857,15 +885,44 @@ func (cg *CodeGenerator) findFunctionByName(name string) *ast.FunctionStatement 
 	return nil
 }
 
-// findPrefixStatement 在程序中查找 prefix 语句
+// findPrefixStatement 在程序中查找 prefix 语句（递归搜索）
 func (cg *CodeGenerator) findPrefixStatement(name string) *ast.PrefixStatement {
 	if cg.program == nil {
 		return nil
 	}
-	for _, stmt := range cg.program.Statements {
-		if prefixStmt, ok := stmt.(*ast.PrefixStatement); ok {
-			if prefixStmt.Name == name {
-				return prefixStmt
+	return cg.findPrefixInStatements(cg.program.Statements, name)
+}
+
+// findPrefixInStatements 递归搜索 statements 中的 prefix 语句
+func (cg *CodeGenerator) findPrefixInStatements(stmts []ast.Statement, name string) *ast.PrefixStatement {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.PrefixStatement:
+			if s.Name == name {
+				return s
+			}
+		case *ast.FunctionStatement:
+			if result := cg.findPrefixInStatements(s.Body, name); result != nil {
+				return result
+			}
+		case *ast.IfStatement:
+			if result := cg.findPrefixInStatements(s.Body, name); result != nil {
+				return result
+			}
+			if result := cg.findPrefixInStatements(s.Else, name); result != nil {
+				return result
+			}
+		case *ast.WhileStatement:
+			if result := cg.findPrefixInStatements(s.Body, name); result != nil {
+				return result
+			}
+		case *ast.ForStatement:
+			if result := cg.findPrefixInStatements(s.Body, name); result != nil {
+				return result
+			}
+		case *ast.BlockStatement:
+			if result := cg.findPrefixInStatements(s.Statements, name); result != nil {
+				return result
 			}
 		}
 	}

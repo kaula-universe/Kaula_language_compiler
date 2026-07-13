@@ -213,6 +213,10 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 	case lexer.TOKEN_OBJECT:
 		return p.parseObjectStatementIterative()
 	case lexer.TOKEN_FUNC:
+		// fn 后面跟 ( 是 lambda 表达式，跟标识符是函数声明
+		if p.peekTok.Type == lexer.TOKEN_LPAREN {
+			return p.parseExpressionStatementIterative()
+		}
 		return p.parseFunctionStatementIterative()
 	case lexer.TOKEN_CLASS:
 		return p.parseClassStatementIterative()
@@ -342,7 +346,7 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		if p.curTok.Type == lexer.TOKEN_LT {
 			p.nextToken()
 			typeArgs := []string{}
-			for p.curTok.Type == lexer.TOKEN_IDENT {
+			for p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
 				typeArgs = append(typeArgs, p.curTok.Value)
 				p.nextToken()
 				if p.curTok.Type == lexer.TOKEN_COMMA {
@@ -544,10 +548,23 @@ func (p *Parser) parseStaticDeclarationIterative() *ast.VariableDeclaration {
 }
 
 // parseConstDeclarationIterative 解析 const 编译期常量声明
-// 语法: const name: type = value  或  const type name = value
+// 语法: const type name = value  或  const name = value
 // 编译期常量，不可修改
 func (p *Parser) parseConstDeclarationIterative() *ast.VariableDeclaration {
 	p.nextToken() // 跳过 const
+
+	// const name = value 风格（无类型，从值推导）
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
+		stmt := &ast.VariableDeclaration{IsConst: true}
+		stmt.Name = p.curTok.Value
+		p.nextToken() // 跳过 name
+		if p.curTok.Type == lexer.TOKEN_ASSIGN {
+			p.nextToken()
+			stmt.Value = p.parseExpressionIterative()
+		}
+		return stmt
+	}
+
 	stmt := p.parseVariableDeclarationIterative()
 	if stmt != nil {
 		stmt.IsConst = true
@@ -756,6 +773,8 @@ func (p *Parser) parseSpendCallStatementIterative() *ast.SpendStatement {
 		Calls: []*ast.CallClause{},
 	}
 
+	p.nextToken() // 跳过 spend/spend_call 关键字
+
 	// 解析 spend 目标
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
@@ -940,18 +959,11 @@ func (p *Parser) parsePrefixStatementIterative() *ast.PrefixStatement {
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
-			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
-				// 检查当前 token 是否是 IDENT 且下一个 token 是 ASSIGN
-				// 如果是，说明这是下一个赋值语句的开始，不要调用 nextToken()
-				if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
-					// 跳过 nextToken()，直接继续循环
-					continue
-				}
+			} else {
 				p.nextToken()
 			}
 		}
@@ -2756,6 +2768,8 @@ var precedences = map[lexer.TokenType]int{
 	lexer.TOKEN_LSHIFT: 5,
 	lexer.TOKEN_RSHIFT: 5,
 	lexer.TOKEN_XOR:    4,
+	lexer.TOKEN_PIPE:   4,
+	lexer.TOKEN_AMPERSAND: 5,
 	lexer.TOKEN_PLUS:   6,
 	lexer.TOKEN_MINUS:  6,
 	lexer.TOKEN_MULTIPLY: 7,
@@ -2827,6 +2841,18 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		}
 		return &ast.UnaryExpression{
 			Operator: "*",
+			Right:    right,
+		}
+	case lexer.TOKEN_TILDE:
+		// 按位取反 ~x
+		p.nextToken()
+		right := p.parsePrimaryExpressionIterative()
+		if right == nil {
+			p.error("~ 后应该跟表达式")
+			return nil
+		}
+		return &ast.UnaryExpression{
+			Operator: "~",
 			Right:    right,
 		}
 	case lexer.TOKEN_PREFIX_REF:
@@ -3015,6 +3041,10 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 				if p.curTok.Type == lexer.TOKEN_LPAREN {
 					return p.parseCallExpressionIterative(expr)
 				}
+				// 泛型调用（obj.method<int>(...)），需避免与比较运算符混淆
+				if p.curTok.Type == lexer.TOKEN_LT && p.looksLikeGenericArgs() {
+					return p.parseCallExpressionIterative(expr)
+				}
 			} else {
 				break
 			}
@@ -3045,12 +3075,24 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 		}
 	}
 	
-	// 检查是否是函数调用（没有成员访问的情况）
+	// 检查是否是函数调用（含泛型调用 identity<int>(42)）
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		return p.parseCallExpressionIterative(expr)
 	}
 	
+	// 泛型调用：必须是 < 后跟类型名（避免与比较运算符 < 混淆）
+	if p.curTok.Type == lexer.TOKEN_LT && p.looksLikeGenericArgs() {
+		return p.parseCallExpressionIterative(expr)
+	}
+	
 	return expr
+}
+
+// looksLikeGenericArgs 检查当前 < 是否是泛型类型参数列表
+// 规则：< 后跟类型关键字（int/float/bool/char/string/void/double）则是泛型
+// 后跟 IDENT 可能是比较运算（i < j），保守跳过以避免回归
+func (p *Parser) looksLikeGenericArgs() bool {
+	return p.isTypeToken(p.peekTok.Type)
 }
 
 // parseIntegerLiteralIterative 迭代解析整数字面量
@@ -3240,16 +3282,11 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 		Function: function,
 		Args:     []ast.Expression{},
 	}
-	// 当前 token 是 LPAREN，跳过它
-	if p.curTok.Type != lexer.TOKEN_LPAREN {
-		return nil
-	}
-	p.nextToken()
 	
-	// 解析泛型参数（如果存在）
+	// 解析泛型参数（如果存在），语法: fn<T>(args)
 	if p.curTok.Type == lexer.TOKEN_LT {
 		p.nextToken()
-		for p.curTok.Type == lexer.TOKEN_IDENT {
+		for p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
 			call.TypeArgs = append(call.TypeArgs, p.curTok.Value)
 			p.nextToken()
 			if p.curTok.Type == lexer.TOKEN_COMMA {
@@ -3262,6 +3299,13 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 			p.nextToken()
 		}
 	}
+	
+	// 当前 token 必须是 LPAREN
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		return nil
+	}
+	p.nextToken()
+	
 	for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
 		prevTok := p.curTok
 		
@@ -4139,14 +4183,24 @@ func (p *Parser) parseLambdaExpression() *ast.LambdaExpression {
 		}
 	}
 
-	// 可选的返回类型 fn(...) -> type
+	// 可选的返回类型: fn(...) -> type 或 fn(...) type
 	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+		// -> type 形式
 		p.nextToken() // -
 		p.nextToken() // >
 		if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
 			expr.ReturnType = p.curTok.Value
 			p.nextToken()
 		}
+	} else if p.isTypeToken(p.curTok.Type) && p.peekTok.Type == lexer.TOKEN_LBRACE {
+		// bare type 形式: fn(...) int { ... }
+		expr.ReturnType = strings.ToLower(lexer.TokenTypeToString(p.curTok.Type))
+		expr.ReturnType = strings.TrimPrefix(expr.ReturnType, "type_")
+		p.nextToken()
+	} else if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_LBRACE {
+		// bare custom type 形式: fn(...) MyType { ... }
+		expr.ReturnType = p.curTok.Value
+		p.nextToken()
 	}
 
 	// 解析函数体

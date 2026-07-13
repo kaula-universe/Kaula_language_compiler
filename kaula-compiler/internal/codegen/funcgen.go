@@ -327,8 +327,24 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
 	builder.WriteString(safeName)
-	if hasTaskParams {
-		builder.WriteString("_task(void* arg) {\n")
+	if hasTaskParams || hasAsyncParams {
+		// 生成正常函数签名（task/async 参数元数据通过注释保留）
+		builder.WriteString("(")
+		for i, param := range stmt.Params {
+			if i > 0 {
+				builder.WriteString(", ")
+			}
+			paramType := "int64_t"
+			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+				paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
+			}
+			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
+			fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		}
+		if len(stmt.Params) == 0 {
+			builder.WriteString("void")
+		}
+		builder.WriteString(") {\n")
 	} else if hasAsyncParams {
 		builder.WriteString("_async(void* arg) {\n")
 	} else {
@@ -355,31 +371,10 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 	if hasTaskParams {
 		indent := fg.codegen.indentString()
-		builder.WriteString(indent)
-		builder.WriteString("if (arg == NULL) { return -1; }\n")
-		builder.WriteString(indent)
-		builder.WriteString("TaskParam* tp = (TaskParam*)arg;\n")
-		builder.WriteString(indent)
-		builder.WriteString("if (tp == NULL) { return -1; }\n")
-		builder.WriteString(indent)
-		builder.WriteString("int priority = tp->priority;\n")
-		builder.WriteString(indent)
-		builder.WriteString("void* result = tp->data;\n")
-
 		for i := range stmt.TaskParams {
 			priorityCode := fg.codegen.expressionGenerator.GenerateExpression(stmt.TaskParams[i].Priority)
 			builder.WriteString(indent)
-			fmt.Fprintf(&builder, "// Task参数 %d: 优先级=%s (索引: %d)\n", i+1, priorityCode, i)
-		}
-		
-		if len(stmt.TaskParams) > 0 {
-			builder.WriteString(indent)
-			for i := range stmt.TaskParams {
-				paramName := fmt.Sprintf("task_param_%d", i)
-				builder.WriteString(indent)
-				fmt.Fprintf(&builder, "int64_t %s = ((int64_t*)tp->data)[%d];\n", paramName, i)
-				fg.codegen.AddSymbol(paramName, "int64_t", false, "task_param", stmt.Pos.Line, stmt.Pos.Column)
-			}
+			fmt.Fprintf(&builder, "// task param %d: priority=%s\n", i+1, priorityCode)
 		}
 
 		for _, bodyStmt := range stmt.Body {
@@ -391,29 +386,10 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		}
 	} else if hasAsyncParams {
 		indent := fg.codegen.indentString()
-		builder.WriteString(indent)
-		builder.WriteString("if (arg == NULL) { return -1; }\n")
-		builder.WriteString(indent)
-		builder.WriteString("AsyncParam* ap = (AsyncParam*)arg;\n")
-		builder.WriteString(indent)
-		builder.WriteString("if (ap == NULL) { return -1; }\n")
-		builder.WriteString(indent)
-		builder.WriteString("void* async_value = ap->data;\n")
-
 		for i := range stmt.AsyncParams {
 			valueCode := fg.codegen.expressionGenerator.GenerateExpression(stmt.AsyncParams[i].Value)
 			builder.WriteString(indent)
-			fmt.Fprintf(&builder, "// Async参数 %d: 值=%s (索引: %d)\n", i+1, valueCode, i)
-		}
-		
-		if len(stmt.AsyncParams) > 0 {
-			builder.WriteString(indent)
-			for i := range stmt.AsyncParams {
-				paramName := fmt.Sprintf("async_param_%d", i)
-				builder.WriteString(indent)
-				fmt.Fprintf(&builder, "int64_t %s = ((int64_t*)ap->data)[%d];\n", paramName, i)
-				fg.codegen.AddSymbol(paramName, "int64_t", false, "async_param", stmt.Pos.Line, stmt.Pos.Column)
-			}
+			fmt.Fprintf(&builder, "// async param %d: value=%s\n", i+1, valueCode)
 		}
 
 		for _, bodyStmt := range stmt.Body {
@@ -679,7 +655,12 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code.WriteString(attrPrefix)
 		code.WriteByte(' ')
 	}
-	code.WriteString("int main() {\n")
+	
+	funcName := "main"
+	if fg.codegen.config != nil && fg.codegen.config.Freestanding {
+		funcName = "kaula_main"
+	}
+	code.WriteString("int " + funcName + "() {\n")
 	fg.codegen.indent++
 	
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body

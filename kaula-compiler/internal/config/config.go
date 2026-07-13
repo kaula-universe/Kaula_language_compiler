@@ -198,6 +198,10 @@ func loadFlags(config *Config) {
 	// 源码映射
 	flag.BoolVar(&config.SourceMap, "sourcemap", config.SourceMap, "生成源码映射文件")
 
+	// pkglib 分析
+	flag.StringVar(&config.AnalyzePkg, "analyze-pkg", config.AnalyzePkg, "分析指定包并生成配置文件")
+	flag.BoolVar(&config.AnalyzePkgAll, "analyze-pkg-all", config.AnalyzePkgAll, "分析所有 pkglib 中的包")
+
 	flag.Parse()
 
 	// 解析逗号/空格分隔的列表

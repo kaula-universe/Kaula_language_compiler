@@ -580,6 +580,29 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 		return tg.GenerateGenericEnumStatement(stmt)
 	}
 
+	// 检查是否有带数据的变体
+	hasDataVariants := false
+	for _, variant := range stmt.Variants {
+		if len(variant.FieldTypes) > 0 {
+			hasDataVariants = true
+			break
+		}
+	}
+
+	if !hasDataVariants {
+		// 简单枚举（无数据），直接生成 C enum
+		code.WriteString(fmt.Sprintf("typedef enum {\n"))
+		for i, variant := range stmt.Variants {
+			code.WriteString(fmt.Sprintf("    %s_Kind_%s", stmt.Name, variant.Name))
+			if i < len(stmt.Variants)-1 {
+				code.WriteString(",")
+			}
+			code.WriteString("\n")
+		}
+		code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+		return code.String()
+	}
+
 	// 生成 kind 枚举
 	code.WriteString(fmt.Sprintf("typedef enum {\n"))
 	for i, variant := range stmt.Variants {
@@ -603,6 +626,8 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 				fieldName := variant.Name + "_val"
 				if len(variant.FieldNames) > j && variant.FieldNames[j] != "" {
 					fieldName = variant.FieldNames[j]
+				} else if len(variant.FieldTypes) > 1 {
+					fieldName = fmt.Sprintf("%s_val%d", variant.Name, j)
 				}
 				if j > 0 {
 					code.WriteString("; ")

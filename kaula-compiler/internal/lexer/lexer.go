@@ -102,6 +102,8 @@ const (
 	TOKEN_GE
 	TOKEN_LSHIFT
 	TOKEN_RSHIFT
+	TOKEN_PIPE
+	TOKEN_TILDE
 	TOKEN_XOR
 	TOKEN_PREFIX_REF
 	TOKEN_QUESTION
@@ -347,8 +349,8 @@ func (l *Lexer) Next() Token {
 				l.next()
 				return Token{Type: TOKEN_OR, Value: "||", Line: l.line, Column: l.column}
 			} else {
-				l.error("unexpected token")
-				continue
+				l.next()
+				return Token{Type: TOKEN_PIPE, Value: "|", Line: l.line, Column: l.column}
 			}
 		case char == '.':
 			l.next()
@@ -359,6 +361,9 @@ func (l *Lexer) Next() Token {
 		case char == '^':
 			l.next()
 			return Token{Type: TOKEN_XOR, Value: "^", Line: l.line, Column: l.column}
+		case char == '~':
+			l.next()
+			return Token{Type: TOKEN_TILDE, Value: "~", Line: l.line, Column: l.column}
 		default:
 			l.error(fmt.Sprintf("unexpected character: %c", char))
 			continue
@@ -957,6 +962,10 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "RSHIFT"
 	case TOKEN_XOR:
 		return "XOR"
+	case TOKEN_PIPE:
+		return "PIPE"
+	case TOKEN_TILDE:
+		return "TILDE"
 	case TOKEN_AND:
 		return "AND"
 	case TOKEN_AMPERSAND:

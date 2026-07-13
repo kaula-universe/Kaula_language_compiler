@@ -209,4 +209,6 @@ void* fast_alloc(size_t size);
 void* fast_calloc(size_t num, size_t size);
 void fast_free(void* ptr);
 
+#include "kaula_runtime.h"
+
 #endif // KAULA_H

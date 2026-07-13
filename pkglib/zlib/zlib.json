@@ -1,9 +1,9 @@
 {
   "name": "zlib",
   "header": "zlib/zlib.h",
-  "headers": ["<zlib.h>"],
+  "headers": ["\"zlib/zlib.h\""],
   "libraries": ["z"],
-  "include_path": "",
+  "include_path": "../pkglib",
   "library_path": "",
   "functions": {
     "zlibVersion": {

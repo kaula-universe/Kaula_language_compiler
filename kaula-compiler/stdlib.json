@@ -6283,7 +6283,7 @@
   },
   "std.compress": {
     "header": "compress/compress.h",
-    "compress_rle": {
+    "rle_compress": {
       "args": [
         "const void*",
         "size_t",
@@ -6292,7 +6292,7 @@
       ],
       "return": "size_t"
     },
-    "decompress_rle": {
+    "rle_decompress": {
       "args": [
         "const void*",
         "size_t",
@@ -6301,7 +6301,7 @@
       ],
       "return": "size_t"
     },
-    "compress_lz77": {
+    "lz77_compress": {
       "args": [
         "const void*",
         "size_t",
@@ -6310,7 +6310,7 @@
       ],
       "return": "size_t"
     },
-    "decompress_lz77": {
+    "lz77_decompress": {
       "args": [
         "const void*",
         "size_t",
