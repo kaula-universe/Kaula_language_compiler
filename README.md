@@ -4,839 +4,392 @@
 
 <img src="logo.png" alt="Kaula Logo" width="200">
 
-**高性能、系统级的编译型编程语言**
+**更现代、更好用的 C**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.21.0-00ADD8.svg?logo=go)](https://go.dev/)
-[![Language](https://img.shields.io/badge/language-C-C.svg?logo=c)](https://en.wikipedia.org/wiki/C_(programming_language))
-[![Version](https://img.shields.io/badge/version-0.1--release-brightgreen.svg)](https://github.com/yourusername/kaula/releases)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8.svg?logo=go)](https://go.dev/)
+[![Language](https://img.shields.io/badge/runtime-C-A8B9CC.svg?logo=c)](https://en.wikipedia.org/wiki/C_(programming_language))
 
 </div>
 
 ---
 
-## 📖 项目概述
+## Kaula 是什么
 
-Kaula 是一款静态类型的编译型编程语言，采用 **Go 语言实现的编译器** 和 **C 语言实现的运行时系统**。
+Kaula 是一门**静态类型的系统级编程语言**，编译到 C，由 Clang 生成原生代码。
 
----
-
-## 🏗️ 项目架构
-
-```
-kaula/
-├── kaula-compiler/          # 编译器（Go 实现）
-│   ├── cmd/kaulac/          # 编译器命令行工具
-│   │   └── main.go          # 主入口（并发编译管线、缓存管理、超时控制）
-│   ├── internal/
-│   │   ├── ast/             # 抽象语法树定义
-│   │   │   └── ast.go
-│   │   ├── cache/           # 增量编译缓存系统
-│   │   │   └── cache.go     # 缓存管理器（SHA256 验证、原子写入、清单管理）
-│   │   ├── codegen/         # C 代码生成器（模块化架构）
-│   │   │   ├── codegen.go   # 核心生成器
-│   │   │   ├── generator.go # 生成器接口定义
-│   │   │   ├── typegen.go   # 类型生成
-│   │   │   ├── funcgen.go   # 函数生成
-│   │   │   ├── exprgen.go   # 表达式生成
-│   │   │   ├── stmtgen.go   # 语句生成
-│   │   │   ├── template.go  # 模板管理
-│   │   │   └── plugin.go    # 插件系统
-│   │   ├── compiler/        # 编译器核心逻辑
-│   │   ├── config/          # 配置管理
-│   │   ├── core/            # 核心运行时特性（Go 层）
-│   │   │   ├── vo.go        # VO 系统
-│   │   │   ├── spendcall.go # Spend/Call 机制
-│   │   │   ├── prefix.go    # 前缀系统
-│   │   │   ├── tree.go      # 树系统
-│   │   │   └── task.go      # 任务调度
-│   │   ├── errors/          # 错误处理
-│   │   ├── lexer/           # 词法分析器
-│   │   ├── parser/          # 语法分析器（递归下降解析）
-│   │   ├── sema/            # 语义分析器（两遍分析、泛型支持）
-│   │   ├── semantic/        # 语义分析（扩展）
-│   │   ├── stdlib/          # 标准库配置加载
-│   │   ├── symbol/          # 符号表
-│   │   ├── test/            # 测试工具
-│   │   └── timeout/         # 超时控制（内存、时间限制）
-│   ├── templates/           # 代码生成模板
-│   │   └── main.c.tmpl
-│   ├── stdlib.json          # 标准库函数签名定义（43 个模块）
-│   └── go.mod
-├── pkglib/                  # 第三方库自动加载
-│   ├── stb_image/
-│   ├── nuklear/
-│   └── zlib/
-├── src/                     # 运行时系统（C 实现）
-│   ├── kaula.h              # 核心头文件（跨平台宏、类型定义）
-│   ├── platform.h           # 平台检测
-│   ├── kmm_scoped_allocator_v4.h # V4 内存管理头文件
-│   ├── kmm_scoped_allocator.c   # KMM V4 作用域分配器
-│   ├── allocator.c          # 快速分配器
-│   ├── vo.c                 # VO 系统
-│   ├── spend_call.c         # Spend/Call 机制
-│   ├── queue.c              # 优先级队列
-│   ├── prefix_system.c      # 前缀系统
-│   └── tree_system.c        # 树系统
-└── std/                     # 标准库（C 实现，62 个模块）
-    ├── algorithm/           # 算法（排序、查找、遍历、比较）
-    ├── async/               # 异步操作（事件循环、协程、I/O、定时器管理）
-    ├── base/                # 基础类型转换与比较
-    ├── cli/                 # 命令行参数解析
-    ├── compress/            # 压缩算法（Deflate、Gzip）
-    ├── concurrent/          # 并发原语（线程、锁、原子操作、线程池、Channel、Future/Promise）
-    ├── container/           # 容器（Vector、LinkedList、HashMap、Stack）
-    ├── crypto/              # 加密算法（MD5、SHA256、Base64、CRC32、HMAC）
-    ├── db/                  # 数据库接口
-    ├── encoding/            # 编码转换（Base64、Hex、URL 编码）
-    ├── error/               # 错误处理
-    ├── format/              # 格式化（printf、FormatBuilder）
-    ├── fs/                  # 文件系统操作（文件树遍历、路径操作）
-    ├── gui/                 # GUI 支持（Nuklear 绑定）
-    ├── i18n/                # 国际化（多语言、编码转换、UTF-8、RTL 支持）
-    ├── io/                  # I/O 操作（控制台、文件、路径处理）
-    ├── json/                # JSON 解析与序列化
-    ├── logging/             # 日志系统
-    ├── math/                # 数学函数（标准数学库、三角函数、随机数）
-    ├── memory/              # 内存管理（KMM V4、对齐分配、批量分配、Offset 管理）
-    ├── net/                 # 网络编程（TCP/UDP、DNS 解析）
-    ├── option/              # Option/Result 类型
-    ├── path/                # 路径处理（规范化、连接、扩展名、文件名操作）
-    ├── prefix/              # 前缀系统接口
-    ├── regex/               # 正则表达式（NFA 实现）
-    ├── serialize/           # 序列化（二进制、文本）
-    ├── string/              # 字符串处理（含正则表达式）
-    ├── system/              # 系统调用（进程、文件、环境、网络）
-    ├── task/                # 任务调度（优先级队列）
-    ├── testing/             # 单元测试框架
-    ├── time/                # 时间测量
-    ├── toml/                # TOML 配置解析
-    ├── traits/              # 类型特征
-    ├── unicode/             # Unicode 支持（UTF-8/UTF-16 转换、字符属性）
-    ├── vo/                  # VO 系统接口
-    ├── web/                 # HTTP 服务器/客户端、URL 处理
-    ├── xml/                 # XML 解析
-    ├── graph/               # 图数据结构（BFS、DFS、Dijkstra、Bellman-Ford、拓扑排序）
-    ├── heap/                # 堆数据结构（最小堆、堆排序、合并、K路合并）
-    ├── trie/                # 前缀树（Trie）数据结构（插入、查找、前缀搜索）
-    ├── datetime/            # 日期时间处理（时间戳转换、ISO 8601、时区支持）
-    ├── calendar/            # 日历操作（闰年检测、星期计算、日期加减）
-    ├── protobuf/            # Protocol Buffers 二进制序列化（Varint 编码）
-    ├── msgpack/             # MessagePack 二进制序列化（动态类型）
-    ├── parallel/            # 并行计算（并行 for、并行 reduce、并行排序）
-    ├── tls/                 # TLS 加密协议（连接、握手、加密读写）
-    ├── ssh/                 # SSH 协议（会话管理、通道操作、远程执行）
-    ├── random/              # 随机数生成器（XorShift128+、范围随机、UUID）
-    ├── cmath/               # 复数运算（四则运算、三角函数、指数对数）
-    ├── decimal/             # 高精度小数（任意精度、四则运算、比较）
-    ├── bitset/              # 位向量（位操作、位运算、位查找）
-    ├── deque/               # 双端队列（两端插入/删除、随机访问）
-    ├── ipaddress/           # IP 地址处理（IPv4/IPv6、CIDR、网络判断）
-    ├── subprocess/          # 子进程管理（创建、管道、环境变量）
-    ├── archive/             # 归档处理（Tar/Zip、压缩/解压）
-    └── template/            # 模板引擎（变量替换、过滤器）
-```
+核心设计目标：**用更简单的语法，获得接近 Rust 的安全保证**——通过 SOR（子结构所有权）在编译期消除数据竞争和悬垂指针，而不引入运行时开销。
 
 ---
 
-## ✨ 核心特性
+## 快速示例
 
-### 1. 编译器
-
-Kaula 编译器使用 **Go 1.21+** 实现，包含以下核心组件：
-
-- **词法分析器（Lexer）**：状态机实现，支持关键字、标识符、字面量、字符串、注解（`#[...]`）、前缀引用（`$`）、前缀调用（`@`）等
-- **语法分析器（Parser）**：迭代式递归下降解析，构建抽象语法树
-- **语义分析器（Semantic）**：两遍分析（符号收集 → 函数体分析）、符号表管理、类型检查、作用域验证、泛型约束
-- **代码生成器（Codegen）**：基于模板生成 C 代码，模块化设计（类型/函数/表达式/语句生成器分离），支持泛型实例化缓存
-- **增量编译缓存系统（Cache）**：基于 SHA256 的缓存验证、原子写入、清单管理、自动清理机制
-- **泛型系统**：支持泛型函数实例化与缓存，自动避免命名冲突（`kaula_` 前缀）
-
-**编译流程**：
-```
-源代码 → 词法分析 → 语法分析 → 语义分析 → 代码生成 → C 代码缓存 → Clang 编译 → 可执行文件
-```
-
-**并发编译**：编译器支持多阶段并发处理（词法/语法分析、语义分析、代码生成、C 编译）
-
-**内存与超时控制**：内置内存监控和超时保护，防止编译器资源耗尽
-
-> 📚 **编译器详细文档**：查看 [docs/](docs/) 目录了解各组件的实现细节
-
-### 2. 运行时系统
-
-运行时使用 **C 语言** 实现，提供以下核心功能：
-
-#### KMM V4 ScopedAllocator（作用域内存管理）
-
-基于 V4 架构的分级内存管理系统：
-- 支持 Arena 分级分配
-- ThreadCache 线程局部缓存（原子操作，轻量实时线程安全）
-- SafeAlloc 安全分配
-- Cleanup Stack 自动清理栈
-- Union Domain 联合域管理
-- O(1) 批量释放，作用域退出时自动清理
-
-#### VO (Virtual On-site) 系统
-
-高效的数据和代码缓存机制：
+### Hello World
 
 ```kaula
-vo create(100)              # 创建 VO 模块
-vo_data_load(vo, 1, data)   # 加载数据
-vo_code_load(vo, -1, fn)    # 加载代码
-vo_associate(vo, 1, -1)     # 关联数据和代码
-result = vo_access(vo, 1)   # 访问（自动执行代码）
-```
+import std.io
 
-#### Spend/Call 机制
-
-动态组件管理：
-
-```kaula
-spend(component1, component2):
-    call target1:
-        # 处理逻辑
-    call target2:
-        # 处理逻辑
-```
-
-#### 三级优先级队列
-
-任务调度系统：
-- Priority 0 (HIGH) - 高优先级任务
-- Priority 1 (MEDIUM) - 普通任务
-- Priority 2 (LOW) - 低优先级任务
-
-#### 跨平台支持
-
-`kaula.h` 提供跨平台宏定义：
-- Windows / Linux / macOS 平台检测
-- GCC / Clang / MSVC 编译器检测
-- 线程局部存储（TLS）支持
-- 原子操作支持（C11 或 GCC 内置）
-
-### 3. 标准库
-
-提供超过 **700+** 个标准函数，包括：
-
-| 模块 | 功能 |
-|------|------|
-| **base** | 类型转换、比较、类型判断 |
-| **memory** | KMM V4、快速分配器、内存池、对齐分配、批量分配 |
-| **string** | 字符串创建、操作、搜索、替换、正则表达式 |
-| **io** | 控制台 I/O、文件操作、路径处理 |
-| **math** | 数学函数、三角函数、随机数 |
-| **container** | Vector、LinkedList、HashMap、Stack |
-| **concurrent** | 线程、互斥锁、条件变量、信号量、读写锁、原子操作、线程池、Channel、Future/Promise |
-| **async** | 异步任务、事件循环、协程、异步 I/O、定时器管理 |
-| **system** | 系统信息、进程管理、环境变量、文件系统、网络状态 |
-| **task** | 任务创建、优先级队列调度 |
-| **vo** | VO 系统接口 |
-| **prefix** | 前缀系统接口 |
-| **error** | 错误处理、错误类型、错误打印 |
-| **format** | 格式化输出、FormatBuilder |
-| **time** | 时间测量、日期时间转换 |
-| **i18n** | 国际化、多语言支持、编码转换、RTL 支持 |
-| **gui** | GUI 支持（Nuklear 绑定） |
-| **web** | HTTP 服务器/客户端、URL 处理、MIME 类型 |
-| **json** | JSON 解析、序列化、反序列化、pretty 打印 |
-| **crypto** | MD5、SHA256、Base64、CRC32、HMAC |
-| **net** | TCP/UDP 套接字、DNS 解析 |
-| **toml** | TOML 配置解析 |
-| **xml** | XML 解析 |
-| **logging** | 日志系统 |
-| **testing** | 单元测试框架 |
-| **windows** | Windows 特定功能（注册表、进程信息） |
-| **syscall** | 系统调用接口 |
-| **algorithm** | 排序、查找、遍历、比较算法 |
-| **cli** | 命令行参数解析 |
-| **compress** | 压缩算法（Deflate、Gzip） |
-| **db** | 数据库接口 |
-| **encoding** | 编码转换（Base64、Hex、URL 编码） |
-| **fs** | 文件系统操作（文件树遍历、路径操作） |
-| **option** | Option/Result 类型 |
-| **path** | 路径处理（规范化、连接、扩展名、文件名操作） |
-| **regex** | 正则表达式（NFA 实现） |
-| **serialize** | 序列化（二进制、文本） |
-| **traits** | 类型特征 |
-| **unicode** | Unicode 支持（UTF-8/UTF-16 转换、字符属性）
-
----
-
-## 🛠️ 编译器工具链
-
-### kaulac 命令行用法
-
-```bash
-# 基本用法
-kaulac.exe [选项] <源文件.kl>
-
-# 初始化项目配置
-kaulac.exe --init
-
-# 编译单个文件
-kaulac.exe program.kl
-
-# 使用 Release 模式编译
-kaulac.exe --release program.kl
-
-# 启用 SOR 所有权分析
-kaulac.exe --sor program.kl
-
-# 指定优化级别
-kaulac.exe --opt O0 program.kl
-
-# 禁用缓存强制重新编译
-kaulac.exe --no-cache program.kl
-
-# 查看缓存统计信息
-kaulac.exe --cache-stats
-
-# 清理过期缓存（7 天以上）
-kaulac.exe --clean-cache
-
-# 清空所有缓存
-kaulac.exe --purge-cache
-
-# 生成源码映射
-kaulac.exe --sourcemap program.kl
-
-# 自定义内存和超时限制
-kaulac.exe --memory-limit 8192 --timeout 300 program.kl
-
-# 额外 C 编译器参数
-kaulac.exe --cflags "-Wall -Werror" --defines "DEBUG=1" program.kl
-```
-
-### 命令行选项
-
-| 选项 | 说明 |
-|------|------|
-| `--init` | 生成默认 `kaula.json` 配置文件 |
-| `--no-cache` | 禁用增量编译，强制重新编译 |
-| `--cache-stats` | 显示缓存统计信息（条目数、大小、时间范围） |
-| `--clean-cache` | 清理过期缓存条目（7 天以上） |
-| `--purge-cache` | 清空所有缓存 |
-| `--sor` | 启用 SOR 编译时所有权分析（默认 -O3） |
-| `--release` | Release 模式（-O3 优化） |
-| `--opt <level>` | 优化级别（O0/O1/O2/O3），覆盖所有默认值 |
-| `--sourcemap` | 生成源码映射文件 |
-| `--memory-limit <MB>` | 内存限制（默认 4096 MB） |
-| `--timeout <sec>` | 编译超时限制（默认 120 秒） |
-| `--template <path>` | 代码生成模板路径（默认：templates） |
-| `--include <path>` | C 头文件包含路径（默认：../std） |
-| `--stdlib <path>` | 标准库路径（自动检测） |
-| `--pkglib <path>` | 第三方库路径（自动检测） |
-| `--target <lang>` | 目标语言（默认：c） |
-| `--output-dir <dir>` | 输出目录 |
-| `--vo-cache <size>` | VO 缓存大小（默认：2048） |
-| `--queue <size>` | 队列大小（默认：100） |
-| `--spendable <size>` | 可花费组件大小（默认：10） |
-| `--cflags <flags>` | 额外的 C 编译器参数 |
-| `--defines <macros>` | 额外的 C 宏定义（逗号分隔） |
-| `--libs <libs>` | 额外的链接库（逗号分隔） |
-| `--analyze-pkg <name>` | 分析指定包并生成配置文件 |
-| `--analyze-pkg-all` | 分析所有 pkglib 中的包 |
-
-> 📋 所有参数均可通过 `kaula.json` 配置文件设置，命令行参数优先级更高。详见 [编译配置文件](docs/build-config.md)。
-
-### 编译流程
-
-```
-┌─────────────┐
-│ 源文件.kl    │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ 词法分析    │ 6ms
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ 语法分析    │ (并发)
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ 语义分析    │ 3ms
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ 代码生成    │ 生成 C 代码
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ Clang 编译   │ 2.6s
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ 可执行文件   │
-└─────────────┘
-```
-
-**典型编译时间**：~2.9s（首次编译） / ~2.6s（缓存命中）
-
-### 增量编译
-
-编译器支持智能增量编译，通过缓存机制加速重复编译：
-
-```bash
-# 首次编译（完整流程）
-$ kaulac.exe main.kl
-[Cache] Stored cache for main.kl (362 bytes)
-[Compile] Completed in 2.85s
-
-# 第二次编译（使用缓存）
-$ kaulac.exe main.kl
-[Cache] Cache hit for main.kl
-[Cache] Using cached C code: cache/main.c
-[Compile] Completed in 2.64s (cache hit)
-
-# 查看缓存统计
-$ kaulac.exe --cache-stats
-=== Cache Statistics ===
-Total entries: 1
-Total size: 479 bytes (0.00 MB)
-Oldest entry: 2026-04-26 18:32:08
-Newest entry: 2026-04-26 18:32:08
-```
-
-**缓存验证机制**：
-- SHA256 源文件哈希比对
-- 文件大小和修改时间验证
-- 编译器版本追踪
-- 自动失效机制
-- 原子写入（先写临时文件再重命名，确保数据完整性）
-- 清单文件管理（记录所有缓存条目元数据）
-
-### 标准库配置
-
-编译器通过 `stdlib.json` 管理标准库函数签名：
-
-```json
-{
-  "std.io": {
-    "header": "std/io/io.h",
-    "println": {"args": ["const char*"], "varargs": true},
-    "print_int": {"args": ["i64"]},
-    "file_open": {"args": ["const char*", "const char*"], "return": "File"}
-  },
-  "std.math": {
-    "header": "std/math/math.h",
-    "math_sqrt": {"args": ["f64"], "return": "f64"},
-    "math_pow": {"args": ["f64", "f64"], "return": "f64"}
-  }
+fn main() {
+    println("Hello, Kaula!")
 }
 ```
 
-**作用**：
-- 类型检查时验证函数调用
-- 自动生成正确的 C 函数声明
-- 追踪模块依赖关系
+### 变量与类型
 
-### 第三方库集成
-
-编译器自动从 `pkglib/` 目录加载第三方库：
-
-```bash
-pkglib/
-├── stb_image/
-│   └── stb_image.json
-├── nuklear/
-│   └── nuklear.json
-└── zlib/
-    └── zlib.json
+```kaula
+i32 x = 42               # 显式类型
+auto y = 3.14             # 类型推导
+string name = "Kaula"
+bool flag = true
+i32* ptr = &x             # 指针
+i32? maybe = null         # 可空类型
+const MAX = 1024          # 编译期常量
 ```
 
-**库配置文件格式**：
+### 函数与泛型
 
-```json
-{
-  "name": "stb_image",
-  "headers": ["\"stb_image.h\""],
-  "libraries": ["stb_image.lib"],
-  "functions": {
-    "stbi_load": {
-      "args": ["const char*", "int*", "int*", "int*", "int"],
-      "return": "void*"
+```kaula
+fn add(i32 a, i32 b) i32 {
+    return a + b
+}
+
+# 泛型函数
+fn first<T>(T a, T b) T {
+    return a
+}
+
+# 内联汇编
+#[asm]
+fn read_cr0() u64 {
+    mov %cr0, %rax
+}
+```
+
+### 控制流
+
+```kaula
+# if/else
+if x > 0 {
+    println("positive")
+} else if x == 0 {
+    println("zero")
+} else {
+    println("negative")
+}
+
+# while
+while x > 0 {
+    x = x - 1
+}
+
+# for
+for (i32 i = 0; i < 10; i = i + 1) {
+    println(i)
+}
+
+# switch
+switch x {
+    case 1:
+        println("one")
+    case 2:
+        println("two")
+    default:
+        println("other")
+}
+```
+
+### struct 与 class
+
+```kaula
+# 结构体 - 值类型
+#[packed]
+struct PacketHeader {
+    u8 version
+    u8 flags
+    u16 length
+}
+
+# 类 - 引用语义，支持方法和构造函数
+class Vec2 {
+    f64 x
+    f64 y
+
+    constructor(f64 x, f64 y) {
+        self.x = x
+        self.y = y
     }
-  }
+
+    fn length() f64 {
+        return math_sqrt(self.x * self.x + self.y * self.y)
+    }
+}
+
+# 接口
+interface Printable {
+    fn to_string() string
 }
 ```
 
-**使用方式**：
+### enum 与 match
 
 ```kaula
-import stb_image
+# 代数数据类型
+enum Option<T> {
+    Some(T)
+    None
+}
 
-fn main():
-    # 使用 stb_image 加载图片
-    void* img = stbi_load("texture.png", &width, &height, &channels, 4)
+enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+# 模式匹配
+auto result = fetch_data()
+match result {
+    Ok(data) => {
+        println(data)
+    }
+    Err(e) => {
+        println("error: " + e)
+    }
+    _ => {
+        println("unknown")
+    }
+}
 ```
 
-### 编译输出
+### SOR 子结构所有权
 
-```bash
-$ kaulac.exe program.kl
-=== Concurrent Compilation Pipeline ===
-Starting at 18:32:08.619
+Kaula 的核心安全机制——SOR（Sub-structural Ownership）在编译期追踪资源所有权，无需 GC 或引用计数开销：
 
-[Stage 1] Lexing + Parsing...
-[Stage 1] Lex + Parse completed in 6.0025ms
+```kaula
+#[sor]
+fn process() {
+    auto buf = std.memory.kmm_v4_alloc(1024)
 
-[Stage 2] Semantic Analysis...
-[Stage 2] Semantic Analysis completed in 0.9999ms
+    # yeide: 转移所有权，原变量不可再访问
+    yeide buf -> owner
 
-[Stage 3] Code Generation + C Compilation...
-[Cache] Stored cache for program.kl (362 bytes)
-[Compile] Clang command args:
-  cache/program.c
-  -o program.exe
-  -O3
-  -I E:\kaula
-  -I E:\kaula\src
-  -I E:\kaula\std
-  E:\kaula\src\kmm_scoped_allocator.c
-  E:\kaula\std\io\io.c
-[Compile] Successfully compiled: program.exe
-[Compile] Completed in 2.8505352s
+    # extract: 从集合中提取子结构所有权
+    extract owner[0] -> first_byte
 
-=== Compilation Results ===
-Status: SUCCESS
-Output: program.exe
-Cache: cache/program.c
-
-=== Timing Breakdown ===
-Stage 1 (Lex + Parse):         6.0025ms
-Stage 2 (Semantic):            0.9999ms
-Stage 3 (Codegen+Compile):    2.8505352s
----------------------------------
-Total End-to-End:              2.9200441s
+    # release: 将所有权分发到多个持有者
+    release owner -> [holder_a, holder_b]
+}
 ```
 
-### 错误处理
+三大原语：
+- **yeide** — 所有权转移（move 语义）
+- **extract** — 子结构提取（从复合类型中取出部分所有权）
+- **release** — 所有权分发（将一个资源拆分给多个持有者）
 
-编译器提供详细的错误报告和修复建议：
+启用方式：`--sor` 全局启用，或 `#[sor]` 单函数启用。
 
-```bash
-=== Compilation Errors ===
+### Prefix 前缀系统
 
-[Lexing & Parsing Errors] (2 errors)
-  1. Syntax Error at line 7, column 34: unexpected token: PLUS
-     Suggestion: Check for missing or extra punctuation
-  2. Syntax Error at line 7, column 35: unexpected token: RPAREN
-     Suggestion: Check for missing or extra punctuation
+Kaula 独有的声明式代码复用机制：
 
-[Semantic Analysis Errors] (1 errors)
-  1. Type Error at line 12, column 5: undefined variable 'x'
-     Suggestion: Declare variable before use or check scope
+```kaula
+# 定义前缀模板
+prefix Logger {
+    $message
+    $level
+    auto log = $level + ": " + $message
+    println(log)
+}
 
-Total: 3 error(s)
+# 用 @ 调用前缀
+@Logger(message = "server started", level = "INFO")
+
+# 前缀内可用 $ 引用参数
+prefix Validate {
+    $value
+    $min
+    if $value < $min {
+        println("validation failed")
+    }
+}
+
+@Validate(value = age, min = 0)
 ```
 
-### 性能优化选项
+### Spend/Call 消费式遍历
 
-**编译器优化**：
-- `-O3`：默认使用 Clang 最高优化级别
-- 并发编译：多阶段并行处理
-- 增量缓存：跳过未变化的代码生成
+对集合的逐元素结构化处理：
 
-**运行时优化**：
-- KMM V4 内存管理：O(1) 批量释放
-- VO 缓存系统：热点数据自动缓存
-- 优先级队列：任务调度优化
-
-### 调试技巧
-
-**1. 查看生成的 C 代码**：
-```bash
-# C 代码保存在 cache/ 目录
-cat cache/program.c
+```kaula
+auto items = [10, 20, 30]
+spend(items) {
+    call(1) {
+        println("first")
+    }
+    call(2) {
+        println("second")
+    }
+    call(3) {
+        println("third")
+    }
+}
 ```
 
-**2. 禁用优化调试**：
-```bash
-# 修改 compileCCode 函数中的 -O3 为 -O0 或 -g
+### 属性注解
+
+```kaula
+#[packed]                         # 紧凑内存布局
+#[aligned(16)]                    # 对齐要求
+#[section(".isr_vector")]         # 链接到指定段
+#[volatile]                       # volatile 语义
+#[naked]                          # 裸函数（无 prologue/epilogue）
+#[inline]                         # 内联提示
+#[no_kmm]                         # 禁用 KMM 内存管理
+#[deprecated]                     # 标记弃用
+#[weak]                           # 弱符号
 ```
 
-**3. 查看编译器日志**：
-```bash
-# 编译器输出包含详细的阶段信息
-# 检查 [Stage X] 和 [Cache] 日志
+### 类型反射与编译期计算
+
+```kaula
+auto sz = sizeof(PacketHeader)        # 类型大小
+auto al = alignof(PacketHeader)       # 类型对齐
+auto off = offsetof(Packet, length)   # 字段偏移
+
+# 编译期表达式
+comptime auto count = #field_count(MyStruct)
+comptime auto name = #type_name(i32)
+comptime auto kind = #type_kind(MyEnum)
 ```
 
-**4. 内存泄漏检测**：
-```bash
-# 编译器内置内存和超时监控
-# 超出限制时自动终止并报告
+### extern 与 FFI
+
+```kaula
+# 声明外部符号
+extern bss_start: u8
+
+# 声明外部函数
+extern fn boot_main() -> void
+
+# 导入标准库
+import std.io
+import std.math
+import std.string
 ```
 
-### 构建系统
+### 裸机开发
 
-**编译编译器自身**：
+```kaula
+#[naked]
+#[section(".init")]
+fn _start() {
+    # 直接操作硬件寄存器
+    #[volatile] u32* reg = 0x40000000
+    *reg = 0x01
+}
+
+# --freestanding 编译模式
+# 自动链接 kaula_freestanding_runtime.c
+# 提供 memset/memcpy/memmove 等最小运行时
+```
+
+---
+
+## 标准库
+
+62 个模块，800+ 函数，覆盖从系统编程到 Web 开发：
+
+| 分类 | 模块 |
+|------|------|
+| **内存** | memory（KMM V4 作用域分配器）、bitset |
+| **容器** | container（Vector/LinkedList/HashMap/Stack）、deque、heap、trie、graph |
+| **字符串** | string、regex、unicode、template |
+| **I/O** | io、fs、path |
+| **并发** | concurrent（线程/锁/原子/线程池/Channel/Future）、async、parallel |
+| **网络** | net、web、ssh、tls |
+| **序列化** | json、toml、xml、protobuf、msgpack、serialize |
+| **数学** | math、cmath、decimal、random |
+| **编码** | encoding、crypto、compress、archive |
+| **系统** | system、subprocess、cli、time、datetime、calendar |
+| **类型** | option、traits、base、error |
+| **运行时** | vo、prefix、task、format、logging、testing、i18n |
+| **GUI** | gui（Nuklear 绑定） |
+
+---
+
+## 编译器
+
+### 安装
+
 ```bash
 cd kaula-compiler
 go build -o kaulac.exe cmd/kaulac/main.go
 ```
 
-**运行测试**：
+依赖：Go 1.21+、Clang
+
+### 编译流程
+
+```
+源代码 .kl → 词法分析 → 语法分析 → 语义分析 → C 代码生成 → Clang 编译 → 可执行文件
+```
+
+支持多阶段并发编译和基于 SHA256 的增量缓存。
+
+### 用法
+
 ```bash
-# 运行编译器测试套件
-go test ./internal/...
+kaulac [选项] <源文件.kl>
 
-# 运行基准测试
-go test -bench=. ./internal/lexer
-go test -bench=. ./internal/parser
-go test -bench=. ./internal/codegen
+kaulac program.kl              # 编译
+kaulac --sor program.kl        # 启用 SOR 所有权分析
+kaulac --release program.kl    # Release 模式 (-O3)
+kaulac --freestanding program.kl  # 裸机模式
+kaulac --sourcemap program.kl  # 生成源码映射
+kaulac --no-cache program.kl   # 禁用缓存
 ```
 
-**交叉编译**：
-```bash
-# Windows (当前平台)
-GOOS=windows GOARCH=amd64 go build -o kaulac.exe
+常用选项：
 
-# Linux
-GOOS=linux GOARCH=amd64 go build -o kaulac
+| 选项 | 说明 |
+|------|------|
+| `--sor` | 启用 SOR 编译时所有权分析 |
+| `--release` | Release 模式（-O3） |
+| `--freestanding` | 裸机模式（无 OS 依赖） |
+| `--opt <level>` | 优化级别 O0/O1/O2/O3 |
+| `--sourcemap` | 生成源码映射 |
+| `--no-cache` | 禁用增量编译 |
+| `--output-format <fmt>` | 输出格式 elf/bin/obj |
 
-# macOS
-GOOS=darwin GOARCH=amd64 go build -o kaulac
-```
-
-### 编译器开发文档
-
-编译器各组件的详细文档位于 [docs/](docs/) 目录：
-
-| 组件 | 文档 | 说明 |
-|------|------|------|
-| 架构 | [编译器架构](docs/compiler-architecture.md) | 整体架构、编译流程、目录结构 |
-| 配置 | [编译配置文件](docs/build-config.md) | kaula.json 配置系统、所有参数说明 |
-| 词法分析 | [词法分析器](docs/lexer.md) | Token 类型、扫描策略、UTF-8 支持 |
-| 语法分析 | [语法分析器](docs/parser.md) | 语法规则、递归下降解析、错误恢复 |
-| AST | [抽象语法树](docs/ast.md) | 节点类型、层次结构、遍历机制 |
-| 语义分析 | [语义分析](docs/semantic-analysis.md) | 两遍分析、类型检查、泛型约束 |
-| 代码生成 | [代码生成器](docs/code-generation.md) | 模块化生成、模板系统、SOR 集成 |
-| 符号表 | [符号表](docs/symbol-table.md) | 层次化作用域、泛型支持 |
-| 缓存 | [增量编译缓存](docs/cache-system.md) | SHA-256 验证、原子写入 |
-| 错误处理 | [错误处理](docs/error-handling.md) | 错误类型、源码上下文、修复建议 |
-| SOR | [SOR 子结构所有权](docs/sor-system.md) | 所有权原语、分析流程 |
-| 标准库 | [标准库集成](docs/stdlib-integration.md) | 配置驱动、自动发现 |
-| 运行时 | [核心运行时特性](docs/core-runtime.md) | VO 系统、前缀系统、任务调度 |
-| 资源控制 | [超时与内存控制](docs/timeout-memory.md) | 资源监控、阶段统计 |
-
-### 项目结构最佳实践
-
-**推荐的目录组织**：
-```
-myproject/
-├── src/
-│   ├── main.kl          # 主入口
-│   ├── utils.kl         # 工具函数
-│   └── modules/         # 模块目录
-├── cache/               # 编译缓存（自动创建）
-├── build.bat            # 构建脚本
-└── .gitignore
-    cache/
-    *.exe
-```
-
-**构建脚本示例** (build.bat)：
-```batch
-@echo off
-echo Building Kaula project...
-
-REM 清理旧缓存（可选）
-kaulac.exe --clean-cache
-
-REM 编译主程序
-kaulac.exe src/main.kl
-
-REM 检查编译结果
-if exist src\main.exe (
-    echo Build successful!
-    src\main.exe
-) else (
-    echo Build failed!
-    exit /b 1
-)
-```
-
-### 常见问题
-
-**Q: 编译器找不到 clang？**
-```bash
-# 确保 clang 在 PATH 中
-# Windows: 安装 LLVM 并添加到系统 PATH
-# Linux: sudo apt install clang
-```
-
-**Q: 缓存目录在哪里？**
-```bash
-# 缓存位于工作目录的 cache/ 子目录
-# 可以通过 --cache-stats 查看使用情况
-```
-
-**Q: 如何禁用增量编译？**
-```bash
-# 使用 --no-cache 选项
-kaulac.exe --no-cache program.kl
-```
-
-**Q: 标准库如何更新？**
-```bash
-# 修改 stdlib.json 后重新编译
-# 编译器会自动加载最新配置
-```
-
-**Q: 如何适配第三方 C 库？**
-
-**步骤 1：在 pkglib/ 目录创建库配置文件夹**
-```bash
-pkglib/
-└── mylib/
-    └── mylib.json
-```
-
-**步骤 2：编写库配置文件（mylib.json）**
-```json
-{
-  "name": "mylib",
-  "headers": ["\"mylib.h\""],
-  "libraries": ["mylib.lib"],
-  "functions": {
-    "mylib_init": {
-      "args": [],
-      "return": "int"
-    },
-    "mylib_process": {
-      "args": ["const char*", "int"],
-      "return": "void*"
-    },
-    "mylib_cleanup": {
-      "args": ["void*"],
-      "return": "void"
-    }
-  }
-}
-```
-
-**字段说明**：
-- `name`: 库名称（用于 import 语句）
-- `headers`: C 头文件路径列表（相对于项目根目录）
-- `libraries`: 需要链接的库文件列表（Windows 为 .lib，Linux 为 .a/.so）
-- `functions`: 函数签名定义
-  - `args`: 参数类型列表（使用 C 类型）
-  - `return`: 返回类型（使用 C 类型）
-
-**步骤 3：在 Kaula 代码中使用**
-```kaula
-import mylib
-
-fn main() {
-    mylib_init()
-    void* result = mylib_process("data", 42)
-    mylib_cleanup(result)
-}
-```
-
-**步骤 4：编译时指定库路径**
-```bash
-# 编译器会自动从 pkglib/加载配置
-kaulac.exe program.kl
-
-# 如果需要额外指定库文件路径
-# 修改 compileCCode 函数添加 -L 参数
-```
-
-**Q: 第三方库如何更新？**
-
-**方法 1：更新头文件**
-```bash
-# 1. 替换 pkglib/mylib/mylib.h 为新版本
-# 2. 检查函数签名是否变化
-# 3. 更新 pkglib/mylib/mylib.json 中的函数定义
-# 4. 重新编译程序
-kaulac.exe --no-cache program.kl
-```
-
-**方法 2：更新库文件**
-```bash
-# 1. 替换编译后的库文件（mylib.lib 或 libmylib.a）
-# 2. 确保新版本的 ABI 兼容
-# 3. 重新链接程序
-kaulac.exe --no-cache program.kl
-```
-
-**方法 3：版本升级注意事项**
-```bash
-# 如果第三方库有破坏性变更（Breaking Changes）：
-# 1. 检查头文件中的函数签名变化
-# 2. 更新 mylib.json 中的函数定义
-# 3. 修改 Kaula 代码中的调用方式
-# 4. 清除缓存并重新编译
-kaulac.exe --purge-cache
-kaulac.exe --no-cache program.kl
-```
-
-**示例：stb_image 库配置**
-```json
-{
-  "name": "stb_image",
-  "headers": ["\"stb_image.h\""],
-  "libraries": [],
-  "functions": {
-    "stbi_load": {
-      "args": ["const char*", "int*", "int*", "int*", "int"],
-      "return": "void*"
-    },
-    "stbi_image_free": {
-      "args": ["void*"],
-      "return": "void"
-    },
-    "stbi_write_png": {
-      "args": ["const char*", "int", "int", "int", "const void*", "int"],
-      "return": "int"
-    }
-  }
-}
-```
-
-**Q: 如何处理第三方库的依赖关系？**
-
-如果第三方库依赖其他库（如 zlib 依赖 libpng）：
-
-```json
-{
-  "name": "zlib",
-  "headers": ["\"zlib.h\""],
-  "libraries": ["zlib.lib"],
-  "dependencies": ["libpng"],  // 声明依赖
-  "functions": {
-    "compress": {
-      "args": ["void*", "unsigned long*", "const void*", "unsigned long"],
-      "return": "int"
-    }
-  }
-}
-```
-
-编译器会按依赖顺序自动链接所有必需的库。
+完整选项列表和 kaula.json 配置见 [docs/](docs/)。
 
 ---
 
-## 📄 许可证
+## 项目结构
 
-本项目采用 Apache License 2.0 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情
+```
+kaula/
+├── kaula-compiler/          # 编译器（Go 实现）
+│   ├── cmd/kaulac/          # 编译器 CLI
+│   ├── internal/
+│   │   ├── lexer/           # 词法分析
+│   │   ├── parser/          # 语法分析（递归下降）
+│   │   ├── sema/            # 语义分析（两遍、泛型、SOR）
+│   │   ├── codegen/         # C 代码生成
+│   │   ├── sor/             # SOR 所有权分析引擎
+│   │   ├── symbol/          # 符号表
+│   │   ├── stdlib/          # 标准库配置
+│   │   └── ...
+│   └── stdlib.json
+├── src/                     # 运行时系统（C 实现）
+│   ├── kaula.h              # 跨平台头文件
+│   ├── kmm_scoped_allocator_v4.h  # KMM V4 内存管理
+│   └── ...
+├── std/                     # 标准库（C 实现，62 个模块）
+├── pkglib/                  # 第三方库（stb_image, nuklear, zlib）
+└── docs/                    # 编译器详细文档
+```
 
 ---
 
-<div align="center">
+## 许可证
 
-**Kaula -更现代更好用的C**
-
-</div>
+[Apache License 2.0](LICENSE)
