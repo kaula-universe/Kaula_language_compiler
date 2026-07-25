@@ -229,6 +229,16 @@ func traverseNode(node Node, visitor func(Node)) {
 		for _, stmt := range n.Body {
 			traverseNode(stmt, visitor)
 		}
+	case *ForInStatement:
+		if n.Variable != nil {
+			traverseNode(n.Variable, visitor)
+		}
+		if n.Iterable != nil {
+			traverseNode(n.Iterable, visitor)
+		}
+		for _, stmt := range n.Body {
+			traverseNode(stmt, visitor)
+		}
 	case *ReturnStatement:
 		if n.Value != nil {
 			traverseNode(n.Value, visitor)
@@ -242,32 +252,6 @@ func traverseNode(node Node, visitor func(Node)) {
 	case *VariableDeclaration:
 		if n.Value != nil {
 			traverseNode(n.Value, visitor)
-		}
-	case *SwitchStatement:
-		if n.Expression != nil {
-			traverseNode(n.Expression, visitor)
-		}
-		for _, stmt := range n.Statements {
-			traverseNode(stmt, visitor)
-		}
-		for _, caseStmt := range n.Cases {
-			traverseNode(&caseStmt, visitor)
-			if caseStmt.Value != nil {
-				traverseNode(caseStmt.Value, visitor)
-			}
-			for _, stmt := range caseStmt.Body {
-				traverseNode(stmt, visitor)
-			}
-		}
-		for _, stmt := range n.Default {
-			traverseNode(stmt, visitor)
-		}
-	case *CaseStatement:
-		if n.Value != nil {
-			traverseNode(n.Value, visitor)
-		}
-		for _, stmt := range n.Body {
-			traverseNode(stmt, visitor)
 		}
 	case *ExpressionStatement:
 		if n.Expression != nil {
@@ -1016,6 +1000,29 @@ func (w *WhileStatement) SetPosition(pos Position) {
 	w.Pos = pos
 }
 
+// ForInStatement 表示安全迭代语句 for x in iterable { body }
+// 编译器生成的索引变量在用户代码中不可见，消除越界可能
+type ForInStatement struct {
+	Variable *Identifier // 循环变量名（用户可见的迭代变量）
+	Iterable Expression  // 可迭代对象（支持 []T 和 [N]T）
+	Body     []Statement
+	Pos      Position
+}
+
+func (f *ForInStatement) statementNode() {}
+
+func (f *ForInStatement) String() string {
+	return "ForInStatement"
+}
+
+func (f *ForInStatement) GetPosition() Position {
+	return f.Pos
+}
+
+func (f *ForInStatement) SetPosition(pos Position) {
+	f.Pos = pos
+}
+
 // ForStatement 表示for语句
 type ForStatement struct {
 	Init      Statement
@@ -1219,57 +1226,6 @@ func (v *VariableDeclaration) SetPosition(pos Position) {
 	v.Pos = pos
 }
 
-// SwitchStatement 表示switch语句
-type SwitchStatement struct {
-	Expression Expression
-	Statements []Statement
-	Cases      []CaseStatement
-	Default    []Statement
-	Pos        Position
-}
-
-// statementNode 实现Statement接口
-func (s *SwitchStatement) statementNode() {}
-
-// String 实现Node接口
-func (s *SwitchStatement) String() string {
-	return "SwitchStatement"
-}
-
-// GetPosition 实现Node接口
-func (s *SwitchStatement) GetPosition() Position {
-	return s.Pos
-}
-
-// SetPosition 实现Node接口
-func (s *SwitchStatement) SetPosition(pos Position) {
-	s.Pos = pos
-}
-
-// CaseStatement 表示case语句
-type CaseStatement struct {
-	Value Expression
-	Body  []Statement
-	Pos   Position
-}
-
-// statementNode 实现Statement接口
-func (c *CaseStatement) statementNode() {}
-
-// String 实现Node接口
-func (c *CaseStatement) String() string {
-	return "CaseStatement"
-}
-
-// GetPosition 实现Node接口
-func (c *CaseStatement) GetPosition() Position {
-	return c.Pos
-}
-
-// SetPosition 实现Node接口
-func (c *CaseStatement) SetPosition(pos Position) {
-	c.Pos = pos
-}
 
 
 
@@ -2025,6 +1981,32 @@ func (l *LiteralExpression) GetPosition() Position {
 // SetPosition 实现Node接口
 func (l *LiteralExpression) SetPosition(pos Position) {
 	l.Pos = pos
+}
+
+// StructLiteralField 表示结构体字面量的一个字段初始化
+type StructLiteralField struct {
+	Name  string // 字段名（不含前导 .）
+	Value Expression
+}
+
+// StructLiteral 表示结构体字面量表达式 { .field = value, ... }
+type StructLiteral struct {
+	Fields []StructLiteralField
+	Pos    Position
+}
+
+func (s *StructLiteral) expressionNode() {}
+
+func (s *StructLiteral) String() string {
+	return "StructLiteral"
+}
+
+func (s *StructLiteral) GetPosition() Position {
+	return s.Pos
+}
+
+func (s *StructLiteral) SetPosition(pos Position) {
+	s.Pos = pos
 }
 
 // ParenExpression 表示括号表达式

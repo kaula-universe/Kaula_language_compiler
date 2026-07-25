@@ -1,0 +1,26 @@
+import std.io
+
+fn add(int a, int b) int {
+    return a + b
+}
+
+fn greet(string name) {
+    println("Hello, ", name)
+}
+
+fn factorial(int n) int {
+    if (n <= 1) {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn main() {
+    int result = add(10, 20)
+    println("10 + 20 = ", result)
+
+    greet("Kaula")
+
+    int fact = factorial(5)
+    println("5! = ", fact)
+}

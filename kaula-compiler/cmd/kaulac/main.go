@@ -936,6 +936,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	clangArgs := []string{"-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir}
+	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 	clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
 	if poolCapacity > 0 {
 		clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
@@ -1206,6 +1207,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 	} // end if !cfg.Freestanding
+
+	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 
 	// 添加 Windows 系统库链接（裸机模式跳过）
 	if runtime.GOOS == "windows" && (cfg == nil || !cfg.Freestanding) {

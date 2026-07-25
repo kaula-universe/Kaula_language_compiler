@@ -4,6 +4,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
+
+// ==================== 基础类型 ====================
+// 带长度前缀的字符串类型（性能优先，O(1) 取长度）
+#ifndef KAULA_STRING_DEFINED
+#define KAULA_STRING_DEFINED
+typedef struct {
+    size_t len;
+    char* ptr;
+} String;
+#endif
 
 // ==================== 跨平台支持 ====================
 // platform.h will be included after configuration constants to avoid circular dependency

@@ -72,6 +72,22 @@ Type*      → Type*
 Box<int>   → Box_int (泛型实例化)
 ```
 
+### 用户类型命名消歧
+
+为避免与系统头文件中的宏/类型冲突（如 Windows `wingdi.h` 的 `Rectangle` 函数宏），所有用户定义的 struct/class/enum/interface 在生成 C 代码时统一添加 `K_` 前缀：
+
+```
+Kaula 类型 → C 类型
+struct Point        → typedef struct K_Point { ... } K_Point
+struct Rectangle    → typedef struct K_Rectangle { ... } K_Rectangle
+class Box           → typedef struct K_Box { ... } K_Box
+interface Drawable  → typedef struct K_Drawable_MethodGroup { ... } K_Drawable_MethodGroup
+enum Option         → typedef enum { Option_Kind_... } Option_Kind
+                       typedef struct K_Option { Option_Kind kind; union { ... } data; } K_Option
+```
+
+`MapKaulaTypeToC` 函数自动处理前缀转换：当类型名注册在 `structTypes` 中时，返回带 `K_` 前缀的 C 类型名。用户代码中直接使用 Kaula 原名（如 `Rectangle`），编译器在代码生成阶段统一替换为 `K_Rectangle`。
+
 ## 函数生成 (funcgen.go)
 
 生成 C 函数：

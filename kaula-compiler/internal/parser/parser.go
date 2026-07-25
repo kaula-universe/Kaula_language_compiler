@@ -241,9 +241,23 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 	case lexer.TOKEN_WHILE:
 		return p.parseWhileStatementIterative()
 	case lexer.TOKEN_FOR:
+		// for x in expr { body } 语法
+		if p.peekTok.Type == lexer.TOKEN_IDENT {
+			varName := p.peekTok.Value
+			// need to check if identifier is followed by "in"
+			// save state, consume identifier, check next
+			savedCur := p.curTok
+			savedPeek := p.peekTok
+			p.nextToken()
+			p.nextToken() // consume identifier too
+			if p.curTok.Type == lexer.TOKEN_IN {
+				return p.parseForInStatement(varName)
+			}
+			// not for-in, restore and fall through
+			p.curTok = savedCur
+			p.peekTok = savedPeek
+		}
 		return p.parseForStatementIterative()
-	case lexer.TOKEN_SWITCH:
-		return p.parseSwitchStatementIterative()
 	case lexer.TOKEN_RETURN:
 		return p.parseReturnStatementIterative()
 	case lexer.TOKEN_BREAK:
@@ -1489,6 +1503,43 @@ func (p *Parser) parseWhileStatementIterative() *ast.WhileStatement {
 	return stmt
 }
 
+// parseForInStatement 解析 for x in expr { body } 安全迭代语句
+// 调用时 curTok = TOKEN_IN, peekTok = 表达式开始
+func (p *Parser) parseForInStatement(varName string) *ast.ForInStatement {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken() // consume TOKEN_IN
+
+	iterExpr := p.parseExpressionIterative()
+
+	stmt := &ast.ForInStatement{
+		Variable: &ast.Identifier{Name: varName, Pos: pos},
+		Iterable: iterExpr,
+		Body:     []ast.Statement{},
+		Pos:      pos,
+	}
+
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			bodyStmt := p.parseStatementIterative()
+			if bodyStmt != nil {
+				stmt.Body = append(stmt.Body, bodyStmt)
+			}
+			if bodyStmt == nil && p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+	return stmt
+}
+
 // parseForStatementIterative 迭代解析 for 语句
 func (p *Parser) parseForStatementIterative() *ast.ForStatement {
 	pos := ast.Position{
@@ -1532,92 +1583,6 @@ func (p *Parser) parseForStatementIterative() *ast.ForStatement {
 		}
 		if p.curTok.Type == lexer.TOKEN_RBRACE {
 			p.nextToken()
-		}
-	}
-	return stmt
-}
-
-// parseSwitchStatementIterative 迭代解析 switch 语句
-func (p *Parser) parseSwitchStatementIterative() *ast.SwitchStatement {
-	pos := ast.Position{
-		Line:   p.curTok.Line,
-		Column: p.curTok.Column,
-		File:   p.file,
-	}
-	stmt := &ast.SwitchStatement{
-		Statements: []ast.Statement{},
-		Cases: []ast.CaseStatement{},
-		Default: []ast.Statement{},
-		Pos:    pos,
-	}
-	p.nextToken()
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		p.nextToken()
-		stmt.Expression = p.parseExpressionIterative()
-		if p.curTok.Type == lexer.TOKEN_RPAREN {
-			p.nextToken()
-		}
-	}
-	if p.curTok.Type == lexer.TOKEN_LBRACE {
-		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
-			if p.curTok.Type == lexer.TOKEN_CASE {
-				caseStmt := p.parseCaseStatementIterative()
-				stmt.Cases = append(stmt.Cases, *caseStmt)
-			} else if p.curTok.Type == lexer.TOKEN_DEFAULT {
-				p.nextToken()
-				if p.curTok.Type == lexer.TOKEN_COLON {
-					p.nextToken()
-					for p.curTok.Type != lexer.TOKEN_CASE && p.curTok.Type != lexer.TOKEN_DEFAULT && p.curTok.Type != lexer.TOKEN_RBRACE {
-						bodyStmt := p.parseStatementIterative()
-						if bodyStmt != nil {
-							stmt.Default = append(stmt.Default, bodyStmt)
-						}
-						if p.curTok.Type != lexer.TOKEN_CASE && p.curTok.Type != lexer.TOKEN_DEFAULT && p.curTok.Type != lexer.TOKEN_RBRACE {
-							p.nextToken()
-						}
-					}
-				}
-			} else {
-				bodyStmt := p.parseStatementIterative()
-				if bodyStmt != nil {
-					stmt.Statements = append(stmt.Statements, bodyStmt)
-				}
-				if p.curTok.Type != lexer.TOKEN_RBRACE {
-					p.nextToken()
-				}
-			}
-		}
-		if p.curTok.Type == lexer.TOKEN_RBRACE {
-			p.nextToken()
-		}
-	}
-	return stmt
-}
-
-// parseCaseStatementIterative 迭代解析 case 语句
-func (p *Parser) parseCaseStatementIterative() *ast.CaseStatement {
-	pos := ast.Position{
-		Line:   p.curTok.Line,
-		Column: p.curTok.Column,
-		File:   p.file,
-	}
-	stmt := &ast.CaseStatement{
-		Body: []ast.Statement{},
-		Pos:  pos,
-	}
-	p.nextToken()
-	stmt.Value = p.parseExpressionIterative()
-	if p.curTok.Type == lexer.TOKEN_COLON {
-		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_CASE && p.curTok.Type != lexer.TOKEN_DEFAULT && p.curTok.Type != lexer.TOKEN_RBRACE {
-			bodyStmt := p.parseStatementIterative()
-			if bodyStmt != nil {
-				stmt.Body = append(stmt.Body, bodyStmt)
-			}
-			if p.curTok.Type != lexer.TOKEN_CASE && p.curTok.Type != lexer.TOKEN_DEFAULT && p.curTok.Type != lexer.TOKEN_RBRACE {
-				p.nextToken()
-			}
 		}
 	}
 	return stmt
@@ -2987,13 +2952,51 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		}
 		// 否则忽略（函数声明不是表达式）
 		return nil
-	case lexer.TOKEN_RBRACE, lexer.TOKEN_LBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT, lexer.TOKEN_LSHIFT, lexer.TOKEN_RSHIFT, lexer.TOKEN_RPAREN, lexer.TOKEN_COMMA:
+	case lexer.TOKEN_LBRACE:
+		return p.parseStructLiteralExpression()
+	case lexer.TOKEN_RBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT, lexer.TOKEN_LSHIFT, lexer.TOKEN_RSHIFT, lexer.TOKEN_RPAREN, lexer.TOKEN_COMMA:
 		return nil
 	default:
 		p.error(fmt.Sprintf("unexpected token: %s", lexer.TokenTypeToString(p.curTok.Type)))
 		p.nextToken()
 		return nil
 	}
+}
+
+// parseStructLiteralExpression 解析结构体字面量 { .field = value, ... }
+func (p *Parser) parseStructLiteralExpression() ast.Expression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	stmt := &ast.StructLiteral{
+		Fields: []ast.StructLiteralField{},
+		Pos:    pos,
+	}
+	p.nextToken() // 跳过 {
+	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		if p.curTok.Type == lexer.TOKEN_DOT {
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_IDENT {
+				field := ast.StructLiteralField{Name: p.curTok.Value}
+				p.nextToken()
+				if p.curTok.Type == lexer.TOKEN_ASSIGN {
+					p.nextToken()
+					field.Value = p.parseExpressionIterative()
+				}
+				stmt.Fields = append(stmt.Fields, field)
+			}
+		} else if p.curTok.Type == lexer.TOKEN_COMMA {
+			p.nextToken()
+		} else {
+			p.nextToken()
+		}
+	}
+	if p.curTok.Type == lexer.TOKEN_RBRACE {
+		p.nextToken()
+	}
+	return stmt
 }
 
 // parseIdentifierIterative 迭代解析标识符（支持多级成员访问和索引访问）

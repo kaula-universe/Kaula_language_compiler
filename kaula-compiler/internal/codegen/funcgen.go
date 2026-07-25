@@ -118,6 +118,10 @@ func (fg *FunctionGenerator) bodyHasAllocationCall(bodyStmts []ast.Statement) bo
 			if s != nil && fg.bodyHasAllocationCall(s.Body) {
 				return true
 			}
+		case *ast.ForInStatement:
+			if s != nil && fg.bodyHasAllocationCall(s.Body) {
+				return true
+			}
 		}
 	}
 	return false
@@ -742,9 +746,9 @@ func (fg *FunctionGenerator) mapReturnType(returnType string) string {
 	case "void":
 		return "void "
 	case "string":
-		return "char* "
+		return "String "
 	default:
-		return returnType + " "
+		return fg.codegen.typeGenerator.convertType(returnType, false) + " "
 	}
 }
 

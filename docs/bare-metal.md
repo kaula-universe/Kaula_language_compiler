@@ -274,15 +274,17 @@ struct PageTableEntry {
 生成：
 
 ```c
-typedef struct PageTableEntry {
+typedef struct K_PageTableEntry {
     uint32_t present : 1;
     uint32_t writable : 1;
     uint32_t user : 1;
     // ...
     uint32_t pfn : 20;
     // ...
-} PageTableEntry;
+} K_PageTableEntry;
 ```
+
+> 注意：所有用户定义的 struct 在生成 C 代码时统一添加 `K_` 前缀（如 `K_PageTableEntry`），以避免与系统头文件中的宏/类型冲突（详见[代码生成器文档](code-generation.md#用户类型命名消歧)）。
 
 ## 函数与类型属性
 

@@ -2,9 +2,17 @@
 #define STD_STRING_STRING_H
 
 #include "../base/types.h"
+#include <string.h>
 
-// 字符串类型
-typedef char* String;
+// String 类型由 types.h 提供（struct { size_t len; char* ptr; }）
+
+// 常用常量
+#define STRING_EMPTY ((String){.len=0, .ptr=""})
+
+// 从 C 字符串创建 String（不复制，指针引用）
+static inline String string_wrap(const char* str) {
+    return (String){.len = strlen(str), .ptr = (char*)str};
+}
 
 // 字符串创建函数
 extern String string_create(const char* str);
@@ -12,56 +20,56 @@ extern String string_create_from_char(char c);
 extern String string_create_from_int(i64 value);
 extern String string_create_from_float(f64 value);
 extern String string_create_from_bool(bool value);
-extern String string_copy(const char* str);
-extern String string_substring(const char* str, size_t start, size_t length);
+extern String string_copy(String str);
+extern String string_substring(String str, size_t start, size_t length);
 
 // 字符串操作函数
-extern size_t string_length(const String str);
-extern char string_char_at(const String str, size_t index);
+extern size_t string_length(String str);
+extern char string_char_at(String str, size_t index);
 extern void string_set_char_at(String str, size_t index, char c);
-extern String string_concat(const String str1, const String str2);
-extern String string_concat_char(const String str, char c);
-extern String string_concat_int(const String str, i64 value);
-extern String string_concat_float(const String str, f64 value);
-extern String string_concat_bool(const String str, bool value);
+extern String string_concat(String str1, String str2);
+extern String string_concat_char(String str, char c);
+extern String string_concat_int(String str, i64 value);
+extern String string_concat_float(String str, f64 value);
+extern String string_concat_bool(String str, bool value);
 
 // 字符串比较函数
-extern int string_compare(const String str1, const String str2);
-extern int string_compare_ignore_case(const String str1, const String str2);
-extern bool string_equals(const String str1, const String str2);
-extern bool string_equals_ignore_case(const String str1, const String str2);
+extern int string_compare(String str1, String str2);
+extern int string_compare_ignore_case(String str1, String str2);
+extern bool string_equals(String str1, String str2);
+extern bool string_equals_ignore_case(String str1, String str2);
 
 // 字符串查找函数
-extern size_t string_index_of(const String str, char c);
-extern size_t string_index_of_string(const String str, const String substr);
-extern size_t string_last_index_of(const String str, char c);
-extern size_t string_last_index_of_string(const String str, const String substr);
-extern bool string_contains(const String str, char c);
-extern bool string_contains_string(const String str, const String substr);
+extern size_t string_index_of(String str, char c);
+extern size_t string_index_of_string(String str, String substr);
+extern size_t string_last_index_of(String str, char c);
+extern size_t string_last_index_of_string(String str, String substr);
+extern bool string_contains(String str, char c);
+extern bool string_contains_string(String str, String substr);
 
 // 字符串修改函数
-extern String string_to_upper(const String str);
-extern String string_to_lower(const String str);
-extern String string_trim(const String str);
-extern String string_trim_left(const String str);
-extern String string_trim_right(const String str);
-extern String string_replace(const String str, char old_char, char new_char);
-extern String string_replace_string(const String str, const String old_substr, const String new_substr);
+extern String string_to_upper(String str);
+extern String string_to_lower(String str);
+extern String string_trim(String str);
+extern String string_trim_left(String str);
+extern String string_trim_right(String str);
+extern String string_replace(String str, char old_char, char new_char);
+extern String string_replace_string(String str, String old_substr, String new_substr);
 
 // 字符串分割函数
-extern String* string_split(const String str, char delimiter, size_t* count);
-extern String* string_split_string(const String str, const String delimiter, size_t* count);
+extern String* string_split(String str, char delimiter, size_t* count);
+extern String* string_split_string(String str, String delimiter, size_t* count);
 
 // 字符串转换函数
-extern i64 string_to_int(const String str);
-extern f64 string_to_float(const String str);
-extern bool string_to_bool(const String str);
+extern i64 string_to_int(String str);
+extern f64 string_to_float(String str);
+extern bool string_to_bool(String str);
 
 // 字符串内存管理
 extern void string_free(String str);
 extern String string_realloc(String str, size_t new_size);
 
-// StringBuilder
+// StringBuilder（内部仍使用 char* buffer，输出转为 String）
 typedef struct StringBuilder {
     char* buffer;
     size_t length;
@@ -75,29 +83,19 @@ extern void string_builder_append_char(StringBuilder* sb, char c);
 extern String string_builder_to_string(StringBuilder* sb);
 
 // 字符串工具函数
-extern bool string_is_empty(const String str);
-extern bool string_starts_with(const String str, const String prefix);
-extern bool string_ends_with(const String str, const String suffix);
-extern size_t string_count(const String str, char c);
-extern size_t string_count_string(const String str, const String substr);
+extern bool string_is_empty(String str);
+extern bool string_starts_with(String str, String prefix);
+extern bool string_ends_with(String str, String suffix);
+extern size_t string_count(String str, char c);
+extern size_t string_count_string(String str, String substr);
 
-// KString 操作函数（带长度缓存，避免重复 strlen）
-extern KString kstring_create(const char* str);
-extern KString kstring_create_with_len(const char* str, size_t len);
-extern KString kstring_copy(const KString* ks);
-extern void kstring_concat(KString* dst, const KString* src);
-extern void kstring_append(KString* ks, const char* str);
-extern size_t kstring_length(const KString* ks);
-extern bool kstring_equals(const KString* a, const KString* b);
-extern int kstring_compare(const KString* a, const KString* b);
-extern void kstring_free(KString* ks);
-extern bool string_match_regex(const String str, const String pattern);
-extern size_t string_match_regex_offset(const String str, const String pattern, size_t start_offset);
-extern String* string_find_all_regex(const String str, const String pattern, size_t* count);
-extern String string_replace_regex(const String str, const String pattern, const String replacement);
-extern bool string_validate_email(const String str);
-extern bool string_validate_url(const String str);
-extern bool string_validate_ipv4(const String str);
-extern bool string_validate_number(const String str);
+extern bool string_match_regex(String str, String pattern);
+extern size_t string_match_regex_offset(String str, String pattern, size_t start_offset);
+extern String* string_find_all_regex(String str, String pattern, size_t* count);
+extern String string_replace_regex(String str, String pattern, String replacement);
+extern bool string_validate_email(String str);
+extern bool string_validate_url(String str);
+extern bool string_validate_ipv4(String str);
+extern bool string_validate_number(String str);
 
 #endif // STD_STRING_STRING_H

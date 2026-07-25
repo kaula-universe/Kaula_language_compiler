@@ -223,46 +223,6 @@ func (ma *MemoryAnalyzer) GetDecision(varName string) *MemoryDecision {
 // 代码生成辅助
 // ============================================================================
 
-// GenerateCleanupCode 为作用域退出生成清理代码。
-// bump pool / arena 由 KMM_V4_SCOPE_END 自动回收，此处仅处理特殊情况。
-func GenerateCleanupCode(decisions []*MemoryDecision, scopeID int, indent string) string {
-	var b strings.Builder
-	for _, d := range decisions {
-		if d.ScopeID != scopeID {
-			continue
-		}
-		switch d.DropAction {
-		case DropHollow:
-			if d.IsComposite && len(d.ExtractedChildren) > 0 {
-				b.WriteString(indent)
-				b.WriteString(fmt.Sprintf("/* hollow cleanup: %s */\n", d.VarName))
-			}
-		case DropScopeEnd:
-			if d.FinalState == StateReleased {
-				b.WriteString(indent)
-				b.WriteString(fmt.Sprintf("/* scope-end release: %s — consumers exited */\n", d.VarName))
-			}
-		}
-	}
-	return b.String()
-}
-
-// GenerateScopeCleanupHeader 生成作用域 KMM 头
-func GenerateScopeCleanupHeader(indent string, scopeID int) string {
-	return fmt.Sprintf("%sKMM_V4_SCOPE_START { /* scope %d */\n", indent, scopeID)
-}
-
-// GenerateScopeCleanupFooter 生成作用域 KMM 脚
-func GenerateScopeCleanupFooter(indent string, scopeID int, decisions []*MemoryDecision) string {
-	var b strings.Builder
-	cleanup := GenerateCleanupCode(decisions, scopeID, indent+"    ")
-	if cleanup != "" {
-		b.WriteString(cleanup)
-	}
-	b.WriteString(fmt.Sprintf("%s} KMM_V4_SCOPE_END; /* scope %d */\n", indent, scopeID))
-	return b.String()
-}
-
 // ============================================================================
 // 扩展入口
 // ============================================================================

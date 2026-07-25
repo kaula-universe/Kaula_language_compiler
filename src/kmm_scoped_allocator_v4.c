@@ -169,7 +169,7 @@ void kmm_v4_pool_commit(size_t needed) {
 
 // 为当前线程填充 TLAB
 // 返回新 TLAB 的起始地址，如果失败返回 NULL
-static uint8_t* kmm_v4_tlab_refill(void) {
+uint8_t* kmm_v4_tlab_refill(void) {
     pool_ensure_init();
     if (!g_kmm_v4_pool) return NULL;
     

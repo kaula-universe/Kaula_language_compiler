@@ -365,19 +365,22 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if varDecl == nil {
 				continue
 			}
+			// const 变量：纯编译期常量，不生成运行时 C 代码
+			// 存入常量表供后续编译期求值引用
+			if varDecl.IsConst {
+				if evaluated := cg.tryEvalConstExpr(varDecl.Value); evaluated != "" {
+					cg.constTable[varDecl.Name] = evaluated
+				} else if varDecl.Value != nil {
+					cg.constTable[varDecl.Name] = cg.expressionGenerator.GenerateExpression(varDecl.Value)
+				}
+				continue
+			}
 			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
 			initValue := cg.generateExpression(varDecl.Value)
 			if varDecl.IsAuto {
 				cType = "auto"
 			}
-			// const 变量：尝试编译期求值并存入常量表
-			// 后续引用此变量时，在 codegen 阶段直接内联为字面量
-			if varDecl.IsConst {
-				if evaluated := cg.tryEvalConstExpr(varDecl.Value); evaluated != "" {
-					cg.constTable[varDecl.Name] = evaluated
-				}
-			}
-			// 全局变量：支持属性、static、const
+			// 全局变量：支持属性、static
 			var varPrefix strings.Builder
 			if len(varDecl.Attributes) > 0 {
 				varPrefix.WriteString(generateVarAttributes(varDecl.Attributes))
@@ -920,6 +923,10 @@ func (cg *CodeGenerator) findPrefixInStatements(stmts []ast.Statement, name stri
 			if result := cg.findPrefixInStatements(s.Body, name); result != nil {
 				return result
 			}
+		case *ast.ForInStatement:
+			if result := cg.findPrefixInStatements(s.Body, name); result != nil {
+				return result
+			}
 		case *ast.BlockStatement:
 			if result := cg.findPrefixInStatements(s.Statements, name); result != nil {
 				return result
@@ -991,6 +998,8 @@ func getStmtPos(stmt ast.Statement) *ast.Position {
 		return &s.Pos
 	case *ast.ForStatement:
 		return &s.Pos
+	case *ast.ForInStatement:
+		return &s.Pos
 	case *ast.ReturnStatement:
 		return &s.Pos
 	case *ast.ExpressionStatement:
@@ -1030,8 +1039,6 @@ func getStmtPos(stmt ast.Statement) *ast.Position {
 	case *ast.EnumStatement:
 		return &s.Pos
 	case *ast.TypeAliasStatement:
-		return &s.Pos
-	case *ast.SwitchStatement:
 		return &s.Pos
 	case *ast.CallStatement:
 		return &s.Pos

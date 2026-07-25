@@ -1,0 +1,16 @@
+import std.io
+
+fn main() {
+    int x = 42
+    float y = 3.14
+    string name = "Kaula"
+    bool flag = true
+
+    println("x = ", x)
+    println("y = ", y)
+    println("name = ", name)
+    println("flag = ", flag)
+
+    auto z = x + 8
+    println("z = ", z)
+}

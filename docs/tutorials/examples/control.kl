@@ -1,0 +1,27 @@
+import std.io
+
+fn main() {
+    println("=== if/else ===")
+    int score = 85
+    if (score >= 90) {
+        println("Grade: A")
+    } else if (score >= 80) {
+        println("Grade: B")
+    } else {
+        println("Grade: C")
+    }
+
+    println("=== while ===")
+    int i = 0
+    while (i < 5) {
+        println("i = ", i)
+        i = i + 1
+    }
+
+    // C-style for still available for counter loops
+    // for-in (for x in arr) supported when array variables are available
+    println("=== for ===")
+    for (int j = 0; j < 3; j = j + 1) {
+        println("j = ", j)
+    }
+}

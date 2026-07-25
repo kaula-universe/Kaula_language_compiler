@@ -152,7 +152,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	case *ast.FloatLiteral:
 		return strconv.FormatFloat(e.Value, 'f', -1, 64)
 	case *ast.StringLiteral:
-		return "\"" + e.Value + "\""
+		escaped := escapeCString(e.Value)
+		return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", len(e.Value), escaped)
 	case *ast.CharLiteral:
 		return "'" + e.Value + "'"
 	case *ast.BooleanLiteral:
@@ -165,6 +166,10 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	case *ast.CallExpression:
 		return eg.generateCallExpression(e)
 	case *ast.IndexExpression:
+		objType := eg.inferType(e.Object)
+		if objType == "s" {
+			return eg.GenerateExpression(e.Object) + ".ptr[" + eg.GenerateExpression(e.Index) + "]"
+		}
 		return eg.GenerateExpression(e.Object) + "[" + eg.GenerateExpression(e.Index) + "]"
 	case *ast.PrefixCallExpression:
 		return eg.generatePrefixCallExpression(e)
@@ -207,6 +212,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.generateMatchExpression(e)
 	case *ast.AttributeExpression:
 		return eg.generateAttributeExpression(e)
+	case *ast.StructLiteral:
+		return eg.generateStructLiteral(e)
 	default:
 		return "0"
 	}
@@ -423,48 +430,28 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 
 // generatePlusOperation 生成加法操作代码
 func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression) string {
+	leftType := eg.inferType(left)
+	rightType := eg.inferType(right)
 	leftStr := eg.GenerateExpression(left)
 	rightStr := eg.GenerateExpression(right)
-	
-	// 检查是否是字符串连接
-	if strings.HasPrefix(leftStr, "\"") && strings.HasSuffix(leftStr, "\"") {
-		return eg.generateStringConcat(leftStr, rightStr)
-	} else if strings.HasPrefix(rightStr, "\"") && strings.HasSuffix(rightStr, "\"") {
-		return eg.generateStringConcat(rightStr, leftStr)
-	} else {
-		// 假设是整数加法
-		return "int_object_add(" + leftStr + ", " + rightStr + ")"
-	}
-}
 
-// generateStringConcat 生成字符串连接代码
-// 优化: 两个字面量在编译期拼接，运行时值用更高效的 printf
-func (eg *ExpressionGenerator) generateStringConcat(strLiteral, other string) string {
-	// 编译期拼接: 两个字符串字面量直接合并
-	if strings.HasPrefix(other, "\"") && strings.HasSuffix(other, "\"") {
-		inner1 := strLiteral[1 : len(strLiteral)-1]
-		inner2 := other[1 : len(other)-1]
-		return "\"" + inner1 + inner2 + "\""
-	}
-
-	// 运行时拼接: 根据 other 的类型选择格式符
-	if strings.HasSuffix(other, "()") {
-		if strings.HasPrefix(other, "system_get_os_name") {
-			return "printf(\"%s%s\", " + strLiteral + ", " + other + ")"
-		} else if strings.HasPrefix(other, "system_get_cpu_count") ||
-			strings.HasPrefix(other, "system_get_total_memory") ||
-			strings.HasPrefix(other, "system_get_available_memory") {
-			return "printf(\"%s%zu\", " + strLiteral + ", " + other + ")"
-		} else if strings.HasPrefix(other, "math_sin") ||
-			strings.HasPrefix(other, "math_cos") ||
-			strings.HasPrefix(other, "math_tan") ||
-			strings.HasPrefix(other, "sin_pi") ||
-			strings.HasPrefix(other, "cos_pi") ||
-			strings.HasPrefix(other, "tan_pi") {
-			return "printf(\"%s%f\", " + strLiteral + ", " + other + ")"
+	// 编译期字符串字面量拼接
+	if leftType == "s" && rightType == "s" {
+		if leftLit, ok := left.(*ast.StringLiteral); ok {
+			if rightLit, ok := right.(*ast.StringLiteral); ok {
+				merged := leftLit.Value + rightLit.Value
+				return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", len(merged), escapeCString(merged))
+			}
 		}
 	}
-	return "printf(\"%s%s\", " + strLiteral + ", " + other + ")"
+
+	// 字符串连接（运行时）
+	if leftType == "s" || rightType == "s" {
+		return "string_concat(" + leftStr + ", " + rightStr + ")"
+	}
+
+	// 整数加法
+	return "int_object_add(" + leftStr + ", " + rightStr + ")"
 }
 
 // generateCallExpression 生成函数调用表达式代码（支持泛型调用）
@@ -746,7 +733,7 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 		if argType == "d" && isIntegerLiteral(argCode) {
 			return "printf(\"" + argCode + "\\n\")"
 		}
-		return "printf(\"%" + argType + "\\n\", " + argCode + ")"
+		return "printf(\"%" + argType + "\\n\", " + eg.maybeUnwrapString(argCode, argType) + ")"
 	} else {
 		return eg.generatePrintlnMulti(args)
 	}
@@ -809,7 +796,7 @@ func (eg *ExpressionGenerator) generatePrintCall(args []ast.Expression) string {
 	if len(args) == 1 {
 		argCode := eg.GenerateExpression(args[0])
 		argType := eg.inferType(args[0])
-		return "printf(\"%" + argType + "\", " + argCode + ")"
+		return "printf(\"%" + argType + "\", " + eg.maybeUnwrapString(argCode, argType) + ")"
 	}
 
 	// 多个参数
@@ -857,7 +844,7 @@ func (eg *ExpressionGenerator) generatePrintlnMulti(args []ast.Expression) strin
 			b.WriteString(argCode)
 		case "s":
 			b.WriteString("2, ")
-			b.WriteString(argCode)
+			b.WriteString(eg.maybeUnwrapString(argCode, "s"))
 		default:
 			b.WriteString("0, (int64_t)(")
 			b.WriteString(argCode)
@@ -867,6 +854,14 @@ func (eg *ExpressionGenerator) generatePrintlnMulti(args []ast.Expression) strin
 
 	b.WriteString(")")
 	return b.String()
+}
+
+// maybeUnwrapString 对 string 类型表达式追加 .ptr 以匹配 C %s 约定
+func (eg *ExpressionGenerator) maybeUnwrapString(code string, typeHint string) string {
+	if typeHint == "s" {
+		return code + ".ptr"
+	}
+	return code
 }
 
 // inferType 推导表达式的类型（带缓存）
@@ -1127,7 +1122,7 @@ func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpress
 
 // mapTypeToC 将 Kaula 类型映射到 C 类型
 func (eg *ExpressionGenerator) mapTypeToC(kaulaType string) string {
-	return MapKaulaTypeToC(kaulaType)
+	return eg.codegen.typeGenerator.MapKaulaTypeToC(kaulaType)
 }
 
 func (eg *ExpressionGenerator) generateSizeOfExpression(e *ast.SizeOfExpression) string {
@@ -1674,4 +1669,17 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 		eg.codegen.error(fmt.Sprintf("unknown attribute expression: #[%s]", attr.Name))
 		return "0"
 	}
+}
+
+// generateStructLiteral 生成结构体字面量 C 代码 { .field = value, ... }
+func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) string {
+	if len(sl.Fields) == 0 {
+		return "{0}"
+	}
+	var parts []string
+	for _, f := range sl.Fields {
+		val := eg.GenerateExpression(f.Value)
+		parts = append(parts, fmt.Sprintf(".%s=%s", f.Name, val))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }

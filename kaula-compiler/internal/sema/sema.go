@@ -11,6 +11,7 @@ import (
 	"kaula-compiler/internal/stdlib"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -218,6 +219,8 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		sa.analyzeWhileStatement(s)
 	case *ast.ForStatement:
 		sa.analyzeForStatement(s)
+	case *ast.ForInStatement:
+		sa.analyzeForInStatement(s)
 	case *ast.ReturnStatement:
 		sa.analyzeReturnStatement(s)
 	case *ast.NonLocalStatement:
@@ -1022,6 +1025,40 @@ func (sa *SemanticAnalyzer) analyzeForStatement(stmt *ast.ForStatement) {
 	}
 }
 
+// analyzeForInStatement 分析 for-in 安全迭代语句
+// 验证迭代对象是数组/切片类型，推断元素类型并在作用域中注册循环变量
+func (sa *SemanticAnalyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
+	if stmt.Variable != nil {
+		sa.analyzeExpression(stmt.Variable)
+	}
+	if stmt.Iterable != nil {
+		sa.analyzeExpression(stmt.Iterable)
+	}
+	// 推断元素类型：从数组/切片类型中提取元素类型
+	if stmt.Variable != nil && stmt.Iterable != nil {
+		iterType := sa.inferExpressionType(stmt.Iterable)
+		elemType := inferElementType(iterType)
+		if elemType != "" {
+			sa.symbolTable.AddSymbol(stmt.Variable.Name, elemType, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+		}
+	}
+	for _, bodyStmt := range stmt.Body {
+		sa.analyzeStatement(bodyStmt)
+	}
+}
+
+// inferElementType 从数组/切片类型字符串中提取元素类型
+// [3]i32 → i32, []string → string, []i8 → i8
+func inferElementType(typeStr string) string {
+	if len(typeStr) > 0 && typeStr[0] == '[' {
+		closeBracket := strings.Index(typeStr, "]")
+		if closeBracket > 0 {
+			return typeStr[closeBracket+1:]
+		}
+	}
+	return ""
+}
+
 // analyzeReturnStatement 分析 return 语句
 func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 	if stmt.Value != nil {
@@ -1238,10 +1275,27 @@ func (sa *SemanticAnalyzer) analyzeIndexExpression(expr *ast.IndexExpression) {
 	if expr == nil {
 		return
 	}
-	// 空指针安全：对 Nullable 类型解引用时发出警告
 	sa.checkNullableDereference(expr.Object, expr.Pos.Line, expr.Pos.Column)
 	sa.analyzeExpression(expr.Object)
 	sa.analyzeExpression(expr.Index)
+
+	// 编译期常量索引越界检查
+	if lit, ok := expr.Index.(*ast.IntegerLiteral); ok {
+		objType := sa.inferExpressionType(expr.Object)
+		idx := lit.Value
+		// 固定大小数组 [N]T：检查索引是否 >= N
+		if len(objType) > 0 && objType[0] == '[' {
+			closeBracket := strings.Index(objType, "]")
+			if closeBracket > 0 {
+				sizeStr := objType[1:closeBracket]
+				if arraySize, err := strconv.ParseUint(sizeStr, 10, 64); err == nil {
+					if uint64(idx) >= arraySize {
+						sa.error(fmt.Sprintf("index %d out of bounds for array of size %d", idx, arraySize), expr.Pos.Line, expr.Pos.Column)
+					}
+				}
+			}
+		}
+	}
 }
 
 // analyzeMemberExpression 分析成员访问表达式
@@ -1396,6 +1450,8 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		return "string"
 	case *ast.FieldCountExpression:
 		return "u64"
+	case *ast.StructLiteral:
+		return "struct"
 	default:
 		return ""
 	}
@@ -1710,6 +1766,11 @@ func (sa *SemanticAnalyzer) hasSORPrimitives(body []ast.Statement) bool {
 		case *ast.ForStatement:
 			forStmt := stmt.(*ast.ForStatement)
 			if sa.hasSORPrimitives(forStmt.Body) {
+				return true
+			}
+		case *ast.ForInStatement:
+			forInStmt := stmt.(*ast.ForInStatement)
+			if sa.hasSORPrimitives(forInStmt.Body) {
 				return true
 			}
 		}

@@ -8,17 +8,25 @@ import (
 
 // TypeGenerator 负责类型相关的代码生成
 type TypeGenerator struct {
-	codegen *CodeGenerator
-	typeErasure map[string]string
-	clibTypeMap map[string]string
+	codegen      *CodeGenerator
+	typeErasure  map[string]string
+	clibTypeMap  map[string]string
+	structTypes  map[string]bool
 }
 
 func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 	return &TypeGenerator{
-		codegen: cg,
-		typeErasure: make(map[string]string),
-		clibTypeMap: make(map[string]string),
+		codegen:      cg,
+		typeErasure:  make(map[string]string),
+		clibTypeMap:  make(map[string]string),
+		structTypes:  make(map[string]bool),
 	}
+}
+
+// kaulaStructTag 将 Kaula 类型名转换为 C struct tag 名称，添加 K_ 前缀
+// 以避免与系统头文件中的宏/类型冲突（如 Windows wingdi.h 的 Rectangle 宏）
+func kaulaStructTag(name string) string {
+	return "K_" + name
 }
 
 var globalTypeMap = map[string]string{
@@ -60,16 +68,16 @@ var globalTypeMap = map[string]string{
 	"byte":   "uint8_t",
 	"sbyte":  "int8_t",
 	"void":   "void",
-	"string": "char*",
+	"string": "String",
 	"cstring": "const char*",
-	"str":    "char*",
+	"str":    "String",
 	"intptr": "intptr_t",
 	"uintptr": "uintptr_t",
 	"size":   "size_t",
 	"ssize":  "ssize_t",
 }
 
-func MapKaulaTypeToC(kaulaType string) string {
+func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 	typeLower := strings.ToLower(kaulaType)
 	if cType, ok := globalTypeMap[typeLower]; ok {
 		return cType
@@ -80,14 +88,17 @@ func MapKaulaTypeToC(kaulaType string) string {
 		if closeBracket > 0 {
 			arraySize := typeLower[1:closeBracket]
 			elemType := typeLower[closeBracket+1:]
-			cElemType := MapKaulaTypeToC(elemType)
+			cElemType := tg.MapKaulaTypeToC(elemType)
 			return cElemType + "[" + arraySize + "]"
 		}
 	}
 	if strings.HasPrefix(typeLower, "[]") {
 		innerType := typeLower[2:]
-		if innerType == "string" || innerType == "str" || innerType == "cstring" {
-			return "char**"
+		if innerType == "cstring" {
+			return "const char**"
+		}
+		if innerType == "string" || innerType == "str" {
+			return "String*"
 		}
 		if cType, ok := globalTypeMap[innerType]; ok {
 			return cType + "*"
@@ -96,18 +107,25 @@ func MapKaulaTypeToC(kaulaType string) string {
 	}
 	if strings.HasPrefix(typeLower, "*") {
 		innerType := typeLower[1:]
-		if innerType == "string" || innerType == "str" || innerType == "cstring" {
-			return "char**"
+		if innerType == "cstring" {
+			return "const char**"
+		}
+		if innerType == "string" || innerType == "str" {
+			return "String*"
 		}
 		if cType, ok := globalTypeMap[innerType]; ok {
 			return cType + "*"
 		}
-		return kaulaType[1:] + "*"
+		// 对于 struct 类型，内部递归 tg.MapKaulaTypeToC 会添加 struct 前缀
+		return tg.MapKaulaTypeToC(kaulaType[1:]) + "*"
 	}
 	if strings.HasSuffix(typeLower, "*") {
 		baseType := typeLower[:len(typeLower)-1]
-		if baseType == "string" || baseType == "str" || baseType == "cstring" {
-			return "char**"
+		if baseType == "cstring" {
+			return "const char**"
+		}
+		if baseType == "string" || baseType == "str" {
+			return "String*"
 		}
 		if cType, ok := globalTypeMap[baseType]; ok {
 			return cType + "*"
@@ -117,12 +135,15 @@ func MapKaulaTypeToC(kaulaType string) string {
 	if strings.HasPrefix(typeLower, "const ") {
 		innerType := typeLower[6:]
 		if innerType == "string" || innerType == "str" {
-			return "const char*"
+			return "String"
 		}
 		if cType, ok := globalTypeMap[innerType]; ok {
 			return "const " + cType
 		}
 		return "const " + kaulaType[6:]
+	}
+	if tg.structTypes[kaulaType] {
+		return kaulaStructTag(kaulaType)
 	}
 	return kaulaType
 }
@@ -228,7 +249,8 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 		return tg.GenerateGenericClassStatement(stmt)
 	}
 
-	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 
 	for _, ifaceName := range stmt.Implements {
 		code.WriteString(fmt.Sprintf("    %s_MethodGroup %s;\n", ifaceName, ifaceName))
@@ -238,11 +260,11 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 		fieldType := tg.convertType(field.Type, field.Nullable)
 		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
-	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 
 	for _, method := range stmt.Methods {
 		returnType := tg.convertType(method.ReturnType, false)
-		code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, stmt.Name))
+		code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, tg.convertType(stmt.Name, false)))
 		for _, param := range method.Params {
 			paramType := tg.convertType(param.Type, false)
 			code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
@@ -264,7 +286,8 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 
 func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className string, interfaces []string, methods []*ast.MethodStatement, constructor *ast.ConstructorStatement) string {
 	var code strings.Builder
-	code.WriteString(fmt.Sprintf("%s* %s_new(", className, className))
+	cName := kaulaStructTag(className)
+	code.WriteString(fmt.Sprintf("%s* %s_new(", cName, className))
 	for i, param := range constructor.Params {
 		paramType := tg.convertType(param.Type, param.Nullable)
 		if i > 0 {
@@ -274,7 +297,7 @@ func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className
 	}
 	code.WriteString(") {\n")
 
-	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className))
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
 	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
 
 	if len(interfaces) > 0 && len(methods) > 0 {
@@ -459,7 +482,7 @@ func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement)
 		code.WriteString("\n")
 	}
 	
-	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	for _, field := range stmt.Fields {
 		fieldType := tg.eraseGenericType(field.Type)
 		if field.Nullable {
@@ -467,8 +490,8 @@ func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement)
 		}
 		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
-	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
-	
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
+
 	for _, constructor := range stmt.Constructors {
 		code.WriteString(tg.GenerateGenericConstructorStatement(stmt.Name, constructor))
 	}
@@ -479,8 +502,10 @@ func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement)
 func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement) string {
 	var code strings.Builder
 	code.WriteString(fmt.Sprintf("// Interface: %s (Composition Grouping - Zero Overhead)\n", stmt.Name))
-	
-	code.WriteString(fmt.Sprintf("typedef struct %s_MethodGroup {\n", stmt.Name))
+
+	methodGroupName := stmt.Name + "_MethodGroup"
+	tg.structTypes[methodGroupName] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(methodGroupName)))
 	for _, method := range stmt.Methods {
 		returnType := tg.convertType(method.ReturnType, false)
 		code.WriteString(fmt.Sprintf("    %s (*%s)(void* self", returnType, method.Name))
@@ -490,8 +515,8 @@ func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement
 		}
 		code.WriteString(");\n")
 	}
-	code.WriteString(fmt.Sprintf("} %s_MethodGroup;\n\n", stmt.Name))
-	
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(methodGroupName)))
+
 	return code.String()
 }
 
@@ -502,18 +527,11 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 	if stmt.Generic {
 		return tg.GenerateGenericStructStatement(stmt)
 	}
-	
-	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
-		// In C, self-referential pointer fields need "struct" tag: e.g. struct ListNode* next
-		// because typedef hasn't completed yet inside the struct body
-		if strings.HasSuffix(fieldType, "*") {
-			baseType := strings.TrimSuffix(fieldType, "*")
-			if baseType == stmt.Name {
-				fieldType = "struct " + fieldType
-			}
-		}
 		// 位域: fieldName: type : width → type fieldName : width;
 		bitSuffix := ""
 		if field.BitWidth > 0 {
@@ -533,11 +551,11 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 	// 生成属性对应的 __attribute__
 	attrStr := generateStructAttributes(stmt.Attributes)
 	if attrStr != "" {
-		code.WriteString(fmt.Sprintf("} %s %s;\n\n", attrStr, stmt.Name))
+		code.WriteString(fmt.Sprintf("} %s %s;\n\n", attrStr, kaulaStructTag(stmt.Name)))
 	} else {
-		code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+		code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 	}
-	
+
 	return code.String()
 }
 
@@ -615,14 +633,15 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 	code.WriteString(fmt.Sprintf("} %s_Kind;\n\n", stmt.Name))
 
 	// 生成 tagged union 结构体
-	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	code.WriteString(fmt.Sprintf("    %s_Kind kind;\n", stmt.Name))
 	code.WriteString("    union {\n")
 	for _, variant := range stmt.Variants {
 		if len(variant.FieldTypes) > 0 {
 			code.WriteString("        struct { ")
 			for j, fieldType := range variant.FieldTypes {
-				cType := MapKaulaTypeToC(fieldType)
+				cType := tg.MapKaulaTypeToC(fieldType)
 				fieldName := variant.Name + "_val"
 				if len(variant.FieldNames) > j && variant.FieldNames[j] != "" {
 					fieldName = variant.FieldNames[j]
@@ -638,7 +657,7 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 		}
 	}
 	code.WriteString("    } data;\n")
-	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 
 	return code.String()
 }
@@ -672,7 +691,8 @@ func (tg *TypeGenerator) GenerateGenericEnumStatement(stmt *ast.EnumStatement) s
 	code.WriteString(fmt.Sprintf("} %s_Kind;\n\n", stmt.Name))
 
 	// 生成 tagged union（泛型类型擦除为 void*）
-	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	code.WriteString(fmt.Sprintf("    %s_Kind kind;\n", stmt.Name))
 	code.WriteString("    union {\n")
 	for _, variant := range stmt.Variants {
@@ -693,7 +713,7 @@ func (tg *TypeGenerator) GenerateGenericEnumStatement(stmt *ast.EnumStatement) s
 		}
 	}
 	code.WriteString("    } data;\n")
-	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 
 	return code.String()
 }
@@ -714,19 +734,13 @@ func (tg *TypeGenerator) GenerateGenericStructStatement(stmt *ast.StructStatemen
 	} else {
 		code.WriteString("\n")
 	}
-	
-	code.WriteString(fmt.Sprintf("typedef struct %s {\n", stmt.Name))
+
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	for _, field := range stmt.Fields {
 		fieldType := tg.eraseGenericType(field.Type)
 		if field.Nullable {
 			fieldType += "*"
-		}
-		// Self-referential pointer fields need "struct" tag in C
-		if strings.HasSuffix(fieldType, "*") {
-			baseType := strings.TrimSuffix(fieldType, "*")
-			if baseType == stmt.Name {
-				fieldType = "struct " + fieldType
-			}
 		}
 		// 位域支持
 		bitSuffix := ""
@@ -735,14 +749,15 @@ func (tg *TypeGenerator) GenerateGenericStructStatement(stmt *ast.StructStatemen
 		}
 		code.WriteString(fmt.Sprintf("    %s %s%s;\n", fieldType, field.Name, bitSuffix))
 	}
-	code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 	
 	return code.String()
 }
 
 func (tg *TypeGenerator) GenerateConstructorStatement(className string, constructor *ast.ConstructorStatement) string {
 	var code strings.Builder
-	code.WriteString(fmt.Sprintf("%s* %s_new(", className, className))
+	cName := kaulaStructTag(className)
+	code.WriteString(fmt.Sprintf("%s* %s_new(", cName, className))
 	for i, param := range constructor.Params {
 		paramType := tg.convertType(param.Type, param.Nullable)
 		if i > 0 {
@@ -752,7 +767,7 @@ func (tg *TypeGenerator) GenerateConstructorStatement(className string, construc
 	}
 	code.WriteString(") {\n")
 	
-	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className))
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
 	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
 	
 	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("// Initialize interface method groups\n"))
@@ -769,7 +784,8 @@ func (tg *TypeGenerator) GenerateConstructorStatement(className string, construc
 
 func (tg *TypeGenerator) GenerateGenericConstructorStatement(className string, constructor *ast.ConstructorStatement) string {
 	var code strings.Builder
-	code.WriteString(fmt.Sprintf("%s* %s_new(", className, className))
+	cName := kaulaStructTag(className)
+	code.WriteString(fmt.Sprintf("%s* %s_new(", cName, className))
 	for i, param := range constructor.Params {
 		paramType := tg.eraseGenericType(param.Type)
 		if param.Nullable {
@@ -782,7 +798,7 @@ func (tg *TypeGenerator) GenerateGenericConstructorStatement(className string, c
 	}
 	code.WriteString(") {\n")
 	
-	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", className, className))
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
 	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
 	
 	for _, bodyStmt := range constructor.Body {
@@ -867,7 +883,7 @@ func (tg *TypeGenerator) convertType(kaulaType string, nullable bool) string {
 		return cType
 	}
 
-	cType := MapKaulaTypeToC(kaulaType)
+	cType := tg.MapKaulaTypeToC(kaulaType)
 
 	if nullable && !strings.HasSuffix(cType, "*") {
 		cType += "*"
@@ -903,8 +919,12 @@ func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
 		return 8, true
 	}
 
-	// 字符串类型：char* 指针大小
-	if typeLower == "string" || typeLower == "str" || typeLower == "cstring" {
+	// 字符串类型：String 结构体 {size_t len; char* ptr;} = 16 字节
+	if typeLower == "string" || typeLower == "str" {
+		return 16, true
+	}
+	// cstring：const char* = 8 字节
+	if typeLower == "cstring" {
 		return 8, true
 	}
 

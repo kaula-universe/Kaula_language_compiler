@@ -75,14 +75,10 @@ func (f *Formatter) formatStatement(stmt ast.Statement) {
 		f.formatTypeAliasStatement(s)
 	case *ast.ImportStatement:
 		f.formatImportStatement(s)
-	case *ast.SwitchStatement:
-		f.formatSwitchStatement(s)
 	case *ast.ExportStatement:
 		f.formatExportStatement(s)
 	case *ast.NonLocalStatement:
 		f.formatNonLocalStatement(s)
-	case *ast.CaseStatement:
-		f.formatCaseStatement(s)
 	case *ast.CallStatement:
 		f.formatCallStatementStmt(s)
 	case *ast.MethodStatement:
@@ -592,36 +588,6 @@ func (f *Formatter) formatImportStatement(stmt *ast.ImportStatement) {
 	f.buf.WriteString("import " + `"` + stmt.Module + `"`)
 }
 
-func (f *Formatter) formatSwitchStatement(stmt *ast.SwitchStatement) {
-	f.buf.WriteString("switch ")
-	f.formatExpression(stmt.Expression)
-
-	if len(stmt.Cases) > 0 {
-		f.buf.WriteString(" {\n")
-		f.indent++
-		for _, caseStmt := range stmt.Cases {
-			f.writeIndent()
-			if caseStmt.Value != nil {
-				f.buf.WriteString("case ")
-				f.formatExpression(caseStmt.Value)
-				f.buf.WriteString(":\n")
-			} else {
-				f.buf.WriteString("default:\n")
-			}
-			f.indent++
-			for _, bodyStmt := range caseStmt.Body {
-				f.writeIndent()
-				f.formatStatement(bodyStmt)
-				f.buf.WriteString("\n")
-			}
-			f.indent--
-		}
-		f.indent--
-		f.writeIndent()
-		f.buf.WriteString("}")
-	}
-}
-
 func (f *Formatter) formatExportStatement(stmt *ast.ExportStatement) {
 	f.buf.WriteString("export " + stmt.Name)
 }
@@ -634,22 +600,6 @@ func (f *Formatter) formatNonLocalStatement(stmt *ast.NonLocalStatement) {
 	}
 }
 
-func (f *Formatter) formatCaseStatement(stmt *ast.CaseStatement) {
-	if stmt.Value != nil {
-		f.buf.WriteString("case ")
-		f.formatExpression(stmt.Value)
-		f.buf.WriteString(":\n")
-	} else {
-		f.buf.WriteString("default:\n")
-	}
-	f.indent++
-	for _, bodyStmt := range stmt.Body {
-		f.writeIndent()
-		f.formatStatement(bodyStmt)
-		f.buf.WriteString("\n")
-	}
-	f.indent--
-}
 
 func (f *Formatter) formatCallStatementStmt(stmt *ast.CallStatement) {
 	f.buf.WriteString("call")

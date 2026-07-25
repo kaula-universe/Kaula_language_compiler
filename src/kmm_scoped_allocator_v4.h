@@ -933,16 +933,6 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
        if(p) kmm_v4_zero_auto(p, sizeof(name##_t)); \
        p; })
 
-// ==================== 自动化生命周期管理 ====================
-// RAII 风格资源管理（需要编译器扩展支持）
-#ifdef __GNUC__
-    #define KMM_V4_AUTOFREE __attribute__((cleanup(kmm_v4_autofree_fn)))
-    
-    static inline void kmm_v4_autofree_fn(void* ptr) {
-        (void)ptr;  // 池内对象不释放
-    }
-#endif
-
 // 作用域栈操作函数（嵌套作用域支持）
 // kmm_v4_scope_push: 进入作用域，保存当前 offset + TLAB 状态到作用域栈
 // kmm_v4_scope_pop: 退出作用域，恢复到本层开始时的 offset + TLAB 状态

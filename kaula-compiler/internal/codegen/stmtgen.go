@@ -63,8 +63,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.generateWhileStatement(s)
 	case *ast.ForStatement:
 		return sg.generateForStatement(s)
-	case *ast.SwitchStatement:
-		return sg.generateSwitchStatement(s)
+	case *ast.ForInStatement:
+		return sg.generateForInStatement(s)
 	case *ast.ReturnStatement:
 		return sg.generateReturnStatement(s)
 	case *ast.BreakStatement:
@@ -124,8 +124,14 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		return sg.generateAutoDeclaration(stmt)
 	}
 	
-	// const 无类型变量：编译期常量，不需要生成 C 变量
-	if stmt.IsConst && stmt.Type == "" {
+	// const 变量：纯编译期常量，不参与运行时内存分配
+	if stmt.IsConst {
+		if evaluated := sg.codegen.tryEvalConstExpr(stmt.Value); evaluated != "" {
+			sg.codegen.constTable[stmt.Name] = evaluated
+		} else if stmt.Value != nil {
+			// 非可求值常量表达式：仍跳过运行时分配，注册到常量表
+			sg.codegen.constTable[stmt.Name] = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		}
 		return ""
 	}
 	
@@ -136,46 +142,15 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	var builder strings.Builder
 	builder.Grow(128)
 
-	// SOR Arena 路由落地：如果 SOR 分析启用且变量是指针类型且决策为 arena/bump pool，
-	// 用 kmm_v4_alloc_auto 分配，由 KMM 作用域自动回收
+	// SOR 智能分配路由
 	adapter := sg.codegen.GetSORAdapter()
 	if adapter != nil && adapter.IsActive {
 		if decision := adapter.GetVarDecision(stmt.Name); decision != nil {
-			isPointer := strings.HasSuffix(cType, "*")
-			isArenaOrPool := decision.AllocKind == "ArenaTiny" ||
-				decision.AllocKind == "ArenaSmall" ||
-				decision.AllocKind == "ArenaMedium" ||
-				decision.AllocKind == "BumpPool"
-			// 指针类型变量走 KMM 分配器
-			if isPointer && isArenaOrPool && stmt.Value == nil {
-				// 去掉末尾的 * 得到基类型用于 sizeof
-				baseType := strings.TrimRight(cType, "*")
-				builder.WriteString(cType)
-				builder.WriteByte(' ')
-				builder.WriteString(stmt.Name)
-				builder.WriteString(" = (")
-				builder.WriteString(cType)
-				builder.WriteString(")kmm_v4_alloc_auto(sizeof(")
-				builder.WriteString(baseType)
-				builder.WriteString(")); /* sor: ")
-				builder.WriteString(decision.AllocKind)
-				builder.WriteString(" */\n")
-				return builder.String()
+			var initValue string
+			if stmt.Value != nil {
+				initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 			}
-			// 值类型：保持栈分配，在注释中标注 SOR 决策
-			if !isPointer {
-				builder.WriteString(cType)
-				builder.WriteByte(' ')
-				builder.WriteString(stmt.Name)
-				if stmt.Value != nil {
-					builder.WriteString(" = ")
-					builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
-				}
-				builder.WriteString("; /* sor: ")
-				builder.WriteString(decision.AllocKind)
-				builder.WriteString(" */\n")
-				return builder.String()
-			}
+			return adapter.GenerateSmartVarAlloc(cType, stmt.Name, "", initValue)
 		}
 	}
 
@@ -638,14 +613,15 @@ func (sg *StatementGenerator) generateTreeImplementation(stmt *ast.TreeStatement
 // generateObjectStatement 生成 object 语句代码
 func (sg *StatementGenerator) generateObjectStatement(stmt *ast.ObjectStatement) string {
 	code := fmt.Sprintf("// Object: %s of type %s\n", stmt.Name, stmt.Type)
-	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
+	sg.codegen.typeGenerator.structTypes[stmt.Name] = true
+	code += fmt.Sprintf("typedef struct K_%s {\n", stmt.Name)
 	for i := range stmt.Fields {
 		code += fmt.Sprintf("    void* field%d;\n", i+1)
 	}
-	code += fmt.Sprintf("} %s;\n", stmt.Name)
+	code += fmt.Sprintf("} K_%s;\n", stmt.Name)
 	// 声明全局变量
 	varName := stmt.Name + "_obj"
-	code += fmt.Sprintf("%s* %s;\n", stmt.Name, varName)
+	code += fmt.Sprintf("K_%s* %s;\n", stmt.Name, varName)
 	return code
 }
 
@@ -953,6 +929,15 @@ func stmtContainsAllocation(stmt ast.Statement) bool {
 			}
 		}
 	case *ast.ForStatement:
+		if s == nil {
+			return false
+		}
+		for _, bs := range s.Body {
+			if stmtContainsAllocation(bs) {
+				return true
+			}
+		}
+	case *ast.ForInStatement:
 		if s == nil {
 			return false
 		}
@@ -1305,6 +1290,80 @@ func (sg *StatementGenerator) generateForStatement(stmt *ast.ForStatement) strin
 	return code
 }
 
+// generateForInStatement 生成 for-in 安全迭代代码
+// for x in arr { body } → for (size_t _i_ = 0; _i_ < len; _i_++) { T x = arr[_i_]; body }
+// 索引变量由编译器管理，用户代码不可见，消除越界可能
+func (sg *StatementGenerator) generateForInStatement(stmt *ast.ForInStatement) string {
+	iterCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Iterable)
+
+	// 从符号表获取迭代对象的 Kaula 类型，决定迭代方式
+	var iterName string
+	if id, ok := stmt.Iterable.(*ast.Identifier); ok {
+		iterName = id.Name
+	}
+
+	var elemCType string
+	var isFixedArray bool
+	var arraySize string
+
+	if iterName != "" {
+		if sym := sg.codegen.GetSymbol(iterName); sym != nil {
+			kt := sym.Type
+			elemKaula := inferElementType(kt)
+			if elemKaula != "" {
+				elemCType = sg.codegen.typeGenerator.convertType(elemKaula, false)
+			}
+			if len(kt) > 0 && kt[0] == '[' {
+				isFixedArray = true
+				closeBracket := strings.Index(kt, "]")
+				if closeBracket > 0 {
+					arraySize = kt[1:closeBracket]
+				}
+			}
+		}
+	}
+
+	code := "for (size_t _i_ = 0; _i_ < "
+	if isFixedArray && arraySize != "" {
+		code += arraySize
+	} else {
+		code += "(" + iterCode + ").len"
+	}
+	code += "; _i_++) {\n"
+
+	sg.codegen.indent++
+	code += sg.codegen.indentString()
+	if elemCType != "" {
+		code += elemCType + " " + stmt.Variable.Name + " = " + iterCode
+	} else {
+		code += "auto " + stmt.Variable.Name + " = " + iterCode
+	}
+	if isFixedArray {
+		code += "[_i_]"
+	} else {
+		code += ".ptr[_i_]"
+	}
+	code += ";\n"
+
+	for _, bodyStmt := range stmt.Body {
+		code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+	}
+	sg.codegen.indent--
+	code += sg.codegen.indentString() + "}\n"
+	return code
+}
+
+// inferElementType 从数组/切片类型字符串中提取元素类型
+func inferElementType(typeStr string) string {
+	if len(typeStr) > 0 && typeStr[0] == '[' {
+		closeBracket := strings.Index(typeStr, "]")
+		if closeBracket > 0 {
+			return typeStr[closeBracket+1:]
+		}
+	}
+	return ""
+}
+
 // shouldUseKMMScopeForForBody 预判断 for 循环体是否需要 KMM scope
 // 保留用于兼容，实际已被 shouldUseKMMScopeForBody 替代
 func (sg *StatementGenerator) shouldUseKMMScopeForForBody() bool {
@@ -1337,46 +1396,6 @@ func (sg *StatementGenerator) shouldUseKMMScopeForForBody() bool {
 		}
 	}
 	return false
-}
-
-// generateSwitchStatement 生成 switch 语句代码
-func (sg *StatementGenerator) generateSwitchStatement(stmt *ast.SwitchStatement) string {
-	code := "switch ("
-	if stmt.Expression != nil {
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression)
-	}
-	code += ") {\n"
-	sg.codegen.indent++
-	// 生成 switch 语句体中的其他语句（如变量声明）
-	for _, bodyStmt := range stmt.Statements {
-		code += sg.codegen.indentString()
-		code += sg.codegen.generateStatement(bodyStmt)
-	}
-	for _, caseStmt := range stmt.Cases {
-		code += sg.codegen.indentString() + "case "
-		code += sg.codegen.expressionGenerator.GenerateExpression(caseStmt.Value)
-		code += ":\n"
-		sg.codegen.indent++
-		for _, bodyStmt := range caseStmt.Body {
-			code += sg.codegen.indentString()
-			code += sg.codegen.generateStatement(bodyStmt)
-		}
-		code += sg.codegen.indentString() + "break;\n"
-		sg.codegen.indent--
-	}
-	if len(stmt.Default) > 0 {
-		code += sg.codegen.indentString() + "default:\n"
-		sg.codegen.indent++
-		for _, bodyStmt := range stmt.Default {
-			code += sg.codegen.indentString()
-			code += sg.codegen.generateStatement(bodyStmt)
-		}
-		code += sg.codegen.indentString() + "break;\n"
-		sg.codegen.indent--
-	}
-	sg.codegen.indent--
-	code += sg.codegen.indentString() + "}\n"
-	return code
 }
 
 // generateReturnStatement 生成 return 语句代码
@@ -1454,23 +1473,47 @@ func (sg *StatementGenerator) generateNonLocalStatement(stmt *ast.NonLocalStatem
 
 // generateBlockStatement 生成块语句代码
 func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) string {
-	// 进入块作用域
 	sg.codegen.EnterScope("block")
-
 	indent := sg.codegen.indentString()
 
-	// 分析块内的 malloc 调用
+	adapter := sg.codegen.GetSORAdapter()
+	needsKMM := false
+	if adapter != nil && adapter.IsActive {
+		needsKMM = sg.shouldUseKMMScopeForBody(stmt.Statements)
+	}
+
+	if needsKMM {
+		// SOR 需要 KMM 作用域：offset save/restore
+		if sg.codegen.IsInOffsetScope() {
+			code := "{\n"
+			sg.codegen.indent++
+			for _, bodyStmt := range stmt.Statements {
+				code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+			}
+			sg.codegen.indent--
+			code += indent + "}\n"
+			sg.codegen.ExitScope()
+			return code
+		}
+		code := "{\n"
+		sg.codegen.indent++
+		sg.codegen.EnterOffsetScope()
+		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
+		for _, bodyStmt := range stmt.Statements {
+			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
+		sg.codegen.ExitOffsetScope()
+		sg.codegen.indent--
+		code += indent + "}\n"
+		sg.codegen.ExitScope()
+		return code
+	}
+
+	// SOR 不活跃或不需要 KMM：退回到现有启发式
 	canBatch, totalSize, mallocCount := sg.analyzeBlockMallocs(stmt.Statements)
 
-	// 优化策略（激进触发，让单对象场景也能走最快路径）：
-	// 1. 单个 malloc 且大小已知 -> 直接 bump + offset_restore (零 scope 栈开销)
-	// 2. 多个 malloc 且大小都已知 -> 批量 bump + offset_restore (单次 bump 分配)
-	// 3. 有 malloc 但大小未知 -> offset_save/restore (比 scope_push/pop 快)
-	// 4. 无 malloc -> scope_push/pop (标准路径)
 	if canBatch && totalSize > 0 && mallocCount >= 1 {
-		// 批量/单对象分配优化：单次 bump + 直接 offset 恢复
-		// 当 mallocCount == 1 时，totalSize 就是该 malloc 的大小
-		// 当 mallocCount >= 2 时，totalSize 是所有 malloc 大小之和
 		code := "{\n"
 		sg.codegen.indent++
 		sg.codegen.EnterOffsetScope()
@@ -1489,7 +1532,6 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	}
 
 	if mallocCount >= 1 {
-		// 有 malloc 但大小未知 -> offset_save/restore (轻量级，无 scope 栈操作)
 		code := "{\n"
 		sg.codegen.indent++
 		sg.codegen.EnterOffsetScope()
@@ -1505,10 +1547,7 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		return code
 	}
 
-	// 标准路径：scope push/pop (无 malloc 时)
-	// 相邻 scope 合并优化：如果已在 offset scope 内，跳过 KMM scope 包裹，直接内联
 	if sg.codegen.IsInOffsetScope() {
-		// 已在 offset scope 内，直接内联块内容，避免重复 scope 开销
 		code := "{\n"
 		sg.codegen.indent++
 		for _, bodyStmt := range stmt.Statements {
@@ -1526,21 +1565,18 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
 	}
 
-	// 生成内存释放代码
 	code += sg.codegen.indentString() + "// Free allocated memory\n"
 	for name, symbol := range sg.codegen.currentScope.GetAllSymbols() {
 		if symbol.Nullable {
-			if symbol.Type == "string" {
+			if symbol.Type == "string" || symbol.Type == "str" {
 				code += sg.codegen.indentString()
-				code += "if (" + name + " != NULL) { free(" + name + "); }\n"
+				code += "if (" + name + ".ptr != NULL) { free(" + name + ".ptr); }\n"
 			}
 		}
 	}
 
 	sg.codegen.indent--
 	code += indent + "} KMM_V4_SCOPE_END;\n"
-
-	// 退出块作用域
 	sg.codegen.ExitScope()
 	return code
 }

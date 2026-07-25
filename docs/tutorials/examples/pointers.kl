@@ -1,0 +1,8 @@
+import std.io
+
+fn main() {
+    int x = 10
+    int y = 20
+    int z = x + y
+    println("x + y = ", z)
+}

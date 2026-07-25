@@ -26,9 +26,7 @@ const (
 	TOKEN_ELSE
 	TOKEN_WHILE
 	TOKEN_FOR
-	TOKEN_SWITCH
-	TOKEN_CASE
-	TOKEN_DEFAULT
+	TOKEN_IN
 	TOKEN_RETURN
 	TOKEN_IMPORT
 	TOKEN_EXPORT
@@ -458,12 +456,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_WHILE
 	case "for":
 		tokenType = TOKEN_FOR
-	case "switch":
-		tokenType = TOKEN_SWITCH
-	case "case":
-		tokenType = TOKEN_CASE
-	case "default":
-		tokenType = TOKEN_DEFAULT
+	case "in":
+		tokenType = TOKEN_IN
 	case "return":
 		tokenType = TOKEN_RETURN
 	case "import":
@@ -830,12 +824,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "WHILE"
 	case TOKEN_FOR:
 		return "FOR"
-	case TOKEN_SWITCH:
-		return "SWITCH"
-	case TOKEN_CASE:
-		return "CASE"
-	case TOKEN_DEFAULT:
-		return "DEFAULT"
+	case TOKEN_IN:
+		return "IN"
 	case TOKEN_RETURN:
 		return "RETURN"
 	case TOKEN_IMPORT:

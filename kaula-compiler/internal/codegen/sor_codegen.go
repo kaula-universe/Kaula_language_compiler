@@ -44,11 +44,9 @@ type SORVarDecision struct {
 
 // SORScopeDecision 作用域级别的 CodeGen 决策
 type SORScopeDecision struct {
-	ScopeID      int      // 作用域 ID
-	DropVars     []string // 需要在作用域退出时释放的变量
-	HollowVars   []string // 需要清理 hollow 状态的变量
-	UsesBumpPool bool     // 是否使用 bump pool
-	UsesArena    string   // "" 或 "tiny" 或 "small" 或 "medium"
+	ScopeID      int    // 作用域 ID
+	UsesBumpPool bool   // 是否使用 bump pool
+	UsesArena    string // "" 或 "tiny" 或 "small" 或 "medium"
 }
 
 // NewSORCodeGenAdapter 从分析结果的序列化形式创建 CodeGen 适配器
@@ -119,20 +117,13 @@ func NewSORCodeGenAdapter(result map[string]interface{}) *SORCodeGenAdapter {
 					scopeID := 0
 					fmt.Sscanf(scopeIDStr, "%d", &scopeID)
 
-					sd := adapter.ScopeDecisions[scopeID]
-					if sd == nil {
-						sd = &SORScopeDecision{ScopeID: scopeID}
-						adapter.ScopeDecisions[scopeID] = sd
-					}
+				sd := adapter.ScopeDecisions[scopeID]
+				if sd == nil {
+					sd = &SORScopeDecision{ScopeID: scopeID}
+					adapter.ScopeDecisions[scopeID] = sd
+				}
 
-					switch dropAction {
-					case "Hollow":
-						sd.HollowVars = append(sd.HollowVars, varName)
-					case "ScopeEnd":
-						sd.DropVars = append(sd.DropVars, varName)
-					}
-
-					switch allocKind {
+				switch allocKind {
 					case "BumpPool":
 						sd.UsesBumpPool = true
 					case "ArenaTiny":
@@ -186,61 +177,6 @@ func (a *SORCodeGenAdapter) GetScopeDecision(scopeID int) *SORScopeDecision {
 	return a.ScopeDecisions[scopeID]
 }
 
-// GenerateVarDecl 生成变量的 C 声明代码（含 Arena 路由）
-// 如果变量有 SOR 决策，将根据分配策略生成带注释的初始化声明
-func (a *SORCodeGenAdapter) GenerateVarDecl(cType, varName string, indent string) string {
-	if decision := a.GetVarDecision(varName); decision != nil && decision.IsSOR {
-		switch decision.AllocKind {
-		case "ArenaTiny":
-			return fmt.Sprintf("%s%s %s = {0}; /* sor: arena_tiny */\n", indent, cType, varName)
-		case "ArenaSmall":
-			return fmt.Sprintf("%s%s %s = {0}; /* sor: arena_small */\n", indent, cType, varName)
-		case "ArenaMedium":
-			return fmt.Sprintf("%s%s %s = {0}; /* sor: arena_medium */\n", indent, cType, varName)
-		case "BumpPool":
-			return fmt.Sprintf("%s%s %s = {0}; /* sor: bmppool */\n", indent, cType, varName)
-		default:
-			return fmt.Sprintf("%s%s %s = {0}; /* sor: stack */\n", indent, cType, varName)
-		}
-	}
-	return fmt.Sprintf("%s%s %s;\n", indent, cType, varName)
-}
-
-// GenerateScopeCleanup 生成作用域退出时的 SOR 清理代码
-// 在 KMM_V4_SCOPE_END 之前调用，处理 hollow 清理和 scope_end 释放
-func (a *SORCodeGenAdapter) GenerateScopeCleanup(scopeID int, indent string) string {
-	if !a.IsActive {
-		return ""
-	}
-
-	decision := a.GetScopeDecision(scopeID)
-	if decision == nil {
-		return ""
-	}
-
-	var b strings.Builder
-	for _, varName := range decision.HollowVars {
-		b.WriteString(fmt.Sprintf("%s/* sor: hollow cleanup %s */\n", indent, varName))
-	}
-	for _, varName := range decision.DropVars {
-		b.WriteString(fmt.Sprintf("%s/* sor: drop %s (scope_end) */\n", indent, varName))
-	}
-	return b.String()
-}
-
-// NeedsKMMScope 判断指定作用域是否需要 KMM scope
-// 基于 SOR 的精确分析结果，只有当作用域内有 BumpPool/Arena 分配的变量时才返回 true
-func (a *SORCodeGenAdapter) NeedsKMMScope(scopeID int) bool {
-	if !a.IsActive {
-		return false
-	}
-	sd := a.GetScopeDecision(scopeID)
-	if sd == nil {
-		return false
-	}
-	return sd.UsesBumpPool || sd.UsesArena != ""
-}
-
 // NeedsKMMScopeByVars 判断一组变量是否需要 KMM scope
 // 如果其中任何一个变量需要 BumpPool/Arena 分配且需要作用域回收，则返回 true
 // 活跃性分析驱动的优化：
@@ -268,51 +204,51 @@ func (a *SORCodeGenAdapter) NeedsKMMScopeByVars(varNames []string) bool {
 
 // GenerateSmartVarAlloc 生成智能内存分配代码
 // 根据 SOR 的大小路由和逃逸分析结果，选择最合适的分配策略
-func (a *SORCodeGenAdapter) GenerateSmartVarAlloc(cType, varName string, indent string) string {
+// 如果提供了 initValue，生成的代码会将变量初始化为该值
+func (a *SORCodeGenAdapter) GenerateSmartVarAlloc(cType, varName, indent string, initValue string) string {
 	if !a.IsActive {
-		return fmt.Sprintf("%s%s %s;\n", indent, cType, varName)
+		return a.defaultVarDecl(cType, varName, indent, initValue)
 	}
 
 	decision := a.GetVarDecision(varName)
 	if decision == nil || !decision.IsSOR {
-		return fmt.Sprintf("%s%s %s;\n", indent, cType, varName)
+		return a.defaultVarDecl(cType, varName, indent, initValue)
 	}
 
 	isPointer := strings.HasSuffix(cType, "*")
 	if !isPointer {
-		return fmt.Sprintf("%s%s %s = {0}; /* sor: %s */\n", indent, cType, varName, decision.AllocKind)
+		return a.stackVarDecl(cType, varName, indent, initValue, decision.AllocKind)
 	}
 
 	baseType := strings.TrimRight(cType, "*")
 	switch decision.AllocKind {
 	case "BumpPool", "ArenaTiny", "ArenaSmall", "ArenaMedium":
+		if initValue != "" {
+			return fmt.Sprintf("%s%s %s = (%s)kmm_v4_alloc_auto(sizeof(%s)); /* sor: %s */\n%s*%s = %s;\n",
+				indent, cType, varName, cType, baseType, decision.AllocKind,
+				indent, varName, initValue)
+		}
 		return fmt.Sprintf("%s%s %s = (%s)kmm_v4_alloc_auto(sizeof(%s)); /* sor: %s */\n",
 			indent, cType, varName, cType, baseType, decision.AllocKind)
 	default:
-		return fmt.Sprintf("%s%s %s = {0}; /* sor: stack */\n", indent, cType, varName)
+		return a.stackVarDecl(cType, varName, indent, initValue, decision.AllocKind)
 	}
 }
 
-// GetScopeAllocSummary 获取作用域的分配策略摘要
-func (a *SORCodeGenAdapter) GetScopeAllocSummary(scopeID int) string {
-	if !a.IsActive {
-		return ""
+// defaultVarDecl 生成不带 SOR 决策的默认变量声明
+func (a *SORCodeGenAdapter) defaultVarDecl(cType, varName, indent, initValue string) string {
+	if initValue != "" {
+		return fmt.Sprintf("%s%s %s = %s;\n", indent, cType, varName, initValue)
 	}
-	sd := a.GetScopeDecision(scopeID)
-	if sd == nil {
-		return ""
+	return fmt.Sprintf("%s%s %s;\n", indent, cType, varName)
+}
+
+// stackVarDecl 生成栈分配变量声明（含 SOR 标注）
+func (a *SORCodeGenAdapter) stackVarDecl(cType, varName, indent, initValue, allocKind string) string {
+	if initValue != "" {
+		return fmt.Sprintf("%s%s %s = %s; /* sor: %s */\n", indent, cType, varName, initValue, allocKind)
 	}
-	var parts []string
-	if sd.UsesBumpPool {
-		parts = append(parts, "bump_pool")
-	}
-	if sd.UsesArena != "" {
-		parts = append(parts, "arena_"+sd.UsesArena)
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return strings.Join(parts, ", ")
+	return fmt.Sprintf("%s%s %s = {0}; /* sor: %s */\n", indent, cType, varName, allocKind)
 }
 
 // String 返回适配器的摘要信息（用于调试）
@@ -354,50 +290,4 @@ func (a *SORCodeGenAdapter) GetScopeNameByID(scopeID int) string {
 	return a.scopeIDToName[scopeID]
 }
 
-// NeedsKMMScopeByScopeName 通过 CodeGen 作用域名判断是否需要 KMM scope
-// 统一使用 SOR scopeID 查询 ScopeDecisions，实现精确的作用域级别判断
-func (a *SORCodeGenAdapter) NeedsKMMScopeByScopeName(scopeName string) bool {
-	if !a.IsActive {
-		return false
-	}
-	scopeID := a.GetScopeIDByName(scopeName)
-	if scopeID == 0 {
-		return false
-	}
-	return a.NeedsKMMScope(scopeID)
-}
 
-// ============================================================================
-// 跨函数分析驱动 KMM 优化
-// ============================================================================
-
-// IsPureFunction 判断函数是否为纯函数（不涉及指针所有权传递）
-// 纯函数不需要 KMM scope，因为所有参数都是值语义拷贝或只读借用
-func (a *SORCodeGenAdapter) IsPureFunction(funcName string) bool {
-	if !a.IsActive {
-		return false
-	}
-	sig, ok := a.funcSigs[funcName]
-	if !ok {
-		return false // 无签名信息，保守处理
-	}
-	// 有指针返回值的函数不是纯函数
-	if sig.HasPtrReturn {
-		return false
-	}
-	// 检查参数：如果有 Owned 模式的参数，说明所有权转移发生，不是纯函数
-	for _, mode := range sig.ParamModes {
-		if mode == "Owned" {
-			return false
-		}
-	}
-	return true
-}
-
-// GetFuncSig 获取函数所有权签名
-func (a *SORCodeGenAdapter) GetFuncSig(funcName string) *SORFuncSig {
-	if !a.IsActive {
-		return nil
-	}
-	return a.funcSigs[funcName]
-}

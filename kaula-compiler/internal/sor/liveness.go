@@ -54,14 +54,6 @@ func (lr *LivenessResult) GetLastUse(varName string) *LastUseInfo {
 	return lr.lastUses[varName]
 }
 
-// GetScopeDropVars 获取指定作用域中需要释放的变量列表
-func (lr *LivenessResult) GetScopeDropVars(scopeID int) []string {
-	if lr == nil || lr.scopeLastUse == nil {
-		return nil
-	}
-	return lr.scopeLastUse[scopeID]
-}
-
 // GetAllLastUses 返回所有最后使用信息（按变量名排序）
 func (lr *LivenessResult) GetAllLastUses() []*LastUseInfo {
 	if lr == nil || lr.lastUses == nil {
@@ -398,99 +390,6 @@ func (la *LivenessAnalyzer) ComputeDropPoints(result *LivenessResult) map[int][]
 		dropPoints[scopeID] = sorted
 	}
 	return dropPoints
-}
-
-// ============================================================================
-// 与 CodeGen 的接口
-// ============================================================================
-
-// GenerateScopeDrops 为指定作用域生成 drop 代码。
-// 对于 bump pool: 无需逐变量释放（KMM_V4_SCOPE_END 批量回收）。
-// 但需要为 hollow 变量生成标记清理。
-// 对于 yield 后失效: 无需释放。
-//
-// 参数:
-//   - liveness: 活跃性分析结果
-//   - scopeID: 目标作用域 ID
-//   - decisions: 内存管理决策列表（来自 MemoryAnalyzer）
-//   - indent: 代码缩进
-//
-// 返回: 生成的 drop 代码字符串
-func GenerateScopeDrops(liveness *LivenessResult, scopeID int, decisions []*MemoryDecision, indent string) string {
-	if liveness == nil {
-		return ""
-	}
-
-	var b strings.Builder
-	dropVars := liveness.GetScopeDropVars(scopeID)
-	if len(dropVars) == 0 {
-		return ""
-	}
-
-	// 构建决策查找表
-	decisionMap := make(map[string]*MemoryDecision)
-	for _, d := range decisions {
-		if d != nil {
-			decisionMap[d.VarName] = d
-		}
-	}
-
-	for _, varName := range dropVars {
-		info := liveness.GetLastUse(varName)
-		if info == nil {
-			continue
-		}
-
-		d := decisionMap[varName]
-
-		// yield 后失效的变量无需释放
-		if info.IsYieldSrc {
-			continue
-		}
-
-		// 根据 DropAction 决定生成何种代码
-		if d != nil {
-			switch d.DropAction {
-			case DropHollow:
-				// hollow 变量：释放残留外壳
-				if d.IsComposite && len(d.ExtractedChildren) > 0 {
-					b.WriteString(indent)
-					b.WriteString(fmt.Sprintf("/* hollow cleanup: %s — extracted children: ", varName))
-					children := make([]string, 0, len(d.ExtractedChildren))
-					for path := range d.ExtractedChildren {
-						children = append(children, path)
-					}
-					sort.Strings(children)
-					b.WriteString(strings.Join(children, ", "))
-					b.WriteString(" */\n")
-				}
-
-			case DropScopeEnd:
-				// 作用域退出释放
-				if d.FinalState == StateReleased {
-					// 已 release 的变量：所有消费者退出，引用计数归零
-					b.WriteString(indent)
-					b.WriteString(fmt.Sprintf("/* scope-end release: %s — all consumers exited */\n", varName))
-				} else if d.FinalState == StateOwned {
-					// 仍持有的 Owned 变量：作用域退出时释放
-					b.WriteString(indent)
-					b.WriteString(fmt.Sprintf("/* scope-end drop: %s [obj=%s] — last use at line %d (%s) */\n",
-						varName, info.ObjID, info.LastUseLine, info.LastUseKind))
-				}
-
-			case DropNone:
-				// 无需释放（已 yield / 已 extract / 已 moved）
-				continue
-			}
-		} else {
-			// 无决策信息的变量：默认生成注释标记
-			b.WriteString(indent)
-			b.WriteString(fmt.Sprintf("/* drop: %s — last use at line %d (%s) */\n",
-				varName, info.LastUseLine, info.LastUseKind))
-		}
-	}
-
-	return b.String()
 }
 
 // ============================================================================

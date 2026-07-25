@@ -51,11 +51,14 @@ typedef intptr_t ssize_t;
 typedef ssize_t ssize_t;
 #endif
 
-// 字符串类型（带长度缓存，避免重复 strlen）
-typedef struct KString {
-    char* data;
+// 带长度前缀的字符串类型（性能优先，O(1) 取长度）
+#ifndef KAULA_STRING_DEFINED
+#define KAULA_STRING_DEFINED
+typedef struct {
     size_t len;
-} KString;
+    char* ptr;
+} String;
+#endif
 
 // 类型常量（避免与Windows定义冲突）
 #ifndef TRUE
