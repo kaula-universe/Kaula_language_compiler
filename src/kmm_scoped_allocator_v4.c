@@ -448,21 +448,15 @@ void* kmm_v4_strdup(const char* s) {
     return p;
 }
 
+#ifndef KMM_V4_STATIC_POOL
 void kmm_v4_init_pool(size_t initial_size) {
     pool_ensure_init();
     if (initial_size > 0) pool_commit_up_to(initial_size);
     g_kmm_v4_offset = 0;
-    // 失效当前线程的 TLAB
     kmm_v4_tlab_invalidate();
 }
 
 void kmm_v4_destroy_pool(void) {
-#ifdef KMM_V4_STATIC_POOL
-    // freestanding 模式：静态池无法释放，只重置状态
-    g_committed_bytes = 0;
-    g_kmm_v4_offset = 0;
-    kmm_v4_tlab_invalidate();
-#else
     if (g_kmm_v4_pool) {
 #ifdef _WIN32
         VirtualFree(g_kmm_v4_pool, 0, MEM_RELEASE);
@@ -475,5 +469,5 @@ void kmm_v4_destroy_pool(void) {
         g_kmm_v4_offset = 0;
         kmm_v4_tlab_invalidate();
     }
-#endif
 }
+#endif
