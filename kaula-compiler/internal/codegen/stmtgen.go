@@ -61,8 +61,6 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.generateIfStatement(s)
 	case *ast.WhileStatement:
 		return sg.generateWhileStatement(s)
-	case *ast.ForStatement:
-		return sg.generateForStatement(s)
 	case *ast.ForInStatement:
 		return sg.generateForInStatement(s)
 	case *ast.ReturnStatement:
@@ -778,20 +776,6 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	return code
 }
 
-// trimForClause 去除 for 循环子句末尾的分号、SOR 注释和换行
-func trimForClause(code string) string {
-	code = strings.TrimSuffix(code, "\n")
-	code = strings.TrimSpace(code)
-	// 去除 SOR 行尾注释 /* sor: ... */
-	if idx := strings.LastIndex(code, "/* sor:"); idx != -1 {
-		code = code[:idx]
-		code = strings.TrimSpace(code)
-	}
-	code = strings.TrimSuffix(code, ";")
-	code = strings.TrimSpace(code)
-	return code
-}
-
 // needsKMMScope 检查一段已生成的代码是否需要 KMM scope
 // 优化策略：
 // - 作用域合并：如果外层已有 KMM scope，内层不需要再插入
@@ -1176,125 +1160,21 @@ func needsKMMForType(typeName string) bool {
 	return true
 }
 
-// optimizeForUpdate 检测 for 循环 update 表达式的常见模式并特化
-// x = x + 1 → x++, x = x - 1 → x--
-func optimizeForUpdate(stmt ast.Statement) string {
-	exprStmt, ok := stmt.(*ast.ExpressionStatement)
-	if !ok {
-		return ""
-	}
-	binExpr, ok := exprStmt.Expression.(*ast.BinaryExpression)
-	if !ok {
-		return ""
-	}
-	// 模式: x = x + 1 或 x = x - 1
-	if binExpr.Operator == "ASSIGN" {
-		if rightBin, ok := binExpr.Right.(*ast.BinaryExpression); ok {
-			if ident, ok := binExpr.Left.(*ast.Identifier); ok {
-				if rightIdent, ok := rightBin.Left.(*ast.Identifier); ok {
-					if ident.Name == rightIdent.Name {
-						if intLit, ok := rightBin.Right.(*ast.IntegerLiteral); ok && intLit.Value == 1 {
-							switch rightBin.Operator {
-							case "PLUS", "+":
-								return ident.Name + "++"
-							case "MINUS", "-":
-								return ident.Name + "--"
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// generateForStatement 生成 for 语句代码
-func (sg *StatementGenerator) generateForStatement(stmt *ast.ForStatement) string {
-	code := "for ("
-	if stmt.Init != nil {
-		if exprStmt, ok := stmt.Init.(*ast.ExpressionStatement); ok {
-			code += sg.codegen.expressionGenerator.GenerateExpression(exprStmt.Expression)
-		} else {
-			initCode := sg.codegen.generateStatement(stmt.Init)
-			code += trimForClause(initCode)
-		}
-	} else {
-		code += ""
-	}
-	code += "; "
-	if stmt.Condition != nil {
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
-	} else {
-		code += ""
-	}
-	code += "; "
-	if stmt.Update != nil {
-		// 尝试特化常见增量模式: i = i + 1 → i++
-		if optimized := optimizeForUpdate(stmt.Update); optimized != "" {
-			code += optimized
-		} else if exprStmt, ok := stmt.Update.(*ast.ExpressionStatement); ok {
-			code += sg.codegen.expressionGenerator.GenerateExpression(exprStmt.Expression)
-		} else {
-			updateCode := sg.codegen.generateStatement(stmt.Update)
-			code += trimForClause(updateCode)
-		}
-	} else {
-		code += ""
-	}
-	code += ") {\n"
-
-	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
-	sg.codegen.indent++
-	sg.codegen.EnterScope("for_body")
-
-	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
-	// 相邻 scope 合并优化：如果循环体包含分配调用，使用 offset_save/restore 代替 scope_push/pop
-	useOffset := !useKMM && bodyContainsAllocation(stmt.Body)
-
-	if useKMM {
-		sg.codegen.EnterKMMScope()
-	}
-	if useOffset {
-		sg.codegen.EnterOffsetScope()
-	}
-
-	var bodyCode strings.Builder
-	for _, bodyStmt := range stmt.Body {
-		bodyCode.WriteString(sg.codegen.indentString())
-		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
-	}
-
-	if useOffset {
-		sg.codegen.ExitOffsetScope()
-	}
-	if useKMM {
-		sg.codegen.ExitKMMScope()
-	}
-	sg.codegen.ExitScope()
-	sg.codegen.indent--
-
-	if useOffset {
-		// offset_save/restore 路径：轻量级，无 scope 栈操作
-		code += sg.codegen.indentString() + "size_t _loop_scope_start = kmm_v4_offset_save();\n"
-		code += bodyCode.String()
-		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_loop_scope_start);\n"
-	} else if useKMM {
-		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
-		code += bodyCode.String()
-		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
-	} else {
-		code += bodyCode.String()
-	}
-
-	code += sg.codegen.indentString() + "}\n"
-	return code
-}
-
-// generateForInStatement 生成 for-in 安全迭代代码
-// for x in arr { body } → for (size_t _i_ = 0; _i_ < len; _i_++) { T x = arr[_i_]; body }
+// generateForInStatement 生成 range-based for 迭代代码
+//
+// 支持两种迭代形式：
+//  1. range 迭代:  for x in range(N) | range(start, end[, step]) { body }
+//     → for (T _i_ = start; _i_ < end; _i_ += step) { T x = _i_; body }
+//  2. 数组/切片迭代: for x in arr { body }
+//     → for (size_t _i_ = 0; _i_ < len; _i_++) { T x = arr[_i_]; body }
+//
 // 索引变量由编译器管理，用户代码不可见，消除越界可能
 func (sg *StatementGenerator) generateForInStatement(stmt *ast.ForInStatement) string {
+	// 检测 range(...) 调用
+	if rng := asRangeCall(stmt.Iterable); rng != nil {
+		return sg.generateForRangeStatement(stmt, rng)
+	}
+
 	iterCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Iterable)
 
 	// 从符号表获取迭代对象的 Kaula 类型，决定迭代方式
@@ -1354,6 +1234,127 @@ func (sg *StatementGenerator) generateForInStatement(stmt *ast.ForInStatement) s
 	return code
 }
 
+// rangeCallInfo 描述一个 range(...) 调用的参数（已求值为 C 表达式字符串）
+type rangeCallInfo struct {
+	startExpr string // 起始值（默认 "0"）
+	endExpr   string // 结束值（不包含）
+	stepExpr  string // 步长（默认 "1"）；可能为负
+}
+
+// asRangeCall 判断表达式是否为 range(...) 调用，是则返回参数信息，否则返回 nil
+// 仅识别 CallExpression，且其 Function 为 Identifier "range"
+func asRangeCall(expr ast.Expression) *rangeCallInfo {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok || call == nil {
+		return nil
+	}
+	id, ok := call.Function.(*ast.Identifier)
+	if !ok || id.Name != "range" {
+		return nil
+	}
+	// range 至少需要 1 个参数，最多 3 个
+	if len(call.Args) < 1 || len(call.Args) > 3 {
+		return nil
+	}
+	return &rangeCallInfo{}
+}
+
+// generateForRangeStatement 生成 for x in range(...) { body } 的 C 代码
+func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement, rng *rangeCallInfo) string {
+	call, _ := stmt.Iterable.(*ast.CallExpression)
+
+	// 求值参数
+	argExprs := make([]string, 0, len(call.Args))
+	for _, arg := range call.Args {
+		argExprs = append(argExprs, sg.codegen.expressionGenerator.GenerateExpression(arg))
+	}
+
+	startExpr := "0"
+	endExpr := argExprs[0]
+	stepExpr := "1"
+	switch len(argExprs) {
+	case 1:
+		// range(N) → 0..N-1, step 1
+	case 2:
+		// range(start, end) → start..end-1, step 1
+		startExpr = argExprs[0]
+		endExpr = argExprs[1]
+	case 3:
+		// range(start, end, step)
+		startExpr = argExprs[0]
+		endExpr = argExprs[1]
+		stepExpr = argExprs[2]
+	}
+
+	// 选择索引变量的 C 类型：i64 以匹配 Kaula int 语义
+	idxType := "long long"
+
+	// 步长符号决定循环条件：
+	//   step >= 0 → _i_ < end
+	//   step <  0 → _i_ > end
+	// 编译期无法静态确定符号时，生成条件表达式
+	var cond string
+	if isNegativeLiteral(stepExpr) {
+		cond = "_i_ > (" + endExpr + ")"
+	} else if isPositiveLiteral(stepExpr) {
+		cond = "_i_ < (" + endExpr + ")"
+	} else {
+		// 运行时判断步长符号
+		cond = "((" + stepExpr + ") >= 0 ? _i_ < (" + endExpr + ") : _i_ > (" + endExpr + "))"
+	}
+
+	// 使用 do-while(0) 包裹，便于 body 中 break/continue 正常工作
+	// 同时保持与 KMM scope 插入逻辑兼容
+	code := "for (" + idxType + " _i_ = (" + startExpr + "); " + cond + "; _i_ += (" + stepExpr + ")) {\n"
+
+	sg.codegen.indent++
+	code += sg.codegen.indentString()
+	code += idxType + " " + stmt.Variable.Name + " = _i_;\n"
+
+	for _, bodyStmt := range stmt.Body {
+		code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+	}
+	sg.codegen.indent--
+	code += sg.codegen.indentString() + "}\n"
+	return code
+}
+
+// isPositiveLiteral 判断字符串是否为正整数字面量
+func isPositiveLiteral(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	// 去除可选的 + 号
+	if s[0] == '+' {
+		s = s[1:]
+	}
+	if s == "" {
+		return false
+	}
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	// "0" 视为非负但非正，这里返回 true（>= 0 分支）
+	return true
+}
+
+// isNegativeLiteral 判断字符串是否以 '-' 开头的负数字面量
+func isNegativeLiteral(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	for _, ch := range s[1:] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // inferElementType 从数组/切片类型字符串中提取元素类型
 func inferElementType(typeStr string) string {
 	if len(typeStr) > 0 && typeStr[0] == '[' {
@@ -1363,40 +1364,6 @@ func inferElementType(typeStr string) string {
 		}
 	}
 	return ""
-}
-
-// shouldUseKMMScopeForForBody 预判断 for 循环体是否需要 KMM scope
-// 保留用于兼容，实际已被 shouldUseKMMScopeForBody 替代
-func (sg *StatementGenerator) shouldUseKMMScopeForForBody() bool {
-	// 作用域合并：外层已有 KMM scope 时，内层跳过
-	if sg.codegen.IsInKMMScope() {
-		return false
-	}
-
-	adapter := sg.codegen.GetSORAdapter()
-	if adapter != nil && adapter.IsActive {
-		currentScope := sg.codegen.GetCurrentScope()
-		if currentScope == nil {
-			return false
-		}
-		var varNames []string
-		for name, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "local" {
-				varNames = append(varNames, name)
-			}
-		}
-		return adapter.NeedsKMMScopeByVars(varNames)
-	}
-	// 非 SOR 模式：基于符号表类型分析
-	currentScope := sg.codegen.GetCurrentScope()
-	if currentScope != nil {
-		for _, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "local" && needsKMMForType(sym.Type) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // generateReturnStatement 生成 return 语句代码

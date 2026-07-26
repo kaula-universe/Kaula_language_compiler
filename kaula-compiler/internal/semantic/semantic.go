@@ -125,8 +125,8 @@ func (a *Analyzer) analyzeStatement(stmt ast.Statement) {
 		a.analyzeIfStatement(s)
 	case *ast.WhileStatement:
 		a.analyzeWhileStatement(s)
-	case *ast.ForStatement:
-		a.analyzeForStatement(s)
+	case *ast.ForInStatement:
+		a.analyzeForInStatement(s)
 	case *ast.BlockStatement:
 		a.analyzeBlockStatement(s)
 	case *ast.ExpressionStatement:
@@ -229,29 +229,39 @@ func (a *Analyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	a.ExitScope()
 }
 
-// analyzeForStatement 分析for语句的语义
-func (a *Analyzer) analyzeForStatement(stmt *ast.ForStatement) {
-	// 分析初始化语句
-	if stmt.Init != nil {
-		a.analyzeStatement(stmt.Init)
-	}
-	
-	// 分析条件表达式
-	if stmt.Condition != nil {
-		a.analyzeExpression(stmt.Condition)
-	}
-	
-	// 分析更新语句
-	if stmt.Update != nil {
-		a.analyzeStatement(stmt.Update)
-	}
-	
-	// 分析循环体
+// analyzeForInStatement 分析 range-based for 语句的语义
+// for x in range(...) { body } 或 for x in arr { body }
+func (a *Analyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
+	// 进入循环作用域并注册循环变量
 	a.EnterScope("for")
+
+	if stmt.Variable != nil && stmt.Iterable != nil {
+		// range(...) → 循环变量为 int 类型
+		if isRangeCall(stmt.Iterable) {
+			a.AddSymbol(stmt.Variable.Name, "int", false, stmt.Pos.Line, stmt.Pos.Column)
+		}
+	}
+
+	// 分析迭代表达式
+	if stmt.Iterable != nil {
+		a.analyzeExpression(stmt.Iterable)
+	}
+
+	// 分析循环体
 	for _, bodyStmt := range stmt.Body {
 		a.analyzeStatement(bodyStmt)
 	}
 	a.ExitScope()
+}
+
+// isRangeCall 判断表达式是否为 range(...) 调用
+func isRangeCall(expr ast.Expression) bool {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok || call == nil {
+		return false
+	}
+	id, ok := call.Function.(*ast.Identifier)
+	return ok && id.Name == "range" && len(call.Args) >= 1 && len(call.Args) <= 3
 }
 
 // analyzeBlockStatement 分析块语句的语义
@@ -298,7 +308,12 @@ func (a *Analyzer) analyzeIdentifier(expr *ast.Identifier) {
 	if expr.Name == "null" {
 		return
 	}
-	
+
+	// range 是内置迭代器构造关键字，仅在 for-in 上下文中使用
+	if expr.Name == "range" {
+		return
+	}
+
 	// 检查变量是否已声明
 	if !a.HasSymbol(expr.Name) {
 		a.errorCollector.AddError(errors.ErrorSemantic, "Undefined variable: "+expr.Name, expr.Pos.Line, expr.Pos.Column, "", "Declare the variable before using it")

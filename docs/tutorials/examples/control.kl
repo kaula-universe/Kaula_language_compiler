@@ -18,10 +18,30 @@ fn main() {
         i = i + 1
     }
 
-    // C-style for still available for counter loops
-    // for-in (for x in arr) supported when array variables are available
-    println("=== for ===")
-    for (int j = 0; j < 3; j = j + 1) {
+    // range-based for: 替代 C 风格 for(init; cond; update)
+    println("=== for in range(N) ===")
+    for j in range(3) {
         println("j = ", j)
+    }
+
+    println("=== for in range(start, end) ===")
+    for j in range(2, 6) {
+        println("j = ", j)
+    }
+
+    println("=== for in range(start, end, step) ===")
+    for j in range(0, 10, 2) {
+        println("j = ", j)
+    }
+
+    println("=== for with break/continue ===")
+    for k in range(10) {
+        if (k == 2) {
+            continue
+        }
+        if (k > 5) {
+            break
+        }
+        println("k = ", k)
     }
 }

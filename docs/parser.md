@@ -134,8 +134,11 @@ if 条件 { ... } else if 条件 { ... }
 while (条件) { ... }
 while 条件 { ... }
 
-// for 循环
-for (初始化; 条件; 更新) { ... }
+// for 循环（range 系迭代，不再支持 C 风格 for(init; cond; update)）
+for <var> in range(N) { ... }                  // 0 .. N-1, 步长 1
+for <var> in range(start, end) { ... }         // start .. end-1, 步长 1
+for <var> in range(start, end, step) { ... }   // start .. end-1, 步长 step (可为负)
+for <var> in <数组/切片> { ... }                // 迭代数组/切片元素
 
 // switch 语句
 switch (表达式) {

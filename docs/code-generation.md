@@ -133,13 +133,19 @@ func(a, b)   → func(a, b)
 
 ```
 Kaula 语句 → C 语句
-if (cond) {}     → if (cond) {}
-while (cond) {}  → while (cond) {}
-for (;;) {}      → for (;;) {}
-return x         → return x;
-break            → break;
-continue         → continue;
+if (cond) {}                       → if (cond) {}
+while (cond) {}                    → while (cond) {}
+for x in range(N) { body }        → for (long long _i_ = 0; _i_ < (N); _i_ += 1) { long long x = _i_; body }
+for x in range(s, e) { body }     → for (long long _i_ = (s); _i_ < (e); _i_ += 1) { long long x = _i_; body }
+for x in range(s, e, step) { }    → for (long long _i_ = (s); _i_ < (e); _i_ += (step)) { long long x = _i_; ... }
+                                     // step < 0 时条件自动改为 _i_ > (e)
+for x in arr { body }             → for (size_t _i_ = 0; _i_ < (arr).len; _i_++) { T x = arr.ptr[_i_]; body }
+return x                          → return x;
+break                             → break;
+continue                          → continue;
 ```
+
+注：Kaula 不再支持 C 风格 `for(init; cond; update)`。所有计数循环通过 `range(...)` 表达，索引变量 `_i_` 由编译器管理，用户代码不可见。
 
 ## 模板管理 (template.go)
 

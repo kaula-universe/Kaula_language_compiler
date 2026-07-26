@@ -217,8 +217,6 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		sa.analyzeIfStatement(s)
 	case *ast.WhileStatement:
 		sa.analyzeWhileStatement(s)
-	case *ast.ForStatement:
-		sa.analyzeForStatement(s)
 	case *ast.ForInStatement:
 		sa.analyzeForInStatement(s)
 	case *ast.ReturnStatement:
@@ -1008,43 +1006,42 @@ func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	}
 }
 
-// analyzeForStatement 分析 for 语句
-func (sa *SemanticAnalyzer) analyzeForStatement(stmt *ast.ForStatement) {
-	if stmt.Init != nil {
-		sa.analyzeStatement(stmt.Init)
+// analyzeForInStatement 分析 range-based for 迭代语句
+// 支持两种形式：
+//   - for x in range(...) { body }：循环变量类型为 int (i64)
+//   - for x in arr { body }：从数组/切片类型推断元素类型
+func (sa *SemanticAnalyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
+	// 注意：不要对 stmt.Variable 调用 analyzeExpression，因为它是被 for-in 声明的循环变量，
+	// 在注册到符号表之前不应被当作普通标识符检查。
+	if stmt.Iterable != nil {
+		sa.analyzeExpression(stmt.Iterable)
 	}
-	if stmt.Condition != nil {
-		sa.analyzeExpression(stmt.Condition)
-	}
-	// Update 是 Statement 类型，不是 Expression
-	if stmt.Update != nil {
-		sa.analyzeStatement(stmt.Update)
+	// 推断循环变量类型
+	if stmt.Variable != nil && stmt.Iterable != nil {
+		if isRangeCallExpr(stmt.Iterable) {
+			// range(...) 产生的值为整数类型
+			sa.symbolTable.AddSymbol(stmt.Variable.Name, "int", false, "local", stmt.Pos.Line, stmt.Pos.Column)
+		} else {
+			iterType := sa.inferExpressionType(stmt.Iterable)
+			elemType := inferElementType(iterType)
+			if elemType != "" {
+				sa.symbolTable.AddSymbol(stmt.Variable.Name, elemType, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+			}
+		}
 	}
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
 }
 
-// analyzeForInStatement 分析 for-in 安全迭代语句
-// 验证迭代对象是数组/切片类型，推断元素类型并在作用域中注册循环变量
-func (sa *SemanticAnalyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
-	if stmt.Variable != nil {
-		sa.analyzeExpression(stmt.Variable)
+// isRangeCallExpr 判断表达式是否为 range(...) 调用
+func isRangeCallExpr(expr ast.Expression) bool {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok || call == nil {
+		return false
 	}
-	if stmt.Iterable != nil {
-		sa.analyzeExpression(stmt.Iterable)
-	}
-	// 推断元素类型：从数组/切片类型中提取元素类型
-	if stmt.Variable != nil && stmt.Iterable != nil {
-		iterType := sa.inferExpressionType(stmt.Iterable)
-		elemType := inferElementType(iterType)
-		if elemType != "" {
-			sa.symbolTable.AddSymbol(stmt.Variable.Name, elemType, false, "local", stmt.Pos.Line, stmt.Pos.Column)
-		}
-	}
-	for _, bodyStmt := range stmt.Body {
-		sa.analyzeStatement(bodyStmt)
-	}
+	id, ok := call.Function.(*ast.Identifier)
+	return ok && id.Name == "range" && len(call.Args) >= 1 && len(call.Args) <= 3
 }
 
 // inferElementType 从数组/切片类型字符串中提取元素类型
@@ -1136,6 +1133,11 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 		return
 	}
 	if expr.Name == "null" || expr.Name == "true" || expr.Name == "false" {
+		return
+	}
+
+	// range 是内置迭代器构造，仅在 for-in 上下文中作为 range(...) 使用
+	if expr.Name == "range" {
 		return
 	}
 

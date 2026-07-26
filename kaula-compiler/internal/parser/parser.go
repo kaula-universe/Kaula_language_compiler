@@ -241,23 +241,21 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 	case lexer.TOKEN_WHILE:
 		return p.parseWhileStatementIterative()
 	case lexer.TOKEN_FOR:
-		// for x in expr { body } 语法
-		if p.peekTok.Type == lexer.TOKEN_IDENT {
-			varName := p.peekTok.Value
-			// need to check if identifier is followed by "in"
-			// save state, consume identifier, check next
-			savedCur := p.curTok
-			savedPeek := p.peekTok
-			p.nextToken()
-			p.nextToken() // consume identifier too
-			if p.curTok.Type == lexer.TOKEN_IN {
-				return p.parseForInStatement(varName)
-			}
-			// not for-in, restore and fall through
-			p.curTok = savedCur
-			p.peekTok = savedPeek
+		// range-based for: for x in <iterable> { body }
+		// <iterable> 可以是 range(N) / range(start, end[, step]) 或数组/切片表达式
+		if p.peekTok.Type != lexer.TOKEN_IDENT {
+			p.error("expected 'for <var> in <iterable> { ... }' (range-based for); got token " + lexer.TokenTypeToString(p.peekTok.Type))
+			return nil
 		}
-		return p.parseForStatementIterative()
+		varName := p.peekTok.Value
+		// consume 'for' and the loop variable identifier
+		p.nextToken() // curTok = IDENT
+		p.nextToken() // consume identifier; curTok should be 'in'
+		if p.curTok.Type != lexer.TOKEN_IN {
+			p.error("expected 'in' after loop variable '" + varName + "'; use syntax: for " + varName + " in range(...) { ... }")
+			return nil
+		}
+		return p.parseForInStatement(varName)
 	case lexer.TOKEN_RETURN:
 		return p.parseReturnStatementIterative()
 	case lexer.TOKEN_BREAK:
@@ -1529,54 +1527,6 @@ func (p *Parser) parseForInStatement(varName string) *ast.ForInStatement {
 			if bodyStmt != nil {
 				stmt.Body = append(stmt.Body, bodyStmt)
 			}
-			if bodyStmt == nil && p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
-				p.nextToken()
-			}
-		}
-		if p.curTok.Type == lexer.TOKEN_RBRACE {
-			p.nextToken()
-		}
-	}
-	return stmt
-}
-
-// parseForStatementIterative 迭代解析 for 语句
-func (p *Parser) parseForStatementIterative() *ast.ForStatement {
-	pos := ast.Position{
-		Line:   p.curTok.Line,
-		Column: p.curTok.Column,
-		File:   p.file,
-	}
-	stmt := &ast.ForStatement{
-		Body: []ast.Statement{},
-		Pos:  pos,
-	}
-	p.nextToken()
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		p.nextToken()
-		stmt.Init = p.parseStatementIterative()
-		if p.curTok.Type == lexer.TOKEN_SEMICOLON {
-			p.nextToken()
-		}
-		stmt.Condition = p.parseExpressionIterative()
-		if p.curTok.Type == lexer.TOKEN_SEMICOLON {
-			p.nextToken()
-		}
-		stmt.Update = p.parseStatementIterative()
-		if p.curTok.Type == lexer.TOKEN_RPAREN {
-			p.nextToken()
-		}
-	}
-	if p.curTok.Type == lexer.TOKEN_LBRACE {
-		p.nextToken()
-		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
-			bodyStmt := p.parseStatementIterative()
-			if bodyStmt != nil {
-				stmt.Body = append(stmt.Body, bodyStmt)
-			}
-			// 注意：不要在这里调用 nextToken()
-			// parseStatementIterative 已经正确处理了token位置
-			// 如果当前不是 } 且解析失败，才跳过当前token
 			if bodyStmt == nil && p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 				p.nextToken()
 			}

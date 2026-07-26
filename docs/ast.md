@@ -22,7 +22,8 @@ Node (接口)
 │   ├── VariableDeclaration        // 变量声明
 │   ├── IfStatement                // if 语句
 │   ├── WhileStatement             // while 循环
-│   ├── ForStatement               // for 循环
+│   ├── ForStatement               // (legacy) C 风格 for，已不再由解析器生成
+│   ├── ForInStatement             // range-based for: for x in range(...) / arr { body }
 │   ├── SwitchStatement            // switch 语句
 │   ├── CaseStatement              // case 分支
 │   ├── ReturnStatement            // return 语句

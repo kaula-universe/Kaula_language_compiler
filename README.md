@@ -82,8 +82,12 @@ while x > 0 {
     x = x - 1
 }
 
-# for
-for (i32 i = 0; i < 10; i = i + 1) {
+# for (range 系迭代)
+for i in range(10) {
+    println(i)
+}
+# range(start, end) / range(start, end, step) 同样支持
+for i in range(0, 10, 2) {
     println(i)
 }
 
