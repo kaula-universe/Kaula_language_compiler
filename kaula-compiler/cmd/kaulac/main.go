@@ -755,17 +755,29 @@ func (s *semaResult_t) HasErrors() bool {
 }
 
 func findStdlib() string {
-	// 首先尝试从可执行文件所在目录查找 stdlib.json
-	exePath, err := os.Executable()
-	if err == nil {
-		exeDir := filepath.Dir(exePath)
-		stdlibPath := filepath.Join(exeDir, "stdlib.json")
-		if _, err := os.Stat(stdlibPath); err == nil {
-			return stdlibPath
+	// 1. KAULA_HOME 环境变量
+	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
+		p := filepath.Join(envHome, "kaula-compiler", "stdlib.json")
+		if _, err := os.Stat(p); err == nil {
+			return p
 		}
 	}
-	
-	// 尝试多个路径
+
+	// 2. 可执行文件路径
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(filepath.Clean(exePath))
+		candidates := []string{
+			filepath.Join(exeDir, "stdlib.json"),
+			filepath.Join(exeDir, "..", "kaula-compiler", "stdlib.json"),
+		}
+		for _, p := range candidates {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+
+	// 3. 工作目录相对路径
 	paths := []string{"stdlib.json", "kaula-compiler/stdlib.json", "../stdlib.json", "../../kaula-compiler/stdlib.json"}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
@@ -866,20 +878,54 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		return fmt.Errorf("clang not found in PATH")
 	}
 
-	// 查找 kaula.h 所在的目录
-	kaulaSrcPaths := []string{
-		filepath.Join(workDir, "..", "..", "..", "kaula", "src"),  // glm_cli/src -> 新建文件夹/kaula/src
-		filepath.Join(workDir, "..", "..", "src"),                  // 上两级的 src
-		filepath.Join(workDir, "..", "src"),                        // 上一级的 src
-		filepath.Join(workDir, "src"),                              // 当前目录下的 src
-	}
-	
-	var kaulaSrcPath string
-	for _, p := range kaulaSrcPaths {
-		if _, err := os.Stat(filepath.Join(p, "kaula.h")); err == nil {
-			kaulaSrcPath = p
-			break
+	// 查找 kaula.h 所在的目录（优先级：KAULA_HOME > 可执行文件路径 > 相对路径）
+	var kaulaRoot string
+
+	// 1. 环境变量 KAULA_HOME
+	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
+		if _, err := os.Stat(filepath.Join(envHome, "src", "kaula.h")); err == nil {
+			kaulaRoot = envHome
 		}
+	}
+
+	// 2. 从可执行文件路径推断（kaulac 通常在 kaula-compiler/ 或 build/bin/ 下）
+	if kaulaRoot == "" {
+		if exePath, err := os.Executable(); err == nil {
+			exeDir := filepath.Dir(filepath.Clean(exePath))
+			candidates := []string{
+				filepath.Join(exeDir, ".."),           // kaula-compiler/ 的上级 = kaula 根
+				filepath.Join(exeDir, "..", ".."),     // build/bin/ 的上两级 = kaula 根
+				exeDir,                                // 可执行文件所在目录就是 kaula 根
+			}
+			for _, c := range candidates {
+				if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
+					kaulaRoot = c
+					break
+				}
+			}
+		}
+	}
+
+	// 3. 从工作目录相对路径回溯
+	if kaulaRoot == "" {
+		candidates := []string{
+			workDir,
+			filepath.Join(workDir, ".."),
+			filepath.Join(workDir, "..", ".."),
+			filepath.Join(workDir, "..", "..", ".."),
+			filepath.Join(workDir, "..", "..", "..", "kaula"),
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
+				kaulaRoot = c
+				break
+			}
+		}
+	}
+
+	var kaulaSrcPath string
+	if kaulaRoot != "" {
+		kaulaSrcPath = filepath.Join(kaulaRoot, "src")
 	}
 
 	srcPaths := []string{
@@ -889,13 +935,16 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		srcPaths = append(srcPaths, kaulaSrcPath)
 	}
 	srcPaths = append(srcPaths, filepath.Join(workDir, "..", "src"))
-	
-	stdPaths := []string{
-		filepath.Join(workDir, "..", "..", "..", "kaula", "std"),  // glm_cli/src -> 新建文件夹/kaula/std
-		filepath.Join(workDir, "..", "..", "std"),                  // 上两级的 std
-		filepath.Join(workDir, "..", "std"),                        // 上一级的 std
-		filepath.Join(workDir, "std"),                              // 当前目录下的 std
+
+	stdPaths := []string{}
+	if kaulaRoot != "" {
+		stdPaths = append(stdPaths, filepath.Join(kaulaRoot, "std"))
 	}
+	stdPaths = append(stdPaths,
+		filepath.Join(workDir, "std"),
+		filepath.Join(workDir, "..", "std"),
+		filepath.Join(workDir, "..", "..", "std"),
+	)
 
 	var validSrcPaths, validStdPaths []string
 	for _, p := range srcPaths {
@@ -1346,12 +1395,34 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 // findPkglibPath 查找 pkglib 目录路径
 func findPkglibPath() string {
-	exePath, _ := os.Executable()
-	exeDir := filepath.Dir(exePath)
+	// 1. KAULA_HOME 环境变量
+	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
+		p := filepath.Join(envHome, "pkglib")
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			absPath, _ := filepath.Abs(p)
+			return absPath
+		}
+	}
+
+	// 2. 可执行文件路径
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(filepath.Clean(exePath))
+		candidates := []string{
+			filepath.Join(exeDir, "pkglib"),
+			filepath.Join(exeDir, "..", "pkglib"),
+			filepath.Join(exeDir, "..", "..", "pkglib"),
+		}
+		for _, p := range candidates {
+			if info, err := os.Stat(p); err == nil && info.IsDir() {
+				absPath, _ := filepath.Abs(p)
+				return absPath
+			}
+		}
+	}
+
+	// 3. 工作目录
 	cwd, _ := os.Getwd()
 	candidates := []string{
-		filepath.Join(exeDir, "pkglib"),
-		filepath.Join(exeDir, "..", "pkglib"),
 		filepath.Join(cwd, "pkglib"),
 		filepath.Join(cwd, "..", "pkglib"),
 		"pkglib",
