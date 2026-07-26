@@ -289,8 +289,9 @@ class CBuilder:
             else:
                 fail += 1
 
-        if ok == 0:
-            print("[-] 标准库编译全部失败")
+        if fail > 0:
+            print(f"[-] 标准库编译失败: {fail} 个文件")
+            self.obj_files = old_objs
             return False
 
         lib_name = "kaula_std.lib" if self.is_msvc else "libkaula_std.a"
@@ -326,8 +327,9 @@ class CBuilder:
             else:
                 fail += 1
 
-        if ok == 0:
-            print("[-] 运行时编译全部失败")
+        if fail > 0:
+            print(f"[-] 运行时编译失败: {fail} 个文件")
+            self.obj_files = old_objs
             return False
 
         lib_name = "kaula_runtime.lib" if self.is_msvc else "libkaula_runtime.a"
@@ -473,7 +475,8 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
         print(f"  {name:20s}: {status}")
     print("=" * 60)
 
-    all_ok = all(v is not False for v in results.values())
+    failed_components = [name for name, ok in results.items() if ok is False]
+    all_ok = not failed_components
     if all_ok:
         print("\n\u2705 构建完成!")
         print(f"   可执行文件: {config.bin_dir}")
@@ -481,6 +484,7 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
         print(f"   头文件:     {config.include_dir}")
     else:
         print("\n\u274c 部分组件构建失败")
+        print(f"   失败组件: {', '.join(failed_components)}")
 
     return all_ok
 
