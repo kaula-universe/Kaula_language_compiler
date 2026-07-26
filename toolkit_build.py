@@ -360,6 +360,42 @@ class CBuilder:
 
         return True
 
+    def setup_toolchain(self):
+        """配置工具链：将 src/ 和 std/ 复制到 build/ 下，使 kaulac 在任意目录可用"""
+        print("\n=== 配置工具链 ===")
+
+        # build/src/ — 运行时（头文件 + .c 源码，kaulac 编译运行时需要）
+        build_src = self.config.build_dir / "src"
+        if self.config.src_dir.exists():
+            if build_src.exists():
+                shutil.rmtree(build_src)
+            shutil.copytree(self.config.src_dir, build_src,
+                            ignore=shutil.ignore_patterns("build"))
+            print(f"[\u2713] 工具链: build/src/")
+
+        # build/std/ — 标准库头文件（kaulac 通过 exeDir/../std/ 查找）
+        build_std = self.config.build_dir / "std"
+        if self.config.std_dir.exists():
+            if build_std.exists():
+                shutil.rmtree(build_std)
+            shutil.copytree(self.config.std_dir, build_std,
+                            ignore=shutil.ignore_patterns("*.c", "build"))
+            print(f"[\u2713] 工具链: build/std/")
+
+        # 生成 KAULA_HOME 配置文件
+        config_file = self.config.build_dir / "kaula.json"
+        config_data = {
+            "kaula_home": str(self.config.project_root),
+            "src_path": str(build_src),
+            "std_path": str(build_std),
+            "stdlib_json": str(self.config.bin_dir / "stdlib.json"),
+        }
+        config_file.write_text(json.dumps(config_data, indent=2, ensure_ascii=False),
+                               encoding="utf-8")
+        print(f"[\u2713] 工具链: build/kaula.json")
+
+        return True
+
 
 class GoBuilder:
     """Go 代码构建器"""
@@ -451,6 +487,7 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
     results["std_lib"] = c_builder.build_std_lib()
     results["runtime_lib"] = c_builder.build_runtime_lib()
     results["headers"] = c_builder.install_headers()
+    results["toolchain"] = c_builder.setup_toolchain()
 
     if go_cmd:
         go_builder = GoBuilder(config, go_cmd, release)
@@ -607,6 +644,10 @@ def main():
         else:
             print("[-] 错误: 安装头文件需要 C 构建器")
             success = False
+
+    # 所有 target 构建完成后，配置工具链
+    if success and c_builder:
+        c_builder.setup_toolchain()
 
     sys.exit(0 if success else 1)
 
