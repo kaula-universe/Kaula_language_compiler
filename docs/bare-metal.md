@@ -363,13 +363,140 @@ freestanding 模式使用 `freestanding.c.tmpl` 模板，提供：
 | `{{type_code}}` | 类型定义（struct/enum/typedef） |
 | `{{function_code}}` | 函数定义 |
 
-## KMM 静态池
+## KMM V4 静态池模式
 
-freestanding 模式下定义 `KMM_V4_STATIC_POOL`，Kaula 内存分配器使用 BSS 段中的静态池，无需 `malloc`/`free`：
+freestanding 模式下定义 `KMM_V4_STATIC_POOL`，Kaula 内存分配器使用 BSS 段中的静态池，无需 `malloc`/`free`。
 
-- 池内存在 BSS 段分配，编译期确定大小
-- 无需操作系统支持
-- 适用于裸机/内核环境
+### 设计原理
+
+KMM V4 采用 per-thread heap + bump allocation 架构。静态池模式下：
+
+- **池内存**：在 BSS 段分配 `g_kmm_v4_pool[KMM_V4_POOL_SIZE]`，编译期确定大小
+- **全局 offset**：单调递增，记录已分配的字节数
+- **Per-thread heap**：每个线程从全局池批量获取内存块，线程本地 offset 推进分配
+- **作用域回收**：`kmm_v4_scope_push`/`kmm_v4_scope_pop` 保存/恢复线程本地 offset
+
+```c
+// 静态池模式下的内存布局
+static uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE];  // BSS 段
+static size_t  g_kmm_v4_offset = 0;               // 全局分配偏移
+
+// Per-thread heap（线程本地）
+__thread struct {
+    uint8_t* base;     // 当前 thread heap 起始
+    size_t   offset;   // 线程本地分配偏移
+    size_t   capacity; // thread heap 容量
+} g_kmm_v4_thread_heap;
+```
+
+### 静态池 vs 动态池
+
+| 特性 | 静态池 (`KMM_V4_STATIC_POOL`) | 动态池（默认） |
+|------|-------------------------------|----------------|
+| 内存来源 | BSS 段，编译期固定 | 运行时 `malloc` 申请 |
+| 池大小 | 默认 16MB（freestanding 优化） | 默认 256MB（64位 hosted） |
+| 系统依赖 | 无 | 需要 `malloc` |
+| 适用场景 | 裸机/内核/嵌入式 | 用户态应用 |
+| 线程安全 | 原子 CAS（Level 1+） | 原子 CAS（Level 1+） |
+| `kmm_v4_free` | no-op（作用域回收） | no-op（作用域回收） |
+
+### 池大小配置
+
+通过 `-D` 编译选项覆盖默认池大小：
+
+```bash
+# 自定义池大小为 32MB
+clang -DKMM_V4_STATIC_POOL -DKMM_V4_POOL_SIZE=$((32*1024*1024)) ...
+
+# 或在 kaula.json 中配置
+{
+    "freestanding": true,
+    "extra_clang_flags": ["-DKMM_V4_POOL_SIZE=33554432"]
+}
+```
+
+池大小选择建议：
+
+| 场景 | 推荐大小 | 说明 |
+|------|----------|------|
+| 嵌入式（RAM < 64MB） | 4-8 MB | 节省 BSS 段 |
+| 内核开发 | 16-64 MB | 平衡内核内存 |
+| 用户态应用（静态池） | 64-256 MB | 充足分配空间 |
+
+### freestanding 下的分配流程
+
+```c
+// 1. 线程首次分配：从全局池获取 thread heap
+//    kmm_v4_thread_heap_refill() 使用 CAS 从 g_kmm_v4_offset 推进
+uint8_t* kmm_v4_thread_heap_refill(size_t min_needed) {
+    size_t chunk = KMM_TLS_BUFFER_SIZE;  // 默认 4 * L1 cache
+    if (min_needed > chunk) chunk = min_needed;
+    
+    // CAS 推进全局 offset
+    size_t old = atomic_load(&g_kmm_v4_offset);
+    size_t new_offset = old + chunk;
+    if (new_offset > g_kmm_v4_pool_capacity) return NULL;
+    while (!atomic_cas_weak(&g_kmm_v4_offset, old, new_offset)) {
+        old = atomic_load(&g_kmm_v4_offset);
+        new_offset = old + chunk;
+        if (new_offset > g_kmm_v4_pool_capacity) return NULL;
+    }
+    
+    g_kmm_v4_thread_heap.base = g_kmm_v4_pool + old;
+    g_kmm_v4_thread_heap.offset = 0;
+    g_kmm_v4_thread_heap.capacity = chunk;
+    return g_kmm_v4_thread_heap.base;
+}
+
+// 2. 后续分配：直接推进 thread heap offset（无原子操作）
+static inline void* kmm_v4_alloc_auto(size_t size) {
+    size_t aligned = (size + 7) & ~7;  // 8 字节对齐
+    if (g_kmm_v4_thread_heap.offset + aligned <= g_kmm_v4_thread_heap.capacity) {
+        void* ptr = g_kmm_v4_thread_heap.base + g_kmm_v4_thread_heap.offset;
+        g_kmm_v4_thread_heap.offset += aligned;
+        return ptr;  // 快速路径，无锁
+    }
+    // 慢路径：refill thread heap
+    ...
+}
+```
+
+### 性能特点
+
+静态池模式下，KMM V4 同样保持高性能：
+
+- **分配**：O(1) bump pointer，无系统调用
+- **释放**：no-op，作用域退出批量回收
+- **多线程**：per-thread heap 隔离，CAS 仅在 refill 时触发
+- **内存安全**：池越界返回 NULL（严格模式）或回退 malloc（`KMM_V4_ENABLE_FALLBACK=1`）
+
+### 裸机使用示例
+
+```kaula
+// 裸机程序使用 KMM V4 静态池
+#[naked, section(".text.boot")]
+fn _start() -> void {
+    kaula_main()
+}
+
+fn kaula_main() -> void {
+    // KMM V4 自动管理作用域
+    auto buf = std.memory.std_malloc(4096)   // 从静态池分配
+    // ... 使用 buf ...
+    // 函数返回时自动回收
+}
+```
+
+### 配置宏总览
+
+| 宏 | 默认值 | 说明 |
+|----|--------|------|
+| `KMM_V4_STATIC_POOL` | freestanding 自动定义 | 启用静态池模式 |
+| `KMM_V4_POOL_SIZE` | 16MB (static) / 256MB (dynamic) | 池大小（字节） |
+| `KMM_V4_ALIGNMENT` | 8/16/32/64（按 SIMD 自动） | 对齐字节数 |
+| `KMM_THREAD_SAFETY_LEVEL` | 1（优化模式） | 线程安全级别 |
+| `KMM_V4_ENABLE_FALLBACK` | 0（release） | 越界时回退 malloc |
+| `KMM_TLS_BUFFER_SIZE` | 4 * L1 cache | Per-thread heap 批量大小 |
 
 ## 完整示例
 

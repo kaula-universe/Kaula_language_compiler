@@ -234,19 +234,159 @@ type GenericInstanceCache struct {
 }
 ```
 
-## KMM 内存管理
+## KMM V4 内存管理
 
-代码生成器跟踪 KMM 作用域深度：
+KMM V4 是 Kaula 的默认内存分配器，代码生成器负责将 Kaula 层的内存操作转换为高效的 C 代码。
+
+### 设计架构
+
+KMM V4 采用 **per-thread heap + bump allocation + scope-based reclamation** 架构：
+
+- **Per-Thread Heap**：每个线程从全局池批量获取内存块，分配时只推进线程本地 offset
+- **Bump Allocation**：分配即指针推进，O(1) 复杂度
+- **Scope-based Reclamation**：作用域退出时批量回收，`kmm_v4_free` 为 no-op
+
+### 代码生成的三大优化
+
+#### 1. std_malloc inline 重写
+
+编译器将所有 `std_malloc` 调用无条件重写为 `kmm_v4_alloc_auto` inline 调用：
+
+```kaula
+// Kaula 源码
+auto buf = std.memory.std_malloc(1024)
+```
+
+```c
+// 生成的 C 代码（inline 展开）
+void* buf = kmm_v4_alloc_auto(1024);
+```
+
+**关键规则**：
+- 当 KMM 启用时，`std_malloc` → `kmm_v4_alloc_auto` 是无条件重写
+- `kmm_v4_alloc_auto` 是 `static inline` 函数，编译器可完全内联
+- 消除函数调用开销，分配路径仅剩指针推进 + 比较
+
+#### 2. 作用域自动插入
+
+代码生成器跟踪 KMM 作用域深度，在函数入口/出口自动插入 scope 操作：
+
+```kaula
+// Kaula 源码
+fn process() {
+    auto a = std.memory.std_malloc(64)
+    auto b = std.memory.std_malloc(128)
+    // ... 使用 a, b ...
+}
+```
+
+```c
+// 生成的 C 代码
+void process(void) {
+    kmm_v4_scope_push();           // 函数入口：保存 thread heap offset
+    void* a = kmm_v4_alloc_auto(64);
+    void* b = kmm_v4_alloc_auto(128);
+    // ... 使用 a, b ...
+    kmm_v4_scope_pop();            // 函数出口：恢复 offset，批量回收
+}
+```
+
+**作用域插入策略**：
+- `kmm_v4_scope_push()` 插入在函数入口（prologue 之后）
+- `kmm_v4_scope_pop()` 插入在所有退出路径（return/break/continue + 函数末尾）
+- 嵌套作用域支持最大深度 64 层（`KMM_V4_MAX_SCOPE_DEPTH`）
 
 ```go
-// KMM 作用域深度
+// 代码生成器中的 KMM 作用域管理
 cg.kmmScopeDepth++
 
-// 生成作用域开始/结束代码
-// kmm_scope_begin()
-// ... 函数体 ...
-// kmm_scope_end()
+// 生成作用域开始代码
+cg.emit("kmm_v4_scope_push();")
+
+// 生成函数体
+cg.generateBody(func.Body)
+
+// 在所有退出路径插入 scope_pop
+for _, exitPoint := range func.ExitPoints {
+    cg.emitAt(exitPoint, "kmm_v4_scope_pop();")
+}
 ```
+
+#### 3. free 消除
+
+KMM V4 中 `kmm_v4_free` 是 no-op，代码生成器不生成任何 free 调用：
+
+```kaula
+// Kaula 源码（如果用户写了 free）
+std.memory.kmm_v4_free(buf)
+```
+
+```c
+// 生成的 C 代码
+// (无代码生成，kmm_v4_free 是空操作)
+```
+
+### 分配路径生成
+
+代码生成器为不同的分配模式生成最优代码：
+
+```kaula
+// 1. 普通分配
+auto p = std.memory.std_malloc(64)
+// → kmm_v4_alloc_auto(64)
+
+// 2. 零初始化分配
+auto arr = std.memory.kmm_v4_calloc(100, sizeof_int)
+// → kmm_v4_calloc(100, sizeof(int))
+
+// 3. 字符串复制
+auto s = std.memory.kmm_v4_strdup("hello")
+// → kmm_v4_strdup("hello")
+```
+
+### #[no_kmm] 属性
+
+使用 `#[no_kmm]` 属性可以在特定函数中禁用 KMM，回退到系统 malloc：
+
+```kaula
+#[no_kmm]
+fn raw_buffer() void* {
+    // 此函数内不插入 scope_push/pop
+    // std_malloc 不会被重写为 kmm_v4_alloc_auto
+    return std.memory.std_malloc(1024)
+}
+```
+
+### SOR 模式下的集成
+
+启用 `--sor` 时，SOR 分析结果指导代码生成：
+
+```go
+// SOR 分析传递池容量给代码生成
+if config.SOR {
+    sorResult := sor.AnalyzeFull(program)
+    codegen.SetSORResult(sorResult)
+    
+    // 生成 KMM 池大小定义
+    // #define KMM_V4_POOL_SIZE <poolSize>
+}
+```
+
+SOR 模式下的额外优化：
+- **逃逸分析**：无逃逸对象可省略 scope_push/pop
+- **活跃性分析**：精确计算作用域释放点
+- **池容量优化**：根据对象大小总和自动计算 `KMM_V4_POOL_SIZE`
+
+### 性能数据
+
+KMM V4 的 inline 机制带来显著性能提升（10M 次迭代基准测试）：
+
+| 场景 | KMM V4 (inline) | malloc/free | 加速比 |
+|------|-----------------|-------------|--------|
+| 纯分配吞吐量（64B, 1M 次） | 3.5 ms | 72.7 ms | **20.5x** |
+| 16B 小对象分配+回收 | 51.8 ms | 634.3 ms | **12.2x** |
+| 64B 对象分配+回收 | 65.9 ms | 661.5 ms | **10.0x** |
+| 混合负载（16~1024B） | 287.9 ms | 658.1 ms | **2.2x** |
 
 ## API
 

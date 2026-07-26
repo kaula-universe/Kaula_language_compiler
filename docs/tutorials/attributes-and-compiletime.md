@@ -34,11 +34,34 @@ fn old_api() { }
 #[weak]                           # 弱符号
 fn fallback() int { return -1 }
 
-#[no_kmm]                         # 禁用 KMM 内存管理
-fn raw_alloc() void* { }
+#[no_kmm]                         # 禁用 KMM 内存管理（回退到系统 malloc）
 
 #[volatile]                       # volatile 语义
 u32* status_reg = 0x40000000
+```
+
+### #[no_kmm] 详解
+
+`#[no_kmm]` 属性在特定函数中禁用 KMM V4 内存管理：
+
+- 函数内不插入 `kmm_v4_scope_push()`/`kmm_v4_scope_pop()`
+- `std_malloc` 不会被重写为 `kmm_v4_alloc_auto`，保持系统 malloc 调用
+- 适用于需要手动管理内存生命周期的场景（如 C 库互操作）
+
+```kaula
+#[no_kmm]
+fn manual_memory() void* {
+    // 使用系统 malloc，不受 KMM 作用域管理
+    auto ptr = std.memory.std_malloc(1024)
+    // ... 需要手动 std_free ...
+    return ptr
+}
+
+fn kmm_managed() {
+    // 默认 KMM 管理，函数退出自动回收
+    auto ptr = std.memory.std_malloc(1024)
+    // 无需 free
+}
 ```
 
 ### 表达式级属性

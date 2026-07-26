@@ -42,6 +42,20 @@
 
 查看 [SOR 子所有权释放](sor-system.md) 和 [核心运行时特性](core-runtime.md)。
 
+KMM V4 是 Kaula 的默认内存分配器，基于 per-thread heap + bump allocation，在基准测试中比 malloc/free 快 **2-20x**：
+
+| 场景 | KMM V4 | malloc/free | 加速比 |
+|------|--------|-------------|--------|
+| 纯分配吞吐量（64B, 1M 次） | 3.5 ms | 72.7 ms | **20.5x** |
+| 16B 小对象分配+回收 | 51.8 ms | 634.3 ms | **12.2x** |
+| 64B 对象分配+回收 | 65.9 ms | 661.5 ms | **10.0x** |
+| 混合负载（16~1024B 交替） | 287.9 ms | 658.1 ms | **2.2x** |
+
+相关文档：
+- [代码生成器](code-generation.md) - KMM inline 机制、作用域插入策略
+- [裸机开发指南](bare-metal.md) - KMM V4 静态池模式（freestanding）
+- [SOR 子所有权释放](sor-system.md) - SOR 与 KMM 集成、内存分配决策
+
 ### 想了解如何扩展编译器？
 
 查看 [代码生成器 (Codegen)](code-generation.md) 中的插件系统部分。

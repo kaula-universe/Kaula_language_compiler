@@ -69,3 +69,6 @@ nul/
 *.swp
 *.swo
 *~
+
+# TRAE temporary files
+.trae-html-share-packages/

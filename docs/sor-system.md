@@ -324,9 +324,92 @@ SOR Error: Use after move
 SOR 分析结果用于优化内存分配：
 
 1. **栈分配**：无逃逸的对象分配在栈上
-2. **Arena 分配**：有逃逸的对象分配在 Arena 中
-3. **Bump Pool**：临时对象使用 Bump Pool
-4. **作用域释放**：作用域结束时批量释放
+2. **Bump Pool**：临时对象使用 Bump Pool（KMM V4 per-thread heap）
+3. **作用域释放**：作用域结束时批量释放（kmm_v4_scope_pop）
+
+> **注意**：Arena 分级（AllocArenaTiny/Small/Medium）已在 KMM V4 中收敛为 BumpPool，代码生成统一使用 `kmm_v4_alloc_auto`。
+
+## SOR 与 KMM V4 集成
+
+### 内存分配决策收敛
+
+KMM V4 统一了分配路径，SOR 的分配决策在代码生成阶段全部映射到 BumpPool：
+
+```go
+// memory.go - SOR 分配决策
+type AllocKind int
+
+const (
+    AllocStack      AllocKind = iota // 栈分配
+    AllocBumpPool                     // Bump Pool 分配（KMM V4 唯一运行时路径）
+    AllocArenaTiny                    // 已废弃，收敛到 BumpPool
+    AllocArenaSmall                   // 已废弃，收敛到 BumpPool
+    AllocArenaMedium                  // 已废弃，收敛到 BumpPool
+)
+```
+
+代码生成器将所有 `AllocBumpPool`/`AllocArenaTiny`/`AllocArenaSmall`/`AllocArenaMedium` 统一生成为 `kmm_v4_alloc_auto` 调用：
+
+```go
+// sor_codegen.go - 分配代码生成
+func (scg *SORCodegen) generateAlloc(kind AllocKind, size int) string {
+    switch kind {
+    case AllocStack:
+        return generateStackAlloc(size)  // 栈上分配
+    default:
+        // 所有堆分配统一走 KMM V4 BumpPool
+        return fmt.Sprintf("kmm_v4_alloc_auto(%d)", size)
+    }
+}
+```
+
+### 作用域释放点计算
+
+SOR 的活跃性分析精确计算每个变量的最后使用点，指导代码生成器在正确位置插入 `kmm_v4_scope_pop`：
+
+```kaula
+#[sor]
+fn process() {
+    auto buf = std.memory.std_malloc(1024)
+    
+    yield buf -> owner         // 所有权转移
+    
+    extract owner[0] -> first  // 提取子结构
+    
+    println(first)             // 最后使用点
+    
+    release owner -> [a, b]    // 释放所有权
+    // ↑ SOR 分析在此插入 kmm_v4_scope_pop()
+}
+```
+
+### 池容量自动计算
+
+SOR 分析根据对象大小总和自动计算 KMM 池容量：
+
+```go
+// SOR 分析结果传递给代码生成
+sorResult := sor.AnalyzeFull(program)
+
+// 根据 SOR 分析的对象大小总和计算池容量
+poolSize := sorResult.TotalObjectSize * 2  // 2x 余量
+codegen.EmitDefine("KMM_V4_POOL_SIZE", poolSize)
+```
+
+### KMM V4 per-thread heap 与 SOR 的协作
+
+SOR 的作用域模型与 KMM V4 的 per-thread heap 完美契合：
+
+| SOR 概念 | KMM V4 实现 | 说明 |
+|----------|-------------|------|
+| 作用域进入 | `kmm_v4_scope_push()` | 保存 thread heap offset |
+| 作用域退出 | `kmm_v4_scope_pop()` | 恢复 offset，批量回收 |
+| 对象分配 | `kmm_v4_alloc_auto(size)` | Bump pointer 推进 |
+| 对象释放 | no-op | 作用域退出时统一回收 |
+| 所有权转移 | 编译期检查 | 运行时零开销 |
+| 子结构提取 | 编译期检查 | 运行时零开销 |
+
+**关键设计**：scope_push/pop 只操作 per-thread heap offset，不影响全局 offset。多线程环境下，一个线程的 scope 回退不会影响其他线程的分配。
 
 ## API
 

@@ -293,13 +293,62 @@ fn _start() {
 
 ---
 
+## KMM V4 内存管理
+
+Kaula 默认使用 KMM V4（Kaula Memory Manager V4）作为内存分配器，基于 per-thread heap + bump allocation + scope-based reclamation 设计，相比传统 malloc/free 有显著性能优势。
+
+### 性能对比（vs C malloc/free）
+
+基于 10M 次迭代基准测试（Windows, Clang 16, x86-64）：
+
+| 场景 | KMM V4 | malloc/free | 加速比 |
+|------|--------|-------------|--------|
+| 16B 小对象分配+回收 | 51.8 ms | 634.3 ms | **12.2x** |
+| 64B 对象分配+回收 | 65.9 ms | 661.5 ms | **10.0x** |
+| 256B 对象分配+回收 | 152.3 ms | 711.8 ms | **4.6x** |
+| 零初始化分配（calloc 等价） | 66.1 ms | 704.0 ms | **10.6x** |
+| 纯分配吞吐量（64B, 1M 次） | 3.5 ms | 72.7 ms | **20.5x** |
+| 字符串处理（32+64+128B） | 72.9 ms | 575.0 ms | **7.8x** |
+| 链表节点（8x48B） | 139.1 ms | 594.5 ms | **4.2x** |
+| 大对象（4KB） | 486.3 ms | 1597.6 ms | **3.2x** |
+| 混合负载（16~1024B 交替） | 287.9 ms | 658.1 ms | **2.2x** |
+
+**核心优势**：纯分配路径快 20x+，小对象分配快 10x+，零初始化分配快 10x。
+
+### 设计特点
+
+- **Per-Thread Heap**：每个线程从全局池批量获取内存块，分配时只推进线程本地 offset，无原子操作、无锁
+- **Bump Allocation**：分配即指针推进，O(1) 复杂度，无碎片
+- **Scope-based Reclamation**：`kmm_v4_scope_push`/`kmm_v4_scope_pop` 保存/恢复线程本地 offset，作用域退出批量回收，无需逐个 free
+- **Inline 优化**：编译器将 `std_malloc` 重写为 `kmm_v4_alloc_auto` inline 调用，消除函数调用开销
+- **kmm_v4_free 为 no-op**：无需维护 free list，释放零开销
+
+```kaula
+// KMM V4 自动作用域管理示例
+fn process_data() {
+    // 编译器自动插入 kmm_v4_scope_push()
+    auto buf1 = std.memory.std_malloc(1024)   // 内联为 kmm_v4_alloc_auto(1024)
+    auto buf2 = std.memory.std_malloc(2048)   // 内联为 kmm_v4_alloc_auto(2048)
+    // ... 使用 buf1, buf2 ...
+    // 编译器自动插入 kmm_v4_scope_pop()，批量回收
+}
+```
+
+### 线程安全
+
+- **全局 offset**：单调递增，CAS 推进，永不回退
+- **Per-thread heap offset**：scope 操作仅影响当前线程，多线程互不干扰
+- **Thread Safety Level**：自动根据编译模式选择（0=单线程零开销，1=轻量实时原子，2=完全线程安全）
+
+---
+
 ## 标准库
 
 62 个模块，800+ 函数，覆盖从系统编程到 Web 开发：
 
 | 分类 | 模块 |
 |------|------|
-| **内存** | memory（KMM V4 作用域分配器）、bitset |
+| **内存** | memory（KMM V4 per-thread heap 作用域分配器，比 malloc 快 2-20x）、bitset |
 | **容器** | container（Vector/LinkedList/HashMap/Stack）、deque、heap、trie、graph |
 | **字符串** | string、regex、unicode、template |
 | **I/O** | io、fs、path |

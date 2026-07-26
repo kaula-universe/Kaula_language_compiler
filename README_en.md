@@ -293,13 +293,62 @@ fn _start() {
 
 ---
 
+## KMM V4 Memory Management
+
+Kaula uses KMM V4 (Kaula Memory Manager V4) as the default allocator, based on per-thread heap + bump allocation + scope-based reclamation. It delivers significant performance advantages over traditional malloc/free.
+
+### Performance Comparison (vs C malloc/free)
+
+Based on 10M iteration benchmarks (Windows, Clang 16, x86-64):
+
+| Scenario | KMM V4 | malloc/free | Speedup |
+|----------|--------|-------------|---------|
+| 16B small object alloc+free | 51.8 ms | 634.3 ms | **12.2x** |
+| 64B object alloc+free | 65.9 ms | 661.5 ms | **10.0x** |
+| 256B object alloc+free | 152.3 ms | 711.8 ms | **4.6x** |
+| Zero-init alloc (calloc equivalent) | 66.1 ms | 704.0 ms | **10.6x** |
+| Pure alloc throughput (64B, 1M times) | 3.5 ms | 72.7 ms | **20.5x** |
+| String processing (32+64+128B) | 72.9 ms | 575.0 ms | **7.8x** |
+| Linked list nodes (8x48B) | 139.1 ms | 594.5 ms | **4.2x** |
+| Large object (4KB) | 486.3 ms | 1597.6 ms | **3.2x** |
+| Mixed workload (16~1024B alternating) | 287.9 ms | 658.1 ms | **2.2x** |
+
+**Key advantages**: Pure allocation path 20x+ faster, small object allocation 10x+ faster, zero-init allocation 10x faster.
+
+### Design Highlights
+
+- **Per-Thread Heap**: Each thread batch-acquires memory from the global pool; allocation only advances the thread-local offset, no atomics, no locks
+- **Bump Allocation**: Allocation is pointer advancement, O(1) complexity, no fragmentation
+- **Scope-based Reclamation**: `kmm_v4_scope_push`/`kmm_v4_scope_pop` save/restore thread-local offset, batch reclaim on scope exit, no per-object free needed
+- **Inline Optimization**: Compiler rewrites `std_malloc` to `kmm_v4_alloc_auto` inline calls, eliminating function call overhead
+- **kmm_v4_free is a no-op**: No free list maintenance, zero-cost deallocation
+
+```kaula
+// KMM V4 automatic scope management example
+fn process_data() {
+    // Compiler auto-inserts kmm_v4_scope_push()
+    auto buf1 = std.memory.std_malloc(1024)   // inlined to kmm_v4_alloc_auto(1024)
+    auto buf2 = std.memory.std_malloc(2048)   // inlined to kmm_v4_alloc_auto(2048)
+    // ... use buf1, buf2 ...
+    // Compiler auto-inserts kmm_v4_scope_pop(), batch reclaim
+}
+```
+
+### Thread Safety
+
+- **Global offset**: Monotonically increasing, CAS-advanced, never rolled back
+- **Per-thread heap offset**: Scope operations only affect the current thread, multi-threaded isolation
+- **Thread Safety Level**: Auto-selected by build mode (0=single-thread zero-overhead, 1=lightweight realtime atomics, 2=fully thread-safe)
+
+---
+
 ## Standard Library
 
 62 modules, 800+ functions, covering systems programming to web development:
 
 | Category | Modules |
 |----------|---------|
-| **Memory** | memory (KMM V4 scoped allocator), bitset |
+| **Memory** | memory (KMM V4 per-thread heap scoped allocator, 2-20x faster than malloc), bitset |
 | **Containers** | container (Vector/LinkedList/HashMap/Stack), deque, heap, trie, graph |
 | **Strings** | string, regex, unicode, template |
 | **I/O** | io, fs, path |

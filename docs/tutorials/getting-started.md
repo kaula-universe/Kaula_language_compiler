@@ -45,8 +45,28 @@ kaulac hello.kl
 
 - **编译到 C**：Kaula 源码→C 代码→机器码，与现有 C 库无缝互操作
 - **渐进类型**：支持显式类型和 `auto` 类型推导
-- **内存安全**：KMM V4 作用域分配器（默认启用）+ 可选 SOR 所有权分析
+- **内存安全**：KMM V4 per-thread heap 作用域分配器（默认启用，比 malloc 快 2-20x）+ 可选 SOR 所有权分析
 - **零开销抽象**：结构体、枚举（带变体）、泛型等抽象在编译期展开，无运行时开销
+
+## 内存管理
+
+Kaula 默认使用 KMM V4 作为内存分配器，无需手动 free：
+
+```kaula
+import std.memory
+
+fn main() {
+    // std_malloc 被编译器内联为 kmm_v4_alloc_auto
+    auto buf = std.memory.std_malloc(1024)
+    
+    // 使用 buf...
+    memset(buf, 0, 1024)
+    
+    // 函数退出时自动回收，无需 free
+}
+```
+
+KMM V4 基于 per-thread heap + bump allocation，在基准测试中比 malloc/free 快 2-20x（纯分配路径快 20x+，小对象分配快 10x+）。
 
 ## 完整的示例文件
 
