@@ -26,7 +26,7 @@ void traits_register(const char* name, const TypeInfo* info) {
     }
     entry = (TypeRegistryEntryInternal*)kmm_v4_malloc(sizeof(TypeRegistryEntryInternal));
     if (!entry) return;
-    entry->type_name = string_copy(name);
+    entry->type_name = string_create(name).ptr;
     entry->info = *info;
     entry->next = NULL;
     if (!g_registry_head) {

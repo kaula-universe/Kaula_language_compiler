@@ -77,12 +77,12 @@ bool_t tls_set_cipher(TLSContext* ctx, TLSCipher cipher) {
 
 String tls_get_peer_certificate(TLSContext* ctx) {
     (void)ctx;
-    return string_copy("None");
+    return string_create("None");
 }
 
 String tls_get_cipher_name(TLSContext* ctx) {
     (void)ctx;
-    return string_copy("AES-256-GCM");
+    return string_create("AES-256-GCM");
 }
 
 TLSVersion tls_get_version(TLSContext* ctx) {

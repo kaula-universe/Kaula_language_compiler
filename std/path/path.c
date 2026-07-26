@@ -1,3 +1,10 @@
+/* _DEFAULT_SOURCE 必须在所有 #include 之前定义，以确保 realpath
+   在 <stdlib.h> 中可见（现代 glibc 要求 _DEFAULT_SOURCE）。
+   注意：_POSIX_C_SOURCE=200809L 会隐藏 realpath，必须用 _DEFAULT_SOURCE。 */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "path.h"
 #include "../memory/memory.h"
 #include "../string/string.h"
@@ -42,8 +49,8 @@ const char* path_sep_str(void) {
 
 String path_join(const char* path1, const char* path2) {
     if (!path1 && !path2) return string_create("");
-    if (!path1) return string_copy(path2);
-    if (!path2) return string_copy(path1);
+    if (!path1) return string_create(path2);
+    if (!path2) return string_create(path1);
 
     size_t len1 = strlen(path1);
     size_t len2 = strlen(path2);
@@ -55,7 +62,7 @@ String path_join(const char* path1, const char* path2) {
 
     size_t total = len1 + len2 + (need_sep ? 1 : 0);
     char* result = (char*)kmm_v4_malloc(total + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
 
     memcpy(result, path1, len1);
     size_t pos = len1;
@@ -63,12 +70,12 @@ String path_join(const char* path1, const char* path2) {
     memcpy(result + pos, path2, len2);
     result[pos + len2] = '\0';
 
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_join_n(const char** parts, size_t count) {
     if (!parts || count == 0) return string_create("");
-    if (count == 1) return string_copy(parts[0] ? parts[0] : "");
+    if (count == 1) return string_create(parts[0] ? parts[0] : "");
 
     size_t total = 0;
     char sep = path_separator();
@@ -80,7 +87,7 @@ String path_join_n(const char** parts, size_t count) {
     total += (count - 1);
 
     char* result = (char*)kmm_v4_malloc(total + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
 
     size_t pos = 0;
     for (i = 0; i < count; i++) {
@@ -101,7 +108,7 @@ String path_join_n(const char** parts, size_t count) {
     }
     result[pos] = '\0';
 
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_dirname(const char* path) {
@@ -123,11 +130,11 @@ String path_dirname(const char* path) {
 #ifdef _WIN32
     if (!slash && len >= 2 && path[1] == ':') {
         char* result = (char*)kmm_v4_malloc(3);
-        if (!result) return NULL;
+        if (!result) return STRING_EMPTY;
         result[0] = path[0];
         result[1] = ':';
         result[2] = '\0';
-        return result;
+        return (String){.len = strlen(result), .ptr = result};
     }
 #endif
 
@@ -136,10 +143,10 @@ String path_dirname(const char* path) {
 #ifdef _WIN32
     if (slash == path && len >= 1 && is_sep(path[0])) {
         char* result = (char*)kmm_v4_malloc(2);
-        if (!result) return NULL;
+        if (!result) return STRING_EMPTY;
         result[0] = path[0];
         result[1] = '\0';
-        return result;
+        return (String){.len = strlen(result), .ptr = result};
     }
 #else
     if (slash == path) {
@@ -151,10 +158,10 @@ String path_dirname(const char* path) {
     if (dir_len == 0) return string_create("/");
 
     char* result = (char*)kmm_v4_malloc(dir_len + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
     memcpy(result, path, dir_len);
     result[dir_len] = '\0';
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_basename(const char* path) {
@@ -184,25 +191,25 @@ String path_basename(const char* path) {
 
     size_t base_len = len - (size_t)(start - path);
     char* result = (char*)kmm_v4_malloc(base_len + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
     memcpy(result, start, base_len);
     result[base_len] = '\0';
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_extension(const char* path) {
     if (!path) return string_create("");
 
     String base = path_basename(path);
-    if (!base) return string_create("");
+    if (base.len == 0) return string_create("");
 
-    const char* dot = strrchr(base, '.');
-    if (!dot || dot == base) {
+    const char* dot = strrchr(base.ptr, '.');
+    if (!dot || dot == base.ptr) {
         string_free(base);
         return string_create("");
     }
 
-    String result = string_copy(dot);
+    String result = string_create(dot);
     string_free(base);
     return result;
 }
@@ -211,23 +218,23 @@ String path_stem(const char* path) {
     if (!path) return string_create("");
 
     String base = path_basename(path);
-    if (!base) return string_create("");
+    if (base.len == 0) return string_create("");
 
-    char* dot = strrchr(base, '.');
-    if (!dot || dot == base) {
+    char* dot = strrchr(base.ptr, '.');
+    if (!dot || dot == base.ptr) {
         return base;
     }
 
-    size_t stem_len = (size_t)(dot - base);
+    size_t stem_len = (size_t)(dot - base.ptr);
     char* result = (char*)kmm_v4_malloc(stem_len + 1);
     if (!result) {
         string_free(base);
-        return NULL;
+        return STRING_EMPTY;
     }
-    memcpy(result, base, stem_len);
+    memcpy(result, base.ptr, stem_len);
     result[stem_len] = '\0';
     string_free(base);
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_absolute(const char* path) {
@@ -236,12 +243,12 @@ String path_absolute(const char* path) {
 #ifdef _WIN32
     char buf[MAX_PATH];
     DWORD len = GetFullPathNameA(path, MAX_PATH, buf, NULL);
-    if (len == 0 || len > MAX_PATH) return string_copy(path);
-    return string_copy(buf);
+    if (len == 0 || len > MAX_PATH) return string_create(path);
+    return string_create(buf);
 #else
     char buf[PATH_MAX];
-    if (realpath(path, buf)) return string_copy(buf);
-    return string_copy(path);
+    if (realpath(path, buf)) return string_create(buf);
+    return string_create(path);
 #endif
 }
 
@@ -251,12 +258,12 @@ String path_canonical(const char* path) {
 #ifdef _WIN32
     char buf[MAX_PATH];
     DWORD len = GetFullPathNameA(path, MAX_PATH, buf, NULL);
-    if (len == 0 || len > MAX_PATH) return string_copy(path);
-    return string_copy(buf);
+    if (len == 0 || len > MAX_PATH) return string_create(path);
+    return string_create(buf);
 #else
     char buf[PATH_MAX];
-    if (realpath(path, buf)) return string_copy(buf);
-    return string_copy(path);
+    if (realpath(path, buf)) return string_create(buf);
+    return string_create(path);
 #endif
 }
 
@@ -274,7 +281,7 @@ static String path_normalize_internal(const char* path) {
 
     size_t len = strlen(path);
     char* buf = (char*)kmm_v4_malloc(len + 1);
-    if (!buf) return NULL;
+    if (!buf) return STRING_EMPTY;
     memcpy(buf, path, len + 1);
 
     normalize_separators(buf);
@@ -346,11 +353,11 @@ static String path_normalize_internal(const char* path) {
     char* result = (char*)kmm_v4_malloc(write_pos + 1);
     if (!result) {
         kmm_v4_free(buf);
-        return NULL;
+        return STRING_EMPTY;
     }
     memcpy(result, buf, write_pos + 1);
     kmm_v4_free(buf);
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_normalize(const char* path) {
@@ -395,7 +402,7 @@ bool_t path_exists(const char* path) {
 
 String path_replace_extension(const char* path, const char* new_ext) {
     if (!path) return string_create("");
-    if (!new_ext) return string_copy(path);
+    if (!new_ext) return string_create(path);
 
     const char* dot = strrchr(path, '.');
     const char* last_sep = strrchr(path, '/');
@@ -409,26 +416,26 @@ String path_replace_extension(const char* path, const char* new_ext) {
         size_t ext_len = strlen(new_ext);
         int need_dot = (*new_ext != '.');
         char* result = (char*)kmm_v4_malloc(path_len + (need_dot ? 1 : 0) + ext_len + 1);
-        if (!result) return NULL;
+        if (!result) return STRING_EMPTY;
         memcpy(result, path, path_len);
         size_t pos = path_len;
         if (need_dot) result[pos++] = '.';
         memcpy(result + pos, new_ext, ext_len);
         result[pos + ext_len] = '\0';
-        return result;
+        return (String){.len = strlen(result), .ptr = result};
     }
 
     size_t base_len = (size_t)(dot - path);
     size_t ext_len = strlen(new_ext);
     int need_dot = (*new_ext != '.');
     char* result = (char*)kmm_v4_malloc(base_len + (need_dot ? 1 : 0) + ext_len + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
     memcpy(result, path, base_len);
     size_t pos = base_len;
     if (need_dot) result[pos++] = '.';
     memcpy(result + pos, new_ext, ext_len);
     result[pos + ext_len] = '\0';
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_without_extension(const char* path) {
@@ -441,14 +448,14 @@ String path_without_extension(const char* path) {
     if (last_bs && (!last_sep || last_bs > last_sep)) last_sep = last_bs;
 #endif
 
-    if (!dot || (last_sep && dot < last_sep)) return string_copy(path);
+    if (!dot || (last_sep && dot < last_sep)) return string_create(path);
 
     size_t len = (size_t)(dot - path);
     char* result = (char*)kmm_v4_malloc(len + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
     memcpy(result, path, len);
     result[len] = '\0';
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 String path_common_prefix(const char* path1, const char* path2) {
@@ -469,24 +476,24 @@ String path_common_prefix(const char* path1, const char* path2) {
     }
 
     if (i == min_len) {
-        if (len1 == len2) return string_copy(path1);
+        if (len1 == len2) return string_create(path1);
         const char* shorter = len1 < len2 ? path1 : path2;
         if (is_sep(shorter[min_len - 1]) || min_len == 0) {
-            return string_copy(shorter);
+            return string_create(shorter);
         }
-        if (len1 < len2 && is_sep(path2[min_len])) return string_copy(path1);
-        if (len2 < len1 && is_sep(path1[min_len])) return string_copy(path2);
+        if (len1 < len2 && is_sep(path2[min_len])) return string_create(path1);
+        if (len2 < len1 && is_sep(path1[min_len])) return string_create(path2);
     }
 
     if (last_sep == 0 && i > 0) {
 #ifdef _WIN32
         if (min_len >= 2 && path1[1] == ':' && path2[1] == ':' && path1[0] == path2[0]) {
             char* result = (char*)kmm_v4_malloc(3);
-            if (!result) return NULL;
+            if (!result) return STRING_EMPTY;
             result[0] = path1[0];
             result[1] = ':';
             result[2] = '\0';
-            return result;
+            return (String){.len = strlen(result), .ptr = result};
         }
 #endif
         if (is_sep(path1[0]) && is_sep(path2[0])) {
@@ -497,10 +504,10 @@ String path_common_prefix(const char* path1, const char* path2) {
     if (last_sep == 0) return string_create("");
 
     char* result = (char*)kmm_v4_malloc(last_sep + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
     memcpy(result, path1, last_sep);
     result[last_sep] = '\0';
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 static size_t count_components(const char* path) {
@@ -517,21 +524,21 @@ static size_t count_components(const char* path) {
     return count;
 }
 
-static void split_components(const char* path, char** comps, size_t count) {
+static void split_components(const char* path, String* comps, size_t count) {
     size_t idx = 0;
     size_t i = 0;
     while (path[i] && idx < count) {
-        if (is_sep(path[i])) {
-            i++;
-            continue;
-        }
+        if (is_sep(path[i])) { i++; continue; }
         const char* start = path + i;
         while (path[i] && !is_sep(path[i])) i++;
         size_t len = (size_t)(path + i - start);
-        comps[idx] = (char*)kmm_v4_malloc(len + 1);
-        if (comps[idx]) {
-            memcpy(comps[idx], start, len);
-            comps[idx][len] = '\0';
+        char* buf = (char*)kmm_v4_malloc(len + 1);
+        if (buf) {
+            memcpy(buf, start, len);
+            buf[len] = '\0';
+            comps[idx] = (String){.len = len, .ptr = buf};
+        } else {
+            comps[idx] = STRING_EMPTY;
         }
         idx++;
     }
@@ -542,31 +549,31 @@ String path_relative(const char* base, const char* target) {
 
     String norm_base = path_normalize_internal(base);
     String norm_target = path_normalize_internal(target);
-    if (!norm_base || !norm_target) {
-        if (norm_base) string_free(norm_base);
-        if (norm_target) string_free(norm_target);
+    if (norm_base.len == 0 || norm_target.len == 0) {
+        if (norm_base.len > 0) string_free(norm_base);
+        if (norm_target.len > 0) string_free(norm_target);
         return string_create("");
     }
 
-    size_t base_count = count_components(norm_base);
-    size_t target_count = count_components(norm_target);
+    size_t base_count = count_components(norm_base.ptr);
+    size_t target_count = count_components(norm_target.ptr);
 
-    char** base_comps = NULL;
-    char** target_comps = NULL;
+    String* base_comps = NULL;
+    String* target_comps = NULL;
 
     if (base_count > 0) {
-        base_comps = (char**)kmm_v4_malloc(base_count * sizeof(char*));
-        if (base_comps) split_components(norm_base, base_comps, base_count);
+        base_comps = (String*)kmm_v4_malloc(base_count * sizeof(String));
+        if (base_comps) split_components(norm_base.ptr, base_comps, base_count);
     }
     if (target_count > 0) {
-        target_comps = (char**)kmm_v4_malloc(target_count * sizeof(char*));
-        if (target_comps) split_components(norm_target, target_comps, target_count);
+        target_comps = (String*)kmm_v4_malloc(target_count * sizeof(String));
+        if (target_comps) split_components(norm_target.ptr, target_comps, target_count);
     }
 
     size_t common = 0;
     while (common < base_count && common < target_count &&
            base_comps && target_comps &&
-           strcmp(base_comps[common], target_comps[common]) == 0) {
+           strcmp(base_comps[common].ptr, target_comps[common].ptr) == 0) {
         common++;
     }
 
@@ -578,8 +585,8 @@ String path_relative(const char* base, const char* target) {
         total_len += 3;
     }
     for (i = common; i < target_count; i++) {
-        if (target_comps && target_comps[i]) {
-            total_len += strlen(target_comps[i]) + 1;
+        if (target_comps && target_comps[i].len > 0) {
+            total_len += target_comps[i].len + 1;
         }
     }
     if (total_len == 0) total_len = 1;
@@ -588,17 +595,17 @@ String path_relative(const char* base, const char* target) {
     if (!result) {
         if (base_comps) {
             for (i = 0; i < base_count; i++)
-                if (base_comps[i]) kmm_v4_free(base_comps[i]);
+                if (base_comps[i].ptr) kmm_v4_free(base_comps[i].ptr);
             kmm_v4_free(base_comps);
         }
         if (target_comps) {
             for (i = 0; i < target_count; i++)
-                if (target_comps[i]) kmm_v4_free(target_comps[i]);
+                if (target_comps[i].ptr) kmm_v4_free(target_comps[i].ptr);
             kmm_v4_free(target_comps);
         }
         string_free(norm_base);
         string_free(norm_target);
-        return NULL;
+        return STRING_EMPTY;
     }
 
     size_t pos = 0;
@@ -611,9 +618,9 @@ String path_relative(const char* base, const char* target) {
     }
     for (i = common; i < target_count; i++) {
         if (pos > 0) result[pos++] = sep;
-        if (target_comps && target_comps[i]) {
-            size_t len = strlen(target_comps[i]);
-            memcpy(result + pos, target_comps[i], len);
+        if (target_comps && target_comps[i].len > 0) {
+            size_t len = target_comps[i].len;
+            memcpy(result + pos, target_comps[i].ptr, len);
             pos += len;
         }
     }
@@ -622,18 +629,18 @@ String path_relative(const char* base, const char* target) {
 
     if (base_comps) {
         for (i = 0; i < base_count; i++)
-            if (base_comps[i]) kmm_v4_free(base_comps[i]);
+            if (base_comps[i].ptr) kmm_v4_free(base_comps[i].ptr);
         kmm_v4_free(base_comps);
     }
     if (target_comps) {
         for (i = 0; i < target_count; i++)
-            if (target_comps[i]) kmm_v4_free(target_comps[i]);
+            if (target_comps[i].ptr) kmm_v4_free(target_comps[i].ptr);
         kmm_v4_free(target_comps);
     }
     string_free(norm_base);
     string_free(norm_target);
 
-    return result;
+    return (String){.len = strlen(result), .ptr = result};
 }
 
 bool_t path_is_subpath(const char* parent, const char* child) {
@@ -641,14 +648,14 @@ bool_t path_is_subpath(const char* parent, const char* child) {
 
     String norm_parent = path_normalize_internal(parent);
     String norm_child = path_normalize_internal(child);
-    if (!norm_parent || !norm_child) {
-        if (norm_parent) string_free(norm_parent);
-        if (norm_child) string_free(norm_child);
+    if (norm_parent.len == 0 || norm_child.len == 0) {
+        if (norm_parent.len > 0) string_free(norm_parent);
+        if (norm_child.len > 0) string_free(norm_child);
         return 0;
     }
 
-    size_t parent_len = strlen(norm_parent);
-    size_t child_len = strlen(norm_child);
+    size_t parent_len = strlen(norm_parent.ptr);
+    size_t child_len = strlen(norm_child.ptr);
 
     if (child_len <= parent_len) {
         string_free(norm_parent);
@@ -657,8 +664,8 @@ bool_t path_is_subpath(const char* parent, const char* child) {
     }
 
     bool_t result = 0;
-    if (strncmp(norm_child, norm_parent, parent_len) == 0) {
-        if (is_sep(norm_child[parent_len])) {
+    if (strncmp(norm_child.ptr, norm_parent.ptr, parent_len) == 0) {
+        if (is_sep(norm_child.ptr[parent_len])) {
             result = 1;
         }
     }
@@ -676,9 +683,9 @@ String path_resolve(const char* base, const char* rel) {
     if (path_is_absolute(rel)) return path_normalize_internal(rel);
 
     String joined = path_join(base, rel);
-    if (!joined) return NULL;
+    if (joined.len == 0) return STRING_EMPTY;
 
-    String result = path_normalize_internal(joined);
+    String result = path_normalize_internal(joined.ptr);
     string_free(joined);
     return result;
 }

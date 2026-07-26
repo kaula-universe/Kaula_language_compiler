@@ -397,8 +397,8 @@ int algo_compare_float(const void* a, const void* b) {
 int algo_compare_string(const void* a, const void* b) {
     const String sa = *(const String*)a;
     const String sb = *(const String*)b;
-    if (!sa && !sb) return 0;
-    if (!sa) return -1;
-    if (!sb) return 1;
-    return strcmp(sa, sb);
+    if (!sa.ptr && !sb.ptr) return 0;
+    if (!sa.ptr) return -1;
+    if (!sb.ptr) return 1;
+    return strcmp(sa.ptr, sb.ptr);
 }

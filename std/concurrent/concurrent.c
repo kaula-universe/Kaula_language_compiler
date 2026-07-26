@@ -1,3 +1,9 @@
+/* _GNU_SOURCE 必须在所有 #include 之前定义，以确保 syscall 和 SYS_gettid
+   在 <sys/syscall.h> 中可见（Linux glibc 要求） */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "concurrent.h"
 #include "../memory/memory.h"
 #include <stdlib.h>

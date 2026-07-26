@@ -698,14 +698,18 @@ func SerializeFullAnalysisResult(result *FullAnalysisResult) map[string]interfac
 	out := make(map[string]interface{})
 
 	// decisions: 变量决策数组
+	// 修复 #23：同时输出 int 值，消除 codegen 侧字符串匹配的脆弱性
 	decisionsArr := make([]interface{}, 0, len(result.Decisions))
 	for _, d := range result.Decisions {
 		dm := map[string]interface{}{
-			"var_name":    d.VarName,
-			"obj_id":      d.ObjID,
-			"alloc_kind":  d.AllocKind.String(),
-			"drop_action": d.DropAction.String(),
-			"scope_id":    fmt.Sprintf("%d", d.ScopeID),
+			"var_name":        d.VarName,
+			"obj_id":          d.ObjID,
+			"alloc_kind":      d.AllocKind.String(),
+			"alloc_kind_id":   int(d.AllocKind),
+			"drop_action":     d.DropAction.String(),
+			"drop_action_id":  int(d.DropAction),
+			"scope_id":        fmt.Sprintf("%d", d.ScopeID),
+			"scope_id_int":    d.ScopeID,
 		}
 		decisionsArr = append(decisionsArr, dm)
 	}
@@ -725,32 +729,26 @@ func SerializeFullAnalysisResult(result *FullAnalysisResult) map[string]interfac
 	}
 	out["sizes"] = sizesMap
 
-	// func_sigs: 跨函数分析的函数签名
-	if result.InterProc != nil && len(result.InterProc.FuncSigs) > 0 {
-		funcSigsMap := make(map[string]interface{})
-		for name, sig := range result.InterProc.FuncSigs {
-			// has_ptr_return: 返回值是否涉及指针/所有权
-			hasPtrReturn := false
-			for _, ret := range sig.Returns {
-				if ret.Mode == ModeOwned || strings.Contains(ret.Type, "*") {
-					hasPtrReturn = true
-					break
-				}
+	// 修复 #16：序列化 liveness 数据，供 codegen 用于 scope 拆分优化
+	if result.Liveness != nil {
+		livenessArr := make([]interface{}, 0)
+		for _, info := range result.Liveness.GetAllLastUses() {
+			lm := map[string]interface{}{
+				"var_name":      info.VarName,
+				"obj_id":        info.ObjID,
+				"last_use_line": info.LastUseLine,
+				"last_use_kind": info.LastUseKind,
+				"is_yield_src":  info.IsYieldSrc,
+				"is_extract_src": info.IsExtractSrc,
+				"is_in_loop":    info.IsInLoop,
 			}
-			sigMap := map[string]interface{}{
-				"name":           sig.Name,
-				"has_ptr_return": hasPtrReturn,
-				"param_modes":    []interface{}{},
-			}
-			modes := make([]interface{}, 0, len(sig.Params))
-			for _, p := range sig.Params {
-				modes = append(modes, p.Mode.String())
-			}
-			sigMap["param_modes"] = modes
-			funcSigsMap[name] = sigMap
+			livenessArr = append(livenessArr, lm)
 		}
-		out["func_sigs"] = funcSigsMap
+		out["liveness"] = livenessArr
 	}
+
+	// 修复 #17：funcSigs 未被 codegen 消费，移除序列化以减少死数据
+	// 跨函数所有权传递特性上线时再恢复
 
 	return out
 }

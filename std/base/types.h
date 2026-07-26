@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>      // wchar_t, size_t (C 标准)
+
+// POSIX ssize_t（Linux/macOS）
+#if !defined(_WIN32) || defined(__CYGWIN__)
+    #include <sys/types.h>  // ssize_t
+#endif
 
 // 平台检测宏
 #if defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)
@@ -36,20 +42,19 @@ typedef bool bool_t;
 
 // 字符类型
 typedef char char_t;
-typedef wchar_t wchar_t;
+// wchar_t 由 <stddef.h> 提供，无需重定义
 
 // 指针类型
 typedef void* ptr;
 
 // 大小类型
-typedef size_t size_t;
+// size_t 由 <stddef.h> 提供，无需重定义
 
-// 定义ssize_t类型（在Windows上可能不存在）
+// ssize_t 类型
 #ifdef _WIN32
 typedef intptr_t ssize_t;
-#else
-typedef ssize_t ssize_t;
 #endif
+// Linux/macOS: ssize_t 由 <sys/types.h> 提供
 
 // 带长度前缀的字符串类型（性能优先，O(1) 取长度）
 #ifndef KAULA_STRING_DEFINED

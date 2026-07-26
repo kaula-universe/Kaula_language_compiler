@@ -207,7 +207,7 @@ bool_t pb_read_bool(PBReader* reader, bool_t* value) {
     return true;
 }
 
-bool_t pb_read_string(PBReader* reader, KString* value) {
+bool_t pb_read_string(PBReader* reader, String* value) {
     if (!reader || !value) return false;
     
     i64 len;
@@ -215,10 +215,10 @@ bool_t pb_read_string(PBReader* reader, KString* value) {
     
     if (reader->offset + (size_t)len > reader->size) return false;
     
-    value->data = (char*)kmm_v4_malloc((size_t)len + 1);
+    value->ptr = (char*)kmm_v4_malloc((size_t)len + 1);
     value->len = (size_t)len;
-    memcpy(value->data, reader->buffer + reader->offset, (size_t)len);
-    value->data[(size_t)len] = '\0';
+    memcpy(value->ptr, reader->buffer + reader->offset, (size_t)len);
+    value->ptr[(size_t)len] = '\0';
     reader->offset += (size_t)len;
     
     return true;

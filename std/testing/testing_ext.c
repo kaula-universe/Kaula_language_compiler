@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 static TestSuiteNode* g_suites = NULL;
 static TestStats g_stats = {0, 0, 0, 0.0};
@@ -25,7 +26,7 @@ static void output_print(const char* fmt, ...) {
 static TestSuiteNode* find_suite(const char* name) {
     TestSuiteNode* s = g_suites;
     while (s) {
-        if (strcmp(s->name, name) == 0) return s;
+        if (strcmp(s->name.ptr, name) == 0) return s;
         s = s->next;
     }
     return NULL;
@@ -39,7 +40,7 @@ void test_register_suite(const char* name) {
     if (existing) return;
     suite = (TestSuiteNode*)kmm_v4_malloc(sizeof(TestSuiteNode));
     if (!suite) return;
-    suite->name = string_copy(name);
+    suite->name = string_create(name);
     suite->cases = NULL;
     suite->case_count = 0;
     suite->next = g_suites;
@@ -58,7 +59,7 @@ void test_register_case(const char* suite_name, const char* case_name, TestFunc 
     }
     c = (TestCaseNode*)kmm_v4_malloc(sizeof(TestCaseNode));
     if (!c) return;
-    c->name = string_copy(case_name);
+    c->name = string_create(case_name);
     c->func = func;
     c->next = suite->cases;
     suite->cases = c;
@@ -120,28 +121,28 @@ void test_run_suite_by_name(const char* suite_name) {
         output_print("Suite not found: %s\n", suite_name);
         return;
     }
-    output_print("=== Running suite: %s ===\n", suite->name);
+    output_print("=== Running suite: %s ===\n", suite->name.ptr);
     start_ms = time_now_ms();
     c = suite->cases;
     while (c) {
         bool_t failed;
-        output_print("  [ RUN      ] %s\n", c->name);
+        output_print("  [ RUN      ] %s\n", c->name.ptr);
         reset_expect_flag();
         g_stats.total++;
         c->func();
         failed = get_expect_flag();
         if (failed) {
             g_stats.failed++;
-            output_print("  [  FAILED  ] %s\n", c->name);
+            output_print("  [  FAILED  ] %s\n", c->name.ptr);
         } else {
             g_stats.passed++;
-            output_print("  [       OK ] %s\n", c->name);
+            output_print("  [       OK ] %s\n", c->name.ptr);
         }
         c = c->next;
     }
     g_stats.elapsed_ms += time_now_ms() - start_ms;
     output_print("=== Suite %s: %zu passed, %zu failed ===\n\n",
-                 suite->name, g_stats.passed, g_stats.failed);
+                 suite->name.ptr, g_stats.passed, g_stats.failed);
 }
 
 void test_run_all_suites(void) {
@@ -154,7 +155,7 @@ void test_run_all_suites(void) {
     output_print("========== Running all test suites ==========\n\n");
     while (s) {
         TestSuiteNode* next = s->next;
-        test_run_suite_by_name(s->name);
+        test_run_suite_by_name(s->name.ptr);
         s = next;
     }
     g_stats.elapsed_ms = time_now_ms() - start_ms;

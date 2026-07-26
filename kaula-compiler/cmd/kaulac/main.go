@@ -239,8 +239,10 @@ func main() {
 	initConfig := false
 
 	// 预扫描 os.Args，提取非 flag 参数和自定义 flag
+	// 修复：-o/--output 的值不应被误认为输入文件；子命令（compile/run 等）也不是输入文件
 	customArgs := []string{}
 	args := os.Args[1:]
+	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -252,9 +254,17 @@ func main() {
 			showCacheStats = true
 		case arg == "--init":
 			initConfig = true
+		case arg == "-o" || arg == "--output":
+			// -o/--output 接受一个值（输出路径），需要跳过下一个参数避免误判为输入文件
+			customArgs = append(customArgs, arg)
+			if i+1 < len(args) {
+				customArgs = append(customArgs, args[i+1])
+				i++ // 跳过输出文件路径
+			}
 		default:
 			customArgs = append(customArgs, arg)
-			if len(arg) > 0 && arg[0] != '-' {
+			// 只将非 flag、非子命令的参数视为输入文件候选
+			if len(arg) > 0 && arg[0] != '-' && !knownSubcommands[arg] {
 				inputFile = arg
 			}
 		}

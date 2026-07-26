@@ -1042,7 +1042,8 @@ func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement
 				if scopeID > 0 {
 					if sd := adapter.GetScopeDecision(scopeID); sd != nil {
 						// 有作用域决策，直接使用
-						return sd.UsesBumpPool || sd.UsesArena != ""
+						// 修复 #15：arena 子系统已移除，只需检查 UsesBumpPool
+						return sd.UsesBumpPool
 					}
 				}
 			}
@@ -1399,23 +1400,41 @@ func (sg *StatementGenerator) shouldUseKMMScopeForForBody() bool {
 }
 
 // generateReturnStatement 生成 return 语句代码
+// 修复 #22：在 return 前补 kmm_v4_scope_pop()，防止 do-while(0) 作用域泄漏
+// KMM_V4_SCOPE_START/END 使用 do-while(0) 包裹，return 会跳过 KMM_V4_SCOPE_END
+// 中的 scope_pop，导致作用域栈不弹出。此处按当前 kmmScopeDepth 补齐 pop。
 func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement) string {
 	retType := sg.codegen.currentFunctionReturnType
 	isVoid := (retType == "" || retType == "void" || retType == "Void")
-	
+
+	var b strings.Builder
+
+	// 在 return 前补 scope_pop，防止作用域泄漏
+	// kmmScopeDepth 跟踪当前活跃的 do-while(0) KMM 作用域数量
+	// （作用域合并优化确保内层不会重复创建 scope，所以 depth 通常为 0 或 1）
+	if sg.codegen.kmmScopeDepth > 0 {
+		indent := sg.codegen.indentString()
+		for i := 0; i < sg.codegen.kmmScopeDepth; i++ {
+			b.WriteString(indent)
+			b.WriteString("kmm_v4_scope_pop();\n")
+		}
+	}
+
 	if isVoid {
-		code := "return;\n"
-		return sg.codegen.indentString() + code
+		b.WriteString(sg.codegen.indentString())
+		b.WriteString("return;\n")
+		return b.String()
 	}
-	
-	code := "return "
+
+	b.WriteString(sg.codegen.indentString())
+	b.WriteString("return ")
 	if stmt.Value != nil {
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 	} else {
-		code += "0"
+		b.WriteString("0")
 	}
-	code += ";\n"
-	return sg.codegen.indentString() + code
+	b.WriteString(";\n")
+	return b.String()
 }
 
 // generateBreakStatement 生成 break 语句代码
@@ -1511,25 +1530,9 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	}
 
 	// SOR 不活跃或不需要 KMM：退回到现有启发式
-	canBatch, totalSize, mallocCount := sg.analyzeBlockMallocs(stmt.Statements)
-
-	if canBatch && totalSize > 0 && mallocCount >= 1 {
-		code := "{\n"
-		sg.codegen.indent++
-		sg.codegen.EnterOffsetScope()
-		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
-		code += sg.codegen.indentString()
-		code += fmt.Sprintf("void* _batch_ptr = kmm_v4_bump(%d);\n", totalSize)
-		for _, bodyStmt := range stmt.Statements {
-			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
-		}
-		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
-		sg.codegen.ExitOffsetScope()
-		sg.codegen.indent--
-		code += indent + "}\n"
-		sg.codegen.ExitScope()
-		return code
-	}
+	// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
+	// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
+	_, _, mallocCount := sg.analyzeBlockMallocs(stmt.Statements)
 
 	if mallocCount >= 1 {
 		code := "{\n"

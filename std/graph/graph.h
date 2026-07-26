@@ -3,7 +3,7 @@
 #include "../memory/memory.h"
 
 typedef struct GraphNode {
-    KString name;
+    String name;
     void* data;
     struct GraphEdge* edges;
     size_t edge_count;

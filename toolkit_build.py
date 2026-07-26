@@ -4,11 +4,14 @@
 Kaula Toolkit 一键编译脚本
 编译所有组件：标准库 (std.lib)、运行时、编译器 (kaulac)、格式化工具 (kaulafmt)
 
+默认使用 clang 作为 C 编译器（跨平台一致），可通过 --cc 覆盖。
+
 Usage:
-  python toolkit_build.py                  # 默认构建所有组件 (Debug)
+  python toolkit_build.py                  # 默认构建所有组件 (Debug, clang)
   python toolkit_build.py --release        # Release 模式构建所有组件
   python toolkit_build.py --target std     # 只构建标准库
   python toolkit_build.py --target compiler  # 只构建编译器
+  python toolkit_build.py --cc gcc         # 指定使用 gcc 而非默认的 clang
   python toolkit_build.py --clean          # 清理所有构建产物
   python toolkit_build.py --install-dir D:/kaula  # 自定义输出目录
 """
@@ -57,6 +60,7 @@ class BuildConfig:
         ]
         if not sys.platform.startswith("win"):
             self.common_flags.append("-fPIC")
+            self.common_flags.append("-D_POSIX_C_SOURCE=200809L")
         else:
             self.common_flags.append("-D_CRT_SECURE_NO_WARNINGS")
 
@@ -73,8 +77,28 @@ class ToolDetector:
     """工具链检测器"""
 
     @staticmethod
-    def detect_c_compiler():
-        for compiler in ["gcc", "clang", "cc"]:
+    def detect_c_compiler(preferred="clang"):
+        """检测 C 编译器，默认使用 clang（跨平台一致）。
+
+        preferred: 用户指定的编译器名称（默认 "clang"）。
+                   若该编译器可用则直接使用；不可用时回退到自动检测。
+        """
+        # 1) 优先验证用户指定 / 默认的编译器
+        if preferred:
+            try:
+                result = subprocess.run(
+                    [preferred, "--version"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    version_line = result.stdout.split('\n')[0]
+                    print(f"[+] C 编译器: {preferred} ({version_line})")
+                    return preferred
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                print(f"[-] 警告: 编译器 '{preferred}' 不可用，回退到自动检测")
+
+        # 2) 回退检测链：clang -> gcc -> cc（跨平台一致）
+        for compiler in ["clang", "gcc", "cc"]:
             try:
                 result = subprocess.run(
                     [compiler, "--version"],
@@ -87,6 +111,7 @@ class ToolDetector:
             except (subprocess.TimeoutExpired, FileNotFoundError):
                 continue
 
+        # 3) Windows 最后回退：MSVC cl.exe
         try:
             result = subprocess.run(
                 ["cl", "/nologo"],
@@ -99,7 +124,8 @@ class ToolDetector:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-        print("[-] 错误: 未找到可用的 C 编译器 (gcc/clang/cc/msvc)")
+        print("[-] 错误: 未找到可用的 C 编译器 (clang/gcc/cc/msvc)")
+        print("    建议: 安装 LLVM/Clang 以获得跨平台一致的构建体验")
         return None
 
     @staticmethod
@@ -490,10 +516,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python toolkit_build.py               # 构建所有组件 (Debug)
+  python toolkit_build.py               # 构建所有组件 (Debug, 默认 clang)
   python toolkit_build.py --release     # Release 模式
   python toolkit_build.py --target std  # 只构建标准库
   python toolkit_build.py --target compiler  # 只构建 Go 编译器和格式化工具
+  python toolkit_build.py --cc gcc      # 使用 gcc 替代默认 clang
   python toolkit_build.py --clean       # 清理所有构建产物
         """
     )
@@ -507,6 +534,8 @@ def main():
                         help="指定构建目标 (默认: all)")
     parser.add_argument("--install-dir", type=str, default=None,
                         help="自定义输出目录 (默认: build/)")
+    parser.add_argument("--cc", type=str, default="clang",
+                        help="指定 C 编译器 (默认: clang，跨平台一致)")
     args = parser.parse_args()
 
     config = BuildConfig()
@@ -521,7 +550,7 @@ def main():
         clean_all(config)
         return
 
-    c_compiler = ToolDetector.detect_c_compiler()
+    c_compiler = ToolDetector.detect_c_compiler(args.cc)
     if not c_compiler:
         if args.target in ("all", "std", "runtime", "headers"):
             print("[-] 错误: 构建 C 组件需要 C 编译器")

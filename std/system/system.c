@@ -1,3 +1,10 @@
+/* _DEFAULT_SOURCE 必须在所有 #include 之前定义，以确保 usleep
+   在 <unistd.h> 中可见（Linux glibc 要求 _DEFAULT_SOURCE 或 _BSD_SOURCE）。
+   同时 _time64 是 Windows 专用函数，Linux 下用 time() 替代。 */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "system.h"
 #include "../memory/memory.h"
 #include <stdlib.h>
@@ -89,9 +96,12 @@ const char* system_get_os_name() {
 #ifdef _WIN32
     return "Windows";
 #else
+    static char os_name[256];
     struct utsname info;
     if (uname(&info) == 0) {
-        return info.sysname;
+        strncpy(os_name, info.sysname, sizeof(os_name) - 1);
+        os_name[sizeof(os_name) - 1] = '\0';
+        return os_name;
     }
     return "Unknown";
 #endif
@@ -119,9 +129,12 @@ const char* system_get_os_version() {
     sprintf(version, "Windows NT 10.0");
     return version;
 #else
+    static char os_version[256];
     struct utsname info;
     if (uname(&info) == 0) {
-        return info.release;
+        strncpy(os_version, info.release, sizeof(os_version) - 1);
+        os_version[sizeof(os_version) - 1] = '\0';
+        return os_version;
     }
     return "Unknown";
 #endif
@@ -213,17 +226,21 @@ Timestamp system_get_timestamp() {
 #endif
 }
 
-void system_get_current_time(Time* time) {
-    if (!time) return;
+void system_get_current_time(Time* t) {
+    if (!t) return;
+#ifdef _WIN32
     time_t now = _time64(NULL);
+#else
+    time_t now = time(NULL);
+#endif
     struct tm* tm_info = localtime(&now);
-    time->year = tm_info->tm_year + 1900;
-    time->month = tm_info->tm_mon + 1;
-    time->day = tm_info->tm_mday;
-    time->hour = tm_info->tm_hour;
-    time->minute = tm_info->tm_min;
-    time->second = tm_info->tm_sec;
-    time->millisecond = 0;
+    t->year = tm_info->tm_year + 1900;
+    t->month = tm_info->tm_mon + 1;
+    t->day = tm_info->tm_mday;
+    t->hour = tm_info->tm_hour;
+    t->minute = tm_info->tm_min;
+    t->second = tm_info->tm_sec;
+    t->millisecond = 0;
 }
 
 Timestamp system_time_to_timestamp(const Time* time) {
@@ -345,6 +362,7 @@ char** system_get_env_list() {
     FreeEnvironmentStringsW(env_block);
     return env_array;
 #else
+    extern char** environ;
     return environ;
 #endif
 }

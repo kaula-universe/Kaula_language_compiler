@@ -456,7 +456,7 @@ bool_t mp_read_double(MPReader* reader, f64* value) {
     return true;
 }
 
-bool_t mp_read_string(MPReader* reader, KString* value) {
+bool_t mp_read_string(MPReader* reader, String* value) {
     if (!reader || !value || reader->offset >= reader->size) return false;
     
     u8 b = reader->buffer[reader->offset++];
@@ -483,10 +483,10 @@ bool_t mp_read_string(MPReader* reader, KString* value) {
     
     if (reader->offset + len > reader->size) return false;
     
-    value->data = (char*)kmm_v4_malloc(len + 1);
+    value->ptr = (char*)kmm_v4_malloc(len + 1);
     value->len = len;
-    memcpy(value->data, reader->buffer + reader->offset, len);
-    value->data[len] = '\0';
+    memcpy(value->ptr, reader->buffer + reader->offset, len);
+    value->ptr[len] = '\0';
     reader->offset += len;
     
     return true;

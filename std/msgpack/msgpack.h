@@ -79,7 +79,7 @@ bool_t mp_read_int(MPReader* reader, i64* value);
 bool_t mp_read_uint(MPReader* reader, u64* value);
 bool_t mp_read_float(MPReader* reader, f32* value);
 bool_t mp_read_double(MPReader* reader, f64* value);
-bool_t mp_read_string(MPReader* reader, KString* value);
+bool_t mp_read_string(MPReader* reader, String* value);
 bool_t mp_read_bytes(MPReader* reader, u8** data, size_t* len);
 
 bool_t mp_read_array_header(MPReader* reader, size_t* count);

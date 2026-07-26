@@ -286,7 +286,7 @@ static i64 deser_read_sint_any(Deserializer* d) {
 /* Read a length-prefixed string payload (header already consumed). */
 static String deser_read_string_body(Deserializer* d, size_t len) {
     char* str = (char*)kmm_v4_malloc(len + 1);
-    if (!str) return NULL;
+    if (!str) return (String){0, NULL};
     if (len > 0) {
         if (d->cursor + len > d->len) {
             len = (d->len > d->cursor) ? (d->len - d->cursor) : 0;
@@ -295,7 +295,7 @@ static String deser_read_string_body(Deserializer* d, size_t len) {
         d->cursor += len;
     }
     str[len] = '\0';
-    return str;
+    return string_create(str);
 }
 
 /* ----------------------------------------------------------------------- */

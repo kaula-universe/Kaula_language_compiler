@@ -182,7 +182,7 @@ CliApp* cli_app_create(const char* name, const char* description, const char* ve
     app->argc = 0;
     app->argv = NULL;
     app->parsed = false;
-    app->program_name = NULL;
+    app->program_name = (String){0, NULL};
 
     internal = get_internal(app);
     internal->parsed_values = NULL;
@@ -226,7 +226,7 @@ void cli_app_destroy(CliApp* app) {
         kmm_v4_free(app->flags);
     }
 
-    if (app->program_name) {
+    if (app->program_name.len > 0) {
         string_free(app->program_name);
     }
 
@@ -363,10 +363,10 @@ bool_t cli_parse(CliApp* app, int argc, char** argv) {
     app->argc = argc;
     app->argv = argv;
 
-    if (app->program_name) {
+    if (app->program_name.len > 0) {
         string_free(app->program_name);
     }
-    app->program_name = string_copy(extract_program_name(argv[0]));
+    app->program_name = string_create(extract_program_name(argv[0]));
 
     for (i = 0; i < app->flag_count; i++) {
         parsed_value_free(&internal->parsed_values[i]);
@@ -635,23 +635,23 @@ String cli_get_string(CliApp* app, const char* name) {
     CliAppInternal* internal;
     size_t idx;
     CliParsedValue* pv;
-    if (!app || !name) return NULL;
+    if (!app || !name) return STRING_EMPTY;
 
     flag = find_flag_by_long_name(app, name);
-    if (!flag) return NULL;
+    if (!flag) return STRING_EMPTY;
 
     internal = get_internal(app);
     idx = find_flag_index(app, flag);
-    if (idx == (size_t)-1) return NULL;
+    if (idx == (size_t)-1) return STRING_EMPTY;
 
     pv = &internal->parsed_values[idx];
     if (pv->is_set && pv->count > 0) {
-        return string_copy(pv->values[pv->count - 1]);
+        return string_create(pv->values[pv->count - 1]);
     }
     if (flag->default_value) {
-        return string_copy(flag->default_value);
+        return string_create(flag->default_value);
     }
-    return NULL;
+    return STRING_EMPTY;
 }
 
 char** cli_get_string_list(CliApp* app, const char* name, size_t* out_count) {
@@ -680,7 +680,7 @@ char** cli_get_string_list(CliApp* app, const char* name, size_t* out_count) {
     if (!result) return NULL;
 
     for (i = 0; i < pv->count; i++) {
-        result[i] = string_copy(pv->values[i]);
+        result[i] = string_create(pv->values[i]).ptr;
     }
 
     if (out_count) *out_count = pv->count;
@@ -710,10 +710,10 @@ size_t cli_arg_count(CliApp* app) {
 
 String cli_arg(CliApp* app, size_t index) {
     CliAppInternal* internal;
-    if (!app || index >= app->arg_count) return NULL;
+    if (!app || index >= app->arg_count) return STRING_EMPTY;
     internal = get_internal(app);
-    if (!internal->positional_args) return NULL;
-    return string_copy(internal->positional_args[index]);
+    if (!internal->positional_args) return STRING_EMPTY;
+    return string_create(internal->positional_args[index]);
 }
 
 String cli_arg_at(CliApp* app, size_t index) {
@@ -725,7 +725,7 @@ void cli_print_help(CliApp* app) {
     size_t max_len = 0;
     if (!app) return;
 
-    printf("Usage: %s [OPTIONS]", app->program_name ? app->program_name : app->name);
+    printf("Usage: %s [OPTIONS]", app->program_name.len > 0 ? app->program_name.ptr : app->name);
 
     for (i = 0; i < app->flag_count; i++) {
         if (app->flags[i].is_positional) {
@@ -814,8 +814,8 @@ bool_t cli_version_requested(CliApp* app) {
 
 const char* cli_program_name(CliApp* app) {
     if (!app) return NULL;
-    if (app->program_name) {
-        return app->program_name;
+    if (app->program_name.len > 0) {
+        return app->program_name.ptr;
     }
     return app->name;
 }

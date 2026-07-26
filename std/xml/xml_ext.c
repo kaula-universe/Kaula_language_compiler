@@ -9,8 +9,8 @@
 XMLNode* xml_create_node(const char* tag) {
     XMLNode* node = (XMLNode*)kmm_v4_malloc(sizeof(XMLNode));
     if (!node) return NULL;
-    node->tag = tag ? string_copy(tag) : NULL;
-    node->text = NULL;
+    node->tag = tag ? string_create(tag) : STRING_EMPTY;
+    node->text = STRING_EMPTY;
     node->attributes = NULL;
     node->children = NULL;
     node->next = NULL;
@@ -24,17 +24,17 @@ void xml_add_attribute(XMLNode* node, const char* name, const char* value) {
     if (!node || !name || !value) return;
     existing = node->attributes;
     while (existing) {
-        if (strcmp(existing->name, name) == 0) {
-            if (existing->value) string_free(existing->value);
-            existing->value = string_copy(value);
+        if (strcmp(existing->name.ptr, name) == 0) {
+            if (existing->value.len > 0) string_free(existing->value);
+            existing->value = string_create(value);
             return;
         }
         existing = existing->next;
     }
     attr = (XMLAttribute*)kmm_v4_malloc(sizeof(XMLAttribute));
     if (!attr) return;
-    attr->name = string_copy(name);
-    attr->value = string_copy(value);
+    attr->name = string_create(name);
+    attr->value = string_create(value);
     attr->next = node->attributes;
     node->attributes = attr;
 }
@@ -58,7 +58,7 @@ const char* xml_node_get_attribute(XMLNode* node, const char* name) {
     if (!node || !name) return NULL;
     attr = node->attributes;
     while (attr) {
-        if (strcmp(attr->name, name) == 0) return attr->value;
+        if (strcmp(attr->name.ptr, name) == 0) return attr->value.ptr;
         attr = attr->next;
     }
     return NULL;
@@ -69,13 +69,13 @@ XMLNode* xml_node_get_child_by_tag(XMLNode* node, const char* tag) {
     if (!node || !tag) return NULL;
     child = node->children;
     while (child) {
-        if (child->tag && strcmp(child->tag, tag) == 0) return child;
+        if (child->tag.len > 0 && strcmp(child->tag.ptr, tag) == 0) return child;
         child = child->next;
     }
     return NULL;
 }
 
-static void append_text(String* dest, const char* s) {
+static void append_text(char** dest, const char* s) {
     size_t old_len;
     size_t s_len;
     char* new_str;
@@ -89,18 +89,18 @@ static void append_text(String* dest, const char* s) {
         memcpy(new_str, *dest, old_len);
         memcpy(new_str + old_len, s, s_len);
         new_str[old_len + s_len] = '\0';
-        string_free(*dest);
+        kmm_v4_free(*dest);
         *dest = new_str;
     } else {
-        *dest = string_copy(s);
+        *dest = string_create(s).ptr;
     }
 }
 
-static void collect_text(XMLNode* node, String* result) {
+static void collect_text(XMLNode* node, char** result) {
     XMLNode* child;
     if (!node) return;
-    if (node->text) {
-        append_text(result, node->text);
+    if (node->text.len > 0) {
+        append_text(result, node->text.ptr);
     }
     child = node->children;
     while (child) {
@@ -110,11 +110,10 @@ static void collect_text(XMLNode* node, String* result) {
 }
 
 String xml_node_get_text_content(XMLNode* node) {
-    String result = NULL;
-    if (!node) return NULL;
-    result = string_copy("");
+    char* result = NULL;
+    if (!node) return STRING_EMPTY;
     collect_text(node, &result);
-    return result;
+    return result ? string_create(result) : STRING_EMPTY;
 }
 
 void xml_free(XMLNode* root) {
@@ -126,8 +125,8 @@ void xml_free(XMLNode* root) {
     attr = root->attributes;
     while (attr) {
         next_attr = attr->next;
-        if (attr->name) string_free(attr->name);
-        if (attr->value) string_free(attr->value);
+        if (attr->name.len > 0) string_free(attr->name);
+        if (attr->value.len > 0) string_free(attr->value);
         kmm_v4_free(attr);
         attr = next_attr;
     }
@@ -137,8 +136,8 @@ void xml_free(XMLNode* root) {
         xml_free(child);
         child = next_child;
     }
-    if (root->tag) string_free(root->tag);
-    if (root->text) string_free(root->text);
+    if (root->tag.len > 0) string_free(root->tag);
+    if (root->text.len > 0) string_free(root->text);
     kmm_v4_free(root);
 }
 
@@ -226,7 +225,7 @@ static void parse_attributes(XMLParser* p, XMLNode* node) {
         value = parse_attr_value(p);
         if (value) {
             xml_add_attribute(node, name, value);
-            string_free(value);
+            kmm_v4_free(value);
         }
         kmm_v4_free(name);
     }
@@ -333,7 +332,7 @@ static XMLNode* parse_element(XMLParser* p) {
     tag = parse_name(p);
     if (!tag) return NULL;
     node = xml_create_node(tag);
-    string_free(tag);
+    kmm_v4_free(tag);
     if (!node) return NULL;
     parse_attributes(p, node);
     skip_whitespace(p);
@@ -381,8 +380,8 @@ static XMLNode* parse_element(XMLParser* p) {
         } else {
             char* text = parse_text(p);
             if (text) {
-                if (node->text) {
-                    char* old = node->text;
+                if (node->text.len > 0) {
+                    char* old = node->text.ptr;
                     size_t old_len = strlen(old);
                     size_t t_len = strlen(text);
                     char* new_str = (char*)kmm_v4_malloc(old_len + t_len + 1);
@@ -390,12 +389,12 @@ static XMLNode* parse_element(XMLParser* p) {
                         memcpy(new_str, old, old_len);
                         memcpy(new_str + old_len, text, t_len);
                         new_str[old_len + t_len] = '\0';
-                        string_free(old);
-                        string_free(text);
-                        node->text = new_str;
+                        kmm_v4_free(old);
+                        kmm_v4_free(text);
+                        node->text = string_wrap(new_str);
                     }
                 } else {
-                    node->text = text;
+                    node->text = string_wrap(text);
                 }
             }
         }
@@ -456,7 +455,7 @@ XMLNode* xml_parse_file(const char* filename) {
     return result;
 }
 
-static void append_str(String* dest, const char* s) {
+static void append_str(char** dest, const char* s) {
     size_t old_len;
     size_t s_len;
     char* new_str;
@@ -469,21 +468,21 @@ static void append_str(String* dest, const char* s) {
         memcpy(new_str, *dest, old_len);
         memcpy(new_str + old_len, s, s_len);
         new_str[old_len + s_len] = '\0';
-        string_free(*dest);
+        kmm_v4_free(*dest);
         *dest = new_str;
     } else {
-        *dest = string_copy(s);
+        *dest = string_create(s).ptr;
     }
 }
 
-static void append_char(String* dest, char c) {
+static void append_char(char** dest, char c) {
     char buf[2];
     buf[0] = c;
     buf[1] = '\0';
     append_str(dest, buf);
 }
 
-static void encode_append(String* dest, const char* text) {
+static void encode_append(char** dest, const char* text) {
     const char* p;
     if (!text) return;
     for (p = text; *p; p++) {
@@ -498,7 +497,7 @@ static void encode_append(String* dest, const char* text) {
     }
 }
 
-static void serialize_indent(String* out, int indent) {
+static void serialize_indent(char** out, int indent) {
     int i;
     char buf[512];
     int len = 0;
@@ -510,24 +509,24 @@ static void serialize_indent(String* out, int indent) {
     append_str(out, buf);
 }
 
-static void serialize_node(String* out, XMLNode* node, int indent) {
+static void serialize_node(char** out, XMLNode* node, int indent) {
     XMLAttribute* attr;
     XMLNode* child;
     bool_t has_children;
-    if (!node || !node->tag) return;
+    if (!node || node->tag.len == 0) return;
     serialize_indent(out, indent);
     append_char(out, '<');
-    append_str(out, node->tag);
+    append_str(out, node->tag.ptr);
     attr = node->attributes;
     while (attr) {
         append_char(out, ' ');
-        append_str(out, attr->name);
+        append_str(out, attr->name.ptr);
         append_str(out, "=\"");
-        encode_append(out, attr->value);
+        encode_append(out, attr->value.ptr);
         append_char(out, '"');
         attr = attr->next;
     }
-    has_children = node->children != NULL || (node->text && strlen(node->text) > 0);
+    has_children = node->children != NULL || (node->text.len > 0 && strlen(node->text.ptr) > 0);
     if (!has_children) {
         append_str(out, " />\n");
         return;
@@ -541,19 +540,18 @@ static void serialize_node(String* out, XMLNode* node, int indent) {
             child = child->next;
         }
         serialize_indent(out, indent);
-    } else if (node->text) {
-        encode_append(out, node->text);
+    } else if (node->text.len > 0) {
+        encode_append(out, node->text.ptr);
     }
     append_str(out, "</");
-    append_str(out, node->tag);
+    append_str(out, node->tag.ptr);
     append_str(out, ">\n");
 }
 
 String xml_serialize(XMLNode* root) {
-    String result = NULL;
-    if (!root) return NULL;
-    result = string_copy("");
+    char* result = NULL;
+    if (!root) return STRING_EMPTY;
     append_str(&result, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     serialize_node(&result, root, 0);
-    return result;
+    return result ? string_create(result) : STRING_EMPTY;
 }

@@ -12,207 +12,9 @@
 #include <stdio.h>
 #endif
 
-// 原子操作支持（轻量实时线程安全）
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-#ifdef __STDC_NO_ATOMICS__
-// C11 不支持原子操作，使用 GCC/Clang 内置函数
-#define KMM_USE_ATOMICS 1
-#define KMM_ATOMIC_TYPE unsigned long
-#define KMM_ATOMIC_LOAD(var) __atomic_load_n(&(var), __ATOMIC_RELAXED)
-#define KMM_ATOMIC_STORE(var, val) __atomic_store_n(&(var), (val), __ATOMIC_RELAXED)
-#define KMM_ATOMIC_CAS(var, expected, desired) \
-    __atomic_compare_exchange_n(&(var), &(expected), (desired), 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
-#define KMM_ATOMIC_FETCH_ADD(var, val) \
-    __atomic_fetch_add(&(var), (val), __ATOMIC_RELAXED)
-#else
-// 使用 C11 标准原子操作
-#define KMM_USE_ATOMICS 1
-#include <stdatomic.h>
-#define KMM_ATOMIC_TYPE _Atomic size_t
-#define KMM_ATOMIC_LOAD(var) atomic_load(&(var))
-#define KMM_ATOMIC_STORE(var, val) atomic_store(&(var), (val))
-#define KMM_ATOMIC_CAS(var, expected, desired) \
-    atomic_compare_exchange_weak(&(var), &(expected), (desired))
-#define KMM_ATOMIC_FETCH_ADD(var, val) \
-    atomic_fetch_add(&(var), (val))
-#endif
-#else
-// 单线程模式，无原子操作
-#define KMM_USE_ATOMICS 0
-#define KMM_ATOMIC_TYPE size_t
-#define KMM_ATOMIC_LOAD(var) (var)
-#define KMM_ATOMIC_STORE(var, val) ((var) = (val))
-// CAS操作返回bool（0或1）
-#define KMM_ATOMIC_CAS(var, expected, desired) \
-    (((var) == (expected)) ? ((var) = (desired), 1) : ((expected) = (var), 0))
-#define KMM_ATOMIC_FETCH_ADD(var, val) \
-    (((var) += (val)) - (val))
-#endif
-
-// ==================== KMM 功能配置 ====================
-// 线程安全级别控制
-// 0 = 单线程(零开销,默认)
-// 1 = 轻量实时(原子操作+TLS隔离,推荐)
-// 2 = 完全线程安全(额外锁保护共享资源)
-#ifndef KMM_THREAD_SAFETY_LEVEL
-#define KMM_THREAD_SAFETY_LEVEL 1
-#endif
-
-#define KMM_ENABLE_ARENA 1
-#define KMM_ENABLE_THREAD_CACHE (KMM_THREAD_SAFETY_LEVEL >= 1)
-#define KMM_ENABLE_CLEANUP_STACK 1
-#define KMM_ENABLE_UNION_DOMAIN 1
-#ifndef KMM_ENABLE_SAFE_ALLOC
-#define KMM_ENABLE_SAFE_ALLOC 1
-#endif
-
-// ==================== 前向类型声明 ====================
-typedef struct kmm_arena kmm_arena_t;
-typedef struct kmm_thread_cache kmm_thread_cache_t;
-typedef struct kmm_cleanup_node kmm_cleanup_node_t;
-typedef struct kmm_union_node kmm_union_node_t;
-typedef struct kmm_union_domain kmm_union_domain_t;
-
-// ==================== 枚举类型定义 ====================
-// Union Domain 状态枚举
-typedef enum {
-    KMM_DOMAIN_LOCAL = 0,
-    KMM_DOMAIN_UNION = 1,
-    KMM_DOMAIN_ESCAPED = 2
-} kmm_domain_status_t;
-
-// ==================== 常量定义 ====================
-// 缓存行大小（用于对齐）
-#ifndef KMM_CACHE_LINE_SIZE
-#define KMM_CACHE_LINE_SIZE 64
-#endif
-
-// 线程缓存大小
-#ifndef KMM_THREAD_CACHE_SIZE
-#define KMM_THREAD_CACHE_SIZE 1024
-#endif
-
-// 线程本地缓冲区大小（减少全局原子操作）
-#ifndef KMM_TLS_BUFFER_SIZE
-#define KMM_TLS_BUFFER_SIZE (256 * 1024)  // 256KB per thread，减少全局 CAS 频率
-#endif
-
-// 批量提交粒度（减少 VirtualAlloc 调用次数）
-#ifndef KMM_BATCH_COMMIT_SIZE
-#define KMM_BATCH_COMMIT_SIZE (4 * 1024 * 1024)  // 4MB 批量提交
-#endif
-
-// 联合域配置
-#ifndef KMM_MAX_UNION_NODES
-#define KMM_MAX_UNION_NODES 128
-#endif
-
-#ifndef KMM_MAX_UNION_DEPTH
-#define KMM_MAX_UNION_DEPTH 64
-#endif
-
-#ifndef KMM_MAX_DEPENDENCIES
-#define KMM_MAX_DEPENDENCIES 32
-#endif
-
-// 作用域栈最大深度（支持嵌套作用域）
-#ifndef KMM_V4_MAX_SCOPE_DEPTH
-#define KMM_V4_MAX_SCOPE_DEPTH 64
-#endif
-
-// ==================== 空闲链表配置 ====================
-// Size-class free list 用于快速复用已释放的小对象
-// 改善逐次分配释放场景的性能
-
-// Size class 数量（8, 16, 32, 64, 128, 256 字节）
-#ifndef KMM_FREE_LIST_CLASSES
-#define KMM_FREE_LIST_CLASSES 6
-#endif
-
-// 每个 size class 的最大空闲块数量
-#ifndef KMM_FREE_LIST_MAX_PER_CLASS
-#define KMM_FREE_LIST_MAX_PER_CLASS 1024
-#endif
-
-// Size class 大小定义
-static const size_t KMM_FREE_LIST_SIZES[KMM_FREE_LIST_CLASSES] = {8, 16, 32, 64, 128, 256};
-
-// ==================== 结构体定义 ====================
-// Arena 结构（用于分级内存管理）
-struct kmm_arena {
-    uint8_t* buffer;
-    size_t capacity;
-    size_t max_capacity;
-    size_t allocations;
-    size_t peak;
-    size_t reset_count;
-    size_t offset;
-    bool is_initialized;
-} __attribute__((aligned(KMM_CACHE_LINE_SIZE)));
-
-// 作用域栈结构（支持嵌套作用域，每层独立保存/恢复 offset + TLAB 状态）
-// 解决嵌套作用域退出时回滚外层分配的问题
-// TLAB 状态保存确保 scope_pop 后 TLS 快速路径仍然正确
-typedef struct {
-    size_t offsets[KMM_V4_MAX_SCOPE_DEPTH];
-    uint8_t* tlab_buffers[KMM_V4_MAX_SCOPE_DEPTH];
-    size_t tlab_remainings[KMM_V4_MAX_SCOPE_DEPTH];
-    size_t depth;
-} kmm_scope_stack_t;
-
-// 空闲链表节点
-typedef struct kmm_free_node {
-    struct kmm_free_node* next;
-} kmm_free_node_t;
-
-// Size-class 空闲链表
-typedef struct {
-    kmm_free_node_t* free_lists[KMM_FREE_LIST_CLASSES];
-    size_t free_counts[KMM_FREE_LIST_CLASSES];
-    bool enabled;
-} kmm_free_list_t;
-
-// 清理节点
-struct kmm_cleanup_node {
-    void* resource;
-    void (*cleanup)(void* ptr);
-    struct kmm_cleanup_node* next;
-};
-
-// 线程缓存
-struct kmm_thread_cache {
-    void* cache[KMM_THREAD_CACHE_SIZE];
-    size_t cache_size;
-};
-
-// Union Node 结构（用于联合域管理）
-struct kmm_union_node {
-    void* object;
-    size_t object_size;
-    kmm_domain_status_t status;
-    size_t scope_depth;
-    struct kmm_union_node* parent;
-    struct kmm_union_node* next;
-    struct kmm_union_node** dependencies;
-    size_t dependency_count;
-    bool is_root;
-    bool is_elected;
-    size_t temp_in_degree;
-    bool temp_visited;
-};
-
-// Union Domain 结构
-struct kmm_union_domain {
-    struct kmm_union_node* root;
-    struct kmm_union_node* current;
-    size_t scope_depth;
-    size_t node_count;
-    size_t max_depth;
-};
-
-// ==================== 编译期智能自动配置系统 ====================
-// 本系统自动检测编译器、平台、硬件特性，并生成最优配置
-// 所有配置均可通过 -D 参数手动覆盖
+// ==================== 辅助宏（必须在配置信息输出之前定义） ====================
+#define KMM_V4_STRINGIFY_IMPL(x) #x
+#define KMM_V4_STRINGIFY(x) KMM_V4_STRINGIFY_IMPL(x)
 
 // ==================== 第 1 层：编译器特性检测 ====================
 
@@ -240,7 +42,9 @@ struct kmm_union_domain {
     #ifndef KMM_V4_COMPILER_VERSION
         #define KMM_V4_COMPILER_VERSION (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
     #endif
-    #define KMM_V4_COMPILER_NAME "GCC"
+    #ifndef KMM_V4_COMPILER_NAME
+        #define KMM_V4_COMPILER_NAME "GCC"
+    #endif
 #else
     #define KMM_V4_COMPILER_GCC 0
 #endif
@@ -342,25 +146,18 @@ struct kmm_union_domain {
     #define KMM_V4_OS_MACOS 0
 #endif
 
-// TLS 宏（基于操作系统和编译器）
+// TLS 宏（基于编译器优先，兼容 Clang on Windows）
+// 修复：Clang 在 Windows 下将 __declspec(thread) 展开为 __attribute__((thread))，
+// 但 Clang 不支持 thread 属性，需要使用 __thread
 #ifndef KMM_TLS
-    #if KMM_V4_OS_WINDOWS
+    #if defined(__GNUC__) || defined(__clang__)
+        #define KMM_TLS __thread
+    #elif KMM_V4_OS_WINDOWS
         #define KMM_TLS __declspec(thread)
     #else
         #define KMM_TLS __thread
     #endif
 #endif
-
-// ==================== Scope 栈扁平化优化（深度 <= 2）====================
-// 当嵌套深度 <= 2 时，使用独立变量代替数组索引，减少内存访问开销
-// 这是单对象场景最常见的嵌套深度，优化后可显著提升性能
-static KMM_TLS size_t g_kmm_v4_scope_offset_0 = 0;
-static KMM_TLS uint8_t* g_kmm_v4_scope_tlab_buffer_0 = NULL;
-static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_0 = 0;
-
-static KMM_TLS size_t g_kmm_v4_scope_offset_1 = 0;
-static KMM_TLS uint8_t* g_kmm_v4_scope_tlab_buffer_1 = NULL;
-static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 
 // ==================== 第 3 层：CPU 架构检测 ====================
 
@@ -432,12 +229,8 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 
 // 缓存行大小（基于架构）
 #ifndef KMM_CACHE_LINE_SIZE
-    #if KMM_V4_ARCH_X86_64 || KMM_V4_ARCH_X86
-        #define KMM_CACHE_LINE_SIZE 64
-    #elif KMM_V4_ARCH_ARM64
+    #if KMM_V4_ARCH_ARM64
         #define KMM_CACHE_LINE_SIZE 128
-    #elif KMM_V4_ARCH_ARM
-        #define KMM_CACHE_LINE_SIZE 64
     #else
         #define KMM_CACHE_LINE_SIZE 64
     #endif
@@ -445,12 +238,10 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 
 // L1 缓存大小估算（用于 TLAB 大小优化）
 #ifndef KMM_V4_L1_CACHE_SIZE
-    #if KMM_V4_ARCH_X86_64
-        #define KMM_V4_L1_CACHE_SIZE (32 * 1024)   // 典型 32KB
-    #elif KMM_V4_ARCH_ARM64
+    #if KMM_V4_ARCH_ARM64
         #define KMM_V4_L1_CACHE_SIZE (64 * 1024)   // 典型 64KB
     #else
-        #define KMM_V4_L1_CACHE_SIZE (32 * 1024)
+        #define KMM_V4_L1_CACHE_SIZE (32 * 1024)   // 典型 32KB
     #endif
 #endif
 
@@ -470,6 +261,8 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 #endif
 
 // ==================== 第 6 层：性能模式自动选择 ====================
+// 注意：第 6/7 层是配置的唯一定义点。
+// 前面不再硬编码默认值，用户可通过 -D 覆盖。
 
 // 调试模式检测
 #ifndef KMM_V4_DEBUG_MODE
@@ -493,7 +286,10 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
     #endif
 #endif
 
-// 自动选择线程安全级别
+// 线程安全级别控制
+// 0 = 单线程(零开销)
+// 1 = 轻量实时(原子操作+per-thread heap,推荐)
+// 2 = 完全线程安全(额外锁保护共享资源)
 #ifndef KMM_THREAD_SAFETY_LEVEL
     #if KMM_V4_DEBUG_MODE
         #define KMM_THREAD_SAFETY_LEVEL 2  // 调试模式：完全线程安全
@@ -503,6 +299,56 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
         #define KMM_THREAD_SAFETY_LEVEL 0  // 未优化：单线程
     #endif
 #endif
+
+// 原子操作支持（基于线程安全级别）
+// 修复 #14：区分循环 CAS（weak）和非循环 CAS（strong）
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+#ifdef __STDC_NO_ATOMICS__
+// C11 不支持原子操作，使用 GCC/Clang 内置函数
+#define KMM_USE_ATOMICS 1
+#define KMM_ATOMIC_TYPE unsigned long
+#define KMM_ATOMIC_LOAD(var) __atomic_load_n(&(var), __ATOMIC_RELAXED)
+#define KMM_ATOMIC_STORE(var, val) __atomic_store_n(&(var), (val), __ATOMIC_RELAXED)
+// 循环 CAS（允许伪失败，循环重试）
+#define KMM_ATOMIC_CAS_WEAK(var, expected, desired) \
+    __atomic_compare_exchange_n(&(var), &(expected), (desired), 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
+// 非循环 CAS（不允许伪失败，单次判断）
+#define KMM_ATOMIC_CAS_STRONG(var, expected, desired) \
+    __atomic_compare_exchange_n(&(var), &(expected), (desired), 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
+#define KMM_ATOMIC_FETCH_ADD(var, val) \
+    __atomic_fetch_add(&(var), (val), __ATOMIC_RELAXED)
+#else
+// 使用 C11 标准原子操作
+#define KMM_USE_ATOMICS 1
+#include <stdatomic.h>
+#define KMM_ATOMIC_TYPE _Atomic size_t
+#define KMM_ATOMIC_LOAD(var) atomic_load(&(var))
+#define KMM_ATOMIC_STORE(var, val) atomic_store(&(var), (val))
+// 循环 CAS（weak，允许伪失败）
+#define KMM_ATOMIC_CAS_WEAK(var, expected, desired) \
+    atomic_compare_exchange_weak(&(var), &(expected), (desired))
+// 非循环 CAS（strong，不允许伪失败）
+#define KMM_ATOMIC_CAS_STRONG(var, expected, desired) \
+    atomic_compare_exchange_strong(&(var), &(expected), (desired))
+#define KMM_ATOMIC_FETCH_ADD(var, val) \
+    atomic_fetch_add(&(var), (val))
+#endif
+#else
+// 单线程模式，无原子操作
+#define KMM_USE_ATOMICS 0
+#define KMM_ATOMIC_TYPE size_t
+#define KMM_ATOMIC_LOAD(var) (var)
+#define KMM_ATOMIC_STORE(var, val) ((var) = (val))
+#define KMM_ATOMIC_CAS_WEAK(var, expected, desired) \
+    (((var) == (expected)) ? ((var) = (desired), 1) : ((expected) = (var), 0))
+#define KMM_ATOMIC_CAS_STRONG(var, expected, desired) \
+    (((var) == (expected)) ? ((var) = (desired), 1) : ((expected) = (var), 0))
+#define KMM_ATOMIC_FETCH_ADD(var, val) \
+    (((var) += (val)) - (val))
+#endif
+
+// 兼容旧代码：KMM_ATOMIC_CAS 默认使用 weak（循环场景）
+#define KMM_ATOMIC_CAS KMM_ATOMIC_CAS_WEAK
 
 // 自动选择 TLAB 大小（基于 L1 缓存）
 #ifndef KMM_TLS_BUFFER_SIZE
@@ -525,10 +371,14 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 #endif
 
 // 自动选择内存池大小（基于指针大小和架构）
+// 修复 #13：freestanding 模式下调低默认值
 #ifndef KMM_V4_POOL_SIZE
-    #if KMM_V4_POINTER_SIZE == 8
+    #if defined(KMM_V4_STATIC_POOL)
+        // freestanding/bare-metal 模式：默认 16MB，避免过大 BSS 段
+        #define KMM_V4_POOL_SIZE (16 * 1024 * 1024)
+    #elif KMM_V4_POINTER_SIZE == 8
         #if KMM_V4_ARCH_X86_64 || KMM_V4_ARCH_ARM64
-            #define KMM_V4_POOL_SIZE (256 * 1024 * 1024)  // 64位：256MB
+            #define KMM_V4_POOL_SIZE (256 * 1024 * 1024)  // 64位 hosted：256MB
         #else
             #define KMM_V4_POOL_SIZE (64 * 1024 * 1024)   // 64位其他：64MB
         #endif
@@ -562,11 +412,16 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 // ==================== 第 7 层：功能开关自动配置 ====================
 
 #ifndef KMM_ENABLE_ARENA
-    #define KMM_ENABLE_ARENA 1
+    #define KMM_ENABLE_ARENA 0  // V4: arena 子系统已移除，V5 预留
 #endif
 
 #ifndef KMM_ENABLE_THREAD_CACHE
     #define KMM_ENABLE_THREAD_CACHE (KMM_THREAD_SAFETY_LEVEL >= 1)
+#endif
+
+// 线程缓存容量（仅用于遗留 kmm_thread_cache 结构体，V4 主路径使用 per-thread heap）
+#ifndef KMM_THREAD_CACHE_SIZE
+    #define KMM_THREAD_CACHE_SIZE 64
 #endif
 
 #ifndef KMM_ENABLE_CLEANUP_STACK
@@ -587,7 +442,6 @@ static KMM_TLS size_t g_kmm_v4_scope_tlab_remaining_1 = 0;
 
 // ==================== 第 8 层：编译期验证 ====================
 
-// 确保关键配置的有效性
 _Static_assert(KMM_V4_POOL_SIZE > 0, "Pool size must be positive");
 _Static_assert((KMM_V4_ALIGNMENT & (KMM_V4_ALIGNMENT - 1)) == 0, "Alignment must be power of 2");
 _Static_assert(KMM_V4_ALIGNMENT >= 8, "Alignment must be at least 8 bytes");
@@ -599,7 +453,7 @@ _Static_assert(KMM_TLS_BUFFER_SIZE >= KMM_V4_PAGE_SIZE, "TLAB size must be at le
 
 #ifdef KMM_V4_PRINT_CONFIG
     #pragma message("KMM_V4 Configuration:")
-    #pragma message("  Compiler: " KMM_V4_OS_NAME)
+    #pragma message("  Compiler: " KMM_V4_COMPILER_NAME)
     #pragma message("  OS: " KMM_V4_OS_NAME)
     #pragma message("  Arch: " KMM_V4_ARCH_NAME)
     #pragma message("  SIMD: " KMM_V4_SIMD_NAME)
@@ -614,31 +468,103 @@ _Static_assert(KMM_TLS_BUFFER_SIZE >= KMM_V4_PAGE_SIZE, "TLAB size must be at le
     #pragma message("  Opt Level: " KMM_V4_STRINGIFY(KMM_V4_OPT_LEVEL))
 #endif
 
-// 辅助宏：将值转换为字符串
-#define KMM_V4_STRINGIFY_IMPL(x) #x
-#define KMM_V4_STRINGIFY(x) KMM_V4_STRINGIFY_IMPL(x)
+// ==================== 常量定义 ====================
 
-// ==================== 编译期计算和类型推导 ====================
-// 编译期常量检查
-#define KMM_V4_CONSTEXPR static const
+// 联合域配置
+#ifndef KMM_MAX_UNION_NODES
+#define KMM_MAX_UNION_NODES 128
+#endif
 
-// 类型自动推导（C11 _Generic）
-#define KMM_V4_TYPE_SIZE(x) _Generic((x), \
-    int8_t: 1, int16_t: 2, int32_t: 4, int64_t: 8, \
-    uint8_t: 1, uint16_t: 2, uint32_t: 4, uint64_t: 8, \
-    float: 4, double: 8, long double: 16, \
-    default: sizeof(x))
+#ifndef KMM_MAX_UNION_DEPTH
+#define KMM_MAX_UNION_DEPTH 64
+#endif
 
-// 自动对齐计算
-#define KMM_V4_ALIGN_UP(size, align) \
-    (((size) + (align) - 1) & ~((align) - 1))
+#ifndef KMM_MAX_DEPENDENCIES
+#define KMM_MAX_DEPENDENCIES 32
+#endif
 
-// 编译期检查对齐
-#define KMM_V4_STATIC_ASSERT_ALIGN(ptr, align) \
-    _Static_assert(((uintptr_t)(ptr) % (align)) == 0, "Alignment check failed")
+// 作用域栈最大深度（支持嵌套作用域）
+#ifndef KMM_V4_MAX_SCOPE_DEPTH
+#define KMM_V4_MAX_SCOPE_DEPTH 64
+#endif
+
+// ==================== 前向类型声明 ====================
+// 修复 #7：arena 子系统已移除，kmm_arena_t 仅保留为不透明占位（V5 预留）
+typedef struct kmm_arena kmm_arena_t;
+typedef struct kmm_thread_cache kmm_thread_cache_t;
+typedef struct kmm_cleanup_node kmm_cleanup_node_t;
+typedef struct kmm_union_node kmm_union_node_t;
+typedef struct kmm_union_domain kmm_union_domain_t;
+
+// ==================== 枚举类型定义 ====================
+// Union Domain 状态枚举
+typedef enum {
+    KMM_DOMAIN_LOCAL = 0,
+    KMM_DOMAIN_UNION = 1,
+    KMM_DOMAIN_ESCAPED = 2
+} kmm_domain_status_t;
+
+// ==================== 结构体定义 ====================
+
+// 清理节点
+struct kmm_cleanup_node {
+    void* resource;
+    void (*cleanup)(void* ptr);
+    struct kmm_cleanup_node* next;
+};
+
+// 线程缓存
+struct kmm_thread_cache {
+    void* cache[KMM_THREAD_CACHE_SIZE];
+    size_t cache_size;
+};
+
+// Union Node 结构（用于联合域管理）
+struct kmm_union_node {
+    void* object;
+    size_t object_size;
+    kmm_domain_status_t status;
+    size_t scope_depth;
+    struct kmm_union_node* parent;
+    struct kmm_union_node* next;
+    struct kmm_union_node** dependencies;
+    size_t dependency_count;
+    bool is_root;
+    bool is_elected;
+    size_t temp_in_degree;
+    bool temp_visited;
+};
+
+// Union Domain 结构
+struct kmm_union_domain {
+    struct kmm_union_node* root;
+    struct kmm_union_node* current;
+    size_t scope_depth;
+    size_t node_count;
+    size_t max_depth;
+};
+
+// ==================== Per-Thread Heap 模型（修复 #1/#19） ====================
+// 核心改动：scope_push/pop 只操作 per-thread heap offset，不碰全局 offset。
+// 全局 offset 单调递增，仅在线程 heap refill 时 CAS 推进。
+// 这样 scope 回退只影响当前线程，其他线程无感知。
+
+// 作用域栈结构（支持嵌套作用域，每层独立保存/恢复 thread_heap offset）
+typedef struct {
+    size_t offsets[KMM_V4_MAX_SCOPE_DEPTH];
+    size_t depth;
+} kmm_scope_stack_t;
+
+// Per-thread heap：每个线程从全局池批量获取一块内存，后续分配在 TLS 内完成
+typedef struct {
+    uint8_t* base;        // 当前 thread heap 起始地址（从全局池获取）
+    size_t   offset;      // 当前 thread heap 内的分配偏移（scope_push/pop 只动这个）
+    size_t   capacity;    // 当前 thread heap 容量
+    size_t   total_allocated; // 该线程累计分配总量（用于统计）
+} kmm_thread_heap_t;
 
 // ==================== 智能内存池（自动化管理） ====================
-// 内存池声明（实际定义在 .c 文件中，由 VirtualAlloc 分配）
+// 内存池声明（实际定义在 .c 文件中）
 #ifdef KMM_V4_STATIC_POOL
 extern uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE];
 static inline void kmm_v4_pool_commit(size_t needed) { (void)needed; }
@@ -648,6 +574,7 @@ extern void kmm_v4_pool_commit(size_t needed);
 #endif
 extern size_t g_kmm_v4_pool_capacity;
 
+// 全局 offset（单调递增，仅 CAS 推进，永不回退）
 #if KMM_THREAD_SAFETY_LEVEL >= 1
 extern KMM_ATOMIC_TYPE g_kmm_v4_offset;
 #else
@@ -657,15 +584,8 @@ extern size_t g_kmm_v4_offset;
 // 作用域栈（线程本地，支持嵌套作用域）
 extern KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack;
 
-// ==================== 线程本地缓冲区（减少全局原子操作）====================
-// 每个线程拥有独立的缓冲区，避免全局 CAS 竞争
-typedef struct {
-    uint8_t* buffer;           // 线程本地缓冲区指针
-    size_t remaining;          // 剩余可用字节
-    size_t total_allocated;    // 该线程已分配总量（用于统计）
-} kmm_tls_buffer_t;
-
-extern KMM_TLS kmm_tls_buffer_t g_kmm_v4_tls_buffer;
+// Per-thread heap（线程本地）
+extern KMM_TLS kmm_thread_heap_t g_kmm_v4_thread_heap;
 
 #ifdef KMM_V4_DEBUG
 #if KMM_THREAD_SAFETY_LEVEL >= 1
@@ -677,140 +597,91 @@ extern size_t g_kmm_v4_alloc_count;
 #endif
 #endif
 
-// 分支预测提示（已在智能配置系统中定义，此处不再重复）
-// KMM_V4_LIKELY 和 KMM_V4_UNLIKELY 已在第 1 层定义
+// Thread heap refill 函数声明（实现在 .c 文件中）
+extern uint8_t* kmm_v4_thread_heap_refill(size_t min_needed);
+extern void kmm_v4_thread_heap_invalidate(void);
 
-// TLAB 填充函数声明（实现在 .c 文件中）
-// 必须在 kmm_v4_bump 和 kmm_v4_alloc_auto 之前声明
-extern uint8_t* kmm_v4_tlab_refill(void);
-extern void kmm_v4_tlab_invalidate(void);
+// ==================== 批量分配 API ====================
 
-// ==================== 批量分配 API（编译器生成，减少原子操作次数）====================
-
-#ifndef KMM_V4_BUMP_IMPL
-// kmm_v4_bump: 批量分配，单次原子加法分配 total_size 字节，返回起始地址
+// kmm_v4_bump: 批量分配，从 per-thread heap 推进 offset
 // 用于编译器将同一 scope 内的多次 malloc 合并为一次分配
-// 优化：使用 TLAB 快速路径，减少全局 CAS
+#ifndef KMM_V4_BUMP_IMPL
 static inline void* kmm_v4_bump(size_t total_size) {
     const size_t mask = KMM_V4_ALIGNMENT - 1;
     size_t aligned_size = (total_size + mask) & ~mask;
 
-    // 快速路径：从 TLAB 分配（无原子操作）
-    if (KMM_V4_LIKELY(g_kmm_v4_tls_buffer.remaining >= aligned_size)) {
-        uint8_t* ptr = g_kmm_v4_tls_buffer.buffer;
-        g_kmm_v4_tls_buffer.buffer += aligned_size;
-        g_kmm_v4_tls_buffer.remaining -= aligned_size;
+    // 快速路径：从 per-thread heap 分配（无原子操作）
+    if (KMM_V4_LIKELY(g_kmm_v4_thread_heap.offset + aligned_size <= g_kmm_v4_thread_heap.capacity)) {
+        uint8_t* ptr = g_kmm_v4_thread_heap.base + g_kmm_v4_thread_heap.offset;
+        g_kmm_v4_thread_heap.offset += aligned_size;
         return ptr;
     }
-    
-    // TLAB 耗尽，尝试填充
-    if (KMM_V4_LIKELY(kmm_v4_tlab_refill() != NULL)) {
-        if (KMM_V4_LIKELY(g_kmm_v4_tls_buffer.remaining >= aligned_size)) {
-            uint8_t* ptr = g_kmm_v4_tls_buffer.buffer;
-            g_kmm_v4_tls_buffer.buffer += aligned_size;
-            g_kmm_v4_tls_buffer.remaining -= aligned_size;
+
+    // thread heap 耗尽，尝试 refill
+    if (KMM_V4_LIKELY(kmm_v4_thread_heap_refill(aligned_size) != NULL)) {
+        if (KMM_V4_LIKELY(g_kmm_v4_thread_heap.offset + aligned_size <= g_kmm_v4_thread_heap.capacity)) {
+            uint8_t* ptr = g_kmm_v4_thread_heap.base + g_kmm_v4_thread_heap.offset;
+            g_kmm_v4_thread_heap.offset += aligned_size;
             return ptr;
         }
     }
 
-    // 慢路径：直接从全局池分配（CAS 循环）
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    size_t offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
-    size_t new_offset;
-    do {
-        new_offset = offset + aligned_size;
-        if (KMM_V4_UNLIKELY(new_offset > g_kmm_v4_pool_capacity)) {
-            return NULL;
-        }
-    } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS(g_kmm_v4_offset, offset, new_offset)));
-
-    kmm_v4_pool_commit(new_offset);
-    return g_kmm_v4_pool + offset;
-#else
-    size_t offset = g_kmm_v4_offset;
-    size_t new_offset = offset + aligned_size;
-
-    if (KMM_V4_LIKELY(new_offset <= g_kmm_v4_pool_capacity)) {
-        g_kmm_v4_offset = new_offset;
-        kmm_v4_pool_commit(new_offset);
-        return g_kmm_v4_pool + offset;
-    }
     return NULL;
-#endif
 }
 #endif
 
+// kmm_v4_offset_save: 保存当前 thread heap offset（用于 scope 优化）
+// 修复 #19：只保存 per-thread heap offset，不碰全局 offset
 #ifndef KMM_V4_OFFSET_SAVE_IMPL
-// kmm_v4_offset_save: 保存当前 offset（用于 scope 优化）
 static inline size_t kmm_v4_offset_save(void) {
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    return KMM_ATOMIC_LOAD(g_kmm_v4_offset);
-#else
-    return g_kmm_v4_offset;
-#endif
+    return g_kmm_v4_thread_heap.offset;
 }
 #endif
 
+// kmm_v4_offset_restore: 恢复 thread heap offset（scope 回退）
+// 修复 #19：只恢复 per-thread heap offset，不影响其他线程
 #ifndef KMM_V4_OFFSET_RESTORE_IMPL
-// kmm_v4_offset_restore: 直接恢复 offset（跳过 scope 栈，用于简单 scope 模式）
 static inline void kmm_v4_offset_restore(size_t saved) {
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    KMM_ATOMIC_STORE(g_kmm_v4_offset, saved);
-#else
-    g_kmm_v4_offset = saved;
-#endif
+    g_kmm_v4_thread_heap.offset = saved;
 }
 #endif
 
 // ==================== 自动化分配策略 ====================
-// 智能选择分配路径（TLAB 快速路径 + 全局 CAS 慢路径）
-// TLAB: Thread Local Allocation Buffer，每个线程从全局池批量获取 256KB
-// 快速路径：从 TLS 缓冲区分配，无原子操作，无锁
-// 慢路径：TLAB 耗尽时，通过 CAS 从全局池获取新的 TLAB
-
-// TLAB 填充函数声明（实现在 .c 文件中）
-// 必须在 kmm_v4_alloc_auto 之前声明
-extern uint8_t* kmm_v4_tlab_refill(void);
-extern void kmm_v4_tlab_invalidate(void);
+// 智能选择分配路径（per-thread heap 快速路径 + 全局 CAS 慢路径）
+// 修复 #6：所有分配路径统一不加 header，kmm_v4_free 为 no-op
 
 static inline void* kmm_v4_alloc_auto(size_t size) {
     const size_t mask = KMM_V4_ALIGNMENT - 1;
     size_t aligned_size = (size + mask) & ~mask;
-    
-    // 快速路径：从 TLAB 分配（无原子操作，无锁）
-    // 只有当分配大小 <= TLAB 大小的 1/4 时才使用 TLAB
-    // 大对象直接走全局 CAS，避免浪费 TLAB 空间
-    if (KMM_V4_LIKELY(aligned_size <= KMM_TLS_BUFFER_SIZE / 4)) {
-        if (KMM_V4_LIKELY(g_kmm_v4_tls_buffer.remaining >= aligned_size)) {
-            uint8_t* ptr = g_kmm_v4_tls_buffer.buffer;
-            g_kmm_v4_tls_buffer.buffer += aligned_size;
-            g_kmm_v4_tls_buffer.remaining -= aligned_size;
-            
+
+    // 快速路径：从 per-thread heap 分配（无原子操作，无锁）
+    if (KMM_V4_LIKELY(g_kmm_v4_thread_heap.offset + aligned_size <= g_kmm_v4_thread_heap.capacity)) {
+        uint8_t* ptr = g_kmm_v4_thread_heap.base + g_kmm_v4_thread_heap.offset;
+        g_kmm_v4_thread_heap.offset += aligned_size;
+
+        #ifdef KMM_V4_DEBUG
+        KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
+        #endif
+
+        return ptr;
+    }
+
+    // thread heap 耗尽，尝试 refill
+    if (KMM_V4_LIKELY(kmm_v4_thread_heap_refill(aligned_size) != NULL)) {
+        if (KMM_V4_LIKELY(g_kmm_v4_thread_heap.offset + aligned_size <= g_kmm_v4_thread_heap.capacity)) {
+            uint8_t* ptr = g_kmm_v4_thread_heap.base + g_kmm_v4_thread_heap.offset;
+            g_kmm_v4_thread_heap.offset += aligned_size;
+
             #ifdef KMM_V4_DEBUG
             KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
             #endif
-            
+
             return ptr;
         }
-        
-        // TLAB 耗尽，尝试填充
-        if (KMM_V4_LIKELY(kmm_v4_tlab_refill() != NULL)) {
-            if (KMM_V4_LIKELY(g_kmm_v4_tls_buffer.remaining >= aligned_size)) {
-                uint8_t* ptr = g_kmm_v4_tls_buffer.buffer;
-                g_kmm_v4_tls_buffer.buffer += aligned_size;
-                g_kmm_v4_tls_buffer.remaining -= aligned_size;
-                
-                #ifdef KMM_V4_DEBUG
-                KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
-                #endif
-                
-                return ptr;
-            }
-        }
     }
-    
+
     // 慢路径：直接从全局池分配（CAS 循环）
-    // 或者 TLAB 填充失败，回退到全局分配
+    // 仅当对象太大无法放入 thread heap 时走此路径
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     size_t offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
     size_t new_offset;
@@ -823,41 +694,38 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
                 return NULL;
             #endif
         }
-    } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS(g_kmm_v4_offset, offset, new_offset)));
-    
-    // 按需提交页面
+    } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS_WEAK(g_kmm_v4_offset, offset, new_offset)));
+
     kmm_v4_pool_commit(new_offset);
-    
+
     #ifdef KMM_V4_DEBUG
     KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
     size_t peak = KMM_ATOMIC_LOAD(g_kmm_v4_peak);
     while (new_offset > peak) {
-        if (KMM_ATOMIC_CAS(g_kmm_v4_peak, peak, new_offset)) break;
+        if (KMM_ATOMIC_CAS_STRONG(g_kmm_v4_peak, peak, new_offset)) break;
         peak = KMM_ATOMIC_LOAD(g_kmm_v4_peak);
     }
     #endif
-    
+
     KMM_V4_PREFETCH(g_kmm_v4_pool + new_offset);
     return g_kmm_v4_pool + offset;
 #else
     size_t offset = g_kmm_v4_offset;
     size_t new_offset = offset + aligned_size;
-    
+
     if (KMM_V4_LIKELY(new_offset <= g_kmm_v4_pool_capacity)) {
         g_kmm_v4_offset = new_offset;
-        
-        // 按需提交页面
         kmm_v4_pool_commit(new_offset);
-        
+
         #ifdef KMM_V4_DEBUG
         if (new_offset > g_kmm_v4_peak) g_kmm_v4_peak = new_offset;
         g_kmm_v4_alloc_count++;
         #endif
-        
+
         KMM_V4_PREFETCH(g_kmm_v4_pool + new_offset);
         return g_kmm_v4_pool + offset;
     }
-    
+
     #if KMM_V4_ENABLE_FALLBACK
         return malloc(size);
     #else
@@ -926,64 +794,22 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
 #define KMM_V4_ALLOC_BATCH(type, count) \
     ((type*)kmm_v4_alloc_auto(sizeof(type) * (count)))
 
-// 结构化分配（自动对齐和清零）
-#define KMM_V4_ALLOC_STRUCT(name, ...) \
-    ({ typedef struct { __VA_ARGS__ } name##_t; \
-       name##_t* p = KMM_V4_ALLOC(name##_t); \
-       if(p) kmm_v4_zero_auto(p, sizeof(name##_t)); \
-       p; })
+// ==================== 作用域栈操作（嵌套作用域支持） ====================
+// 修复 #1/#19：scope_push/pop 只操作 per-thread heap offset，不碰全局 offset。
+// 多线程安全：每个线程有独立的 g_kmm_v4_thread_heap，scope 回退互不影响。
 
-// 作用域栈操作函数（嵌套作用域支持）
-// kmm_v4_scope_push: 进入作用域，保存当前 offset + TLAB 状态到作用域栈
-// kmm_v4_scope_pop: 退出作用域，恢复到本层开始时的 offset + TLAB 状态
-// 注意：定义必须放在头文件中，因为 static inline 函数具有内部链接，
-// 跨编译单元不可见。将定义放在 .c 文件中会导致链接错误。
-//
-// 优化：Scope 栈扁平化（深度 <= 2）
-// 当嵌套深度 <= 2 时，使用独立 TLS变量代替数组索引，减少内存访问开销
-// 这是单对象场景最常见的嵌套深度，优化后可显著提升性能
 static inline void kmm_v4_scope_push(void) {
     kmm_scope_stack_t* stack = &g_kmm_v4_scope_stack;
-    size_t depth = stack->depth;
-    
-    // 快速路径：深度 <= 2 时使用扁平化变量（零数组索引开销）
-    if (KMM_V4_LIKELY(depth <= 1)) {
-        #if KMM_THREAD_SAFETY_LEVEL >= 1
-        size_t current_offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
-        #else
-        size_t current_offset = g_kmm_v4_offset;
-        #endif
-        
-        if (depth == 0) {
-            g_kmm_v4_scope_offset_0 = current_offset;
-            g_kmm_v4_scope_tlab_buffer_0 = g_kmm_v4_tls_buffer.buffer;
-            g_kmm_v4_scope_tlab_remaining_0 = g_kmm_v4_tls_buffer.remaining;
-        } else { // depth == 1
-            g_kmm_v4_scope_offset_1 = current_offset;
-            g_kmm_v4_scope_tlab_buffer_1 = g_kmm_v4_tls_buffer.buffer;
-            g_kmm_v4_scope_tlab_remaining_1 = g_kmm_v4_tls_buffer.remaining;
-        }
-        stack->depth++;
-        return;
-    }
-    
-    // 慢路径：深度 > 2 时使用数组索引
-    if (KMM_V4_UNLIKELY(depth >= KMM_V4_MAX_SCOPE_DEPTH)) {
+
+    if (KMM_V4_UNLIKELY(stack->depth >= KMM_V4_MAX_SCOPE_DEPTH)) {
         #ifdef KMM_V4_DEBUG
         fprintf(stderr, "KMM ERROR: Scope stack overflow (max depth: %d)\n", KMM_V4_MAX_SCOPE_DEPTH);
         #endif
         return;
     }
-    size_t idx = depth;
+    // 保存当前 thread heap offset（TLS 变量，无原子操作）
+    stack->offsets[stack->depth] = g_kmm_v4_thread_heap.offset;
     stack->depth++;
-    #if KMM_THREAD_SAFETY_LEVEL >= 1
-    stack->offsets[idx] = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
-    #else
-    stack->offsets[idx] = g_kmm_v4_offset;
-    #endif
-    // 保存 TLAB 状态
-    stack->tlab_buffers[idx] = g_kmm_v4_tls_buffer.buffer;
-    stack->tlab_remainings[idx] = g_kmm_v4_tls_buffer.remaining;
 }
 
 static inline void kmm_v4_scope_pop(void) {
@@ -994,53 +820,13 @@ static inline void kmm_v4_scope_pop(void) {
         #endif
         return;
     }
-    
-    size_t new_depth = stack->depth - 1;
-    stack->depth = new_depth;
-    
-    // 快速路径：深度 <= 2 时使用扁平化变量（零数组索引开销）
-    if (KMM_V4_LIKELY(new_depth <= 1)) {
-        size_t saved_offset;
-        uint8_t* saved_tlab_buffer;
-        size_t saved_tlab_remaining;
-        
-        if (new_depth == 0) {
-            saved_offset = g_kmm_v4_scope_offset_0;
-            saved_tlab_buffer = g_kmm_v4_scope_tlab_buffer_0;
-            saved_tlab_remaining = g_kmm_v4_scope_tlab_remaining_0;
-        } else { // new_depth == 1
-            saved_offset = g_kmm_v4_scope_offset_1;
-            saved_tlab_buffer = g_kmm_v4_scope_tlab_buffer_1;
-            saved_tlab_remaining = g_kmm_v4_scope_tlab_remaining_1;
-        }
-        
-        #if KMM_THREAD_SAFETY_LEVEL >= 1
-        KMM_ATOMIC_STORE(g_kmm_v4_offset, saved_offset);
-        #else
-        g_kmm_v4_offset = saved_offset;
-        #endif
-        // 恢复 TLAB 状态（确保 scope_pop 后 TLS 快速路径仍然正确）
-        g_kmm_v4_tls_buffer.buffer = saved_tlab_buffer;
-        g_kmm_v4_tls_buffer.remaining = saved_tlab_remaining;
-        return;
-    }
-    
-    // 慢路径：深度 > 2 时使用数组索引
-    size_t idx = new_depth;
-    size_t saved_offset = stack->offsets[idx];
-    #if KMM_THREAD_SAFETY_LEVEL >= 1
-    KMM_ATOMIC_STORE(g_kmm_v4_offset, saved_offset);
-    #else
-    g_kmm_v4_offset = saved_offset;
-    #endif
-    // 恢复 TLAB 状态（确保 scope_pop 后 TLS 快速路径仍然正确）
-    g_kmm_v4_tls_buffer.buffer = stack->tlab_buffers[idx];
-    g_kmm_v4_tls_buffer.remaining = stack->tlab_remainings[idx];
+
+    stack->depth--;
+    // 恢复 thread heap offset（TLS 变量，无原子操作，不影响其他线程）
+    g_kmm_v4_thread_heap.offset = stack->offsets[stack->depth];
 }
 
 // 作用域自动清理（支持嵌套，每层独立管理）
-// 使用 do-while 结构确保在进入块前执行 push，退出块时执行 pop
-// 解决嵌套作用域退出时回滚外层分配的问题
 #define KMM_V4_SCOPE_START \
     kmm_v4_scope_push(); \
     do
@@ -1078,15 +864,8 @@ static kmm_v4_stats_t g_kmm_v4_stats = {0};
 
 // ==================== 自动化 API ====================
 
-// KMM_CACHE_LINE_SIZE 已在常量定义区定义，此处不再重复
-
-// 完整的 KMM 上下文结构
+// KMM 上下文结构（简化版，arena 字段已移除）
 typedef struct kmm_context {
-#if KMM_ENABLE_ARENA
-    kmm_arena_t tiny_arena;
-    kmm_arena_t small_arena;
-    kmm_arena_t medium_arena;
-#endif
 #if KMM_ENABLE_THREAD_CACHE
     kmm_thread_cache_t* thread_cache;
 #endif
@@ -1106,10 +885,11 @@ typedef struct kmm_context {
 // 全局上下文实例
 extern kmm_context_t g_kmm_ctx;
 
-// ==================== 编译期检查 ====================
-// kmm_v4_malloc / kmm_v4_free / kmm_v4_calloc 由 .c 文件提供（非 static，支持跨 TU 链接）
+// ==================== 重置与查询 ====================
+// 当 memory.h 已提供 extern 声明时，跳过 static inline 定义，避免 static/extern 冲突
 
-#ifndef KMM_V4_RESET_IMPL
+#if !defined(KMM_V4_RESET_IMPL) && !defined(KMM_V4_EXTERNAL_DECLS)
+// 修复 #5：reset 只在单线程上下文调用，重置全局 offset + 失效所有 thread heap
 static inline void kmm_v4_reset(void) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     KMM_ATOMIC_STORE(g_kmm_v4_offset, 0);
@@ -1122,12 +902,13 @@ static inline void kmm_v4_reset(void) {
     memset(&g_kmm_v4_stats, 0, sizeof(g_kmm_v4_stats));
     #endif
 #endif
-    // 失效当前线程的 TLAB，强制下次分配时重新填充
-    kmm_v4_tlab_invalidate();
+    // 失效当前线程的 thread heap，强制下次分配时重新填充
+    kmm_v4_thread_heap_invalidate();
 }
 #endif
 
-#ifndef KMM_V4_USAGE_IMPL
+#if !defined(KMM_V4_USAGE_IMPL) && !defined(KMM_V4_EXTERNAL_DECLS)
+// 修复 #12：usage 返回全局 offset（实际已分配的字节）
 static inline size_t kmm_v4_usage(void) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     return KMM_ATOMIC_LOAD(g_kmm_v4_offset);
@@ -1137,20 +918,15 @@ static inline size_t kmm_v4_usage(void) {
 }
 #endif
 
-#ifndef KMM_V4_AVAILABLE_IMPL
+#if !defined(KMM_V4_AVAILABLE_IMPL) && !defined(KMM_V4_EXTERNAL_DECLS)
+// 修复 #12：available 用 g_kmm_v4_pool_capacity 而非宏 KMM_V4_POOL_SIZE
 static inline size_t kmm_v4_available(void) {
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    return KMM_V4_POOL_SIZE - KMM_ATOMIC_LOAD(g_kmm_v4_offset);
-#else
-    return KMM_V4_POOL_SIZE - g_kmm_v4_offset;
-#endif
+    return g_kmm_v4_pool_capacity - kmm_v4_usage();
 }
 #endif
 
-// KMM_V4_ALLOC_ARRAY 已在智能宏系统区定义，此处不再重复
-
 // ==================== 兼容 API: malloc/calloc/free/strdup ====================
-// 为旧代码提供兼容接口，底层基于 bump allocator
+// 修复 #6：统一不加 header，kmm_v4_free 为 no-op（靠 scope 回收）
 // 动态内存池模式：实现在 kmm_scoped_allocator_v4.c 中
 // 静态内存池模式：使用内联版本
 
@@ -1166,6 +942,7 @@ static inline void* kmm_v4_calloc(size_t num, size_t size) {
     return p;
 }
 
+// 修复 #6：free 为 no-op，bump allocator 靠 scope 回收
 static inline void kmm_v4_free(void* ptr) {
     (void)ptr;
 }

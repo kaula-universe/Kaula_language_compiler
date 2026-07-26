@@ -19,6 +19,10 @@
 #ifndef KAULA_STD_MEMORY_H
 #define KAULA_STD_MEMORY_H
 
+/* 标记本头文件提供了 extern 声明，防止 kmm_scoped_allocator_v4.h 中的
+   static inline 定义产生 static/extern 冲突（Linux GCC 严格检查） */
+#define KMM_V4_EXTERNAL_DECLS
+
 #include <stddef.h>
 #include <stdint.h>
 

@@ -18,7 +18,7 @@ static Result result_clone(const Result* r) {
     out.status = r->status;
     out.value = r->value;
     out.err_code = r->err_code;
-    out.err_msg = r->err_msg ? string_copy(r->err_msg) : NULL;
+    out.err_msg = r->err_msg.ptr ? string_copy(r->err_msg) : STRING_EMPTY;
     return out;
 }
 
@@ -160,7 +160,7 @@ Result result_ok_i64(i64 val) {
     r.status = RESULT_OK;
     r.value.ok_i64 = val;
     r.err_code = 0;
-    r.err_msg = NULL;
+    r.err_msg = STRING_EMPTY;
     return r;
 }
 
@@ -169,7 +169,7 @@ Result result_ok_f64(f64 val) {
     r.status = RESULT_OK;
     r.value.ok_f64 = val;
     r.err_code = 0;
-    r.err_msg = NULL;
+    r.err_msg = STRING_EMPTY;
     return r;
 }
 
@@ -178,7 +178,7 @@ Result result_ok_ptr(void* val) {
     r.status = RESULT_OK;
     r.value.ok_ptr = val;
     r.err_code = 0;
-    r.err_msg = NULL;
+    r.err_msg = STRING_EMPTY;
     return r;
 }
 
@@ -187,7 +187,7 @@ Result result_err(int code, const char* msg) {
     r.status = RESULT_ERR;
     r.value.ok_i64 = 0;
     r.err_code = code;
-    r.err_msg = msg ? string_copy(msg) : NULL;
+    r.err_msg = msg ? string_create(msg) : STRING_EMPTY;
     return r;
 }
 
@@ -226,7 +226,7 @@ int result_err_code(const Result* r) {
 }
 
 String result_err_msg(const Result* r) {
-    if (!r) return NULL;
+    if (!r) return STRING_EMPTY;
     return r->err_msg;
 }
 
@@ -273,7 +273,7 @@ Result option_to_result(const Option* opt, int err_code, const char* err_msg) {
     r.status = RESULT_OK;
     r.value.ok_i64 = opt->value.as_i64;
     r.err_code = 0;
-    r.err_msg = NULL;
+    r.err_msg = STRING_EMPTY;
     return r;
 }
 
@@ -281,9 +281,9 @@ Result option_to_result(const Option* opt, int err_code, const char* err_msg) {
 
 void result_destroy(Result* r) {
     if (!r) return;
-    if (r->err_msg) {
+    if (r->err_msg.ptr) {
         string_free(r->err_msg);
-        r->err_msg = NULL;
+        r->err_msg = STRING_EMPTY;
     }
     r->err_code = 0;
 }

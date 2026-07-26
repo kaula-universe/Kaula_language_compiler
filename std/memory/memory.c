@@ -32,41 +32,10 @@ void* kmm_v4_alloc(size_t size) {
     return kmm_v4_alloc_auto(size);
 }
 
-void* kmm_v4_calloc(size_t count, size_t size) {
-    size_t total = count * size;
-    void* ptr = kmm_v4_alloc_auto(total);
-    if (ptr != NULL) {
-        kmm_v4_zero_auto(ptr, total);
-    }
-    return ptr;
-}
-
-void* kmm_v4_realloc(void* ptr, size_t new_size) {
-    if (ptr == NULL) {
-        return kmm_v4_alloc_auto(new_size);
-    }
-    void* new_ptr = kmm_v4_alloc_auto(new_size);
-    if (new_ptr != NULL && ptr != NULL) {
-        memcpy(new_ptr, ptr, new_size);
-    }
-    return new_ptr;
-}
-
-void kmm_v4_free(void* ptr) {
-    (void)ptr;
-}
-
-void* kmm_v4_malloc(size_t size) {
-    return kmm_v4_alloc_auto(size);
-}
-
-void* kmm_v4_strdup(const char* s) {
-    if (!s) return NULL;
-    size_t len = strlen(s) + 1;
-    void* p = kmm_v4_alloc_auto(len);
-    if (p) memcpy(p, s, len);
-    return p;
-}
+/* 修复：kmm_v4_calloc/realloc/free/malloc/strdup 的实现已在
+   kmm_scoped_allocator_v4.c 中提供，此处不再重复定义以避免链接时
+   multiple definition 错误（Linux GCC 严格检查）。
+   memory.h 中的 extern 声明会引用 kmm_scoped_allocator_v4.c 中的实现。 */
 
 /* ============================================================================
  * 对齐分配
@@ -102,49 +71,11 @@ void kmm_v4_scope_exit(void) {
  * 批量分配 API（编译器生成，减少原子操作次数）
  * ============================================================================ */
 
+/* 修复：V4 使用 per-thread heap 替代旧 V3 的 tls_buffer，
+   kmm_v4_bump 直接委托给 kmm_v4_alloc_auto（header 中的 inline 函数），
+   per-thread heap 已实现单次 CAS 批量获取的效果 */
 void* kmm_v4_bump(size_t total_size) {
-    const size_t mask = KMM_V4_ALIGNMENT - 1;
-    size_t aligned_size = (total_size + mask) & ~mask;
-
-    if (KMM_V4_LIKELY(g_kmm_v4_tls_buffer.remaining >= aligned_size)) {
-        uint8_t* ptr = g_kmm_v4_tls_buffer.buffer;
-        g_kmm_v4_tls_buffer.buffer += aligned_size;
-        g_kmm_v4_tls_buffer.remaining -= aligned_size;
-        return ptr;
-    }
-
-    if (KMM_V4_LIKELY(kmm_v4_tlab_refill() != NULL)) {
-        if (KMM_V4_LIKELY(g_kmm_v4_tls_buffer.remaining >= aligned_size)) {
-            uint8_t* ptr = g_kmm_v4_tls_buffer.buffer;
-            g_kmm_v4_tls_buffer.buffer += aligned_size;
-            g_kmm_v4_tls_buffer.remaining -= aligned_size;
-            return ptr;
-        }
-    }
-
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    size_t offset = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
-    size_t new_offset;
-    do {
-        new_offset = offset + aligned_size;
-        if (KMM_V4_UNLIKELY(new_offset > g_kmm_v4_pool_capacity)) {
-            return NULL;
-        }
-    } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS(g_kmm_v4_offset, offset, new_offset)));
-
-    kmm_v4_pool_commit(new_offset);
-    return g_kmm_v4_pool + offset;
-#else
-    size_t offset = g_kmm_v4_offset;
-    size_t new_offset = offset + aligned_size;
-
-    if (KMM_V4_LIKELY(new_offset <= g_kmm_v4_pool_capacity)) {
-        g_kmm_v4_offset = new_offset;
-        kmm_v4_pool_commit(new_offset);
-        return g_kmm_v4_pool + offset;
-    }
-    return NULL;
-#endif
+    return kmm_v4_alloc_auto(total_size);
 }
 
 size_t kmm_v4_offset_save(void) {

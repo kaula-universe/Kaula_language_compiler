@@ -92,20 +92,22 @@ void md5_final(MD5Context* ctx, u8* digest) {
 
 String md5_string(const String input) {
     MD5Context ctx; u8 digest[16];
-    md5_init(&ctx); md5_update(&ctx, (const u8*)input, strlen(input)); md5_final(&ctx, digest);
-    String result = (String)kmm_v4_malloc(33);
-    for (int i = 0; i < 16; i++) sprintf(result + i*2, "%02x", digest[i]);
-    result[32] = '\0'; return result;
+    md5_init(&ctx); md5_update(&ctx, (const u8*)input.ptr, input.len); md5_final(&ctx, digest);
+    char* buf = (char*)kmm_v4_malloc(33);
+    for (int i = 0; i < 16; i++) sprintf(buf + i*2, "%02x", digest[i]);
+    buf[32] = '\0';
+    String result = {32, buf}; return result;
 }
 
 String md5_file(const String path) {
-    FILE* f = fopen(path, "rb"); if (!f) return NULL;
+    FILE* f = fopen(path.ptr, "rb"); if (!f) return (String){0, NULL};
     MD5Context ctx; md5_init(&ctx); u8 buf[4096]; size_t n;
     while ((n = fread(buf, 1, 4096, f)) > 0) md5_update(&ctx, buf, n);
     fclose(f); u8 digest[16]; md5_final(&ctx, digest);
-    String result = (String)kmm_v4_malloc(33);
-    for (int i = 0; i < 16; i++) sprintf(result + i*2, "%02x", digest[i]);
-    result[32] = '\0'; return result;
+    char* hex = (char*)kmm_v4_malloc(33);
+    for (int i = 0; i < 16; i++) sprintf(hex + i*2, "%02x", digest[i]);
+    hex[32] = '\0';
+    String result = {32, hex}; return result;
 }
 
 // SHA-256 实现
@@ -166,52 +168,52 @@ void sha256_final(SHA256Context* ctx, u8* digest) {
 
 String sha256_string(const String input) {
     SHA256Context ctx; u8 digest[32];
-    sha256_init(&ctx); sha256_update(&ctx, (const u8*)input, strlen(input)); sha256_final(&ctx, digest);
-    String result = (String)kmm_v4_malloc(65);
-    for (int i = 0; i < 32; i++) sprintf(result + i*2, "%02x", digest[i]);
-    result[64] = '\0'; return result;
+    sha256_init(&ctx); sha256_update(&ctx, (const u8*)input.ptr, input.len); sha256_final(&ctx, digest);
+    char* buf = (char*)kmm_v4_malloc(65); String result;
+    for (int i = 0; i < 32; i++) sprintf(buf + i*2, "%02x", digest[i]);
+    buf[64] = '\0'; result = (String){.len = 64, .ptr = buf}; return result;
 }
 
 String sha256_file(const String path) {
-    FILE* f = fopen(path, "rb"); if (!f) return NULL;
+    FILE* f = fopen(path.ptr, "rb"); if (!f) return STRING_EMPTY;
     SHA256Context ctx; sha256_init(&ctx); u8 buf[4096]; size_t n;
     while ((n = fread(buf, 1, 4096, f)) > 0) sha256_update(&ctx, buf, n);
     fclose(f); u8 digest[32]; sha256_final(&ctx, digest);
-    String result = (String)kmm_v4_malloc(65);
-    for (int i = 0; i < 32; i++) sprintf(result + i*2, "%02x", digest[i]);
-    result[64] = '\0'; return result;
+    char* hex = (char*)kmm_v4_malloc(65); String result;
+    for (int i = 0; i < 32; i++) sprintf(hex + i*2, "%02x", digest[i]);
+    hex[64] = '\0'; result = (String){.len = 64, .ptr = hex}; return result;
 }
 
 // Base64 实现
 static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 String base64_encode(const u8* data, size_t len) {
-    String result = (String)kmm_v4_malloc((len + 2) / 3 * 4 + 1);
+    char* buf = (char*)kmm_v4_malloc((len + 2) / 3 * 4 + 1); String result;
     size_t i = 0, j = 0;
     while (i < len) {
         u32 octet_a = i < len ? data[i++] : 0;
         u32 octet_b = i < len ? data[i++] : 0;
         u32 octet_c = i < len ? data[i++] : 0;
         u32 triple = (octet_a << 16) | (octet_b << 8) | octet_c;
-        result[j++] = base64_chars[(triple >> 18) & 0x3F];
-        result[j++] = base64_chars[(triple >> 12) & 0x3F];
-        result[j++] = base64_chars[(triple >> 6) & 0x3F];
-        result[j++] = base64_chars[triple & 0x3F];
+        buf[j++] = base64_chars[(triple >> 18) & 0x3F];
+        buf[j++] = base64_chars[(triple >> 12) & 0x3F];
+        buf[j++] = base64_chars[(triple >> 6) & 0x3F];
+        buf[j++] = base64_chars[triple & 0x3F];
     }
-    if (len % 3 == 1) { result[j-2] = '='; result[j-1] = '='; }
-    else if (len % 3 == 2) { result[j-1] = '='; }
-    result[j] = '\0'; return result;
+    if (len % 3 == 1) { buf[j-2] = '='; buf[j-1] = '='; }
+    else if (len % 3 == 2) { buf[j-1] = '='; }
+    buf[j] = '\0'; result = (String){.len = j, .ptr = buf}; return result;
 }
 
 u8* base64_decode(const String input, size_t* out_len) {
-    size_t len = strlen(input); if (len % 4 != 0) return NULL;
-    size_t out_len_val = len / 4 * 3; if (len > 0 && input[len-1] == '=') out_len_val--; if (len > 1 && input[len-2] == '=') out_len_val--;
+    size_t len = input.len; if (len % 4 != 0) return NULL;
+    size_t out_len_val = len / 4 * 3; if (len > 0 && input.ptr[len-1] == '=') out_len_val--; if (len > 1 && input.ptr[len-2] == '=') out_len_val--;
     u8* output = (u8*)kmm_v4_malloc(out_len_val + 1); size_t i = 0, j = 0;
     while (i < len) {
-        u32 sextet_a = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
-        u32 sextet_b = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
-        u32 sextet_c = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
-        u32 sextet_d = input[i] == '=' ? 0 : (u32)(strchr(base64_chars, input[i]) - base64_chars); i++;
+        u32 sextet_a = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
+        u32 sextet_b = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
+        u32 sextet_c = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
+        u32 sextet_d = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
         u32 triple = (sextet_a << 18) | (sextet_b << 12) | (sextet_c << 6) | sextet_d;
         if (j < out_len_val) output[j++] = (triple >> 16) & 0xFF;
         if (j < out_len_val) output[j++] = (triple >> 8) & 0xFF;
@@ -309,9 +311,9 @@ String hmac_sha256(const u8* key, size_t key_len, const u8* data, size_t data_le
     for (int i = 0; i < 64; i++) { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
     sha256_init(&ctx); sha256_update(&ctx, ipad, 64); sha256_update(&ctx, data, data_len); sha256_final(&ctx, hash);
     sha256_init(&ctx); sha256_update(&ctx, opad, 64); sha256_update(&ctx, hash, 32); sha256_final(&ctx, hash);
-    String result = (String)kmm_v4_malloc(65);
-    for (int i = 0; i < 32; i++) sprintf(result + i*2, "%02x", hash[i]);
-    result[64] = '\0'; return result;
+    char* buf = (char*)kmm_v4_malloc(65); String result;
+    for (int i = 0; i < 32; i++) sprintf(buf + i*2, "%02x", hash[i]);
+    buf[64] = '\0'; result = (String){.len = 64, .ptr = buf}; return result;
 }
 
 // CRC32

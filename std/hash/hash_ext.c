@@ -39,15 +39,17 @@ static void be64_write(u8* p, u64 v) {
 
 static String bytes_to_hex(const u8* data, size_t len) {
     static const char hexchars[] = "0123456789abcdef";
-    String out;
+    String out = {0, NULL};
     size_t i;
-    out = (String)kmm_v4_malloc(len * 2 + 1);
-    if (!out) return NULL;
+    char* buf = (char*)kmm_v4_malloc(len * 2 + 1);
+    if (!buf) return out;
     for (i = 0; i < len; i++) {
-        out[i * 2]     = hexchars[(data[i] >> 4) & 0xF];
-        out[i * 2 + 1] = hexchars[data[i] & 0xF];
+        buf[i * 2]     = hexchars[(data[i] >> 4) & 0xF];
+        buf[i * 2 + 1] = hexchars[data[i] & 0xF];
     }
-    out[len * 2] = '\0';
+    buf[len * 2] = '\0';
+    out.ptr = buf;
+    out.len = len * 2;
     return out;
 }
 
@@ -433,12 +435,13 @@ String crc64_hex(const void* data, size_t len) {
     u64 h = crc64_compute(data, len);
     String out;
     int i;
-    out = (String)kmm_v4_malloc(17);
-    if (!out) return NULL;
+    char* buf = (char*)kmm_v4_malloc(17);
+    if (!buf) return STRING_EMPTY;
+    out = (String){.len = 16, .ptr = buf};
     for (i = 0; i < 16; i++) {
-        out[i] = hexchars[(h >> (60 - i * 4)) & 0xF];
+        out.ptr[i] = hexchars[(h >> (60 - i * 4)) & 0xF];
     }
-    out[16] = '\0';
+    out.ptr[16] = '\0';
     return out;
 }
 
@@ -565,10 +568,10 @@ void pbkdf2_sha512(const void* password, size_t pw_len,
  * ============================================================ */
 
 String hash_compute(const char* algorithm, const void* data, size_t len) {
-    if (!algorithm) return NULL;
+    if (!algorithm) return STRING_EMPTY;
     if (strcmp(algorithm, "sha1") == 0)   return sha1_hex(data, len);
     if (strcmp(algorithm, "sha384") == 0) return sha384_hex(data, len);
     if (strcmp(algorithm, "sha512") == 0) return sha512_hex(data, len);
     if (strcmp(algorithm, "crc64") == 0)  return crc64_hex(data, len);
-    return NULL;
+    return STRING_EMPTY;
 }

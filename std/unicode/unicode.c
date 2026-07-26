@@ -595,10 +595,10 @@ String unicode_substr(const char* str, size_t start, size_t count) {
     }
     size_t byte_len = byte_pos - byte_start;
     char* result = (char*)kmm_v4_malloc(byte_len + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
     memcpy(result, str + byte_start, byte_len);
     result[byte_len] = '\0';
-    return result;
+    return string_create(result);
 }
 
 String unicode_reverse(const char* str) {
@@ -609,7 +609,7 @@ String unicode_reverse(const char* str) {
     size_t char_count = unicode_char_count(str);
     if (char_count == 0) return string_create("");
     char* result = (char*)kmm_v4_malloc(byte_len + 1);
-    if (!result) return NULL;
+    if (!result) return STRING_EMPTY;
     size_t out_pos = byte_len;
     result[out_pos] = '\0';
     size_t i = 0;
@@ -620,7 +620,7 @@ String unicode_reverse(const char* str) {
         memcpy(result + out_pos, str + i, len);
         i += len;
     }
-    return result;
+    return (String){.len = byte_len, .ptr = result};
 }
 
 /* ============================================================
@@ -633,7 +633,7 @@ static String str_case_convert(const char* str,
     size_t byte_len = strlen(str);
     /* Worst case: each codepoint expands to 4 bytes */
     char* buf = (char*)kmm_v4_malloc(byte_len * 4 + 1);
-    if (!buf) return NULL;
+    if (!buf) return STRING_EMPTY;
     size_t i = 0;
     size_t out = 0;
     while (i < byte_len) {
@@ -657,12 +657,11 @@ static String str_case_convert(const char* str,
     /* Shrink to fit */
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        result = buf;
-        return result;
+        return (String){.len = out, .ptr = buf};
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return result;
+    return (String){.len = out, .ptr = result};
 }
 
 String unicode_str_to_upper(const char* str) {
@@ -677,7 +676,7 @@ String unicode_str_to_title(const char* str) {
     if (!str) return string_create("");
     size_t byte_len = strlen(str);
     char* buf = (char*)kmm_v4_malloc(byte_len * 4 + 1);
-    if (!buf) return NULL;
+    if (!buf) return STRING_EMPTY;
     size_t i = 0;
     size_t out = 0;
     bool_t next_upper = 1;
@@ -710,19 +709,18 @@ String unicode_str_to_title(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        result = buf;
-        return result;
+        return (String){.len = out, .ptr = buf};
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return result;
+    return (String){.len = out, .ptr = result};
 }
 
 String unicode_str_swapcase(const char* str) {
     if (!str) return string_create("");
     size_t byte_len = strlen(str);
     char* buf = (char*)kmm_v4_malloc(byte_len * 4 + 1);
-    if (!buf) return NULL;
+    if (!buf) return STRING_EMPTY;
     size_t i = 0;
     size_t out = 0;
     while (i < byte_len) {
@@ -752,19 +750,18 @@ String unicode_str_swapcase(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        result = buf;
-        return result;
+        return (String){.len = out, .ptr = buf};
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return result;
+    return (String){.len = out, .ptr = result};
 }
 
 String unicode_str_capitalize(const char* str) {
     if (!str) return string_create("");
     size_t byte_len = strlen(str);
     char* buf = (char*)kmm_v4_malloc(byte_len * 4 + 1);
-    if (!buf) return NULL;
+    if (!buf) return STRING_EMPTY;
     size_t i = 0;
     size_t out = 0;
     bool_t first_char = 1;
@@ -795,12 +792,11 @@ String unicode_str_capitalize(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        result = buf;
-        return result;
+        return (String){.len = out, .ptr = buf};
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return result;
+    return (String){.len = out, .ptr = result};
 }
 
 /* ============================================================
@@ -929,7 +925,7 @@ static String normalize_nfd_impl(const char* str) {
     size_t byte_len = strlen(str);
     /* Worst case: each codepoint becomes 2 codepoints (4 bytes each) */
     char* buf = (char*)kmm_v4_malloc(byte_len * 8 + 1);
-    if (!buf) return NULL;
+    if (!buf) return STRING_EMPTY;
     size_t i = 0;
     size_t out = 0;
     while (i < byte_len) {
@@ -955,12 +951,11 @@ static String normalize_nfd_impl(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        result = buf;
-        return result;
+        return (String){.len = out, .ptr = buf};
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return result;
+    return (String){.len = out, .ptr = result};
 }
 
 /* ============================================================
@@ -970,8 +965,8 @@ static String normalize_nfd_impl(const char* str) {
 static String normalize_nfc_impl(const char* str) {
     /* First decompose */
     String decomposed = normalize_nfd_impl(str);
-    if (!decomposed) return NULL;
-    size_t byte_len = strlen(decomposed);
+    if (decomposed.len == 0) return STRING_EMPTY;
+    size_t byte_len = decomposed.len;
     char* buf = (char*)kmm_v4_malloc(byte_len + 1);
     if (!buf) {
         return decomposed;
@@ -982,14 +977,14 @@ static String normalize_nfc_impl(const char* str) {
     int have_prev = 0;
     while (i < byte_len) {
         u32 cp = 0;
-        int len = unicode_decode_utf8(decomposed + i, &cp);
+        int len = unicode_decode_utf8(decomposed.ptr + i, &cp);
         if (len < 1) {
             if (have_prev) {
                 int e = unicode_encode_utf8(prev_cp, buf + out);
                 if (e > 0) out += e;
                 have_prev = 0;
             }
-            buf[out++] = decomposed[i];
+            buf[out++] = decomposed.ptr[i];
             i++;
             continue;
         }
@@ -1003,7 +998,7 @@ static String normalize_nfc_impl(const char* str) {
                 while (i + len < byte_len) {
                     u32 next_cp = 0;
                     int next_len = unicode_decode_utf8(
-                        decomposed + i + len, &next_cp);
+                        decomposed.ptr + i + len, &next_cp);
                     if (next_len < 1) break;
                     chained = find_composed(prev_cp, next_cp);
                     if (chained) {
@@ -1029,15 +1024,14 @@ static String normalize_nfc_impl(const char* str) {
         if (e > 0) out += e;
     }
     buf[out] = '\0';
-    kmm_v4_free(decomposed);
+    kmm_v4_free(decomposed.ptr);
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        result = buf;
-        return result;
+        return (String){.len = out, .ptr = buf};
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return result;
+    return (String){.len = out, .ptr = result};
 }
 
 String unicode_normalize(const char* str, UnicodeNormalization form) {
@@ -1046,7 +1040,7 @@ String unicode_normalize(const char* str, UnicodeNormalization form) {
         case UNICODE_NFD:  return normalize_nfd_impl(str);
         case UNICODE_NFKC: return normalize_nfc_impl(str);
         case UNICODE_NFKD: return normalize_nfd_impl(str);
-        default:           return string_copy(str);
+        default:           return string_create(str);
     }
 }
 

@@ -43,7 +43,7 @@ bool_t pb_read_fixed64(PBReader* reader, u64* value);
 bool_t pb_read_float(PBReader* reader, f32* value);
 bool_t pb_read_double(PBReader* reader, f64* value);
 bool_t pb_read_bool(PBReader* reader, bool_t* value);
-bool_t pb_read_string(PBReader* reader, KString* value);
+bool_t pb_read_string(PBReader* reader, String* value);
 bool_t pb_read_bytes(PBReader* reader, u8** data, size_t* len);
 
 bool_t pb_read_field(PBReader* reader, i32* field_number, i32* wire_type);

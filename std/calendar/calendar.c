@@ -1,3 +1,9 @@
+/* _GNU_SOURCE 必须在所有 #include 之前定义，以确保 strptime
+   在 <time.h> 中可见（Linux glibc 要求 _GNU_SOURCE 或 _XOPEN_SOURCE >= 700） */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "calendar.h"
 #include <stdlib.h>
 #include <string.h>
@@ -39,14 +45,14 @@ static char* strptime(const char* buf, const char* format, struct tm* tm) {
 Calendar* calendar_create(const char* name, i64 first_day_of_week) {
     Calendar* cal = (Calendar*)kmm_v4_malloc(sizeof(Calendar));
     if (!cal) return NULL;
-    cal->name = string_copy(name);
+    cal->name = string_create(name);
     cal->first_day_of_week = first_day_of_week;
     return cal;
 }
 
 void calendar_destroy(Calendar* cal) {
     if (!cal) return;
-    kmm_v4_free(cal->name);
+    kmm_v4_free(cal->name.ptr);
     kmm_v4_free(cal);
 }
 
@@ -201,7 +207,7 @@ Date calendar_last_day_of_week(const Date* date) {
 }
 
 String calendar_format_date(const Date* date, const char* format) {
-    if (!date || !format) return NULL;
+    if (!date || !format) return STRING_EMPTY;
     
     char buffer[256];
     struct tm tm_info = {0};
@@ -210,7 +216,7 @@ String calendar_format_date(const Date* date, const char* format) {
     tm_info.tm_mday = (int)date->day;
     
     strftime(buffer, sizeof(buffer), format, &tm_info);
-    return string_copy(buffer);
+    return string_create(buffer);
 }
 
 Date calendar_parse_date(const char* str, const char* format) {
@@ -228,7 +234,7 @@ Date calendar_parse_date(const char* str, const char* format) {
 }
 
 MonthInfo calendar_get_month_info(i64 month) {
-    MonthInfo info = {NULL, NULL, 0};
+    MonthInfo info = {STRING_EMPTY, STRING_EMPTY, 0};
     
     const char* names[] = {"January", "February", "March", "April", "May", "June",
                            "July", "August", "September", "October", "November", "December"};
@@ -236,8 +242,8 @@ MonthInfo calendar_get_month_info(i64 month) {
                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     
     if (month >= 1 && month <= 12) {
-        info.name = string_copy(names[month - 1]);
-        info.short_name = string_copy(short_names[month - 1]);
+        info.name = string_create(names[month - 1]);
+        info.short_name = string_create(short_names[month - 1]);
         info.days = 31;
         if (month == 2) info.days = 28;
         else if (month == 4 || month == 6 || month == 9 || month == 11) info.days = 30;
@@ -247,15 +253,15 @@ MonthInfo calendar_get_month_info(i64 month) {
 }
 
 WeekdayInfo calendar_get_weekday_info(i64 weekday) {
-    WeekdayInfo info = {NULL, NULL, weekday};
+    WeekdayInfo info = {STRING_EMPTY, STRING_EMPTY, weekday};
     
     const char* names[] = {"Sunday", "Monday", "Tuesday", "Wednesday",
                            "Thursday", "Friday", "Saturday"};
     const char* short_names[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     
     if (weekday >= 0 && weekday <= 6) {
-        info.name = string_copy(names[weekday]);
-        info.short_name = string_copy(short_names[weekday]);
+        info.name = string_create(names[weekday]);
+        info.short_name = string_create(short_names[weekday]);
     }
     
     return info;

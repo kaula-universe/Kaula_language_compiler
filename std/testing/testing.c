@@ -1,9 +1,17 @@
+/* _POSIX_C_SOURCE 必须在所有 #include 之前定义，以确保 struct timespec
+   和 clock_gettime 在 <time.h> 中可见（Linux 严格模式要求） */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "testing.h"
 #include "../memory/memory.h"
 #include <string.h>
 #include <stdio.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <time.h>
 #endif
 
 static TestReport* g_current_report = NULL;
@@ -39,7 +47,7 @@ TestCase* test_case_create(const String name, void (*func)(void), const String s
     if (tc) {
         tc->name = string_copy(name);
         tc->func = func;
-        tc->suite_name = suite_name ? string_copy(suite_name) : NULL;
+        tc->suite_name = suite_name.ptr ? string_copy(suite_name) : (String){0, NULL};
     }
     if (g_case_count >= g_case_capacity) {
         g_case_capacity *= 2;
@@ -61,7 +69,7 @@ TestReport* test_run_all() {
     for (size_t i = 0; i < g_case_count; i++) {
         TestCase* tc = g_all_cases[i];
         TestSuite* suite = NULL;
-        if (tc->suite_name) {
+        if (tc->suite_name.len > 0) {
             for (size_t j = 0; j < g_suite_count; j++) {
                 if (string_equals(g_all_suites[j]->name, tc->suite_name)) {
                     suite = g_all_suites[j];
@@ -107,9 +115,9 @@ void test_report_print(TestReport* report) {
     for (size_t i = 0; i < report->count; i++) {
         TestResult* r = &report->results[i];
         if (r->passed) {
-            print("  [PASS] %s (%lld ms)\n", r->name, r->duration_ms);
+            print("  [PASS] %s (%lld ms)\n", r->name.ptr, r->duration_ms);
         } else {
-            print("  [FAIL] %s: %s (%s:%d)\n", r->name, r->message, r->file, r->line);
+            print("  [FAIL] %s: %s (%s:%d)\n", r->name.ptr, r->message.ptr, r->file.ptr, r->line);
         }
     }
     if (report->failed == 0) print("All tests passed!\n");

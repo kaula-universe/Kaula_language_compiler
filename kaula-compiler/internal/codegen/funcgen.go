@@ -431,33 +431,19 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 				bodyCode := bodyBuilder.String()
 
-				if useKMM {
-					// 批量分配优化：尝试将多次 malloc 合并为一次 bump
-					canBatch, totalSize, _ := fg.analyzeBodyMallocs(stmt.Body)
-					if canBatch && totalSize > 0 {
-						// 优化路径：单次 bump 分配 + 直接 offset 恢复
-						builder.WriteString(bodyIndent)
-						builder.WriteString("{\n")
-						builder.WriteString(bodyIndent)
-						builder.WriteString("    size_t _scope_start = kmm_v4_offset_save();\n")
-						builder.WriteString(bodyIndent)
-						fmt.Fprintf(&builder, "    void* _batch_ptr = kmm_v4_bump(%d);\n", totalSize)
-						builder.WriteString(bodyCode)
-						builder.WriteString(bodyIndent)
-						builder.WriteString("    kmm_v4_offset_restore(_scope_start);\n")
-						builder.WriteString(bodyIndent)
-						builder.WriteString("}\n")
-					} else {
-						// 标准路径：scope push/pop
-						builder.WriteString(bodyIndent)
-						builder.WriteString("KMM_V4_SCOPE_START {\n")
-						builder.WriteString(bodyCode)
-						builder.WriteString(bodyIndent)
-						builder.WriteString("} KMM_V4_SCOPE_END;\n")
-					}
-				} else {
-					builder.WriteString(bodyCode)
-				}
+			if useKMM {
+				// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
+				// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
+				// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
+				// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
+				builder.WriteString(bodyIndent)
+				builder.WriteString("KMM_V4_SCOPE_START {\n")
+				builder.WriteString(bodyCode)
+				builder.WriteString(bodyIndent)
+				builder.WriteString("} KMM_V4_SCOPE_END;\n")
+			} else {
+				builder.WriteString(bodyCode)
+			}
 			} else {
 				indent := fg.codegen.indentString()
 				for _, bodyStmt := range stmt.Body {

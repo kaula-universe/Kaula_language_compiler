@@ -41,30 +41,30 @@ String hex_encode(const void* data, size_t len) {
     const unsigned char* p = (const unsigned char*)data;
     char* out;
     size_t i;
-    if (!data && len > 0) return NULL;
+    if (!data && len > 0) return STRING_EMPTY;
     out = (char*)kmm_v4_malloc(len * 2 + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
     for (i = 0; i < len; i++) {
         out[i * 2]     = hex_lower[(p[i] >> 4) & 0x0F];
         out[i * 2 + 1] = hex_lower[p[i] & 0x0F];
     }
     out[len * 2] = '\0';
-    return out;
+    return (String){.len = len * 2, .ptr = out};
 }
 
 String hex_encode_upper(const void* data, size_t len) {
     const unsigned char* p = (const unsigned char*)data;
     char* out;
     size_t i;
-    if (!data && len > 0) return NULL;
+    if (!data && len > 0) return STRING_EMPTY;
     out = (char*)kmm_v4_malloc(len * 2 + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
     for (i = 0; i < len; i++) {
         out[i * 2]     = hex_upper[(p[i] >> 4) & 0x0F];
         out[i * 2 + 1] = hex_upper[p[i] & 0x0F];
     }
     out[len * 2] = '\0';
-    return out;
+    return (String){.len = len * 2, .ptr = out};
 }
 
 void* hex_decode(const char* hex, size_t* out_len) {
@@ -105,10 +105,10 @@ String base32_encode(const void* data, size_t len) {
     size_t o = 0;
     char* out;
     size_t j;
-    if (!data && len > 0) return NULL;
+    if (!data && len > 0) return STRING_EMPTY;
     out_len = ((len + 4) / 5) * 8;
     out = (char*)kmm_v4_malloc(out_len + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
 
     while (i < len) {
         size_t remaining = len - i;
@@ -133,7 +133,7 @@ String base32_encode(const void* data, size_t len) {
         i += (size_t)n;
     }
     out[o] = '\0';
-    return out;
+    return (String){.len = o, .ptr = out};
 }
 
 void* base32_decode(const char* encoded, size_t* out_len) {
@@ -187,10 +187,10 @@ String base64_encode(const void* data, size_t len) {
     size_t i = 0;
     size_t o = 0;
     char* out;
-    if (!data && len > 0) return NULL;
+    if (!data && len > 0) return STRING_EMPTY;
     out_len = ((len + 2) / 3) * 4;
     out = (char*)kmm_v4_malloc(out_len + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
 
     while (i + 3 <= len) {
         unsigned int v = ((unsigned int)p[i] << 16) |
@@ -213,7 +213,7 @@ String base64_encode(const void* data, size_t len) {
         out[o++] = '=';
     }
     out[o] = '\0';
-    return out;
+    return (String){.len = o, .ptr = out};
 }
 
 void* base64_decode(const char* encoded, size_t* out_len) {
@@ -279,10 +279,10 @@ static String url_encode_internal(const char* str, int component) {
     size_t i;
     size_t o = 0;
     char* out;
-    if (!str) return NULL;
+    if (!str) return STRING_EMPTY;
     len = strlen(str);
     out = (char*)kmm_v4_malloc(len * 3 + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
     for (i = 0; i < len; i++) {
         unsigned char c = (unsigned char)str[i];
         if (url_char_safe((char)c, component)) {
@@ -294,7 +294,7 @@ static String url_encode_internal(const char* str, int component) {
         }
     }
     out[o] = '\0';
-    return out;
+    return (String){.len = o, .ptr = out};
 }
 
 String url_encode(const char* str) {
@@ -310,10 +310,10 @@ static String url_decode_internal(const char* str) {
     size_t i;
     size_t o = 0;
     char* out;
-    if (!str) return NULL;
+    if (!str) return STRING_EMPTY;
     len = strlen(str);
     out = (char*)kmm_v4_malloc(len + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
     for (i = 0; i < len; i++) {
         if (str[i] == '%' && i + 2 < len) {
             int hi = hex_value(str[i + 1]);
@@ -327,7 +327,7 @@ static String url_decode_internal(const char* str) {
         out[o++] = str[i];
     }
     out[o] = '\0';
-    return out;
+    return (String){.len = o, .ptr = out};
 }
 
 String url_decode(const char* str) {
@@ -347,10 +347,10 @@ String percent_encode(const char* str, const char* reserved_chars) {
     size_t i;
     size_t o = 0;
     char* out;
-    if (!str) return NULL;
+    if (!str) return STRING_EMPTY;
     len = strlen(str);
     out = (char*)kmm_v4_malloc(len * 3 + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
     for (i = 0; i < len; i++) {
         unsigned char c = (unsigned char)str[i];
         int encode = 0;
@@ -373,7 +373,7 @@ String percent_encode(const char* str, const char* reserved_chars) {
         }
     }
     out[o] = '\0';
-    return out;
+    return (String){.len = o, .ptr = out};
 }
 
 String percent_decode(const char* str) {
@@ -391,12 +391,12 @@ String qp_encode(const char* str) {
     size_t line_len = 0;
     size_t cap;
     char* out;
-    if (!str) return NULL;
+    if (!str) return STRING_EMPTY;
     len = strlen(str);
     /* worst case: 3 chars/byte + soft-break overhead (~len/4) + slack */
     cap = len * 3 + len / 4 + 32;
     out = (char*)kmm_v4_malloc(cap);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
 
     while (i < len) {
         unsigned char c = (unsigned char)str[i];
@@ -464,7 +464,7 @@ String qp_encode(const char* str) {
         i++;
     }
     out[o] = '\0';
-    return out;
+    return (String){.len = o, .ptr = out};
 }
 
 String qp_decode(const char* str) {
@@ -472,10 +472,10 @@ String qp_decode(const char* str) {
     size_t i = 0;
     size_t o = 0;
     char* out;
-    if (!str) return NULL;
+    if (!str) return STRING_EMPTY;
     len = strlen(str);
     out = (char*)kmm_v4_malloc(len + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
 
     while (i < len) {
         if (str[i] == '=') {
@@ -507,7 +507,7 @@ String qp_decode(const char* str) {
         }
     }
     out[o] = '\0';
-    return out;
+    return (String){.len = o, .ptr = out};
 }
 
 /* ============================================================
@@ -523,7 +523,7 @@ String pascal_encode(const char* str) {
     size_t prefix_len;
     char tmp[32];
     char* out;
-    if (!str) return NULL;
+    if (!str) return STRING_EMPTY;
     len = strlen(str);
     n = len;
     if (n == 0) {
@@ -546,12 +546,12 @@ String pascal_encode(const char* str) {
     }
     prefix_len = d + 1; /* digits + ':' */
     out = (char*)kmm_v4_malloc(prefix_len + len + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
     memcpy(out, tmp, d);
     out[d] = ':';
     memcpy(out + prefix_len, str, len);
     out[prefix_len + len] = '\0';
-    return out;
+    return (String){.len = prefix_len + len, .ptr = out};
 }
 
 String pascal_decode(const char* encoded) {
@@ -560,19 +560,19 @@ String pascal_decode(const char* encoded) {
     size_t n = 0;
     const char* payload;
     char* out;
-    if (!encoded) return NULL;
+    if (!encoded) return STRING_EMPTY;
     len = strlen(encoded);
     while (i < len && encoded[i] >= '0' && encoded[i] <= '9') {
         n = n * 10 + (size_t)(encoded[i] - '0');
         i++;
     }
-    if (i >= len || encoded[i] != ':') return NULL;
+    if (i >= len || encoded[i] != ':') return STRING_EMPTY;
     i++; /* skip ':' */
     payload = encoded + i;
-    if (i + n > len) return NULL; /* not enough payload bytes */
+    if (i + n > len) return STRING_EMPTY; /* not enough payload bytes */
     out = (char*)kmm_v4_malloc(n + 1);
-    if (!out) return NULL;
+    if (!out) return STRING_EMPTY;
     memcpy(out, payload, n);
     out[n] = '\0';
-    return out;
+    return (String){.len = n, .ptr = out};
 }

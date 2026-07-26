@@ -1,3 +1,9 @@
+/* _POSIX_C_SOURCE 必须在所有 #include 之前定义，以确保 struct timeval
+   在 <sys/time.h> 中可见（Linux 严格模式要求） */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "net.h"
 #include "../memory/memory.h"
 #include <string.h>
@@ -11,6 +17,7 @@
     #define SOCKET_HANDLE SOCKET
 #else
     #include <sys/socket.h>
+    #include <sys/time.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <netdb.h>
@@ -50,7 +57,7 @@ bool_t socket_bind(Socket* sock, const String host, u16 port) {
     if (!sock || !sock->is_valid) return false;
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    if (host) inet_pton(AF_INET, host, &addr.sin_addr);
+    if (host.ptr) inet_pton(AF_INET, host.ptr, &addr.sin_addr);
     else addr.sin_addr.s_addr = htonl(INADDR_ANY);
 #if STD_PLATFORM_WINDOWS
     return bind((SOCKET)sock->handle, (struct sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR;
@@ -92,10 +99,10 @@ Socket* socket_accept(Socket* sock) {
 }
 
 bool_t socket_connect(Socket* sock, const String host, u16 port) {
-    if (!sock || !host || !sock->is_valid) return false;
+    if (!sock || host.len == 0 || !sock->is_valid) return false;
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    inet_pton(AF_INET, host, &addr.sin_addr);
+    inet_pton(AF_INET, host.ptr, &addr.sin_addr);
 #if STD_PLATFORM_WINDOWS
     return connect((SOCKET)sock->handle, (struct sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR;
 #else
@@ -181,10 +188,10 @@ Socket* udp_socket_create() { return socket_create(AF_INET, SOCK_DGRAM, 0); }
 bool_t udp_bind(Socket* sock, const String host, u16 port) { return socket_bind(sock, host, port); }
 
 size_t udp_send_to(Socket* sock, const String host, u16 port, const u8* data, size_t len) {
-    if (!sock || !sock->is_valid || !host || !data) return 0;
+    if (!sock || !sock->is_valid || host.len == 0 || !data) return 0;
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    inet_pton(AF_INET, host, &addr.sin_addr);
+    inet_pton(AF_INET, host.ptr, &addr.sin_addr);
 #if STD_PLATFORM_WINDOWS
     int ret = sendto((SOCKET)sock->handle, (const char*)data, (int)len, 0, (struct sockaddr*)&addr, sizeof(addr));
     return ret > 0 ? ret : 0;
@@ -225,11 +232,11 @@ bool_t udp_set_broadcast(Socket* sock, bool_t enable) {
 }
 
 bool_t dns_resolve(const String hostname, String* ip_out) {
-    if (!hostname) return false;
+    if (hostname.len == 0) return false;
     struct addrinfo hints, *result;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
-    if (getaddrinfo(hostname, NULL, &hints, &result) != 0) return false;
+    if (getaddrinfo(hostname.ptr, NULL, &hints, &result) != 0) return false;
     char buf[64];
     struct sockaddr_in* ipv4 = (struct sockaddr_in*)result->ai_addr;
     inet_ntop(AF_INET, &ipv4->sin_addr, buf, sizeof(buf));
@@ -239,8 +246,8 @@ bool_t dns_resolve(const String hostname, String* ip_out) {
 }
 
 bool_t net_is_valid_ip(const String ip) {
-    if (!ip) return false;
-    struct sockaddr_in sa; return inet_pton(AF_INET, ip, &(sa.sin_addr)) == 1;
+    if (ip.len == 0) return false;
+    struct sockaddr_in sa; return inet_pton(AF_INET, ip.ptr, &(sa.sin_addr)) == 1;
 }
 
 String net_get_local_hostname() {

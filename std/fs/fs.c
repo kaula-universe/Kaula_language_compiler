@@ -1,3 +1,9 @@
+/* _GNU_SOURCE 必须在所有 #include 之前定义，以确保 DT_DIR/DT_REG 等
+   GNU 扩展在 <dirent.h> 中可见（Linux glibc 要求） */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "fs.h"
 #include "../memory/memory.h"
 #include "../string/string.h"
@@ -12,6 +18,7 @@
 #else
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -231,10 +238,10 @@ static bool_t remove_all_recursive(const char* path) {
 
         FileInfo info;
         while (fs_dir_next(it, &info)) {
-            if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0)
+            if (strcmp(info.name.ptr, ".") == 0 || strcmp(info.name.ptr, "..") == 0)
                 continue;
 
-            char* full = (char*)kmm_v4_malloc(strlen(path) + 1 + strlen(info.name) + 1);
+            char* full = (char*)kmm_v4_malloc(strlen(path) + 1 + info.name.len + 1);
             if (!full) {
                 fs_dir_close(it);
                 return 0;
@@ -245,7 +252,7 @@ static bool_t remove_all_recursive(const char* path) {
 #else
                     '/',
 #endif
-                    info.name);
+                    info.name.ptr);
 
             bool_t ok = remove_all_recursive(full);
             kmm_v4_free(full);
@@ -446,12 +453,13 @@ String* fs_read_lines(const char* path, size_t* out_count) {
                 lines = new_lines;
             }
 
-            lines[count] = (char*)kmm_v4_malloc(line_len + 1);
-            if (lines[count]) {
-                memcpy(lines[count], content + line_start, line_len);
-                lines[count][line_len] = '\0';
+            char* line_buf = (char*)kmm_v4_malloc(line_len + 1);
+            if (line_buf) {
+                memcpy(line_buf, content + line_start, line_len);
+                line_buf[line_len] = '\0';
+                lines[count] = (String){.len = line_len, .ptr = line_buf};
             } else {
-                lines[count] = NULL;
+                lines[count] = STRING_EMPTY;
             }
             count++;
             line_start = i + 1;
@@ -499,11 +507,8 @@ DirIterator* fs_dir_open(const char* path) {
     if (!it) return NULL;
     memset(it, 0, sizeof(DirIterator));
 
-    it->base_path = string_copy(path);
-    if (!it->base_path) {
-        kmm_v4_free(it);
-        return NULL;
-    }
+    String base = string_create(path);
+    it->base_path = base.ptr;
 
 #ifdef _WIN32
     size_t len = strlen(path);
@@ -547,13 +552,16 @@ bool_t fs_dir_next(DirIterator* it, FileInfo* info) {
     it->first = 0;
 
     memset(info, 0, sizeof(FileInfo));
-    info->name = string_copy(it->find_data.cFileName);
+    info->name = string_create(it->find_data.cFileName);
 
     size_t base_len = strlen(it->base_path);
     size_t name_len = strlen(it->find_data.cFileName);
-    info->path = (char*)kmm_v4_malloc(base_len + 1 + name_len + 1);
-    if (info->path) {
-        sprintf(info->path, "%s\\%s", it->base_path, it->find_data.cFileName);
+    char* path_buf = (char*)kmm_v4_malloc(base_len + 1 + name_len + 1);
+    if (path_buf) {
+        sprintf(path_buf, "%s\\%s", it->base_path, it->find_data.cFileName);
+        info->path = (String){.len = base_len + 1 + name_len, .ptr = path_buf};
+    } else {
+        info->path = STRING_EMPTY;
     }
 
     info->is_dir = (it->find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -576,17 +584,20 @@ bool_t fs_dir_next(DirIterator* it, FileInfo* info) {
     if (!entry) return 0;
 
     memset(info, 0, sizeof(FileInfo));
-    info->name = string_copy(entry->d_name);
+    info->name = string_create(entry->d_name);
 
     size_t base_len = strlen(it->base_path);
     size_t name_len = strlen(entry->d_name);
-    info->path = (char*)kmm_v4_malloc(base_len + 1 + name_len + 1);
-    if (info->path) {
-        sprintf(info->path, "%s/%s", it->base_path, entry->d_name);
+    char* path_buf = (char*)kmm_v4_malloc(base_len + 1 + name_len + 1);
+    if (path_buf) {
+        sprintf(path_buf, "%s/%s", it->base_path, entry->d_name);
+        info->path = (String){.len = base_len + 1 + name_len, .ptr = path_buf};
+    } else {
+        info->path = STRING_EMPTY;
     }
 
     struct stat st;
-    if (stat(info->path, &st) == 0) {
+    if (stat(info->path.ptr, &st) == 0) {
         info->is_dir = S_ISDIR(st.st_mode);
         info->is_file = S_ISREG(st.st_mode);
         info->is_symlink = S_ISLNK(st.st_mode);
@@ -693,7 +704,7 @@ static void glob_recursive(const char* pattern, const char* base_dir,
                 *results = new_arr;
                 *capacity = new_cap;
             }
-            (*results)[*count] = string_copy(full_path);
+            (*results)[*count] = string_create(full_path);
             (*count)++;
         }
         return;
@@ -724,16 +735,16 @@ static void glob_recursive(const char* pattern, const char* base_dir,
 
     FileInfo info;
     while (fs_dir_next(it, &info)) {
-        if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) {
-            if (info.path) string_free(info.path);
-            if (info.name) string_free(info.name);
+        if (strcmp(info.name.ptr, ".") == 0 || strcmp(info.name.ptr, "..") == 0) {
+            string_free(info.path);
+            string_free(info.name);
             continue;
         }
 
 #ifdef _WIN32
-        bool_t matched = glob_match(current, info.name);
+        bool_t matched = glob_match(current, info.name.ptr);
 #else
-        bool_t matched = (fnmatch(current, info.name, 0) == 0);
+        bool_t matched = (fnmatch(current, info.name.ptr, 0) == 0);
 #endif
 
         if (matched) {
@@ -742,8 +753,8 @@ static void glob_recursive(const char* pattern, const char* base_dir,
                     size_t new_cap = *capacity * 2;
                     String* new_arr = (String*)kmm_v4_malloc(new_cap * sizeof(String));
                     if (!new_arr) {
-                        if (info.path) string_free(info.path);
-                        if (info.name) string_free(info.name);
+                        string_free(info.path);
+                        string_free(info.name);
                         fs_dir_close(it);
                         return;
                     }
@@ -755,12 +766,12 @@ static void glob_recursive(const char* pattern, const char* base_dir,
                 (*results)[*count] = string_copy(info.path);
                 (*count)++;
             } else if (info.is_dir) {
-                glob_recursive(remaining, info.path, results, count, capacity);
+                glob_recursive(remaining, info.path.ptr, results, count, capacity);
             }
         }
 
-        if (info.path) string_free(info.path);
-        if (info.name) string_free(info.name);
+        string_free(info.path);
+        string_free(info.name);
     }
     fs_dir_close(it);
 }
@@ -785,7 +796,7 @@ bool_t fs_get_info(const char* path, FileInfo* info) {
     if (!fs_exists(path)) return 0;
 
     memset(info, 0, sizeof(FileInfo));
-    info->path = string_copy(path);
+    info->path = string_create(path);
 
     const char* name = strrchr(path, '/');
 #ifdef _WIN32
@@ -793,9 +804,9 @@ bool_t fs_get_info(const char* path, FileInfo* info) {
     if (bname && (!name || bname > name)) name = bname;
 #endif
     if (name) {
-        info->name = string_copy(name + 1);
+        info->name = string_create(name + 1);
     } else {
-        info->name = string_copy(path);
+        info->name = string_create(path);
     }
 
     info->is_dir = fs_is_dir(path);
@@ -854,33 +865,33 @@ String fs_temp_dir(void) {
 #ifdef _WIN32
     char buf[MAX_PATH];
     DWORD len = GetTempPathA(MAX_PATH, buf);
-    if (len == 0 || len > MAX_PATH) return string_copy(".");
+    if (len == 0 || len > MAX_PATH) return string_create(".");
     if (len > 0 && buf[len - 1] == '\\') buf[len - 1] = '\0';
-    return string_copy(buf);
+    return string_create(buf);
 #else
     const char* tmp = getenv("TMPDIR");
     if (!tmp) tmp = getenv("TMP");
     if (!tmp) tmp = getenv("TEMP");
     if (!tmp) tmp = "/tmp";
-    return string_copy(tmp);
+    return string_create(tmp);
 #endif
 }
 
 String fs_temp_file(const char* prefix) {
     String tmpdir = fs_temp_dir();
-    if (!tmpdir) return NULL;
+    if (tmpdir.len == 0) return STRING_EMPTY;
 
     size_t prefix_len = prefix ? strlen(prefix) : 0;
-    size_t dir_len = strlen(tmpdir);
+    size_t dir_len = tmpdir.len;
     size_t total = dir_len + 1 + prefix_len + 16;
 
     char* tmpl = (char*)kmm_v4_malloc(total + 1);
     if (!tmpl) {
         string_free(tmpdir);
-        return NULL;
+        return STRING_EMPTY;
     }
 
-    sprintf(tmpl, "%s%c%sXXXXXX", tmpdir,
+    sprintf(tmpl, "%s%c%sXXXXXX", tmpdir.ptr,
 #ifdef _WIN32
             '\\',
 #else
@@ -893,16 +904,16 @@ String fs_temp_file(const char* prefix) {
 #ifdef _WIN32
     if (_mktemp_s(tmpl, total + 1) != 0) {
         kmm_v4_free(tmpl);
-        return NULL;
+        return STRING_EMPTY;
     }
-    return tmpl;
+    return string_create(tmpl);
 #else
     int fd = mkstemp(tmpl);
     if (fd < 0) {
         kmm_v4_free(tmpl);
-        return NULL;
+        return STRING_EMPTY;
     }
     close(fd);
-    return tmpl;
+    return string_create(tmpl);
 #endif
 }

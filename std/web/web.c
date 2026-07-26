@@ -13,9 +13,11 @@
     #include <errno.h>
     #include <unistd.h>
     #include <fcntl.h>
+    #include <sys/socket.h>
     #define CLOSE_SOCKET close
     #define SOCKET_LAST_ERROR errno
     #define SOCKET_EWOULDBLOCK EWOULDBLOCK
+    typedef int SOCKET;
 #endif
 
 #define HTTP_BUFFER_SIZE 8192
@@ -548,7 +550,7 @@ static bool client_connect(HttpClient* client, const char* host, i32 port) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
+    memcpy(&addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
     addr.sin_port = htons((unsigned short)port);
 
     if (connect(client->socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {

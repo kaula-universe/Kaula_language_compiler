@@ -1,3 +1,9 @@
+/* _GNU_SOURCE 必须在所有 #include 之前定义，以确保 strptime
+   在 <time.h> 中可见（Linux glibc 要求 _GNU_SOURCE 或 _XOPEN_SOURCE >= 700） */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "datetime.h"
 #include <stdlib.h>
 #include <string.h>
@@ -221,7 +227,7 @@ bool_t datetime_greater(const DateTime* a, const DateTime* b) {
 }
 
 String datetime_to_string(const DateTime* dt, const char* format) {
-    if (!dt || !format) return NULL;
+    if (!dt || !format) return (String){0, NULL};
     
     char buffer[256];
     struct tm tm_info = {0};
@@ -233,7 +239,7 @@ String datetime_to_string(const DateTime* dt, const char* format) {
     tm_info.tm_sec = (int)dt->second;
     
     strftime(buffer, sizeof(buffer), format, &tm_info);
-    return string_copy(buffer);
+    return string_create(buffer);
 }
 
 DateTime datetime_from_string(const char* str, const char* format) {
@@ -254,14 +260,14 @@ DateTime datetime_from_string(const char* str, const char* format) {
 }
 
 String datetime_to_iso8601(const DateTime* dt) {
-    if (!dt) return NULL;
+    if (!dt) return STRING_EMPTY;
     
     char buffer[64];
     snprintf(buffer, sizeof(buffer), "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%09lldZ",
              (long long)dt->year, (long long)dt->month, (long long)dt->day,
              (long long)dt->hour, (long long)dt->minute, (long long)dt->second,
              (long long)dt->nanosecond);
-    return string_copy(buffer);
+    return string_create(buffer);
 }
 
 DateTime datetime_from_iso8601(const char* str) {
@@ -386,7 +392,7 @@ Duration duration_subtract(const Duration* a, const Duration* b) {
 TimeZone* timezone_create(const char* name, i64 offset_seconds, bool_t is_dst) {
     TimeZone* tz = (TimeZone*)kmm_v4_malloc(sizeof(TimeZone));
     if (!tz) return NULL;
-    tz->name = string_copy(name);
+    tz->name = string_create(name);
     tz->offset_seconds = offset_seconds;
     tz->is_dst = is_dst;
     return tz;
@@ -394,7 +400,7 @@ TimeZone* timezone_create(const char* name, i64 offset_seconds, bool_t is_dst) {
 
 void timezone_destroy(TimeZone* tz) {
     if (!tz) return;
-    kmm_v4_free(tz->name);
+    kmm_v4_free(tz->name.ptr);
     kmm_v4_free(tz);
 }
 
@@ -409,11 +415,11 @@ TimeZone* timezone_local(void) {
     if (tzi.StandardName[0]) offset += (i64)tzi.StandardBias * 60;
     if (tzi.DaylightName[0]) offset += (i64)tzi.DaylightBias * 60;
     
-    tz->name = string_copy("local");
+    tz->name = string_create("local");
     tz->offset_seconds = -offset;
     tz->is_dst = tzi.DaylightName[0] != 0;
 #else
-    tz->name = string_copy("local");
+    tz->name = string_create("local");
     tz->offset_seconds = 0;
     tz->is_dst = false;
 #endif
@@ -424,7 +430,7 @@ TimeZone* timezone_local(void) {
 TimeZone* timezone_utc(void) {
     TimeZone* tz = (TimeZone*)kmm_v4_malloc(sizeof(TimeZone));
     if (!tz) return NULL;
-    tz->name = string_copy("UTC");
+    tz->name = string_create("UTC");
     tz->offset_seconds = 0;
     tz->is_dst = false;
     return tz;
