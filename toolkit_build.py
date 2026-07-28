@@ -21,7 +21,6 @@ import sys
 import subprocess
 import argparse
 import shutil
-import json
 from pathlib import Path
 
 
@@ -129,16 +128,19 @@ class ToolDetector:
         return None
 
     @staticmethod
-    def detect_archiver(compiler):
-        is_msvc = compiler == "cl"
-        if is_msvc:
-            try:
-                subprocess.run(["lib", "/nologo", "/list"],
-                               capture_output=True, text=True, timeout=5)
-                print("[+] 归档工具: lib.exe (MSVC)")
-                return "lib"
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                pass
+    def detect_archiver(is_windows):
+        if is_windows:
+            for archiver in ["llvm-lib", "lib"]:
+                try:
+                    subprocess.run([archiver, "/?"],
+                                   capture_output=True, text=True, timeout=5)
+                    print(f"[+] 归档工具: {archiver} (COFF)")
+                    return archiver
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
+
+            print("[-] 错误: Windows 构建需要 llvm-lib 或 lib.exe")
+            return None
 
         for ar in ["llvm-ar", "gcc-ar", "ar"]:
             try:
@@ -247,7 +249,7 @@ class CBuilder:
         if output_lib.exists():
             output_lib.unlink()
 
-        if self.is_msvc:
+        if self.config.is_windows:
             cmd = [self.archiver, "/nologo", f"/OUT:{output_lib}"] + [
                 str(f) for f in obj_files
             ]
@@ -294,7 +296,7 @@ class CBuilder:
             self.obj_files = old_objs
             return False
 
-        lib_name = "kaula_std.lib" if self.is_msvc else "libkaula_std.a"
+        lib_name = "kaula_std.lib" if self.config.is_windows else "libkaula_std.a"
         out_lib = self.config.lib_dir / lib_name
         result = self._make_static_lib(out_lib, self.obj_files)
         self.obj_files = old_objs + self.obj_files
@@ -332,7 +334,7 @@ class CBuilder:
             self.obj_files = old_objs
             return False
 
-        lib_name = "kaula_runtime.lib" if self.is_msvc else "libkaula_runtime.a"
+        lib_name = "kaula_runtime.lib" if self.config.is_windows else "libkaula_runtime.a"
         out_lib = self.config.lib_dir / lib_name
         result = self._make_static_lib(out_lib, self.obj_files)
         self.obj_files = old_objs + self.obj_files
@@ -359,43 +361,6 @@ class CBuilder:
             print(f"[\u2713] 头文件: {dest_name}/")
 
         return True
-
-    def setup_toolchain(self):
-        """配置工具链：将 src/ 和 std/ 复制到 build/ 下，使 kaulac 在任意目录可用"""
-        print("\n=== 配置工具链 ===")
-
-        # build/src/ — 运行时（头文件 + .c 源码，kaulac 编译运行时需要）
-        build_src = self.config.build_dir / "src"
-        if self.config.src_dir.exists():
-            if build_src.exists():
-                shutil.rmtree(build_src)
-            shutil.copytree(self.config.src_dir, build_src,
-                            ignore=shutil.ignore_patterns("build"))
-            print(f"[\u2713] 工具链: build/src/")
-
-        # build/std/ — 标准库头文件（kaulac 通过 exeDir/../std/ 查找）
-        build_std = self.config.build_dir / "std"
-        if self.config.std_dir.exists():
-            if build_std.exists():
-                shutil.rmtree(build_std)
-            shutil.copytree(self.config.std_dir, build_std,
-                            ignore=shutil.ignore_patterns("*.c", "build"))
-            print(f"[\u2713] 工具链: build/std/")
-
-        # 生成 KAULA_HOME 配置文件
-        config_file = self.config.build_dir / "kaula.json"
-        config_data = {
-            "kaula_home": str(self.config.project_root),
-            "src_path": str(build_src),
-            "std_path": str(build_std),
-            "stdlib_json": str(self.config.bin_dir / "stdlib.json"),
-        }
-        config_file.write_text(json.dumps(config_data, indent=2, ensure_ascii=False),
-                               encoding="utf-8")
-        print(f"[\u2713] 工具链: build/kaula.json")
-
-        return True
-
 
 class GoBuilder:
     """Go 代码构建器"""
@@ -487,7 +452,6 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
     results["std_lib"] = c_builder.build_std_lib()
     results["runtime_lib"] = c_builder.build_runtime_lib()
     results["headers"] = c_builder.install_headers()
-    results["toolchain"] = c_builder.setup_toolchain()
 
     if go_cmd:
         go_builder = GoBuilder(config, go_cmd, release)
@@ -597,7 +561,7 @@ def main():
             print("[-] 错误: 构建 C 组件需要 C 编译器")
             sys.exit(1)
 
-    archiver = ToolDetector.detect_archiver(c_compiler) if c_compiler else None
+    archiver = ToolDetector.detect_archiver(config.is_windows) if c_compiler else None
     go_cmd = ToolDetector.detect_go()
 
     if args.target == "all":
@@ -644,10 +608,6 @@ def main():
         else:
             print("[-] 错误: 安装头文件需要 C 构建器")
             success = False
-
-    # 所有 target 构建完成后，配置工具链
-    if success and c_builder:
-        c_builder.setup_toolchain()
 
     sys.exit(0 if success else 1)
 
