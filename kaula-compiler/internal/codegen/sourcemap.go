@@ -92,10 +92,10 @@ func (sm *SourceMap) LookupSource(srcLine int) (SourceMapEntry, bool) {
 }
 
 type MappedBuilder struct {
-	builder  strings.Builder
-	srcMap   *SourceMap
-	curLine  int
-	srcFile  string
+	builder strings.Builder
+	srcMap  *SourceMap
+	curLine int
+	srcFile string
 }
 
 func NewMappedBuilder(sourceFile, targetFile string) *MappedBuilder {

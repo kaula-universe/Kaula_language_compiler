@@ -46,21 +46,21 @@ type CodeGenerator struct {
 	usedThirdPartyLibs map[string]bool
 	localImportFuncs   map[string]bool
 
-	genericCache       map[string]*GenericInstanceCache
-	genericInstantiated map[string]bool
-	genericFuncCode    strings.Builder // 泛型实例化函数代码
+	genericCache          map[string]*GenericInstanceCache
+	genericInstantiated   map[string]bool
+	genericFuncCode       strings.Builder // 泛型实例化函数代码
 	currentFuncTypeParams []*ast.TypeParameter
 
-	currentFunctionName string
+	currentFunctionName       string
 	currentFunctionReturnType string
-	callStack           map[string]bool
+	callStack                 map[string]bool
 
 	sorAdapter *SORCodeGenAdapter
 
-	kmmScopeDepth int
+	kmmScopeDepth    int
 	offsetScopeDepth int // 跟踪 offset_save/restore scope 嵌套深度，用于相邻 scope 合并优化
 
-	sourceMap *SourceMap
+	sourceMap  *SourceMap
 	sourceFile string
 
 	lambdaCounter     int
@@ -210,30 +210,30 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	symbolTable := symbol.NewSymbolTable(nil, "global")
 
 	cg := &CodeGenerator{
-		output:          "",
-		indent:          0,
-		templateManager: tm,
-		config:          cfg,
-		pluginManager:   pm,
-		stdlibConfig:    stdlibConfig,
-		treeManager:     treeManager,
-		prefixManager:   prefixManager,
-		symbolTable:     symbolTable,
-		currentScope:    symbolTable,
-		errors:          []string{},
-		usedThirdPartyLibs: make(map[string]bool),
-		localImportFuncs:   make(map[string]bool),
-		genericCache:       make(map[string]*GenericInstanceCache),
+		output:              "",
+		indent:              0,
+		templateManager:     tm,
+		config:              cfg,
+		pluginManager:       pm,
+		stdlibConfig:        stdlibConfig,
+		treeManager:         treeManager,
+		prefixManager:       prefixManager,
+		symbolTable:         symbolTable,
+		currentScope:        symbolTable,
+		errors:              []string{},
+		usedThirdPartyLibs:  make(map[string]bool),
+		localImportFuncs:    make(map[string]bool),
+		genericCache:        make(map[string]*GenericInstanceCache),
 		genericInstantiated: make(map[string]bool),
-		sourceMap:          NewSourceMap("", ""),
+		sourceMap:           NewSourceMap("", ""),
 		constTable:          make(map[string]string),
 	}
-	
+
 	cg.typeGenerator = NewTypeGenerator(cg)
 	cg.functionGenerator = NewFunctionGenerator(cg)
 	cg.expressionGenerator = NewExpressionGenerator(cg)
 	cg.statementGenerator = NewStatementGenerator(cg)
-	
+
 	return cg
 }
 
@@ -244,12 +244,12 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.lambdaDefinitions = nil
 
 	type rawEntry struct {
-		section   string
-		relLine   int
-		srcLine   int
-		srcCol    int
-		kind      string
-		symbol    string
+		section string
+		relLine int
+		srcLine int
+		srcCol  int
+		kind    string
+		symbol  string
 	}
 	var rawEntries []rawEntry
 	var typeLine, globalLine, funcLine, mainLine int
@@ -764,12 +764,12 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 		cacheKey += arg
 	}
 	cacheKey += ">"
-	
+
 	// 检查缓存
 	if cached, ok := cg.genericCache[cacheKey]; ok {
 		return cached.GeneratedCode, nil
 	}
-	
+
 	// 生成实例化后的函数名: kaula_max_int64 (添加 kaula_ 前缀避免与 C 宏冲突)
 	instName := "kaula_" + funcName + "_"
 	for i, arg := range typeArgs {
@@ -785,34 +785,34 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 			}
 		}
 	}
-	
+
 	if cg.genericInstantiated[instName] {
 		return "", nil // 已经实例化过
 	}
-	
+
 	// 获取原始函数
 	program := cg.getProgram()
 	if program == nil {
 		return "", fmt.Errorf("cannot find program for generic instantiation")
 	}
-	
+
 	fnStmt := program.FindFunction(funcName)
 	if fnStmt == nil || !fnStmt.IsGeneric() {
 		return "", fmt.Errorf("function %s is not generic", funcName)
 	}
-	
+
 	// 创建实例化后的函数（复制并替换类型参数）
 	instFunc := cg.instantiateGenericFunction(fnStmt, typeArgs, instName)
-	
+
 	// 生成代码
 	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
-	
+
 	// 写入泛型实例化代码缓冲区，稍后插入到 functionCode 之前
 	if code != "" {
 		cg.genericFuncCode.WriteString(code)
 		cg.genericFuncCode.WriteByte('\n')
 	}
-	
+
 	// 添加到缓存
 	cg.genericCache[cacheKey] = &GenericInstanceCache{
 		OriginalName:   funcName,
@@ -821,7 +821,7 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 		InstantiatedAt: line,
 	}
 	cg.genericInstantiated[instName] = true
-	
+
 	return code, nil
 }
 
@@ -834,13 +834,13 @@ func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatemen
 			typeMap[tp.Name] = typeArgs[i]
 		}
 	}
-	
+
 	// 实例化返回类型
 	returnType := fnStmt.ReturnType
 	if mappedType, ok := typeMap[returnType]; ok {
 		returnType = mappedType
 	}
-	
+
 	// 创建新的函数语句
 	instFunc := &ast.FunctionStatement{
 		Name:       instName,
@@ -852,10 +852,10 @@ func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatemen
 		Inline:     fnStmt.Inline,
 		Annotation: fnStmt.Annotation,
 	}
-	
+
 	// 复制参数名
 	copy(instFunc.Params, fnStmt.Params)
-	
+
 	// 映射参数类型
 	instFunc.ParamTypes = make([]string, len(fnStmt.ParamTypes))
 	for i, pt := range fnStmt.ParamTypes {
@@ -864,7 +864,7 @@ func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatemen
 			instFunc.ParamTypes[i] = mappedType
 		}
 	}
-	
+
 	return instFunc
 }
 
@@ -976,7 +976,7 @@ func (cg *CodeGenerator) GetGenericCachedCode(funcName string, typeArgs []string
 		cacheKey += arg
 	}
 	cacheKey += ">"
-	
+
 	if cached, ok := cg.genericCache[cacheKey]; ok {
 		return cached.GeneratedCode, true
 	}

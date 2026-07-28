@@ -79,14 +79,14 @@ func (t *OwnershipTracker) NewObject(
 	t.nextID++
 
 	obj := &SORObject{
-		ID:           id,
-		Name:         name,
-		State:        StateOwned, // 默认独占所有权
-		TypeName:     typeName,
-		IsComposite:  isComposite,
-		Children:     make(map[string]string),
-		SourceLine:   sourceLine,
-		ScopeID:      t.currentScope,
+		ID:          id,
+		Name:        name,
+		State:       StateOwned, // 默认独占所有权
+		TypeName:    typeName,
+		IsComposite: isComposite,
+		Children:    make(map[string]string),
+		SourceLine:  sourceLine,
+		ScopeID:     t.currentScope,
 	}
 
 	t.objects[id] = obj
@@ -423,16 +423,16 @@ func (t *OwnershipTracker) Extract(srcID, childPath, elemName string, sourceLine
 	// 不受限于物理类型——类型检查由 Stage 2 语义分析负责）
 	// 如果需要严格的类型检查，取消注释下面的代码：
 	/*
-	if !src.IsComposite {
-		t.addError(SORError{
-			Kind:       ErrExtractFromNonComposite,
-			Message:    fmt.Sprintf("extract 失败：'%s' 不是复合类型（%s），无法提取子元素", src.Name, src.TypeName),
-			SourceLine: sourceLine,
-			ObjectID:   srcID,
-			Details:    "只有数组、结构体等复合类型才能进行 extract 操作",
-		})
-		return ""
-	}
+		if !src.IsComposite {
+			t.addError(SORError{
+				Kind:       ErrExtractFromNonComposite,
+				Message:    fmt.Sprintf("extract 失败：'%s' 不是复合类型（%s），无法提取子元素", src.Name, src.TypeName),
+				SourceLine: sourceLine,
+				ObjectID:   srcID,
+				Details:    "只有数组、结构体等复合类型才能进行 extract 操作",
+			})
+			return ""
+		}
 	*/
 
 	// 检查源对象状态：Owned 或 Released 都可以 extract

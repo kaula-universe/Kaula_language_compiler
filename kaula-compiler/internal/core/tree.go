@@ -205,10 +205,10 @@ func NewTree() *Tree {
 
 func NewTreeWithName(name string) *Tree {
 	return &Tree{
-		Root:     NewTreeNode("root", NodeTypeBlock),
+		Root:       NewTreeNode("root", NodeTypeBlock),
 		Annotation: AnnotationTree,
-		Name:     name,
-		IsOrphan: false,
+		Name:       name,
+		IsOrphan:   false,
 	}
 }
 

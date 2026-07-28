@@ -3,27 +3,27 @@ package codegen
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
-	"path/filepath"
 )
 
 // 预编译正则表达式，避免重复编译
 var (
-	extendsRegex   = regexp.MustCompile(`\{\{\s*extends\s+([^\}]+)\s*\}\}`)
-	includeRegex   = regexp.MustCompile(`\{\{\s*include\s+([^\}]+)\s*\}\}`)
-	ifElseRegex    = regexp.MustCompile(`\{\{\s*if\s+([^\}]+)\s*\}\}(.*?)\{\{\s*else\s*\}\}(.*?)\{\{\s*endif\s*\}\}`)
-	ifRegex        = regexp.MustCompile(`\{\{\s*if\s+([^\}]+)\s*\}\}(.*?)\{\{\s*endif\s*\}\}`)
-	eachRegex      = regexp.MustCompile(`\{\{\s*each\s+([^\s]+)\s+as\s+([^\}]+)\s*\}\}(.*?)\{\{\s*endeach\s*\}\}`)
-	blockRegex     = regexp.MustCompile(`\{\{\s*block\s+([^\}]+)\s*\}\}(.*?)\{\{\s*endblock\s*\}\}`)
+	extendsRegex = regexp.MustCompile(`\{\{\s*extends\s+([^\}]+)\s*\}\}`)
+	includeRegex = regexp.MustCompile(`\{\{\s*include\s+([^\}]+)\s*\}\}`)
+	ifElseRegex  = regexp.MustCompile(`\{\{\s*if\s+([^\}]+)\s*\}\}(.*?)\{\{\s*else\s*\}\}(.*?)\{\{\s*endif\s*\}\}`)
+	ifRegex      = regexp.MustCompile(`\{\{\s*if\s+([^\}]+)\s*\}\}(.*?)\{\{\s*endif\s*\}\}`)
+	eachRegex    = regexp.MustCompile(`\{\{\s*each\s+([^\s]+)\s+as\s+([^\}]+)\s*\}\}(.*?)\{\{\s*endeach\s*\}\}`)
+	blockRegex   = regexp.MustCompile(`\{\{\s*block\s+([^\}]+)\s*\}\}(.*?)\{\{\s*endblock\s*\}\}`)
 )
 
 // TemplateManager 表示模板管理器
 type TemplateManager struct {
-	templates      map[string]string
-	templateDirs   []string
-	cacheEnabled   bool
-	cache          map[string]string
+	templates    map[string]string
+	templateDirs []string
+	cacheEnabled bool
+	cache        map[string]string
 }
 
 // NewTemplateManager 创建一个新的模板管理器
@@ -114,7 +114,7 @@ func (tm *TemplateManager) FillTemplate(name string, params map[string]string) (
 	}
 
 	result := template
-	
+
 	// 处理模板继承 {{extends parent}}
 	extendsMatches := extendsRegex.FindStringSubmatch(result)
 	if len(extendsMatches) == 2 {
@@ -143,7 +143,7 @@ func (tm *TemplateManager) FillTemplate(name string, params map[string]string) (
 		}
 		return m
 	})
-	
+
 	// 处理if-else语句（必须在简单if之前处理）{{if condition}}...{{else}}...{{endif}}
 	result = ifElseRegex.ReplaceAllStringFunc(result, func(m string) string {
 		matches := ifElseRegex.FindStringSubmatch(m)
@@ -153,13 +153,13 @@ func (tm *TemplateManager) FillTemplate(name string, params map[string]string) (
 		condition := strings.TrimSpace(matches[1])
 		ifContent := matches[2]
 		elseContent := matches[3]
-		
+
 		if value, exists := params[condition]; exists && value != "" && value != "false" && value != "0" {
 			return ifContent
 		}
 		return elseContent
 	})
-	
+
 	// 处理条件语句 {{if condition}}...{{endif}}（不含else）
 	result = ifRegex.ReplaceAllStringFunc(result, func(m string) string {
 		matches := ifRegex.FindStringSubmatch(m)
@@ -168,13 +168,13 @@ func (tm *TemplateManager) FillTemplate(name string, params map[string]string) (
 		}
 		condition := strings.TrimSpace(matches[1])
 		content := matches[2]
-		
+
 		if value, exists := params[condition]; exists && value != "" && value != "false" && value != "0" {
 			return content
 		}
 		return ""
 	})
-	
+
 	// 处理循环语句 {{each items as item}}...{{endeach}}
 	result = eachRegex.ReplaceAllStringFunc(result, func(m string) string {
 		matches := eachRegex.FindStringSubmatch(m)
@@ -184,7 +184,7 @@ func (tm *TemplateManager) FillTemplate(name string, params map[string]string) (
 		variable := strings.TrimSpace(matches[1])
 		itemName := strings.TrimSpace(matches[2])
 		content := matches[3]
-		
+
 		// 检查参数是否是切片或数组
 		if items, exists := params[variable]; exists {
 			// 简化处理，假设items是用逗号分隔的字符串
@@ -209,7 +209,7 @@ func (tm *TemplateManager) FillTemplate(name string, params map[string]string) (
 		}
 		return ""
 	})
-	
+
 	// 处理变量替换 {{variable}}
 	for key, value := range params {
 		placeholder := fmt.Sprintf("{{%s}}", key)
@@ -223,7 +223,7 @@ func (tm *TemplateManager) FillTemplate(name string, params map[string]string) (
 func (tm *TemplateManager) processBlocks(childTemplate, parentTemplate string) string {
 	// 提取子模板中的所有块
 	blocks := make(map[string]string)
-	
+
 	blockRegex.ReplaceAllStringFunc(childTemplate, func(m string) string {
 		matches := blockRegex.FindStringSubmatch(m)
 		if len(matches) == 3 {
@@ -237,7 +237,7 @@ func (tm *TemplateManager) processBlocks(childTemplate, parentTemplate string) s
 	// 替换父模板中的块
 	result := parentTemplate
 	for blockName, blockContent := range blocks {
-		blockPattern := fmt.Sprintf(`\{\{\s*block\s+%s\s*\}\}(.*?)\{\{\s*endblock\s*\}\}` , regexp.QuoteMeta(blockName))
+		blockPattern := fmt.Sprintf(`\{\{\s*block\s+%s\s*\}\}(.*?)\{\{\s*endblock\s*\}\}`, regexp.QuoteMeta(blockName))
 		blockPatternRegex := regexp.MustCompile(blockPattern)
 		result = blockPatternRegex.ReplaceAllString(result, blockContent)
 	}

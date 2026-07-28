@@ -6,18 +6,18 @@ import (
 
 // Spendable 表示可消费的对象
 type Spendable struct {
-	Components   []interface{}
-	Count        int
-	CallCounter  int
-	Mutex        sync.RWMutex
+	Components  []interface{}
+	Count       int
+	CallCounter int
+	Mutex       sync.RWMutex
 }
 
 // NewSpendable 创建一个新的可消费对象
 func NewSpendable(capacity int) *Spendable {
 	return &Spendable{
-		Components:   make([]interface{}, 0, capacity),
-		Count:        0,
-		CallCounter:  0,
+		Components:  make([]interface{}, 0, capacity),
+		Count:       0,
+		CallCounter: 0,
 	}
 }
 

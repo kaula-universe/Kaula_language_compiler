@@ -13,8 +13,8 @@ import (
 )
 
 type CompileResult struct {
-	CCode string
-	AST   *ast.Program
+	CCode  string
+	AST    *ast.Program
 	Errors []string
 }
 
@@ -71,8 +71,8 @@ func Compile(filename string, source string) (*CompileResult, error) {
 	}
 
 	return &CompileResult{
-		CCode: cCode,
-		AST:   program,
+		CCode:  cCode,
+		AST:    program,
 		Errors: errors,
 	}, nil
 }

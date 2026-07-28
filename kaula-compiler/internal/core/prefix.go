@@ -62,11 +62,11 @@ func (vt PrefixVarType) String() string {
 }
 
 type PrefixVariable struct {
-	Name  string
-	Type  PrefixVarType
-	Value interface{}
+	Name        string
+	Type        PrefixVarType
+	Value       interface{}
 	IsPrefixVar bool
-	Pos   Position
+	Pos         Position
 }
 
 func (pv *PrefixVariable) String() string {
@@ -106,11 +106,11 @@ func (pc *PrefixContext) AddVariable(name string, vartype PrefixVarType, value i
 	pc.Mutex.Lock()
 	defer pc.Mutex.Unlock()
 	pv := &PrefixVariable{
-		Name:         name,
-		Type:         vartype,
-		Value:        value,
-		IsPrefixVar:  isPrefixVar,
-		Pos:          pos,
+		Name:        name,
+		Type:        vartype,
+		Value:       value,
+		IsPrefixVar: isPrefixVar,
+		Pos:         pos,
 	}
 	pc.Variables[name] = pv
 	return pv
@@ -165,10 +165,10 @@ func (pc *PrefixContext) collectVariables(vars *[]*PrefixVariable) {
 }
 
 type PrefixCall struct {
-	Name       string
-	Params     map[string]interface{}
-	Tree       *Tree
-	Pos        Position
+	Name   string
+	Params map[string]interface{}
+	Tree   *Tree
+	Pos    Position
 }
 
 func NewPrefixCall(name string, params map[string]interface{}) *PrefixCall {
@@ -179,7 +179,7 @@ func NewPrefixCall(name string, params map[string]interface{}) *PrefixCall {
 }
 
 type PrefixManager struct {
-	contexts       map[string]*PrefixContext
+	contexts      map[string]*PrefixContext
 	activeContext *PrefixContext
 	rootContext   *PrefixContext
 	calls         map[string]*PrefixCall
@@ -189,10 +189,10 @@ type PrefixManager struct {
 func NewPrefixManager() *PrefixManager {
 	root := NewPrefixContext("root")
 	return &PrefixManager{
-		contexts:       map[string]*PrefixContext{"root": root},
-		activeContext:  root,
-		rootContext:    root,
-		calls:          make(map[string]*PrefixCall),
+		contexts:      map[string]*PrefixContext{"root": root},
+		activeContext: root,
+		rootContext:   root,
+		calls:         make(map[string]*PrefixCall),
 	}
 }
 
@@ -418,16 +418,16 @@ func (pm *PrefixManager) generateInlineRecursive(ctx *PrefixContext, args map[st
 }
 
 type ExportedPrefix struct {
-	Name       string                  `json:"name"`
-	Annotation PrefixAnnotation         `json:"annotation"`
-	Variables  []ExportedVariable      `json:"variables"`
-	Calls     map[string]ExportCall   `json:"calls"`
+	Name       string                `json:"name"`
+	Annotation PrefixAnnotation      `json:"annotation"`
+	Variables  []ExportedVariable    `json:"variables"`
+	Calls      map[string]ExportCall `json:"calls"`
 }
 
 type ExportedVariable struct {
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	IsPrefixVar  bool   `json:"is_prefix_var"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	IsPrefixVar bool   `json:"is_prefix_var"`
 }
 
 type ExportCall struct {

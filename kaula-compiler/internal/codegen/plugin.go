@@ -8,12 +8,12 @@ import (
 type Plugin interface {
 	// Name 返回插件名称
 	Name() string
-	
+
 	// GenerateStatement 生成语句代码
 	// 如果插件处理了该语句，返回生成的代码和true
 	// 否则返回空字符串和false
 	GenerateStatement(stmt ast.Statement, cg *CodeGenerator) (string, bool)
-	
+
 	// GenerateExpression 生成表达式代码
 	// 如果插件处理了该表达式，返回生成的代码和true
 	// 否则返回空字符串和false

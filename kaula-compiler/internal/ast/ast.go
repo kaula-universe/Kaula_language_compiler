@@ -141,7 +141,7 @@ func (p *Program) Traverse(visitor func(Node)) {
 // traverseNode 递归遍历节点
 func traverseNode(node Node, visitor func(Node)) {
 	visitor(node)
-	
+
 	// 根据节点类型进行不同的处理
 	switch n := node.(type) {
 	case *Program:
@@ -433,15 +433,15 @@ func (v *VOStatement) SetPosition(pos Position) {
 // SpendStatement 表示spend语句 - 锁定并开启一个对象的消费流程
 // spend 用于锁定对象，call 必须被调用与元素数量对应的次数
 type SpendStatement struct {
-	Target  Expression     // 消费目标对象（如数组）
-	Calls   []*CallClause // call 子句列表
-	Pos     Position
+	Target Expression    // 消费目标对象（如数组）
+	Calls  []*CallClause // call 子句列表
+	Pos    Position
 }
 
 // CallClause 表示call子句 - 消费一个元素
 // index 是从 1 开始的元素索引
 type CallClause struct {
-	Index Expression // 元素索引（1-based）
+	Index Expression  // 元素索引（1-based）
 	Body  []Statement // 处理逻辑
 	Pos   Position
 }
@@ -510,9 +510,9 @@ func (t *TaskStatement) SetPosition(pos Position) {
 
 // PrefixStatement 表示prefix语句
 type PrefixStatement struct {
-	Name   string
-	Body   []Statement
-	Pos    Position
+	Name string
+	Body []Statement
+	Pos  Position
 }
 
 // statementNode 实现Statement接口
@@ -666,9 +666,9 @@ func (o *ObjectStatement) SetPosition(pos Position) {
 
 // TypeParameter 表示泛型类型参数
 type TypeParameter struct {
-	Name      string
+	Name       string
 	Constraint string // 类型约束，如 "any", "comparable" 等
-	Pos       Position
+	Pos        Position
 }
 
 // GetPosition 实现 Node 接口
@@ -709,10 +709,10 @@ func (ta *TypeArgument) String() string {
 
 // GenericInstance 表示泛型实例
 type GenericInstance struct {
-	OriginalName   string
-	TypeArguments  []TypeArgument
+	OriginalName     string
+	TypeArguments    []TypeArgument
 	InstantiatedName string
-	Pos            Position
+	Pos              Position
 }
 
 // GetPosition 实现 Node 接口
@@ -735,32 +735,32 @@ func (gi *GenericInstance) statementNode() {}
 
 // FunctionStatement 表示函数语句
 type FunctionStatement struct {
-	Name          string
-	TypeParams    []*TypeParameter // 泛型类型参数
-	Params        []string         // 参数名称列表
-	ParamTypes    []string         // 参数类型列表
-	Body          []Statement
-	AsmBody       string           // asm 函数的原始函数体内容
-	ReturnType    string
-	Generic       bool      // 是否是泛型函数
-	NoKMM         bool      // 是否禁用 KMM 内存管理（兼容旧 #[no_kmm]）
-	Inline        bool      // 是否内联函数（兼容旧 #[inline]）
-	Annotation    TreeAnnotationType // 函数注解 (prefix,tree, root,tree)
-	SOREnabled    bool      // 函数级 SOR 启用（兼容旧 #[sor] 注解）
-	Attributes    []*Attribute // 统一属性列表（新）
-	IsPublic      bool      // pub 修饰符：导出给其他 .kl 文件
-	PrefixName    string    // 如果使用prefix，记录prefix名称
-	TaskParams    []*TaskParam // 任务参数列表（如 task(1)）
-	AsyncParams   []*AsyncParam // 异步参数列表（如 async(value)）
-	IsAsm         bool      // 是否是 asm 函数（#[asm] 注解）
-	Pos           Position
+	Name        string
+	TypeParams  []*TypeParameter // 泛型类型参数
+	Params      []string         // 参数名称列表
+	ParamTypes  []string         // 参数类型列表
+	Body        []Statement
+	AsmBody     string // asm 函数的原始函数体内容
+	ReturnType  string
+	Generic     bool               // 是否是泛型函数
+	NoKMM       bool               // 是否禁用 KMM 内存管理（兼容旧 #[no_kmm]）
+	Inline      bool               // 是否内联函数（兼容旧 #[inline]）
+	Annotation  TreeAnnotationType // 函数注解 (prefix,tree, root,tree)
+	SOREnabled  bool               // 函数级 SOR 启用（兼容旧 #[sor] 注解）
+	Attributes  []*Attribute       // 统一属性列表（新）
+	IsPublic    bool               // pub 修饰符：导出给其他 .kl 文件
+	PrefixName  string             // 如果使用prefix，记录prefix名称
+	TaskParams  []*TaskParam       // 任务参数列表（如 task(1)）
+	AsyncParams []*AsyncParam      // 异步参数列表（如 async(value)）
+	IsAsm       bool               // 是否是 asm 函数（#[asm] 注解）
+	Pos         Position
 }
 
 // TaskParam 表示任务参数
 // 用于函数定义中的 task(优先级) 语法
 type TaskParam struct {
 	Priority Expression // 优先级表达式
-	Pos     Position
+	Pos      Position
 }
 
 // AsyncParam 表示异步参数
@@ -1108,10 +1108,10 @@ func (c *ContinueStatement) SetPosition(pos Position) {
 
 // ImportStatement 表示import语句
 type ImportStatement struct {
-	Module   string // 模块名（如 "std.io" 或 "utils"）
-	IsLocal  bool   // 是否是本地 .kl 文件导入
+	Module    string // 模块名（如 "std.io" 或 "utils"）
+	IsLocal   bool   // 是否是本地 .kl 文件导入
 	LocalPath string // 解析后的本地 .kl 文件路径（仅 IsLocal=true 时有效）
-	Pos      Position
+	Pos       Position
 }
 
 // statementNode 实现Statement接口
@@ -1134,9 +1134,9 @@ func (i *ImportStatement) SetPosition(pos Position) {
 
 // ExportStatement 表示 export 语句
 type ExportStatement struct {
-	Name string    // 导出的名称（函数、类、对象等）
-	Type string    // 导出类型："function", "class", "object", "variable"
-	Pos  Position  // 源代码位置
+	Name string   // 导出的名称（函数、类、对象等）
+	Type string   // 导出类型："function", "class", "object", "variable"
+	Pos  Position // 源代码位置
 }
 
 // statementNode 实现 Statement 接口
@@ -1159,13 +1159,13 @@ func (e *ExportStatement) SetPosition(pos Position) {
 
 // PackageStatement 表示 package 声明
 type PackageStatement struct {
-	Name string   // 包名（如 "utils", "math.geometry"）
+	Name string // 包名（如 "utils", "math.geometry"）
 	Pos  Position
 }
 
-func (p *PackageStatement) statementNode() {}
-func (p *PackageStatement) String() string  { return "PackageStatement" }
-func (p *PackageStatement) GetPosition() Position { return p.Pos }
+func (p *PackageStatement) statementNode()           {}
+func (p *PackageStatement) String() string           { return "PackageStatement" }
+func (p *PackageStatement) GetPosition() Position    { return p.Pos }
 func (p *PackageStatement) SetPosition(pos Position) { p.Pos = pos }
 
 // NonLocalStatement 表示 nonlocal 语句
@@ -1201,9 +1201,9 @@ type VariableDeclaration struct {
 	Value      Expression
 	Nullable   bool
 	IsAuto     bool
-	IsPublic   bool // pub 修饰符
-	IsStatic   bool // static 修饰符：函数内静态变量，生命周期为整个程序
-	IsConst    bool // const 修饰符：编译期常量，不可修改
+	IsPublic   bool         // pub 修饰符
+	IsStatic   bool         // static 修饰符：函数内静态变量，生命周期为整个程序
+	IsConst    bool         // const 修饰符：编译期常量，不可修改
 	Attributes []*Attribute // 声明注解：#[volatile], #[section("...")], #[aligned(N)] 等
 	Pos        Position
 }
@@ -1225,9 +1225,6 @@ func (v *VariableDeclaration) GetPosition() Position {
 func (v *VariableDeclaration) SetPosition(pos Position) {
 	v.Pos = pos
 }
-
-
-
 
 // ExpressionStatement 表示表达式语句
 type ExpressionStatement struct {
@@ -1255,9 +1252,9 @@ func (e *ExpressionStatement) SetPosition(pos Position) {
 
 // Identifier 表示标识符
 type Identifier struct {
-	Name string
+	Name        string
 	IsPrefixVar bool
-	Pos  Position
+	Pos         Position
 }
 
 // expressionNode 实现Expression接口
@@ -1457,10 +1454,10 @@ func (b *BinaryExpression) Traverse(visitor func(Node)) {
 
 // CallExpression 表示函数调用表达式
 type CallExpression struct {
-	Function  Expression
-	TypeArgs  []string   // 泛型类型参数
-	Args      []Expression
-	Pos       Position
+	Function Expression
+	TypeArgs []string // 泛型类型参数
+	Args     []Expression
+	Pos      Position
 }
 
 // expressionNode 实现Expression接口
@@ -1587,9 +1584,9 @@ func (b *BlockStatement) SetPosition(pos Position) {
 
 // CallStatement 表示call语句
 type CallStatement struct {
-	Target  Expression
-	Body    []Statement
-	Pos     Position
+	Target Expression
+	Body   []Statement
+	Pos    Position
 }
 
 // statementNode 实现Statement接口
@@ -1636,14 +1633,14 @@ func (p *Param) String() string {
 
 // ClassStatement 表示类定义
 type ClassStatement struct {
-	Name        string
-	TypeParams  []*TypeParameter // 泛型类型参数
-	Fields      []*FieldDeclaration
-	Methods     []*MethodStatement
+	Name         string
+	TypeParams   []*TypeParameter // 泛型类型参数
+	Fields       []*FieldDeclaration
+	Methods      []*MethodStatement
 	Constructors []*ConstructorStatement
-	Implements  []string
-	Generic     bool // 是否是泛型类
-	Pos         Position
+	Implements   []string
+	Generic      bool // 是否是泛型类
+	Pos          Position
 }
 
 // statementNode 实现Statement接口
@@ -1669,7 +1666,7 @@ type FieldDeclaration struct {
 	Name     string
 	Type     string
 	Nullable bool
-	BitWidth int    // 位域宽度（0=普通字段，>0=位域，如 flags: u32 : 5 → BitWidth=5）
+	BitWidth int // 位域宽度（0=普通字段，>0=位域，如 flags: u32 : 5 → BitWidth=5）
 	Pos      Position
 }
 
@@ -1848,7 +1845,7 @@ type StructStatement struct {
 	Name       string
 	TypeParams []*TypeParameter // 泛型类型参数
 	Fields     []*FieldDeclaration
-	Generic    bool // 是否是泛型结构体
+	Generic    bool         // 是否是泛型结构体
 	Attributes []*Attribute // 声明注解：#[packed], #[aligned(N)] 等
 	Pos        Position
 }
@@ -2062,17 +2059,17 @@ func (c *ConditionalExpression) SetPosition(pos Position) {
 // LambdaExpression 表示 lambda/闭包表达式
 // 语法: fn(参数列表) { 函数体 } 或 fn(参数列表) -> 返回类型 { 函数体 }
 type LambdaExpression struct {
-	Params     []string   // 参数名列表
-	ParamTypes []string   // 参数类型列表
-	ReturnType string     // 返回类型（空=void）
+	Params     []string // 参数名列表
+	ParamTypes []string // 参数类型列表
+	ReturnType string   // 返回类型（空=void）
 	Body       []Statement
-	Captures   []string   // 捕获的外部变量名（由语义分析填充）
+	Captures   []string // 捕获的外部变量名（由语义分析填充）
 	Pos        Position
 }
 
-func (l *LambdaExpression) expressionNode() {}
-func (l *LambdaExpression) String() string  { return "LambdaExpression" }
-func (l *LambdaExpression) GetPosition() Position { return l.Pos }
+func (l *LambdaExpression) expressionNode()          {}
+func (l *LambdaExpression) String() string           { return "LambdaExpression" }
+func (l *LambdaExpression) GetPosition() Position    { return l.Pos }
 func (l *LambdaExpression) SetPosition(pos Position) { l.Pos = pos }
 
 // ArrayLiteral 表示数组字面量
@@ -2108,26 +2105,26 @@ func (ta *TypeAliasStatement) IsGeneric() bool {
 // 语法: yield source -> target
 type YieldStatement struct {
 	Source Expression // 被转移的对象
-	Target string    // 目标变量名
+	Target string     // 目标变量名
 	Pos    Position
 }
 
-func (y *YieldStatement) statementNode() {}
-func (y *YieldStatement) String() string { return "YieldStatement" }
-func (y *YieldStatement) GetPosition() Position { return y.Pos }
+func (y *YieldStatement) statementNode()           {}
+func (y *YieldStatement) String() string           { return "YieldStatement" }
+func (y *YieldStatement) GetPosition() Position    { return y.Pos }
 func (y *YieldStatement) SetPosition(pos Position) { y.Pos = pos }
 
 // ReleaseStatement 表示 release（所有权分发）语句
 // 语法: release source -> [holder1, holder2, ...]
 type ReleaseStatement struct {
 	Source  Expression // 被分发的对象
-	Holders []string  // 持有者变量名列表
+	Holders []string   // 持有者变量名列表
 	Pos     Position
 }
 
-func (r *ReleaseStatement) statementNode() {}
-func (r *ReleaseStatement) String() string { return "ReleaseStatement" }
-func (r *ReleaseStatement) GetPosition() Position { return r.Pos }
+func (r *ReleaseStatement) statementNode()           {}
+func (r *ReleaseStatement) String() string           { return "ReleaseStatement" }
+func (r *ReleaseStatement) GetPosition() Position    { return r.Pos }
 func (r *ReleaseStatement) SetPosition(pos Position) { r.Pos = pos }
 
 // ExtractStatement 表示 extract（子结构提取）语句
@@ -2135,13 +2132,13 @@ func (r *ReleaseStatement) SetPosition(pos Position) { r.Pos = pos }
 type ExtractStatement struct {
 	Source Expression // 源对象
 	Index  Expression // 提取的索引
-	Target string    // 目标变量名
+	Target string     // 目标变量名
 	Pos    Position
 }
 
-func (e *ExtractStatement) statementNode() {}
-func (e *ExtractStatement) String() string { return "ExtractStatement" }
-func (e *ExtractStatement) GetPosition() Position { return e.Pos }
+func (e *ExtractStatement) statementNode()           {}
+func (e *ExtractStatement) String() string           { return "ExtractStatement" }
+func (e *ExtractStatement) GetPosition() Position    { return e.Pos }
 func (e *ExtractStatement) SetPosition(pos Position) { e.Pos = pos }
 
 type SizeOfExpression struct {
@@ -2149,9 +2146,9 @@ type SizeOfExpression struct {
 	Pos        Position
 }
 
-func (s *SizeOfExpression) expressionNode() {}
-func (s *SizeOfExpression) String() string { return "SizeOfExpression" }
-func (s *SizeOfExpression) GetPosition() Position { return s.Pos }
+func (s *SizeOfExpression) expressionNode()          {}
+func (s *SizeOfExpression) String() string           { return "SizeOfExpression" }
+func (s *SizeOfExpression) GetPosition() Position    { return s.Pos }
 func (s *SizeOfExpression) SetPosition(pos Position) { s.Pos = pos }
 
 type AlignOfExpression struct {
@@ -2159,9 +2156,9 @@ type AlignOfExpression struct {
 	Pos        Position
 }
 
-func (a *AlignOfExpression) expressionNode() {}
-func (a *AlignOfExpression) String() string { return "AlignOfExpression" }
-func (a *AlignOfExpression) GetPosition() Position { return a.Pos }
+func (a *AlignOfExpression) expressionNode()          {}
+func (a *AlignOfExpression) String() string           { return "AlignOfExpression" }
+func (a *AlignOfExpression) GetPosition() Position    { return a.Pos }
 func (a *AlignOfExpression) SetPosition(pos Position) { a.Pos = pos }
 
 type OffsetOfExpression struct {
@@ -2170,9 +2167,9 @@ type OffsetOfExpression struct {
 	Pos        Position
 }
 
-func (o *OffsetOfExpression) expressionNode() {}
-func (o *OffsetOfExpression) String() string { return "OffsetOfExpression" }
-func (o *OffsetOfExpression) GetPosition() Position { return o.Pos }
+func (o *OffsetOfExpression) expressionNode()          {}
+func (o *OffsetOfExpression) String() string           { return "OffsetOfExpression" }
+func (o *OffsetOfExpression) GetPosition() Position    { return o.Pos }
 func (o *OffsetOfExpression) SetPosition(pos Position) { o.Pos = pos }
 
 type ComptimeExpression struct {
@@ -2180,9 +2177,9 @@ type ComptimeExpression struct {
 	Pos   Position
 }
 
-func (c *ComptimeExpression) expressionNode() {}
-func (c *ComptimeExpression) String() string { return "ComptimeExpression" }
-func (c *ComptimeExpression) GetPosition() Position { return c.Pos }
+func (c *ComptimeExpression) expressionNode()          {}
+func (c *ComptimeExpression) String() string           { return "ComptimeExpression" }
+func (c *ComptimeExpression) GetPosition() Position    { return c.Pos }
 func (c *ComptimeExpression) SetPosition(pos Position) { c.Pos = pos }
 
 type TypeNameExpression struct {
@@ -2190,9 +2187,9 @@ type TypeNameExpression struct {
 	Pos        Position
 }
 
-func (t *TypeNameExpression) expressionNode() {}
-func (t *TypeNameExpression) String() string { return "TypeNameExpression" }
-func (t *TypeNameExpression) GetPosition() Position { return t.Pos }
+func (t *TypeNameExpression) expressionNode()          {}
+func (t *TypeNameExpression) String() string           { return "TypeNameExpression" }
+func (t *TypeNameExpression) GetPosition() Position    { return t.Pos }
 func (t *TypeNameExpression) SetPosition(pos Position) { t.Pos = pos }
 
 type FieldCountExpression struct {
@@ -2200,9 +2197,9 @@ type FieldCountExpression struct {
 	Pos        Position
 }
 
-func (f *FieldCountExpression) expressionNode() {}
-func (f *FieldCountExpression) String() string { return "FieldCountExpression" }
-func (f *FieldCountExpression) GetPosition() Position { return f.Pos }
+func (f *FieldCountExpression) expressionNode()          {}
+func (f *FieldCountExpression) String() string           { return "FieldCountExpression" }
+func (f *FieldCountExpression) GetPosition() Position    { return f.Pos }
 func (f *FieldCountExpression) SetPosition(pos Position) { f.Pos = pos }
 
 type FieldNameExpression struct {
@@ -2211,9 +2208,9 @@ type FieldNameExpression struct {
 	Pos        Position
 }
 
-func (f *FieldNameExpression) expressionNode() {}
-func (f *FieldNameExpression) String() string { return "FieldNameExpression" }
-func (f *FieldNameExpression) GetPosition() Position { return f.Pos }
+func (f *FieldNameExpression) expressionNode()          {}
+func (f *FieldNameExpression) String() string           { return "FieldNameExpression" }
+func (f *FieldNameExpression) GetPosition() Position    { return f.Pos }
 func (f *FieldNameExpression) SetPosition(pos Position) { f.Pos = pos }
 
 type FieldTypeExpression struct {
@@ -2222,9 +2219,9 @@ type FieldTypeExpression struct {
 	Pos        Position
 }
 
-func (f *FieldTypeExpression) expressionNode() {}
-func (f *FieldTypeExpression) String() string { return "FieldTypeExpression" }
-func (f *FieldTypeExpression) GetPosition() Position { return f.Pos }
+func (f *FieldTypeExpression) expressionNode()          {}
+func (f *FieldTypeExpression) String() string           { return "FieldTypeExpression" }
+func (f *FieldTypeExpression) GetPosition() Position    { return f.Pos }
 func (f *FieldTypeExpression) SetPosition(pos Position) { f.Pos = pos }
 
 type TypeKindExpression struct {
@@ -2232,9 +2229,9 @@ type TypeKindExpression struct {
 	Pos        Position
 }
 
-func (t *TypeKindExpression) expressionNode() {}
-func (t *TypeKindExpression) String() string { return "TypeKindExpression" }
-func (t *TypeKindExpression) GetPosition() Position { return t.Pos }
+func (t *TypeKindExpression) expressionNode()          {}
+func (t *TypeKindExpression) String() string           { return "TypeKindExpression" }
+func (t *TypeKindExpression) GetPosition() Position    { return t.Pos }
 func (t *TypeKindExpression) SetPosition(pos Position) { t.Pos = pos }
 
 // ==================== 属性注解系统 ====================
@@ -2243,9 +2240,9 @@ func (t *TypeKindExpression) SetPosition(pos Position) { t.Pos = pos }
 // 语法: #[name] 或 #[name(arg1, arg2)]
 // 用途: 修饰紧随其后的声明（fn/struct/var/type 等）
 type Attribute struct {
-	Name  string   // 属性名："packed", "aligned", "volatile", "section", "naked", "inline", "deprecated", "weak", "no_kmm", "sor"
-	Args  []string // 参数列表：#[section(".isr_vector")] → [".isr_vector"]，#[aligned(16)] → ["16"]
-	Pos   Position
+	Name string   // 属性名："packed", "aligned", "volatile", "section", "naked", "inline", "deprecated", "weak", "no_kmm", "sor"
+	Args []string // 参数列表：#[section(".isr_vector")] → [".isr_vector"]，#[aligned(16)] → ["16"]
+	Pos  Position
 }
 
 func (a *Attribute) String() string {
@@ -2255,7 +2252,7 @@ func (a *Attribute) String() string {
 	return fmt.Sprintf("Attribute(%s)", a.Name)
 }
 
-func (a *Attribute) GetPosition() Position { return a.Pos }
+func (a *Attribute) GetPosition() Position    { return a.Pos }
 func (a *Attribute) SetPosition(pos Position) { a.Pos = pos }
 
 // ParseAttributeString 解析属性内容字符串
@@ -2406,7 +2403,7 @@ func GetAttribute(attrs []*Attribute, name string) *Attribute {
 //   let old = #[atomic_cas(ptr, expected, new)]
 //   #[fence()]
 type AttributeExpression struct {
-	Attr *Attribute  // 属性定义（名称 + 参数列表）
+	Attr *Attribute // 属性定义（名称 + 参数列表）
 	Pos  Position
 }
 
@@ -2417,7 +2414,7 @@ func (a *AttributeExpression) String() string {
 	}
 	return "AttributeExpression"
 }
-func (a *AttributeExpression) GetPosition() Position { return a.Pos }
+func (a *AttributeExpression) GetPosition() Position    { return a.Pos }
 func (a *AttributeExpression) SetPosition(pos Position) { a.Pos = pos }
 
 // ==================== extern 外部符号声明 ====================
@@ -2430,19 +2427,19 @@ func (a *AttributeExpression) SetPosition(pos Position) { a.Pos = pos }
 //   extern fn boot_main() -> void
 //   extern fn memset(dst: *u8, c: i32, n: usize) -> *u8
 type ExternStatement struct {
-	Name        string
-	Type        string   // 变量类型（函数时为返回类型）
-	Nullable    bool
-	IsFunction  bool     // 是否是函数声明
-	Params      []string // 参数名列表（函数时有效）
-	ParamTypes  []string // 参数类型列表（函数时有效）
-	ReturnType  string   // 返回类型（函数时有效）
-	Pos         Position
+	Name       string
+	Type       string // 变量类型（函数时为返回类型）
+	Nullable   bool
+	IsFunction bool     // 是否是函数声明
+	Params     []string // 参数名列表（函数时有效）
+	ParamTypes []string // 参数类型列表（函数时有效）
+	ReturnType string   // 返回类型（函数时有效）
+	Pos        Position
 }
 
-func (e *ExternStatement) statementNode() {}
-func (e *ExternStatement) String() string { return "ExternStatement(" + e.Name + ": " + e.Type + ")" }
-func (e *ExternStatement) GetPosition() Position { return e.Pos }
+func (e *ExternStatement) statementNode()           {}
+func (e *ExternStatement) String() string           { return "ExternStatement(" + e.Name + ": " + e.Type + ")" }
+func (e *ExternStatement) GetPosition() Position    { return e.Pos }
 func (e *ExternStatement) SetPosition(pos Position) { e.Pos = pos }
 
 // ==================== ADT（代数数据类型）+ match（模式匹配） ====================
@@ -2450,8 +2447,8 @@ func (e *ExternStatement) SetPosition(pos Position) { e.Pos = pos }
 // EnumStatement 表示带数据的枚举定义（代数数据类型）
 // 语法: enum Name { Variant1, Variant2(Type), Variant3(Type1, Type2) }
 type EnumStatement struct {
-	Name       string          // 枚举名
-	Variants   []*EnumVariant  // 变体列表
+	Name       string           // 枚举名
+	Variants   []*EnumVariant   // 变体列表
 	TypeParams []*TypeParameter // 泛型类型参数（如 enum Result<T, E>）
 	Generic    bool
 	Attributes []*Attribute
@@ -2460,14 +2457,14 @@ type EnumStatement struct {
 
 // EnumVariant 表示枚举变体
 type EnumVariant struct {
-	Name       string     // 变体名
-	FieldTypes []string   // 关联数据的类型列表（空=无数据变体）
-	FieldNames []string   // 关联数据的字段名（可选）
+	Name       string   // 变体名
+	FieldTypes []string // 关联数据的类型列表（空=无数据变体）
+	FieldNames []string // 关联数据的字段名（可选）
 }
 
-func (e *EnumStatement) statementNode() {}
-func (e *EnumStatement) String() string { return "EnumStatement(" + e.Name + ")" }
-func (e *EnumStatement) GetPosition() Position { return e.Pos }
+func (e *EnumStatement) statementNode()           {}
+func (e *EnumStatement) String() string           { return "EnumStatement(" + e.Name + ")" }
+func (e *EnumStatement) GetPosition() Position    { return e.Pos }
 func (e *EnumStatement) SetPosition(pos Position) { e.Pos = pos }
 
 func (v *EnumVariant) String() string {
@@ -2476,54 +2473,54 @@ func (v *EnumVariant) String() string {
 	}
 	return "EnumVariant(" + v.Name + "(" + strings.Join(v.FieldTypes, ", ") + "))"
 }
-func (v *EnumVariant) GetPosition() Position { return Position{} }
+func (v *EnumVariant) GetPosition() Position    { return Position{} }
 func (v *EnumVariant) SetPosition(pos Position) {}
 
 // MatchExpression 表示模式匹配表达式
 // 语法: match(expr) { Pattern1 => body1, Pattern2(x) => body2, _ => default_body }
 type MatchExpression struct {
-	Target    Expression      // 被匹配的表达式
-	Arms      []*MatchArm     // 匹配分支
-	Pos       Position
+	Target Expression  // 被匹配的表达式
+	Arms   []*MatchArm // 匹配分支
+	Pos    Position
 }
 
 // MatchArm 表示模式匹配的一个分支
 type MatchArm struct {
-	Pattern   *MatchPattern   // 模式
-	Body      []Statement     // 匹配后执行的语句
-	Pos       Position
+	Pattern *MatchPattern // 模式
+	Body    []Statement   // 匹配后执行的语句
+	Pos     Position
 }
 
 // MatchPattern 表示模式匹配的模式
 type MatchPattern struct {
-	Kind      MatchPatternKind // 模式类型
-	VariantName string         // 变体名（Kind=Variant 时有效）
-	Bindings []string          // 绑定的变量名（Kind=Variant/Variable 时有效）
-	IntValue int64             // 整数字面量值（Kind=Integer 时有效）
-	StrValue string            // 字符串字面量值（Kind=String 时有效）
-	Pos      Position
+	Kind        MatchPatternKind // 模式类型
+	VariantName string           // 变体名（Kind=Variant 时有效）
+	Bindings    []string         // 绑定的变量名（Kind=Variant/Variable 时有效）
+	IntValue    int64            // 整数字面量值（Kind=Integer 时有效）
+	StrValue    string           // 字符串字面量值（Kind=String 时有效）
+	Pos         Position
 }
 
 // MatchPatternKind 模式类型
 type MatchPatternKind int
 
 const (
-	PatternWildcard  MatchPatternKind = iota // _ 通配符
-	PatternVariant                            // EnumVariant(x, y)
-	PatternInteger                            // 整数字面量
-	PatternString                             // 字符串字面量
-	PatternVariable                           // 变量绑定
-	PatternBoolean                            // true/false
+	PatternWildcard MatchPatternKind = iota // _ 通配符
+	PatternVariant                          // EnumVariant(x, y)
+	PatternInteger                          // 整数字面量
+	PatternString                           // 字符串字面量
+	PatternVariable                         // 变量绑定
+	PatternBoolean                          // true/false
 )
 
-func (e *MatchExpression) expressionNode() {}
-func (e *MatchExpression) String() string { return "MatchExpression" }
-func (e *MatchExpression) GetPosition() Position { return e.Pos }
+func (e *MatchExpression) expressionNode()          {}
+func (e *MatchExpression) String() string           { return "MatchExpression" }
+func (e *MatchExpression) GetPosition() Position    { return e.Pos }
 func (e *MatchExpression) SetPosition(pos Position) { e.Pos = pos }
 
-func (a *MatchArm) statementNode() {}
-func (a *MatchArm) String() string { return "MatchArm" }
-func (a *MatchArm) GetPosition() Position { return a.Pos }
+func (a *MatchArm) statementNode()           {}
+func (a *MatchArm) String() string           { return "MatchArm" }
+func (a *MatchArm) GetPosition() Position    { return a.Pos }
 func (a *MatchArm) SetPosition(pos Position) { a.Pos = pos }
 
 func (p *MatchPattern) String() string {
@@ -2547,5 +2544,5 @@ func (p *MatchPattern) String() string {
 		return "PatternUnknown"
 	}
 }
-func (p *MatchPattern) GetPosition() Position { return p.Pos }
+func (p *MatchPattern) GetPosition() Position    { return p.Pos }
 func (p *MatchPattern) SetPosition(pos Position) { p.Pos = pos }

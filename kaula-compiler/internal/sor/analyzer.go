@@ -51,11 +51,11 @@ const (
 	StmtUnionRelease
 
 	// 控制流结构标记
-	StmtLoopEnter    // 循环入口，携带迭代次数信息
-	StmtLoopExit     // 循环出口
-	StmtBranchEnter  // if 分支入口
-	StmtBranchExit   // if/else 分支出口（合并点）
-	StmtBranchElse   // else 分支入口（分隔 if body 和 else body）
+	StmtLoopEnter   // 循环入口，携带迭代次数信息
+	StmtLoopExit    // 循环出口
+	StmtBranchEnter // if 分支入口
+	StmtBranchExit  // if/else 分支出口（合并点）
+	StmtBranchElse  // else 分支入口（分隔 if body 和 else body）
 )
 
 // Stmt 表示一条 SOR 分析语句。
@@ -462,8 +462,8 @@ func (a *SORAnalyzer) execCall(stmt Stmt) {
 			// 函数需要独占所有权：检查参数是否为 Owned
 			if argObj.State != StateOwned {
 				a.tracker.addError(SORError{
-					Kind:       ErrYieldInvalidSource,
-					Message:    fmt.Sprintf("参数不匹配：函数 '%s' 第 %d 个参数需要 owned 所有权，但 '%s' 处于 %s 状态",
+					Kind: ErrYieldInvalidSource,
+					Message: fmt.Sprintf("参数不匹配：函数 '%s' 第 %d 个参数需要 owned 所有权，但 '%s' 处于 %s 状态",
 						stmt.FuncName, i+1, argName, argObj.State),
 					SourceLine: stmt.Line,
 					ObjectID:   argID,
@@ -479,8 +479,8 @@ func (a *SORAnalyzer) execCall(stmt Stmt) {
 			// 函数需要只读访问：Owned 或 Released 都可以
 			if argObj.State != StateOwned && argObj.State != StateReleased {
 				a.tracker.addError(SORError{
-					Kind:       ErrReleaseInvalidSource,
-					Message:    fmt.Sprintf("参数不匹配：函数 '%s' 第 %d 个参数需要 release 只读访问，但 '%s' 处于 %s 状态",
+					Kind: ErrReleaseInvalidSource,
+					Message: fmt.Sprintf("参数不匹配：函数 '%s' 第 %d 个参数需要 release 只读访问，但 '%s' 处于 %s 状态",
 						stmt.FuncName, i+1, argName, argObj.State),
 					SourceLine: stmt.Line,
 					ObjectID:   argID,
@@ -645,12 +645,12 @@ func WriteStmt(line int, source, varName string) Stmt {
 // CallStmt 创建一个函数调用语句。
 func CallStmt(line int, source, funcName string, argNames []string, argOwnership []string) Stmt {
 	return Stmt{
-		Kind:          StmtCall,
-		Line:          line,
-		Source:        source,
-		FuncName:      funcName,
-		ArgNames:      argNames,
-		ArgOwnership:  argOwnership,
+		Kind:         StmtCall,
+		Line:         line,
+		Source:       source,
+		FuncName:     funcName,
+		ArgNames:     argNames,
+		ArgOwnership: argOwnership,
 	}
 }
 
