@@ -59,10 +59,10 @@ func TestLoopDetector_NestedLoops(t *testing.T) {
 
 func TestLoopDetector_GetReusableVars(t *testing.T) {
 	loop := &LoopInfo{
-		IterCount:     10,
-		BodyVars:      []string{"x", "y", "z"},
-		ExternalVars:  []string{"y"}, // y is used outside
-		NestedLoops:   nil,
+		IterCount:    10,
+		BodyVars:     []string{"x", "y", "z"},
+		ExternalVars: []string{"y"}, // y is used outside
+		NestedLoops:  nil,
 	}
 
 	reusable := loop.GetReusableVars()

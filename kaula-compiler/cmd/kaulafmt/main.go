@@ -337,7 +337,7 @@ func (f *Formatter) formatBlockStatement(stmt *ast.BlockStatement) {
 
 func (f *Formatter) formatVOStatement(stmt *ast.VOStatement) {
 	f.buf.WriteString("vo")
-	
+
 	if stmt.Value != nil {
 		f.buf.WriteString(" {\n")
 		f.indent++
@@ -599,7 +599,6 @@ func (f *Formatter) formatNonLocalStatement(stmt *ast.NonLocalStatement) {
 		f.formatExpression(stmt.Value)
 	}
 }
-
 
 func (f *Formatter) formatCallStatementStmt(stmt *ast.CallStatement) {
 	f.buf.WriteString("call")

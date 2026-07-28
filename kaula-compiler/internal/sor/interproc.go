@@ -34,9 +34,9 @@ func (m OwnershipMode) String() string {
 
 // ParamOwnership 参数所有权信息
 type ParamOwnership struct {
-	Name  string
-	Type  string
-	Mode  OwnershipMode
+	Name string
+	Type string
+	Mode OwnershipMode
 }
 
 // ReturnOwnership 返回值所有权信息
@@ -61,16 +61,16 @@ type CallGraphEdge struct {
 
 // OwnershipTransfer 所有权转移记录
 type OwnershipTransfer struct {
-	CallSite string
-	VarName  string
+	CallSite  string
+	VarName   string
 	Direction string // "in" 或 "out"
-	Mode     OwnershipMode
+	Mode      OwnershipMode
 }
 
 // InterProcResult 跨函数分析结果
 type InterProcResult struct {
-	FuncSigs      map[string]*FuncOwnershipSig
-	CallGraph     []CallGraphEdge
+	FuncSigs       map[string]*FuncOwnershipSig
+	CallGraph      []CallGraphEdge
 	TransferPoints map[string][]OwnershipTransfer
 }
 

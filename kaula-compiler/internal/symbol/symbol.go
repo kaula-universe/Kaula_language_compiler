@@ -5,7 +5,7 @@ type Symbol struct {
 	Name        string
 	Type        string
 	Nullable    bool
-	NullChecked bool   // 是否已通过 if x != null 检查（空指针安全）
+	NullChecked bool // 是否已通过 if x != null 检查（空指针安全）
 	Scope       string
 	Line        int
 	Column      int
@@ -22,12 +22,12 @@ type GenericInstanceInfo struct {
 
 // SymbolTable 表示符号表
 type SymbolTable struct {
-	symbols       map[string]*Symbol
-	genericTypes  map[string][]string
-	parent        *SymbolTable
-	scopeName     string
-	scopeDepth    int
-	typeCache     map[string]*Symbol
+	symbols      map[string]*Symbol
+	genericTypes map[string][]string
+	parent       *SymbolTable
+	scopeName    string
+	scopeDepth   int
+	typeCache    map[string]*Symbol
 }
 
 // NewSymbolTable 创建一个新的符号表
@@ -49,7 +49,7 @@ func NewSymbolTable(parent *SymbolTable, scopeName string) *SymbolTable {
 // AddSymbol 添加一个符号
 func (st *SymbolTable) AddSymbol(name, symbolType string, nullable bool, scope string, line, column int) {
 	delete(st.typeCache, name)
-	
+
 	st.symbols[name] = &Symbol{
 		Name:     name,
 		Type:     symbolType,
@@ -64,7 +64,7 @@ func (st *SymbolTable) AddSymbol(name, symbolType string, nullable bool, scope s
 func (st *SymbolTable) AddGenericSymbol(name, symbolType string, typeParams []string, nullable bool, scope string, line, column int) {
 	st.genericTypes[name] = typeParams
 	delete(st.typeCache, name)
-	
+
 	st.symbols[name] = &Symbol{
 		Name:      name,
 		Type:      symbolType,
@@ -83,11 +83,11 @@ func (st *SymbolTable) AddGenericSymbol(name, symbolType string, typeParams []st
 // InstantiateGeneric 实例化泛型类型
 func (st *SymbolTable) InstantiateGeneric(name string, typeArgs []string) (*Symbol, error) {
 	symbol, exists := st.symbols[name]
-	
+
 	if !exists || !symbol.IsGeneric {
 		return nil, nil
 	}
-	
+
 	instName := name + "<"
 	for i, arg := range typeArgs {
 		if i > 0 {
@@ -96,11 +96,11 @@ func (st *SymbolTable) InstantiateGeneric(name string, typeArgs []string) (*Symb
 		instName += arg
 	}
 	instName += ">"
-	
+
 	if cached, ok := st.typeCache[instName]; ok {
 		return cached, nil
 	}
-	
+
 	instSymbol := &Symbol{
 		Name:      instName,
 		Type:      symbol.Type,
@@ -114,9 +114,9 @@ func (st *SymbolTable) InstantiateGeneric(name string, typeArgs []string) (*Symb
 			TypeArguments: typeArgs,
 		},
 	}
-	
+
 	st.typeCache[instName] = instSymbol
-	
+
 	return instSymbol, nil
 }
 

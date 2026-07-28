@@ -16,9 +16,9 @@ var cOperatorPrecedence = map[string]int{
 	"=": 1, "+=": 1, "-=": 1,
 	"||": 2,
 	"&&": 3,
-	"|": 4,
-	"^": 5,
-	"&": 6,
+	"|":  4,
+	"^":  5,
+	"&":  6,
 	"==": 7, "!=": 7,
 	"<": 8, ">": 8, "<=": 8, ">=": 8,
 	"<<": 9, ">>": 9,
@@ -39,13 +39,13 @@ func wrapIfNeeded(expr string, op string, side string) string {
 		return expr
 	}
 	outerPrec := cOperatorPrecedence[op]
-	
+
 	// 以分号、换行等结尾，不太可能是表达式
 	lastChar := expr[len(expr)-1]
 	if lastChar == ';' || lastChar == '\n' {
 		return expr
 	}
-	
+
 	// 检查是否包含需要括号的运算符
 	for _, opChar := range sortedOps {
 		pattern := " " + opChar + " "
@@ -63,7 +63,7 @@ func wrapIfNeeded(expr string, op string, side string) string {
 			break
 		}
 	}
-	
+
 	// 右操作数特殊处理：如果外层是位运算(&, |, ^)，内层有一元运算符(~, !)或移位(<<, >>)
 	// 需要加括号，例如: value & ~(1 << bit)
 	if side == "right" {
@@ -74,7 +74,7 @@ func wrapIfNeeded(expr string, op string, side string) string {
 			}
 		}
 	}
-	
+
 	return expr
 }
 func escapeCString(s string) string {
@@ -143,7 +143,7 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	if code, ok := eg.codegen.pluginManager.GenerateExpression(expr, eg.codegen); ok {
 		return code
 	}
-	
+
 	switch e := expr.(type) {
 	case *ast.Identifier:
 		return eg.generateIdentifier(e)
@@ -282,21 +282,21 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 			return eg.mapTypeToC(ident.Name) + " " + eg.GenerateExpression(e.Right)
 		}
 	}
-	
+
 	// 处理赋值操作（已经处理，不应该再次进入这里）
-	
+
 	// 预先计算左右表达式，减少重复调用
 	left := eg.GenerateExpression(e.Left)
 	right := eg.GenerateExpression(e.Right)
-	
+
 	// 常量折叠：如果左右都是整数常量，直接在编译期计算
 	if isIntegerLiteral(left) && isIntegerLiteral(right) {
 		leftVal, _ := strconv.ParseInt(left, 10, 64)
 		rightVal, _ := strconv.ParseInt(right, 10, 64)
-		
+
 		var result int64
 		var hasResult bool
-		
+
 		switch e.Operator {
 		case "PLUS":
 			result = leftVal + rightVal
@@ -375,12 +375,12 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 			result = leftVal ^ rightVal
 			hasResult = true
 		}
-		
+
 		if hasResult {
 			return strconv.FormatInt(result, 10)
 		}
 	}
-	
+
 	// 生成正常的二元表达式（直接字符串拼接，避免 fmt.Sprintf 开销）
 	switch e.Operator {
 	case "ASSIGN":
@@ -472,14 +472,14 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 			return "kmm_v4_alloc_auto(" + sizeArg + ")"
 		}
 	}
-	
+
 	// 检查是否是结构体构造函数调用（无参数的类型名调用）
 	if ident, ok := e.Function.(*ast.Identifier); ok && len(e.Args) == 0 && len(e.TypeArgs) == 0 {
 		if eg.codegen.IsStructType(ident.Name) {
 			return "(" + ident.Name + "){0}"
 		}
 	}
-	
+
 	// 通用泛型适配：如果存在类型参数，则触发实例化
 	if len(e.TypeArgs) > 0 {
 		// 触发泛型实例化
@@ -496,29 +496,29 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 			funcName = "kaula_" + funcName + "_" + strings.Join(e.TypeArgs, "_")
 		}
 	}
-	
+
 	// 避免与C标准库宏冲突（如 max, min）
 	if funcName == "max" || funcName == "min" || funcName == "abs" {
 		funcName = "kaula_" + funcName
 	}
-	
+
 	// 追踪第三方库的使用
 	if eg.codegen.stdlibConfig != nil {
 		if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(funcName); isThirdParty {
 			eg.codegen.usedThirdPartyLibs[lib.Name] = true
 		}
 	}
-	
+
 	// 直接使用标准库中定义的 println 函数
 	if funcName == "println" {
 		return eg.generatePrintlnCall(e.Args)
 	}
-	
+
 	// print 函数（不换行）同样支持格式化
 	if funcName == "print" {
 		return eg.generatePrintCall(e.Args)
 	}
-	
+
 	// 根据参数数量选择不同的调用方式
 	if len(e.Args) == 0 {
 		// 无参数调用
@@ -541,7 +541,7 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccessExpression, args []ast.Expression) string {
 	object := eg.GenerateExpression(memberAccess.Object)
 	methodName := memberAccess.Member
-	
+
 	// 检查是否是标准库模块调用（如 std.io.println）
 	// 处理多级成员访问：获取实际的模块名
 	moduleName := ""
@@ -559,14 +559,14 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 			}
 		}
 	}
-	
+
 	if moduleName != "" && eg.codegen.stdlibConfig != nil {
 		// 支持两种键格式: "io" 和 "std.io"
 		stdlibKey := moduleName
 		if !strings.HasPrefix(stdlibKey, "std.") {
 			stdlibKey = "std." + moduleName
 		}
-		
+
 		if module, exists := eg.codegen.stdlibConfig.Modules[stdlibKey]; exists {
 			// 特殊处理 println：使用类型推导版本
 			if methodName == "println" && len(args) > 1 {
@@ -579,20 +579,20 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 				if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(methodName); isThirdParty {
 					eg.codegen.usedThirdPartyLibs[lib.Name] = true
 				}
-				
-			// 使用 GetCFunctionName 自动添加模块前缀
-			cFuncName := eg.codegen.stdlibConfig.GetCFunctionName(stdlibKey, methodName)
 
-			// 修复 #21：全局将 std_malloc 重写为 kmm_v4_alloc_auto
-			// 统一所有动态分配走 KMM pool，不再依赖 IsInKMMScope() 判断
-			if cFuncName == "std_malloc" || methodName == "std_malloc" {
-				if len(args) == 1 {
-					sizeArg := eg.GenerateExpression(args[0])
-					return "kmm_v4_alloc_auto(" + sizeArg + ")"
+				// 使用 GetCFunctionName 自动添加模块前缀
+				cFuncName := eg.codegen.stdlibConfig.GetCFunctionName(stdlibKey, methodName)
+
+				// 修复 #21：全局将 std_malloc 重写为 kmm_v4_alloc_auto
+				// 统一所有动态分配走 KMM pool，不再依赖 IsInKMMScope() 判断
+				if cFuncName == "std_malloc" || methodName == "std_malloc" {
+					if len(args) == 1 {
+						sizeArg := eg.GenerateExpression(args[0])
+						return "kmm_v4_alloc_auto(" + sizeArg + ")"
+					}
 				}
-			}
 
-			code := cFuncName + "("
+				code := cFuncName + "("
 				for i, arg := range args {
 					if i > 0 {
 						code += ", "
@@ -657,7 +657,7 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 			return "object_equals((Object*)" + object + ", (Object*)" + argCode + ")"
 		}
 	}
-	
+
 	switch methodName {
 	case "length":
 		return "string_object_length(" + object + ")"
@@ -683,15 +683,15 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 // generateObjectMethodCall 生成对象方法调用代码
 func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName string, args []ast.Expression) string {
 	className := ""
-	
+
 	// 尝试从符号表中获取类型
 	// 这里 object 已经是字符串形式的表达式，无法直接推断类型
 	// 暂时使用默认类名
 	className = "Object"
-	
+
 	code := className + "_" + methodName + "("
 	code += object
-	
+
 	for _, arg := range args {
 		code += ", " + eg.GenerateExpression(arg)
 	}
@@ -1086,18 +1086,18 @@ func (eg *ExpressionGenerator) generatePrefixCallExpression(e *ast.PrefixCallExp
 // generateMemberAccessExpression 生成成员访问表达式代码
 func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAccessExpression) string {
 	object := eg.GenerateExpression(e.Object)
-	
+
 	if object == "self" {
 		return object + "->" + e.Member
 	}
-	
+
 	// 检查是否是枚举常量引用（如 Color.Red）
 	if ident, ok := e.Object.(*ast.Identifier); ok {
 		if eg.codegen.IsEnumType(ident.Name) {
 			return ident.Name + "_Kind_" + e.Member
 		}
 	}
-	
+
 	isPtr := false
 	if ident, ok := e.Object.(*ast.Identifier); ok {
 		if sym := eg.codegen.GetSymbol(ident.Name); sym != nil {
@@ -1107,11 +1107,11 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 			}
 		}
 	}
-	
+
 	if isPtr {
 		return object + "->" + e.Member
 	}
-	
+
 	return object + "." + e.Member
 }
 

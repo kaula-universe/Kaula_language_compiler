@@ -23,23 +23,23 @@ type SORCodeGenAdapter struct {
 
 // SORVarDecision 单个变量的 CodeGen 决策
 type SORVarDecision struct {
-	VarName     string // 变量名
-	ObjID       string // SOR 对象 ID
-	CTypeName   string // C 类型名（如 "int64_t*", "MyStruct*"）
-	AllocKind   string // "stack", "bmppool"（arena 已收敛到 bmppool）
-	AllocKindID int    // 修复 #23：int 值，0=Stack, 1=BumpPool, 2-4=Arena(收敛到BumpPool)
-	DropAction  string // "none", "scope_end", "hollow"
-	DropActionID int   // 修复 #23：int 值，0=None, 1=ScopeEnd, 2=Hollow
-	EscapeLevel string // "none", "arg", "return", "cross_scope", "heap"
-	SizeBytes   int    // 估算的字节大小
-	IsSOR       bool   // 是否由 SOR 追踪
-	ScopeID     int    // 修复 #18：直接存储 SOR scopeID
+	VarName      string // 变量名
+	ObjID        string // SOR 对象 ID
+	CTypeName    string // C 类型名（如 "int64_t*", "MyStruct*"）
+	AllocKind    string // "stack", "bmppool"（arena 已收敛到 bmppool）
+	AllocKindID  int    // 修复 #23：int 值，0=Stack, 1=BumpPool, 2-4=Arena(收敛到BumpPool)
+	DropAction   string // "none", "scope_end", "hollow"
+	DropActionID int    // 修复 #23：int 值，0=None, 1=ScopeEnd, 2=Hollow
+	EscapeLevel  string // "none", "arg", "return", "cross_scope", "heap"
+	SizeBytes    int    // 估算的字节大小
+	IsSOR        bool   // 是否由 SOR 追踪
+	ScopeID      int    // 修复 #18：直接存储 SOR scopeID
 }
 
 // SORScopeDecision 作用域级别的 CodeGen 决策
 type SORScopeDecision struct {
-	ScopeID      int    // 作用域 ID
-	UsesBumpPool bool   // 是否使用 bump pool
+	ScopeID      int  // 作用域 ID
+	UsesBumpPool bool // 是否使用 bump pool
 }
 
 // NewSORCodeGenAdapter 从分析结果的序列化形式创建 CodeGen 适配器

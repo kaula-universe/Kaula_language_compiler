@@ -9,13 +9,13 @@ import (
 type Generator interface {
 	// Generate 生成代码
 	Generate(program *ast.Program) string
-	
+
 	// RegisterPlugin 注册插件
 	RegisterPlugin(plugin Plugin)
-	
+
 	// HasErrors 检查是否有错误
 	HasErrors() bool
-	
+
 	// Errors 返回错误列表
 	Errors() []string
 }

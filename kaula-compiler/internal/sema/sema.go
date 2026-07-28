@@ -7,8 +7,8 @@ import (
 	"kaula-compiler/internal/comptime"
 	"kaula-compiler/internal/core"
 	"kaula-compiler/internal/errors"
-	"kaula-compiler/internal/symbol"
 	"kaula-compiler/internal/stdlib"
+	"kaula-compiler/internal/symbol"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,24 +16,24 @@ import (
 )
 
 type SemanticAnalyzer struct {
-	symbolTable      *symbol.SymbolTable
-	scope            int
-	errorCollector   *errors.ErrorCollector
-	currentFunction *ast.FunctionStatement
-	sorGlobalEnabled bool // 全局 SOR 模式（--sor 标志）
-	program         *ast.Program
-	stdlibConfig    *stdlib.StdlibConfig
-	genericStack    []*ast.FunctionStatement
-	typeConstraints map[string][]string
-	exportedSymbols map[string]bool
-	treeManager     *core.TreeManager
-	prefixManager   *core.PrefixManager
-	rootTreeFound   bool
-	source          string // 源码用于错误上下文
+	symbolTable        *symbol.SymbolTable
+	scope              int
+	errorCollector     *errors.ErrorCollector
+	currentFunction    *ast.FunctionStatement
+	sorGlobalEnabled   bool // 全局 SOR 模式（--sor 标志）
+	program            *ast.Program
+	stdlibConfig       *stdlib.StdlibConfig
+	genericStack       []*ast.FunctionStatement
+	typeConstraints    map[string][]string
+	exportedSymbols    map[string]bool
+	treeManager        *core.TreeManager
+	prefixManager      *core.PrefixManager
+	rootTreeFound      bool
+	source             string                         // 源码用于错误上下文
 	prefixSymbolTables map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
-	currentPrefixTable *symbol.SymbolTable             // 当前 @前缀块 的符号表
-	comptime *comptime.Evaluator                        // 编译期表达式评估器
-	importedModules map[string]bool                     // 记录实际导入的模块
+	currentPrefixTable *symbol.SymbolTable            // 当前 @前缀块 的符号表
+	comptime           *comptime.Evaluator            // 编译期表达式评估器
+	importedModules    map[string]bool                // 记录实际导入的模块
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -81,20 +81,20 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 	}
 
 	return &SemanticAnalyzer{
-		symbolTable:     globalSymbolTable,
-		scope:           1,
-		errorCollector:  errorCollector,
-		currentFunction: nil,
-		stdlibConfig:    stdlibConfig,
-		genericStack:    make([]*ast.FunctionStatement, 0),
-		typeConstraints: make(map[string][]string),
-		exportedSymbols: make(map[string]bool),
-		treeManager:     core.NewTreeManager(),
-		prefixManager:   core.NewPrefixManager(),
-		rootTreeFound:   false,
+		symbolTable:        globalSymbolTable,
+		scope:              1,
+		errorCollector:     errorCollector,
+		currentFunction:    nil,
+		stdlibConfig:       stdlibConfig,
+		genericStack:       make([]*ast.FunctionStatement, 0),
+		typeConstraints:    make(map[string][]string),
+		exportedSymbols:    make(map[string]bool),
+		treeManager:        core.NewTreeManager(),
+		prefixManager:      core.NewPrefixManager(),
+		rootTreeFound:      false,
 		prefixSymbolTables: make(map[string]*symbol.SymbolTable),
-		comptime:          nil,
-		importedModules:   make(map[string]bool),
+		comptime:           nil,
+		importedModules:    make(map[string]bool),
 	}
 }
 
@@ -102,7 +102,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 	// 保存 program 引用以便后续查找
 	sa.program = program
-	
+
 	// 从 AST 获取源码
 	if program != nil {
 		sa.source = program.Source
@@ -271,7 +271,7 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 	moduleName := stmt.Module
 	sa.symbolTable.AddSymbol(moduleName, "module", false, "global", stmt.Pos.Line, stmt.Pos.Column)
-	
+
 	// 记录实际导入的模块
 	sa.importedModules[moduleName] = true
 
@@ -282,7 +282,7 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 		if !strings.HasPrefix(stdlibKey, "std.") {
 			stdlibKey = "std." + moduleName
 		}
-		
+
 		// 记录标准库模块名
 		sa.importedModules[stdlibKey] = true
 
@@ -377,10 +377,10 @@ func (sa *SemanticAnalyzer) analyzeExportStatement(stmt *ast.ExportStatement) {
 		sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "exported", stmt.Pos.Line, stmt.Pos.Column)
 		return
 	}
-	
+
 	// 2. 标记符号为导出
 	symbol.Scope = "exported"
-	
+
 	// 3. 添加到导出符号列表
 	sa.exportedSymbols[stmt.Name] = true
 }
@@ -748,10 +748,10 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 			"检查类型名称是否正确，或者是否已定义该类型（类、结构体等）",
 		)
 	}
-	
+
 	// 2. 添加变量到符号表
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
-	
+
 	// 3. 分析初始化表达式
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
@@ -832,10 +832,10 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 		)
 		return
 	}
-	
+
 	// 分析表达式
 	sa.analyzeExpression(stmt.Value)
-	
+
 	// 推导类型
 	inferredType := sa.inferExpressionType(stmt.Value)
 	if inferredType == "" {
@@ -848,9 +848,9 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 		)
 		return
 	}
-	
+
 	stmt.Type = inferredType
-	
+
 	// 添加到符号表
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
 }
@@ -859,87 +859,87 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 	// 基本类型
 	basicTypes := map[string]bool{
-		"int":    true,
+		"int":     true,
 		"integer": true,
-		"i8":     true,
-		"i16":    true,
-		"i32":    true,
-		"i64":    true,
-		"int8":   true,
-		"int16":  true,
-		"int32":  true,
-		"int64":  true,
-		"u8":     true,
-		"u16":    true,
-		"u32":    true,
-		"u64":    true,
-		"uint8":  true,
-		"uint16": true,
-		"uint32": true,
-		"uint64": true,
-		"uint":   true,
-		"uchar":  true,
-		"ushort": true,
-		"ulong":  true,
-		"float":  true,
-		"f32":    true,
-		"single": true,
-		"f64":    true,
-		"double": true,
-		"real":   true,
-		"bool":   true,
+		"i8":      true,
+		"i16":     true,
+		"i32":     true,
+		"i64":     true,
+		"int8":    true,
+		"int16":   true,
+		"int32":   true,
+		"int64":   true,
+		"u8":      true,
+		"u16":     true,
+		"u32":     true,
+		"u64":     true,
+		"uint8":   true,
+		"uint16":  true,
+		"uint32":  true,
+		"uint64":  true,
+		"uint":    true,
+		"uchar":   true,
+		"ushort":  true,
+		"ulong":   true,
+		"float":   true,
+		"f32":     true,
+		"single":  true,
+		"f64":     true,
+		"double":  true,
+		"real":    true,
+		"bool":    true,
 		"boolean": true,
-		"char":   true,
-		"byte":   true,
-		"sbyte":  true,
-		"string": true,
-		"str":    true,
+		"char":    true,
+		"byte":    true,
+		"sbyte":   true,
+		"string":  true,
+		"str":     true,
 		"cstring": true,
-		"void":   true,
-		"any":    true,
-		"long":   true,
-		"short":  true,
-		"size":   true,
-		"ssize":  true,
-		"intptr": true,
+		"void":    true,
+		"any":     true,
+		"long":    true,
+		"short":   true,
+		"size":    true,
+		"ssize":   true,
+		"intptr":  true,
 		"uintptr": true,
 	}
-	
+
 	// 检查是否是基本类型
 	if basicTypes[typeName] {
 		return true
 	}
-	
+
 	// 检查是否是指针类型（如 int*）
 	if len(typeName) > 0 && typeName[len(typeName)-1] == '*' {
 		baseType := typeName[:len(typeName)-1]
 		return sa.isTypeValid(baseType)
 	}
-	
+
 	// 检查是否是数组类型（如 []int）
 	if strings.HasPrefix(typeName, "[]") {
 		innerType := typeName[2:]
 		return sa.isTypeValid(innerType)
 	}
-	
+
 	// 检查是否是const类型（如 const char*）
 	if strings.HasPrefix(typeName, "const ") {
 		innerType := typeName[6:]
 		return sa.isTypeValid(innerType)
 	}
-	
+
 	// 检查符号表中是否有该类型（类、结构体、枚举、接口等）
 	symbol := sa.symbolTable.GetSymbol(typeName)
 	if symbol != nil && (symbol.Type == "class" || symbol.Type == "struct" || symbol.Type == "enum" || symbol.Type == "interface" || symbol.Type == "type") {
 		return true
 	}
-	
+
 	// 检查是否是泛型类型（如 Box<int>）
 	if idx := strings.Index(typeName, "<"); idx > 0 {
 		baseType := typeName[:idx]
 		return sa.isTypeValid(baseType)
 	}
-	
+
 	return false
 }
 
@@ -1230,12 +1230,12 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 	if expr == nil {
 		return
 	}
-	
+
 	// 检查是否是标准库函数调用，验证是否已导入对应模块
 	if memberAccess, ok := expr.Function.(*ast.MemberAccessExpression); ok {
 		sa.checkStdlibImport(memberAccess, expr.Pos)
 	}
-	
+
 	sa.analyzeExpression(expr.Function)
 	for _, arg := range expr.Args {
 		sa.analyzeExpression(arg)
@@ -1246,19 +1246,19 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 func (sa *SemanticAnalyzer) checkStdlibImport(memberAccess *ast.MemberAccessExpression, pos ast.Position) {
 	// 解析模块路径：std.module.function -> module
 	var moduleName string
-	
+
 	// 检查是否是 std.module.function 形式
 	if nestedMember, ok := memberAccess.Object.(*ast.MemberAccessExpression); ok {
 		if innerIdent, ok := nestedMember.Object.(*ast.Identifier); ok && innerIdent.Name == "std" {
 			moduleName = nestedMember.Member
 		}
 	}
-	
+
 	// 如果没有找到模块名，不是标准库调用
 	if moduleName == "" {
 		return
 	}
-	
+
 	// 检查模块是否已导入（使用 importedModules 而不是符号表）
 	stdlibKey := "std." + moduleName
 	if !sa.importedModules[moduleName] && !sa.importedModules[stdlibKey] {
@@ -1502,13 +1502,13 @@ func (sa *SemanticAnalyzer) inferLiteralType(expr *ast.LiteralExpression) string
 
 // isFloatType 检查是否是浮点类型
 func isFloatType(typeName string) bool {
-	return typeName == "float" || typeName == "f32" || typeName == "f64" || 
+	return typeName == "float" || typeName == "f32" || typeName == "f64" ||
 		typeName == "double" || typeName == "real" || typeName == "single"
 }
 
 // isIntegerType 检查是否是整数类型
 func isIntegerType(typeName string) bool {
-	return typeName == "int" || typeName == "integer" || 
+	return typeName == "int" || typeName == "integer" ||
 		typeName == "i8" || typeName == "i16" || typeName == "i32" || typeName == "i64" ||
 		typeName == "int8" || typeName == "int16" || typeName == "int32" || typeName == "int64" ||
 		typeName == "u8" || typeName == "u16" || typeName == "u32" || typeName == "u64" ||
@@ -1546,14 +1546,14 @@ func (sa *SemanticAnalyzer) error(msg string, line, column int) {
 	suggestion := errors.GenerateSuggestion(msg)
 	context, sourceLine, lineNumStr := errors.ExtractSourceContext(sa.source, line, column)
 	err := &errors.Error{
-		Type:       errors.ErrorSemantic,
-		Message:    msg,
-		Line:       line,
-		Column:     column,
-		File:       "",
-		Suggestion: suggestion,
+		Type:          errors.ErrorSemantic,
+		Message:       msg,
+		Line:          line,
+		Column:        column,
+		File:          "",
+		Suggestion:    suggestion,
 		SourceContext: context,
-		SourceLine: sourceLine,
+		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
 	}
 	sa.errorCollector.AddErrorInstance(err)
