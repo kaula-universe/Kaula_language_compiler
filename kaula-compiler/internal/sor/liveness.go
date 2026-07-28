@@ -14,13 +14,13 @@ import (
 
 // LastUseInfo 记录变量的最后使用信息
 type LastUseInfo struct {
-	VarName      string   // 变量名
-	ObjID        string   // 关联的 SOR 对象 ID（使用 VarName 代替，因为 Stmt 无 ObjID 字段）
-	LastUseLine  int      // 最后一次使用的行号
-	LastUseKind  string   // 使用类型: "read", "yield-src", "release-src", "extract-src", "call-arg"
-	IsYieldSrc   bool     // 是否作为 yield 源（转移后失效，无需释放）
-	IsExtractSrc bool     // 是否作为 extract 源（部分失效，hollow 清理）
-	IsInLoop     bool     // 是否在循环体内声明（用于循环感知的池容量计算）
+	VarName      string // 变量名
+	ObjID        string // 关联的 SOR 对象 ID（使用 VarName 代替，因为 Stmt 无 ObjID 字段）
+	LastUseLine  int    // 最后一次使用的行号
+	LastUseKind  string // 使用类型: "read", "yield-src", "release-src", "extract-src", "call-arg"
+	IsYieldSrc   bool   // 是否作为 yield 源（转移后失效，无需释放）
+	IsExtractSrc bool   // 是否作为 extract 源（部分失效，hollow 清理）
+	IsInLoop     bool   // 是否在循环体内声明（用于循环感知的池容量计算）
 }
 
 func (info *LastUseInfo) String() string {

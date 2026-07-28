@@ -15,11 +15,11 @@ type EscapeLevel int
 
 const (
 	EscNone       EscapeLevel = iota // 不逃逸：仅在本作用域内使用
-	EscArg                          // 作为函数参数传递
-	EscReturn                       // 作为函数返回值逃逸
-	EscCrossScope                   // 跨作用域引用
-	EscGlobal                       // 全局逃逸
-	EscHeap                         // 堆逃逸
+	EscArg                           // 作为函数参数传递
+	EscReturn                        // 作为函数返回值逃逸
+	EscCrossScope                    // 跨作用域引用
+	EscGlobal                        // 全局逃逸
+	EscHeap                          // 堆逃逸
 )
 
 func (e EscapeLevel) String() string {

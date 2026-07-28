@@ -131,34 +131,34 @@ const (
 
 // Token 表示一个token
 type Token struct {
-	Type    TokenType
-	Value   string
-	Line    int
-	Column  int
+	Type   TokenType
+	Value  string
+	Line   int
+	Column int
 }
 
 // Lexer 表示词法分析器
 type Lexer struct {
-	input  string
-	pos    int
-	line   int
-	column int
-	inputLen int // 缓存输入长度，避免重复计算
+	input          string
+	pos            int
+	line           int
+	column         int
+	inputLen       int // 缓存输入长度，避免重复计算
 	errorCollector *errors.ErrorCollector
-	file string
-	source string // 保存完整源码用于错误上下文
+	file           string
+	source         string // 保存完整源码用于错误上下文
 }
 
 // NewLexer 创建一个新的词法分析器
 func NewLexer(input string) *Lexer {
 	return &Lexer{
-		input:  input,
-		pos:    0,
-		line:   1,
-		column: 1,
-		inputLen: len(input),
+		input:          input,
+		pos:            0,
+		line:           1,
+		column:         1,
+		inputLen:       len(input),
 		errorCollector: errors.NewErrorCollector(),
-		source: input,
+		source:         input,
 	}
 }
 
@@ -196,19 +196,19 @@ func (l *Lexer) Next() Token {
 				startColumn := l.column
 				l.next() // 跳过 #
 				l.next() // 跳过 [
-				
+
 				// 收集注解内容直到遇到 ]
 				content := ""
 				for l.pos < l.inputLen && l.input[l.pos] != ']' && l.input[l.pos] != '\n' {
 					content += string(l.input[l.pos])
 					l.next()
 				}
-				
+
 				// 跳过 ]
 				if l.pos < l.inputLen && l.input[l.pos] == ']' {
 					l.next()
 				}
-				
+
 				return Token{Type: TOKEN_ATTRIBUTE, Value: "#[" + content + "]", Line: startLine, Column: startColumn}
 			} else {
 				// 注释
@@ -333,14 +333,14 @@ func (l *Lexer) Next() Token {
 				return Token{Type: TOKEN_COLON, Value: ":", Line: l.line, Column: l.column}
 			}
 		case char == '&':
-		if l.peek() == '&' {
-			l.next()
-			l.next()
-			return Token{Type: TOKEN_AND, Value: "&&", Line: l.line, Column: l.column}
-		} else {
-			l.next()
-			return Token{Type: TOKEN_AMPERSAND, Value: "&", Line: l.line, Column: l.column}
-		}
+			if l.peek() == '&' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_AND, Value: "&&", Line: l.line, Column: l.column}
+			} else {
+				l.next()
+				return Token{Type: TOKEN_AMPERSAND, Value: "&", Line: l.line, Column: l.column}
+			}
 		case char == '|':
 			if l.peek() == '|' {
 				l.next()
@@ -404,7 +404,7 @@ func (l *Lexer) skipComment() {
 	} else if l.input[l.pos] == '#' {
 		l.pos++
 	}
-	
+
 	start := l.pos
 	for l.pos < l.inputLen && l.input[l.pos] != '\n' {
 		l.pos++
@@ -427,7 +427,7 @@ func (l *Lexer) scanIdentifier() Token {
 	}
 	value := l.input[start:l.pos]
 	tokenType := TOKEN_IDENT
-	
+
 	// 检查关键字
 	switch value {
 	case "vo":
@@ -651,7 +651,7 @@ func (l *Lexer) scanString() Token {
 	value := l.input[start:l.pos]
 	// 不处理转义字符，保持原始字符串内容
 	// 让代码生成器决定如何处理换行符
-	l.next() // 跳过结尾的 "
+	l.next()                      // 跳过结尾的 "
 	l.column += l.pos - start + 2 // +2 for the quotes
 	return Token{Type: TOKEN_STRING, Value: value, Line: l.line, Column: l.column}
 }
@@ -663,7 +663,7 @@ func (l *Lexer) scanCharLiteral() Token {
 		l.error("unterminated character literal")
 		return Token{Type: TOKEN_LITERAL_CHAR, Value: "", Line: l.line, Column: l.column}
 	}
-	
+
 	charValue := ""
 	if l.input[l.pos] == '\\' {
 		// 转义字符
@@ -693,13 +693,13 @@ func (l *Lexer) scanCharLiteral() Token {
 		charValue = string(l.input[l.pos])
 	}
 	l.pos++
-	
+
 	if l.pos < l.inputLen && l.input[l.pos] == '\'' {
 		l.next() // 跳过结尾的 '
 	} else {
 		l.error("unterminated character literal")
 	}
-	
+
 	return Token{Type: TOKEN_LITERAL_CHAR, Value: charValue, Line: l.line, Column: l.column}
 }
 
@@ -729,14 +729,14 @@ func (l *Lexer) error(message string) {
 	suggestion := errors.GenerateSuggestion(message)
 	context, sourceLine, lineNumStr := errors.ExtractSourceContext(l.source, l.line, l.column)
 	err := &errors.Error{
-		Type:       errors.ErrorSyntax,
-		Message:    message,
-		Line:       l.line,
-		Column:     l.column,
-		File:       l.file,
-		Suggestion: suggestion,
+		Type:          errors.ErrorSyntax,
+		Message:       message,
+		Line:          l.line,
+		Column:        l.column,
+		File:          l.file,
+		Suggestion:    suggestion,
 		SourceContext: context,
-		SourceLine: sourceLine,
+		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
 	}
 	l.errorCollector.AddErrorInstance(err)

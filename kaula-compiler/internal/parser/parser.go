@@ -42,25 +42,25 @@ type ParseTask struct {
 
 // Parser 表示语法分析器
 type Parser struct {
-	lexer  *lexer.Lexer
-	curTok lexer.Token
-	peekTok lexer.Token
+	lexer          *lexer.Lexer
+	curTok         lexer.Token
+	peekTok        lexer.Token
 	errorCollector *errors.ErrorCollector
-	logger *log.Logger
+	logger         *log.Logger
 	loggingEnabled bool
-	file string
-	taskStack []ParseTask
-	skipMainCheck bool // 跳过 main 函数检查（用于导入的库文件）
+	file           string
+	taskStack      []ParseTask
+	skipMainCheck  bool // 跳过 main 函数检查（用于导入的库文件）
 }
 
 // NewParser 创建一个新的语法分析器
 func NewParser(lexer *lexer.Lexer) *Parser {
 	p := &Parser{
-		lexer:  lexer,
+		lexer:          lexer,
 		errorCollector: errors.NewErrorCollector(),
-		logger: log.New(os.Stdout, "[Parser] ", log.LstdFlags),
+		logger:         log.New(os.Stdout, "[Parser] ", log.LstdFlags),
 		loggingEnabled: true,
-		taskStack: make([]ParseTask, 0, 64),
+		taskStack:      make([]ParseTask, 0, 64),
 	}
 	p.nextToken()
 	p.nextToken()
@@ -110,13 +110,13 @@ func (p *Parser) parseProgram() *ast.Program {
 		if p.loggingEnabled {
 			p.log("当前 token: %s, 开始解析语句", lexer.TokenTypeToString(p.curTok.Type))
 		}
-		
+
 		// 跳过空语句（分号、换行符等）
 		if p.curTok.Type == lexer.TOKEN_SEMICOLON {
 			p.nextToken()
 			continue
 		}
-		
+
 		stmt := p.parseStatementIterative()
 		if stmt != nil {
 			if p.loggingEnabled {
@@ -194,7 +194,7 @@ func (p *Parser) parseStatementIterative() ast.Statement {
 		// 例如：#[asm("...")], #[volatile_store(addr, val)], #[fence()]
 		return p.parseExpressionStatementIterative()
 	}
-	
+
 	switch p.curTok.Type {
 	case lexer.TOKEN_VO:
 		return p.parseVOStatementIterative()
@@ -331,17 +331,17 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 	if attrs != nil {
 		stmt.Attributes = attrs
 	}
-	
+
 	// 首先检查是否有类型关键字
 	var typeName string
-	
+
 	// 检查是否是指针前缀 (*Type name)
 	isPointerPrefix := false
 	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
 		isPointerPrefix = true
 		p.nextToken()
 	}
-	
+
 	// 检查是否是基本类型关键字（int, float, string 等）
 	if p.isTypeToken(p.curTok.Type) {
 		typeName = lexer.TokenTypeToString(p.curTok.Type)
@@ -353,7 +353,7 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		// 可能是自定义类型（如类名、结构体名等）
 		typeName = p.curTok.Value
 		p.nextToken()
-		
+
 		// 检查是否是泛型类型（如 Box<int>）
 		if p.curTok.Type == lexer.TOKEN_LT {
 			p.nextToken()
@@ -384,47 +384,47 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		// 不是类型，返回 nil
 		return nil
 	}
-	
+
 	// 现在必须有变量名
 	// 检查是否是可空类型（?）在变量名前面 - 语法: Type? name
 	if p.curTok.Type == lexer.TOKEN_QUESTION {
 		stmt.Nullable = true
 		p.nextToken()
 	}
-	
+
 	// 如果之前有 * 前缀 (*Type name)，添加 * 到类型名
 	if isPointerPrefix {
 		typeName = typeName + "*"
 	}
-	
+
 	// 检查是否是指针类型（*）在变量名前面 - 语法: Type* name
 	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
 		// 指针类型，在类型名后添加 *
 		typeName = typeName + "*"
 		p.nextToken()
 	}
-	
+
 	if p.curTok.Type != lexer.TOKEN_IDENT {
 		// 不是变量名，返回 nil（不要报告错误，因为可能是其他语句）
 		return nil
 	}
-	
+
 	stmt.Type = typeName
 	stmt.Name = p.curTok.Value
 	p.nextToken()
-	
+
 	// 检查变量名后是否还有指针修饰符 - 语法: Type name*
 	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
 		stmt.Type = stmt.Type + "*"
 		p.nextToken()
 	}
-	
+
 	// 检查是否有赋值
 	if p.curTok.Type == lexer.TOKEN_ASSIGN {
 		p.nextToken()
 		stmt.Value = p.parseExpressionIterative()
 	}
-	
+
 	return stmt
 }
 
@@ -601,25 +601,25 @@ func (p *Parser) parseAutoDeclarationIterative() *ast.VariableDeclaration {
 	if attrs != nil {
 		stmt.Attributes = attrs
 	}
-	
+
 	p.nextToken()
-	
+
 	if p.curTok.Type != lexer.TOKEN_IDENT {
 		p.error("auto 后应该跟变量名")
 		return nil
 	}
-	
+
 	stmt.Name = p.curTok.Value
 	p.nextToken()
-	
+
 	if p.curTok.Type != lexer.TOKEN_ASSIGN {
 		p.error("auto 声明必须有初始值用于类型推导 (auto name = value)")
 		return nil
 	}
-	
+
 	p.nextToken()
 	stmt.Value = p.parseExpressionIterative()
-	
+
 	return stmt
 }
 
@@ -630,7 +630,7 @@ func (p *Parser) isTypeToken(tokenType lexer.TokenType) bool {
 
 // isIdentOrTypeToken 检查是否是标识符或类型关键字
 func (p *Parser) isIdentOrTypeToken(tokenType lexer.TokenType) bool {
-	return tokenType == lexer.TOKEN_IDENT || 
+	return tokenType == lexer.TOKEN_IDENT ||
 		(tokenType >= lexer.TOKEN_TYPE_INT && tokenType <= lexer.TOKEN_TYPE_VOID)
 }
 
@@ -706,7 +706,7 @@ func (p *Parser) parseVOStatementIterative() ast.Statement {
 			}
 		}
 	}
-	
+
 	p.log("开始解析 VO 语句")
 	stmt := &ast.VOStatement{}
 	p.nextToken()
@@ -957,7 +957,7 @@ func (p *Parser) parsePrefixStatementIterative() *ast.PrefixStatement {
 		// 这是 prefix 模块调用，不是 prefix 语句，返回 nil
 		return nil
 	}
-	
+
 	stmt := &ast.PrefixStatement{
 		Body: []ast.Statement{},
 	}
@@ -1183,13 +1183,13 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		NoKMM:  false,
 		Inline: false,
 	}
-	
+
 	// 解析函数注解（如果存在）
 	attrs := p.parseAttributes()
 	if attrs != nil {
 		applyFunctionAttributes(stmt, attrs)
 	}
-	
+
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -1248,45 +1248,45 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 			}
 
 			if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_MULTIPLY {
-			typeOrName := ""
-			typeName := ""
-			
-			// 处理指针前缀 (*Type)
-			if p.curTok.Type == lexer.TOKEN_MULTIPLY {
-				p.nextToken()
-				if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
-					typeName = p.curTok.Value + "*"
-					p.nextToken()
-				}
-			} else {
-				typeOrName = p.curTok.Value
-				p.nextToken()
-				
-				// 检查后面是否跟着 * (Type*)
+				typeOrName := ""
+				typeName := ""
+
+				// 处理指针前缀 (*Type)
 				if p.curTok.Type == lexer.TOKEN_MULTIPLY {
-					typeName = typeOrName + "*"
-					typeOrName = ""
 					p.nextToken()
+					if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+						typeName = p.curTok.Value + "*"
+						p.nextToken()
+					}
+				} else {
+					typeOrName = p.curTok.Value
+					p.nextToken()
+
+					// 检查后面是否跟着 * (Type*)
+					if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+						typeName = typeOrName + "*"
+						typeOrName = ""
+						p.nextToken()
+					}
+				}
+
+				if p.curTok.Type == lexer.TOKEN_IDENT {
+					// 有类型：typeName 或 typeOrName 是类型，p.curTok.Value 是名称
+					paramType := typeName
+					if paramType == "" {
+						paramType = typeOrName
+					}
+					stmt.Params = append(stmt.Params, p.curTok.Value)
+					stmt.ParamTypes = append(stmt.ParamTypes, paramType)
+					p.log("解析参数：%s (类型：%s)", p.curTok.Value, paramType)
+					p.nextToken()
+				} else if typeOrName != "" {
+					// typeOrName 就是名称（无类型）
+					stmt.Params = append(stmt.Params, typeOrName)
+					stmt.ParamTypes = append(stmt.ParamTypes, "")
+					p.log("解析参数：%s (无类型)", typeOrName)
 				}
 			}
-			
-			if p.curTok.Type == lexer.TOKEN_IDENT {
-				// 有类型：typeName 或 typeOrName 是类型，p.curTok.Value 是名称
-				paramType := typeName
-				if paramType == "" {
-					paramType = typeOrName
-				}
-				stmt.Params = append(stmt.Params, p.curTok.Value)
-				stmt.ParamTypes = append(stmt.ParamTypes, paramType)
-				p.log("解析参数：%s (类型：%s)", p.curTok.Value, paramType)
-				p.nextToken()
-			} else if typeOrName != "" {
-				// typeOrName 就是名称（无类型）
-				stmt.Params = append(stmt.Params, typeOrName)
-				stmt.ParamTypes = append(stmt.ParamTypes, "")
-				p.log("解析参数：%s (无类型)", typeOrName)
-			}
-		}
 
 			// 如果解析失败，跳过当前 token 避免死循环
 			if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
@@ -1336,7 +1336,7 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		p.error("expected '{' to begin function body")
 		return stmt
 	}
-	
+
 	if stmt.IsAsm {
 		source := p.lexer.GetSource()
 		pos := p.lexer.GetPosition()
@@ -1380,7 +1380,7 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 			}
 		}
 	}
-	
+
 	if p.curTok.Type == lexer.TOKEN_RBRACE {
 		p.nextToken()
 	} else {
@@ -1407,7 +1407,7 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 		Pos:  pos,
 	}
 	p.nextToken() // consume 'if'
-	
+
 	// 解析 if 条件表达式
 	// 检查是否有括号
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
@@ -1420,7 +1420,7 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 		// 没有括号，直接解析条件表达式
 		stmt.Condition = p.parseExpressionIterative()
 	}
-	
+
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
@@ -1681,10 +1681,10 @@ func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
 	stmt := &ast.ExportStatement{
 		Pos: pos,
 	}
-	
+
 	// 消耗 export 关键字
 	p.nextToken()
-	
+
 	// 解析导出类型（可选）
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		// 检查是否是类型关键字
@@ -1692,9 +1692,9 @@ func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
 		if lookahead.Type == lexer.TOKEN_IDENT || lookahead.Type == lexer.TOKEN_LPAREN {
 			// 可能是导出函数：export fn name()
 			switch p.curTok.Value {
-		case "fn":
-			stmt.Type = "function"
-			p.nextToken()
+			case "fn":
+				stmt.Type = "function"
+				p.nextToken()
 			case "class":
 				stmt.Type = "class"
 				p.nextToken()
@@ -1702,8 +1702,8 @@ func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
 				stmt.Type = "object"
 				p.nextToken()
 			case "var", "const":
-			stmt.Type = "variable"
-			p.nextToken()
+				stmt.Type = "variable"
+				p.nextToken()
 			default:
 				// 没有类型，直接是名称
 				stmt.Type = "function" // 默认是函数
@@ -1713,7 +1713,7 @@ func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
 			stmt.Type = "function" // 默认是函数
 		}
 	}
-	
+
 	// 解析导出名称
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -1721,7 +1721,7 @@ func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
 	} else {
 		p.error("export 语句后应该跟标识符")
 	}
-	
+
 	return stmt
 }
 
@@ -1759,11 +1759,11 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 		File:   p.file,
 	}
 	stmt := &ast.ClassStatement{
-		Fields:      make([]*ast.FieldDeclaration, 0, 16),
-		Methods:     make([]*ast.MethodStatement, 0, 16),
+		Fields:       make([]*ast.FieldDeclaration, 0, 16),
+		Methods:      make([]*ast.MethodStatement, 0, 16),
 		Constructors: make([]*ast.ConstructorStatement, 0, 4),
-		Implements:  make([]string, 0, 4),
-		Pos:         pos,
+		Implements:   make([]string, 0, 4),
+		Pos:          pos,
 	}
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
@@ -1800,20 +1800,20 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			p.log("当前 token: %s, 开始解析类成员", lexer.TokenTypeToString(p.curTok.Type))
-			
+
 			// 检查是否是类型关键字开头（方法或字段类型）
 			isTypeKeyword := false
 			switch p.curTok.Type {
 			case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
-				 lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
-				 lexer.TOKEN_TYPE_VOID:
+				lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+				lexer.TOKEN_TYPE_VOID:
 				isTypeKeyword = true
 			}
-			
+
 			if p.curTok.Type == lexer.TOKEN_IDENT || isTypeKeyword {
 				savedCurTok := p.curTok
 				savedPeekTok := p.peekTok
-				
+
 				// 先尝试解析为字段声明（name: type;）
 				if p.curTok.Type == lexer.TOKEN_IDENT {
 					if field := p.parseFieldDeclarationIterative(); field != nil {
@@ -1822,21 +1822,21 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 						continue
 					}
 				}
-				
+
 				// 恢复 token 位置，尝试解析为方法
 				p.curTok = savedCurTok
 				p.peekTok = savedPeekTok
-				
+
 				if method := p.parseMethodStatementIterative(); method != nil {
 					p.log("解析完成方法声明：%s", method.String())
 					stmt.Methods = append(stmt.Methods, method)
 					continue
 				}
-				
+
 				// 恢复 token 位置，尝试解析为构造函数
 				p.curTok = savedCurTok
 				p.peekTok = savedPeekTok
-				
+
 				if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == stmt.Name {
 					p.log("开始解析构造函数")
 					constructor := p.parseConstructorStatementIterative()
@@ -1846,7 +1846,7 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 						continue
 					}
 				}
-				
+
 				// 如果都不匹配，跳过 token
 				p.log("跳过 token: %s", lexer.TokenTypeToString(p.curTok.Type))
 				p.nextToken()
@@ -1854,8 +1854,8 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				// fn 关键字开头的方法
 				savedCurTok := p.curTok
 				savedPeekTok := p.peekTok
-				p.nextToken()  // 跳过 fn
-				
+				p.nextToken() // 跳过 fn
+
 				if method := p.parseMethodStatementIterative(); method != nil {
 					p.log("解析完成方法声明：%s", method.String())
 					stmt.Methods = append(stmt.Methods, method)
@@ -1869,8 +1869,8 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				// constructor 关键字开头的构造函数
 				savedCurTok := p.curTok
 				savedPeekTok := p.peekTok
-				p.nextToken()  // 跳过 constructor
-				
+				p.nextToken() // 跳过 constructor
+
 				// 期望构造函数名（类名）
 				if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == stmt.Name {
 					p.log("开始解析构造函数")
@@ -1927,25 +1927,25 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 			isTypeKeyword := false
 			switch p.curTok.Type {
 			case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
-				 lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
-				 lexer.TOKEN_TYPE_VOID:
+				lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+				lexer.TOKEN_TYPE_VOID:
 				isTypeKeyword = true
 			}
-			
+
 			if p.curTok.Type == lexer.TOKEN_FUNC || p.curTok.Type == lexer.TOKEN_IDENT || isTypeKeyword {
 				savedCurTok := p.curTok
 				savedPeekTok := p.peekTok
-				
+
 				// 跳过 fn 关键字（如果存在）
 				if p.curTok.Type == lexer.TOKEN_FUNC {
 					p.nextToken()
 				}
-				
+
 				if method := p.parseMethodStatementIterative(); method != nil {
 					stmt.Methods = append(stmt.Methods, method)
 					continue
 				}
-				
+
 				// 如果解析失败，恢复 token 位置
 				p.curTok = savedCurTok
 				p.peekTok = savedPeekTok
@@ -2037,7 +2037,7 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 	stmt := &ast.TypeAliasStatement{
 		Pos: pos,
 	}
-	
+
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -2046,7 +2046,7 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 		p.error(fmt.Sprintf("expected type name after 'type', got %s", lexer.TokenTypeToString(p.curTok.Type)))
 		return nil
 	}
-	
+
 	// 解析泛型参数（如果存在）
 	if p.curTok.Type == lexer.TOKEN_LT {
 		p.nextToken()
@@ -2064,7 +2064,7 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 		}
 		stmt.Generic = true
 	}
-	
+
 	// 解析 '=' 或直接解析函数类型
 	if p.curTok.Type == lexer.TOKEN_ASSIGN {
 		p.nextToken()
@@ -2074,7 +2074,7 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 		// 函数类型: type Name func(params) returnType
 		stmt.IsFuncType = true
 		p.nextToken() // 跳过 'func'
-		
+
 		// 解析参数列表
 		if p.curTok.Type == lexer.TOKEN_LPAREN {
 			p.nextToken()
@@ -2091,14 +2091,14 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 				p.nextToken()
 			}
 		}
-		
+
 		// 解析返回类型
 		stmt.FuncReturnType = p.parseTypeString()
 	} else {
 		p.error(fmt.Sprintf("expected '=' or 'func' after type name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
 		return nil
 	}
-	
+
 	if stmt.IsFuncType {
 		p.log("函数类型别名解析完成：%s func(...) %s", stmt.Name, stmt.FuncReturnType)
 	} else {
@@ -2117,23 +2117,23 @@ func (p *Parser) parseTypeFuncParam() *ast.TypeFuncParam {
 	param := &ast.TypeFuncParam{
 		Pos: pos,
 	}
-	
+
 	// 解析类型
 	param.Type = p.parseTypeString()
-	
+
 	// 检查是否可空
 	if p.curTok.Type == lexer.TOKEN_QUESTION {
 		param.Nullable = true
 		p.nextToken()
 	}
-	
+
 	return param
 }
 
 // parseTypeString 解析类型字符串（支持指针、数组等复合类型）
 func (p *Parser) parseTypeString() string {
 	var typeStr strings.Builder
-	
+
 	for {
 		switch p.curTok.Type {
 		case lexer.TOKEN_IDENT, lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
@@ -2309,26 +2309,26 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	
+
 	savedCurTok := p.curTok
 	savedPeekTok := p.peekTok
-	
+
 	method := &ast.MethodStatement{
 		Params: []*ast.Param{},
 		Body:   []ast.Statement{},
 		Pos:    pos,
 	}
 	p.log("开始解析方法，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-	
+
 	// 检查是否是类型关键字（string, int, void 等）作为返回类型
 	isTypeKeyword := false
 	switch p.curTok.Type {
-	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE, 
-		 lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING, 
-		 lexer.TOKEN_TYPE_VOID:
+	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+		lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+		lexer.TOKEN_TYPE_VOID:
 		isTypeKeyword = true
 	}
-	
+
 	if p.curTok.Type != lexer.TOKEN_IDENT && !isTypeKeyword && p.curTok.Type != lexer.TOKEN_MULTIPLY {
 		p.log("不是方法声明，返回 nil")
 		p.curTok = savedCurTok
@@ -2394,16 +2394,16 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 	if p.curTok.Type != lexer.TOKEN_RPAREN {
 		for p.curTok.Type != lexer.TOKEN_RPAREN {
 			p.log("解析参数，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-			
+
 			// 检查是否是类型关键字
 			isParamTypeKeyword := false
 			switch p.curTok.Type {
 			case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
-				 lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
-				 lexer.TOKEN_TYPE_VOID:
+				lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+				lexer.TOKEN_TYPE_VOID:
 				isParamTypeKeyword = true
 			}
-			
+
 			if p.curTok.Type != lexer.TOKEN_IDENT && !isParamTypeKeyword {
 				p.log("不是方法声明，返回 nil")
 				p.curTok = savedCurTok
@@ -2514,15 +2514,15 @@ func (p *Parser) parseConstructorStatementIterative() *ast.ConstructorStatement 
 		p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 		for p.curTok.Type != lexer.TOKEN_RPAREN {
 			p.log("解析参数，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-			
+
 			isTypeKeyword := false
 			switch p.curTok.Type {
 			case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
-				 lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
-				 lexer.TOKEN_TYPE_VOID:
+				lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+				lexer.TOKEN_TYPE_VOID:
 				isTypeKeyword = true
 			}
-			
+
 			if p.curTok.Type != lexer.TOKEN_IDENT && !isTypeKeyword {
 				p.error(fmt.Sprintf("expected type name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
 				break
@@ -2619,30 +2619,30 @@ func (p *Parser) parseExpressionIterative() ast.Expression {
 // parseBinaryExpressionIterative 迭代解析二元表达式（使用显式栈）
 func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 	left := p.parsePrimaryExpressionIterative()
-	
+
 	// 如果解析失败，返回 nil
 	if left == nil {
 		return nil
 	}
-	
+
 	// 使用迭代方式处理相同优先级的运算符
 	for {
 		op := p.curTok.Type
 		opPrecedence := p.precedence(op)
-		
+
 		// 如果没有运算符或优先级不够高，退出循环
 		if opPrecedence == 0 || precedence >= opPrecedence {
 			break
 		}
-		
+
 		prevTok := p.curTok
 		p.nextToken()
-		
+
 		// 如果 nextToken 后 token 没变，说明无法解析，跳出循环避免死循环
 		if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
 			break
 		}
-		
+
 		// 解析右侧表达式
 		var right ast.Expression
 		if op == lexer.TOKEN_ASSIGN {
@@ -2652,12 +2652,12 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 			// 其他运算符是左结合的，使用相同的优先级
 			right = p.parseBinaryExpressionIterative(opPrecedence)
 		}
-		
+
 		// 如果右侧解析失败，返回已解析的左侧
 		if right == nil {
 			return left
 		}
-		
+
 		// 构建新的二元表达式
 		left = &ast.BinaryExpression{
 			Left:     left,
@@ -2665,31 +2665,31 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 			Right:    right,
 		}
 	}
-	
+
 	return left
 }
 
 // precedences 运算符优先级表
 var precedences = map[lexer.TokenType]int{
-	lexer.TOKEN_ASSIGN: 1,
-	lexer.TOKEN_OR:     2,
-	lexer.TOKEN_AND:    3,
-	lexer.TOKEN_EQ:     4,
-	lexer.TOKEN_NE:     4,
-	lexer.TOKEN_LT:     5,
-	lexer.TOKEN_GT:     5,
-	lexer.TOKEN_LE:     5,
-	lexer.TOKEN_GE:     5,
-	lexer.TOKEN_LSHIFT: 5,
-	lexer.TOKEN_RSHIFT: 5,
-	lexer.TOKEN_XOR:    4,
-	lexer.TOKEN_PIPE:   4,
+	lexer.TOKEN_ASSIGN:    1,
+	lexer.TOKEN_OR:        2,
+	lexer.TOKEN_AND:       3,
+	lexer.TOKEN_EQ:        4,
+	lexer.TOKEN_NE:        4,
+	lexer.TOKEN_LT:        5,
+	lexer.TOKEN_GT:        5,
+	lexer.TOKEN_LE:        5,
+	lexer.TOKEN_GE:        5,
+	lexer.TOKEN_LSHIFT:    5,
+	lexer.TOKEN_RSHIFT:    5,
+	lexer.TOKEN_XOR:       4,
+	lexer.TOKEN_PIPE:      4,
 	lexer.TOKEN_AMPERSAND: 5,
-	lexer.TOKEN_PLUS:   6,
-	lexer.TOKEN_MINUS:  6,
-	lexer.TOKEN_MULTIPLY: 7,
-	lexer.TOKEN_DIVIDE: 7,
-	lexer.TOKEN_MOD:    7,
+	lexer.TOKEN_PLUS:      6,
+	lexer.TOKEN_MINUS:     6,
+	lexer.TOKEN_MULTIPLY:  7,
+	lexer.TOKEN_DIVIDE:    7,
+	lexer.TOKEN_MOD:       7,
 }
 
 // precedence 获取运算符优先级
@@ -2774,7 +2774,7 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		p.nextToken()
 		if p.curTok.Type == lexer.TOKEN_IDENT {
 			ident := &ast.Identifier{
-				Name: p.curTok.Value,
+				Name:        p.curTok.Value,
 				IsPrefixVar: true,
 			}
 			p.nextToken()
@@ -2956,7 +2956,7 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	
+
 	// 使用 Expression 接口类型，支持 Identifier 和 MemberAccessExpression
 	var expr ast.Expression
 	expr = &ast.Identifier{
@@ -2964,7 +2964,7 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 		Pos:  pos,
 	}
 	p.nextToken()
-	
+
 	// 循环处理多级成员访问和索引访问（如 std.io.println 或 arr[i].field）
 	for {
 		if p.curTok.Type == lexer.TOKEN_DOT {
@@ -3009,35 +3009,35 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 				File:   p.file,
 			}
 			p.nextToken() // consume '['
-			
+
 			indexExpr := &ast.IndexExpression{
 				Pos:    indexPos,
 				Object: expr,
 				Index:  p.parseExpressionIterative(),
 			}
-			
+
 			if p.curTok.Type == lexer.TOKEN_RBRACKET {
 				p.nextToken()
 			} else {
 				p.error(fmt.Sprintf("expected ']', got %s", lexer.TokenTypeToString(p.curTok.Type)))
 			}
-			
+
 			expr = indexExpr
 		} else {
 			break
 		}
 	}
-	
+
 	// 检查是否是函数调用（含泛型调用 identity<int>(42)）
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		return p.parseCallExpressionIterative(expr)
 	}
-	
+
 	// 泛型调用：必须是 < 后跟类型名（避免与比较运算符 < 混淆）
 	if p.curTok.Type == lexer.TOKEN_LT && p.looksLikeGenericArgs() {
 		return p.parseCallExpressionIterative(expr)
 	}
-	
+
 	return expr
 }
 
@@ -3111,7 +3111,7 @@ func (p *Parser) isTypeCastExpression() bool {
 	// 保存当前状态
 	savedCur := p.curTok
 	savedPeek := p.peekTok
-	
+
 	// 尝试向前看：需要是 (类型)( 的形式
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
@@ -3144,10 +3144,10 @@ func (p *Parser) parseTypeCastExpressionIterative() *ast.TypeCastExpression {
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	
+
 	// 跳过 (
 	p.nextToken()
-	
+
 	// 解析目标类型
 	targetType := ""
 	if p.isTypeToken(p.curTok.Type) {
@@ -3158,25 +3158,25 @@ func (p *Parser) parseTypeCastExpressionIterative() *ast.TypeCastExpression {
 		targetType = p.curTok.Value
 	}
 	p.nextToken()
-	
+
 	// 跳过 )
 	if p.curTok.Type == lexer.TOKEN_RPAREN {
 		p.nextToken()
 	}
-	
+
 	// 跳过 (
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
 	}
-	
+
 	// 解析内部表达式
 	expr := p.parseExpressionIterative()
-	
+
 	// 跳过 )
 	if p.curTok.Type == lexer.TOKEN_RPAREN {
 		p.nextToken()
 	}
-	
+
 	return &ast.TypeCastExpression{
 		TargetType: targetType,
 		Expression: expr,
@@ -3235,7 +3235,7 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 		Function: function,
 		Args:     []ast.Expression{},
 	}
-	
+
 	// 解析泛型参数（如果存在），语法: fn<T>(args)
 	if p.curTok.Type == lexer.TOKEN_LT {
 		p.nextToken()
@@ -3252,21 +3252,21 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 			p.nextToken()
 		}
 	}
-	
+
 	// 当前 token 必须是 LPAREN
 	if p.curTok.Type != lexer.TOKEN_LPAREN {
 		return nil
 	}
 	p.nextToken()
-	
+
 	for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
 		prevTok := p.curTok
-		
+
 		// 如果当前 token 是 RPAREN、COMMA 或 RBRACE，说明参数解析应该结束
 		if p.curTok.Type == lexer.TOKEN_RPAREN || p.curTok.Type == lexer.TOKEN_COMMA || p.curTok.Type == lexer.TOKEN_RBRACE {
 			break
 		}
-		
+
 		if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
 			p.nextToken()
 			p.nextToken()
@@ -3280,12 +3280,12 @@ func (p *Parser) parseCallExpressionIterative(function ast.Expression) ast.Expre
 				call.Args = append(call.Args, arg)
 			}
 		}
-		
+
 		// 如果 parseExpressionIterative 没有消费任何 token，跳过当前 token 避免死循环
 		if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
 			p.nextToken()
 		}
-		
+
 		if p.curTok.Type == lexer.TOKEN_COMMA {
 			p.nextToken()
 		}
@@ -3321,7 +3321,7 @@ func (p *Parser) parseIndexExpressionIterative() ast.Expression {
 	} else {
 		p.error(fmt.Sprintf("expected ']', got %s", lexer.TokenTypeToString(p.curTok.Type)))
 	}
-	
+
 	// 处理索引后的成员访问（如 arr[i].field）
 	expr := ast.Expression(index)
 	for p.curTok.Type == lexer.TOKEN_DOT {
@@ -3334,13 +3334,13 @@ func (p *Parser) parseIndexExpressionIterative() ast.Expression {
 				File:   p.file,
 			}
 			p.nextToken()
-			
+
 			expr = &ast.MemberAccessExpression{
 				Object: expr,
 				Member: memberName,
 				Pos:    memberPos,
 			}
-			
+
 			// 如果后面还有 LPAREN，说明是函数调用
 			if p.curTok.Type == lexer.TOKEN_LPAREN {
 				return p.parseCallExpressionIterative(expr)
@@ -3349,7 +3349,7 @@ func (p *Parser) parseIndexExpressionIterative() ast.Expression {
 			break
 		}
 	}
-	
+
 	return expr
 }
 
@@ -3564,14 +3564,14 @@ func (p *Parser) error(message string) {
 	suggestion := errors.GenerateSuggestion(message)
 	context, sourceLine, lineNumStr := errors.ExtractSourceContext(p.lexer.GetSource(), p.curTok.Line, p.curTok.Column)
 	err := &errors.Error{
-		Type:       errors.ErrorSyntax,
-		Message:    message,
-		Line:       p.curTok.Line,
-		Column:     p.curTok.Column,
-		File:       p.file,
-		Suggestion: suggestion,
+		Type:          errors.ErrorSyntax,
+		Message:       message,
+		Line:          p.curTok.Line,
+		Column:        p.curTok.Column,
+		File:          p.file,
+		Suggestion:    suggestion,
 		SourceContext: context,
-		SourceLine: sourceLine,
+		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
 	}
 	p.errorCollector.AddErrorInstance(err)
@@ -3624,7 +3624,7 @@ func (p *Parser) Parse() *ast.Program {
 // Validate 验证 AST 的数据完整性
 func (p *Parser) Validate(program *ast.Program) {
 	p.log("开始验证 AST 数据完整性")
-	
+
 	functionNames := make(map[string]bool)
 	hasMain := false
 	for _, stmt := range program.Statements {
@@ -3641,11 +3641,11 @@ func (p *Parser) Validate(program *ast.Program) {
 			}
 		}
 	}
-	
+
 	if !hasMain && !p.skipMainCheck {
 		p.error("找不到 main 函数")
 	}
-	
+
 	for _, stmt := range program.Statements {
 		if spendStmt, ok := stmt.(*ast.SpendStatement); ok {
 			if spendStmt.Target == nil {
@@ -3674,7 +3674,7 @@ func (p *Parser) Validate(program *ast.Program) {
 			}
 		}
 	}
-	
+
 	for _, stmt := range program.Statements {
 		if objStmt, ok := stmt.(*ast.ObjectStatement); ok {
 			if objStmt.Type == "" {
@@ -3685,12 +3685,12 @@ func (p *Parser) Validate(program *ast.Program) {
 			}
 		}
 	}
-	
+
 	validModules := map[string]bool{
 		// 基础模块
-		"std":        true,
-		"std.base":   true,
-		
+		"std":      true,
+		"std.base": true,
+
 		// 标准库模块（带 std. 前缀）
 		"std.io":         true,
 		"std.string":     true,
@@ -3714,7 +3714,7 @@ func (p *Parser) Validate(program *ast.Program) {
 		"std.testing":    true,
 		"std.i18n":       true,
 		"std.gui":        true,
-		
+
 		// 兼容旧版（不带 std. 前缀）
 		"io":         true,
 		"string":     true,
@@ -3728,12 +3728,12 @@ func (p *Parser) Validate(program *ast.Program) {
 		"concurrent": true,
 		"error":      true,
 		"base":       true,
-		
+
 		// 系统模块
-		"windows":    true,
-		"syscall":    true,
+		"windows": true,
+		"syscall": true,
 	}
-	
+
 	// 加载第三方库配置，将第三方库名称添加到有效模块列表
 	// 尝试多个路径
 	stdlibPaths := []string{"stdlib.json", "kaula-compiler/stdlib.json", "../stdlib.json"}
@@ -3752,7 +3752,7 @@ func (p *Parser) Validate(program *ast.Program) {
 			break // 加载成功后退出
 		}
 	}
-	
+
 	for _, stmt := range program.Statements {
 		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
 			if importStmt.Module == "" {
@@ -3780,7 +3780,7 @@ func (p *Parser) Validate(program *ast.Program) {
 			}
 		}
 	}
-	
+
 	if p.HasErrors() {
 		p.log("验证完成，发现验证错误")
 	} else {

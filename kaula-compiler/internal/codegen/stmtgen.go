@@ -29,7 +29,7 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	if code, ok := sg.codegen.pluginManager.GenerateStatement(stmt, sg.codegen); ok {
 		return code
 	}
-	
+
 	switch s := stmt.(type) {
 	case *ast.GenericInstance:
 		return sg.generateGenericInstantiation(s)
@@ -121,7 +121,7 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	if stmt.IsAuto {
 		return sg.generateAutoDeclaration(stmt)
 	}
-	
+
 	// const 变量：纯编译期常量，不参与运行时内存分配
 	if stmt.IsConst {
 		if evaluated := sg.codegen.tryEvalConstExpr(stmt.Value); evaluated != "" {
@@ -132,11 +132,11 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		}
 		return ""
 	}
-	
+
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
-	
+
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
-	
+
 	var builder strings.Builder
 	builder.Grow(128)
 
@@ -174,7 +174,7 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	builder.WriteString(cType)
 	builder.WriteByte(' ')
 	builder.WriteString(stmt.Name)
-	
+
 	if stmt.Value != nil {
 		builder.WriteString(" = ")
 		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
@@ -191,18 +191,18 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 		sg.codegen.error(fmt.Sprintf("编译错误：auto 变量 '%s' 类型推导失败，无法生成代码。请显式声明类型。", stmt.Name))
 		return fmt.Sprintf("// ERROR: auto '%s' type not inferred - compilation should have stopped\n", stmt.Name)
 	}
-	
+
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
-	
+
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, false)
-	
+
 	var builder strings.Builder
 	builder.Grow(64)
-	
+
 	builder.WriteString(cType)
 	builder.WriteByte(' ')
 	builder.WriteString(stmt.Name)
-	
+
 	if stmt.Value != nil {
 		builder.WriteString(" = ")
 		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
@@ -273,28 +273,28 @@ func (sg *StatementGenerator) generateExpressionInMain(expr ast.Expression) stri
 // generateGenericInstantiation 生成泛型实例化代码（编译期特化，零成本）
 func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInstance) string {
 	var code string
-	
+
 	// 1. 查找原始泛型函数定义
 	origFunc := sg.codegen.findFunctionByName(inst.OriginalName)
 	if origFunc == nil {
 		return fmt.Sprintf("// Error: Generic function '%s' not found for instantiation\n", inst.OriginalName)
 	}
-	
+
 	// 2. 将 TypeArguments 转换为字符串数组
 	typeArgStrings := make([]string, len(inst.TypeArguments))
 	for i, ta := range inst.TypeArguments {
 		typeArgStrings[i] = ta.Type
 	}
-	
+
 	// 3. 生成特化后的函数名（添加 kaula_ 前缀避免与 C 宏冲突）
 	specializedName := "kaula_" + inst.OriginalName + "_" + strings.Join(typeArgStrings, "_")
-	
+
 	// 4. 检查是否已实例化过（避免重复生成）
 	if sg.codegen.IsGenericInstantiated(specializedName) {
 		return ""
 	}
 	sg.codegen.MarkGenericInstantiated(specializedName)
-	
+
 	// 5. 构建类型映射
 	typeMap := make(map[string]string)
 	for i, tp := range origFunc.TypeParams {
@@ -302,24 +302,26 @@ func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInst
 			typeMap[tp.Name] = typeArgStrings[i]
 		}
 	}
-	
+
 	// 6. 实例化返回类型
 	specializedReturnType := sg.resolveSpecializedType(origFunc.ReturnType, typeArgStrings)
-	
+
 	// 7. 生成特化函数签名
 	code += fmt.Sprintf("// 泛型特化实例: %s<%s>\n", inst.OriginalName, strings.Join(typeArgStrings, ", "))
 	code += fmt.Sprintf("static inline %s %s(", specializedReturnType, specializedName)
-	
+
 	// 8. 生成特化后的参数列表
 	for i, param := range origFunc.Params {
-		if i > 0 { code += ", " }
+		if i > 0 {
+			code += ", "
+		}
 		// 参数名保持不变，但类型需要特化
 		// 注意：这里的 param 是参数名，类型信息需要从原函数获取
 		// 简化处理：使用 int64_t 作为默认类型（实际应该从 AST 获取参数类型）
 		code += fmt.Sprintf("int64_t %s", param)
 	}
 	code += ") {\n"
-	
+
 	// 9. 生成函数体（精确替换泛型类型，避免误替换）
 	sg.codegen.indent++
 	for _, bodyStmt := range origFunc.Body {
@@ -327,7 +329,7 @@ func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInst
 		code += sg.codegen.indentString() + generated
 	}
 	sg.codegen.indent--
-	
+
 	code += "}\n\n"
 	return code
 }
@@ -335,7 +337,7 @@ func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInst
 // generateStatementForGeneric 在泛型实例化中生成语句代码（精确类型替换）
 func (sg *StatementGenerator) generateStatementForGeneric(stmt ast.Statement, typeMap map[string]string) string {
 	generated := sg.codegen.generateStatement(stmt)
-	
+
 	// 精确替换类型声明中的泛型参数
 	// 匹配模式： "T " (类型后跟空格) 或 "T*" (类型后跟指针) 或 "T;" (类型后跟分号)
 	for origType, newType := range typeMap {
@@ -344,7 +346,7 @@ func (sg *StatementGenerator) generateStatementForGeneric(stmt ast.Statement, ty
 		generated = strings.ReplaceAll(generated, origType+"*", newType+"*")
 		generated = strings.ReplaceAll(generated, origType+";", newType+";")
 	}
-	
+
 	return generated
 }
 
@@ -480,7 +482,7 @@ func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression
 		// 匹配 $paramName 后面不是字母数字或下划线的情况
 		paramRegex[paramName] = regexp.MustCompile(`\$` + regexp.QuoteMeta(paramName) + `([^a-zA-Z0-9_]|$)`)
 	}
-	
+
 	paramMap := make(map[string]string)
 	for paramName, paramValue := range e.Params {
 		valueCode := sg.codegen.expressionGenerator.GenerateExpression(paramValue)
@@ -795,8 +797,8 @@ func (sg *StatementGenerator) needsKMMScope(bodyCode string) bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" && 
-				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" &&
+					sym.Scope != "async_param" && sym.Scope != "task_param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -824,8 +826,8 @@ func (sg *StatementGenerator) shouldUseKMMScope() bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" && 
-				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" &&
+					sym.Scope != "async_param" && sym.Scope != "task_param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -837,8 +839,8 @@ func (sg *StatementGenerator) shouldUseKMMScope() bool {
 	currentScope := sg.codegen.GetCurrentScope()
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "parameter" || sym.Scope == "param" || 
-			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" ||
+				sym.Scope == "async_param" || sym.Scope == "task_param" {
 				continue
 			}
 			if needsKMMForType(sym.Type) {
@@ -1077,10 +1079,10 @@ func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement
 // 基于符号表分析变量类型，判断是否需要 KMM scope
 func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 	// 快速检查：如果代码中没有内存分配相关操作，直接返回 false
-	if !strings.Contains(bodyCode, "std_malloc") && 
-	   !strings.Contains(bodyCode, "kmm_v4") &&
-	   !strings.Contains(bodyCode, "string_concat") &&
-	   !strings.Contains(bodyCode, "string_dup") {
+	if !strings.Contains(bodyCode, "std_malloc") &&
+		!strings.Contains(bodyCode, "kmm_v4") &&
+		!strings.Contains(bodyCode, "string_concat") &&
+		!strings.Contains(bodyCode, "string_dup") {
 		return false
 	}
 
@@ -1089,8 +1091,8 @@ func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
 			// 排除函数参数
-			if sym.Scope == "parameter" || sym.Scope == "param" || 
-			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" ||
+				sym.Scope == "async_param" || sym.Scope == "task_param" {
 				continue
 			}
 			// 检查变量类型是否需要 KMM
@@ -1118,32 +1120,32 @@ func needsKMMForType(typeName string) bool {
 		return false
 	}
 	t := strings.ToLower(typeName)
-	
+
 	// 指针类型
 	if strings.Contains(t, "*") {
 		return true
 	}
-	
+
 	// 字符串类型
 	if t == "string" || t == "str" {
 		return true
 	}
-	
+
 	// 切片类型
 	if strings.HasPrefix(t, "[]") {
 		return true
 	}
-	
+
 	// Map 类型
 	if strings.HasPrefix(t, "map[") {
 		return true
 	}
-	
+
 	// 数组类型（大数组可能需要 KMM，但这里保守处理）
 	if strings.HasPrefix(t, "[") {
 		return true
 	}
-	
+
 	// 值类型不需要 KMM
 	switch t {
 	case "int", "int8", "int16", "int32", "int64",
@@ -1155,7 +1157,7 @@ func needsKMMForType(typeName string) bool {
 		"isize", "usize", "size", "void":
 		return false
 	}
-	
+
 	// 其他未知类型，保守处理为需要 KMM
 	return true
 }
@@ -1423,7 +1425,7 @@ func (sg *StatementGenerator) generateImportStatement(stmt *ast.ImportStatement)
 // generateExportStatement 生成 export 语句代码
 func (sg *StatementGenerator) generateExportStatement(stmt *ast.ExportStatement) string {
 	code := ""
-	
+
 	// 根据导出类型生成不同的代码
 	switch stmt.Type {
 	case "function":
@@ -1442,7 +1444,7 @@ func (sg *StatementGenerator) generateExportStatement(stmt *ast.ExportStatement)
 		code += fmt.Sprintf("// Export: %s (%s)\n", stmt.Name, stmt.Type)
 		code += fmt.Sprintf("KAULA_EXPORT %s;\n", stmt.Name)
 	}
-	
+
 	return code
 }
 
@@ -1553,11 +1555,11 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 
 // mallocAnalysis 分析结果结构
 type mallocAnalysis struct {
-	count       int   // malloc 调用总数
-	totalSize   int   // 所有 malloc 大小之和（仅计算已知大小）
-	allKnown    bool  // 是否所有 malloc 大小都已知
-	sizes       []int // 每个 malloc 的大小（0 表示未知）
-	isContiguous bool // malloc 是否连续出现（中间无其他语句）
+	count        int   // malloc 调用总数
+	totalSize    int   // 所有 malloc 大小之和（仅计算已知大小）
+	allKnown     bool  // 是否所有 malloc 大小都已知
+	sizes        []int // 每个 malloc 的大小（0 表示未知）
+	isContiguous bool  // malloc 是否连续出现（中间无其他语句）
 }
 
 // analyzeBlockMallocs 分析块语句中的 malloc 调用，判断是否可以批量分配
@@ -1570,10 +1572,10 @@ func (sg *StatementGenerator) analyzeBlockMallocs(stmts []ast.Statement) (canBat
 // analyzeBlockMallocsDetailed 返回详细的 malloc 分析结果
 func (sg *StatementGenerator) analyzeBlockMallocsDetailed(stmts []ast.Statement) mallocAnalysis {
 	result := mallocAnalysis{
-		count:       0,
-		totalSize:   0,
-		allKnown:    true,
-		sizes:       make([]int, 0),
+		count:        0,
+		totalSize:    0,
+		allKnown:     true,
+		sizes:        make([]int, 0),
 		isContiguous: true,
 	}
 
@@ -1584,10 +1586,10 @@ func (sg *StatementGenerator) analyzeBlockMallocsDetailed(stmts []ast.Statement)
 		if stmt == nil {
 			continue
 		}
-		
+
 		isMalloc := false
 		sizeBytes := 0
-		
+
 		switch s := stmt.(type) {
 		case *ast.VariableDeclaration:
 			if s.Value != nil {
@@ -1610,7 +1612,7 @@ func (sg *StatementGenerator) analyzeBlockMallocsDetailed(stmts []ast.Statement)
 				}
 			}
 		}
-		
+
 		if isMalloc {
 			result.count++
 			result.sizes = append(result.sizes, sizeBytes)
@@ -1619,7 +1621,7 @@ func (sg *StatementGenerator) analyzeBlockMallocsDetailed(stmts []ast.Statement)
 			} else {
 				result.allKnown = false
 			}
-			
+
 			// 检查连续性：如果之前有非 malloc 语句，则不连续
 			if hasOtherStmts && !lastWasMalloc {
 				result.isContiguous = false
@@ -1655,12 +1657,12 @@ func (sg *StatementGenerator) extractMallocSizeBytes(call *ast.CallExpression) i
 		return 0
 	}
 	arg := call.Args[0]
-	
+
 	// 整数字面量：直接返回
 	if lit, ok := arg.(*ast.IntegerLiteral); ok {
 		return int(lit.Value)
 	}
-	
+
 	// sizeof 表达式：尝试从类型系统获取大小
 	if sizeOf, ok := arg.(*ast.SizeOfExpression); ok {
 		// 使用 TypeGenerator 获取类型大小
@@ -1670,7 +1672,7 @@ func (sg *StatementGenerator) extractMallocSizeBytes(call *ast.CallExpression) i
 		// 如果无法确定大小，返回 0（让优化走 offset_save/restore 路径）
 		return 0
 	}
-	
+
 	return 0
 }
 

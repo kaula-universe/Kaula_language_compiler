@@ -7,9 +7,9 @@ import (
 
 // VOData 表示VO中的数据
 type VOData struct {
-	Value    interface{}
-	Code     func(interface{}) interface{}
-	HasCode  bool
+	Value      interface{}
+	Code       func(interface{}) interface{}
+	HasCode    bool
 	LastAccess int64 // 用于LRU
 	CodeIndex  int   // 关联的代码索引
 }
@@ -37,8 +37,8 @@ func (vo *VOModule) DataLoad(index int, value interface{}) {
 	defer vo.Mutex.Unlock()
 	if index >= 0 && index < vo.CacheMax {
 		vo.DataCache[index] = VOData{
-			Value:    value,
-			HasCode:  false,
+			Value:      value,
+			HasCode:    false,
 			LastAccess: time.Now().UnixNano(),
 			CodeIndex:  -1,
 		}
@@ -47,8 +47,8 @@ func (vo *VOModule) DataLoad(index int, value interface{}) {
 		evictIndex := vo.findLRUVictim()
 		if evictIndex >= 0 {
 			vo.DataCache[evictIndex] = VOData{
-				Value:    value,
-				HasCode:  false,
+				Value:      value,
+				HasCode:    false,
 				LastAccess: time.Now().UnixNano(),
 				CodeIndex:  -1,
 			}

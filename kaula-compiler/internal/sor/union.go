@@ -187,13 +187,13 @@ func (ua *UnionAnalyzer) AnalyzeUnionReleases(
 
 		// 构建基础分析结果
 		info := &UnionReleaseInfo{
-			SourceID:    sourceID,
-			SourceName:  sourceObj.Name,
-			HolderIDs:   holderIDs,
-			HolderNames: holderNames,
-			IsUnion:     isUnion,
-			Elected:     make([]bool, len(holderIDs)),
-			ZeroCopy:    make([]bool, len(holderIDs)),
+			SourceID:      sourceID,
+			SourceName:    sourceObj.Name,
+			HolderIDs:     holderIDs,
+			HolderNames:   holderNames,
+			IsUnion:       isUnion,
+			Elected:       make([]bool, len(holderIDs)),
+			ZeroCopy:      make([]bool, len(holderIDs)),
 			CleanupHolder: -1,
 		}
 

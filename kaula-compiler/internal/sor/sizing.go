@@ -16,25 +16,25 @@ import (
 // 覆盖 Kaula 语言中所有标量类型及其别名
 var builtinSizes = map[string]int{
 	// 1 字节
-	"int8":  1, "uint8": 1, "byte": 1, "bool": 1,
+	"int8": 1, "uint8": 1, "byte": 1, "bool": 1,
 	// 2 字节
 	"int16": 2, "uint16": 2,
 	// 4 字节
-	"int32":  4, "uint32": 4, "float32": 4, "f32": 4, "float": 4,
+	"int32": 4, "uint32": 4, "float32": 4, "f32": 4, "float": 4,
 	// 8 字节
-	"int64":   8, "uint64": 8, "float64": 8,
-	"int":     8, "uint":     8,
-	"size":    8, "isize": 8, "usize": 8,
-	"double":  8, "f64":      8,
-	"i64":     8, "u64":      8,
+	"int64": 8, "uint64": 8, "float64": 8,
+	"int": 8, "uint": 8,
+	"size": 8, "isize": 8, "usize": 8,
+	"double": 8, "f64": 8,
+	"i64": 8, "u64": 8,
 }
 
 // TypeSizer 类型大小估算器
 // 维护一个 typeName -> 字节大小的缓存，避免重复计算。
 // pointerSize 为平台指针大小，默认 8（64 位平台）。
 type TypeSizer struct {
-	cache        map[string]int // typeName -> 字节大小
-	pointerSize  int            // 平台指针大小（默认 8）
+	cache        map[string]int      // typeName -> 字节大小
+	pointerSize  int                 // 平台指针大小（默认 8）
 	structFields map[string][]string // 自定义结构体的字段类型注册表
 }
 

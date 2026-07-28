@@ -16,20 +16,20 @@ type Function struct {
 }
 
 type Module struct {
-	Header    string                `json:"header"`
-	Prefix    string                `json:"prefix,omitempty"`
+	Header    string              `json:"header"`
+	Prefix    string              `json:"prefix,omitempty"`
 	Functions map[string]Function `json:"functions"`
 }
 
 type ThirdPartyLibrary struct {
-	Name string `json:"name"`
-	Headers []string `json:"headers"`
-	Libraries []string `json:"libraries"`
-	Type string `json:"type,omitempty"`
-	ImplementMacro string `json:"implement_macro,omitempty"`
-	Functions map[string]Function `json:"functions"`
-	IncludePath string `json:"include_path,omitempty"`
-	LibraryPath string `json:"library_path,omitempty"`
+	Name           string              `json:"name"`
+	Headers        []string            `json:"headers"`
+	Libraries      []string            `json:"libraries"`
+	Type           string              `json:"type,omitempty"`
+	ImplementMacro string              `json:"implement_macro,omitempty"`
+	Functions      map[string]Function `json:"functions"`
+	IncludePath    string              `json:"include_path,omitempty"`
+	LibraryPath    string              `json:"library_path,omitempty"`
 }
 
 type StdlibConfig struct {
@@ -38,8 +38,8 @@ type StdlibConfig struct {
 }
 
 var (
-	configCache     map[string]*StdlibConfig
-	configCacheMu   sync.RWMutex
+	configCache   map[string]*StdlibConfig
+	configCacheMu sync.RWMutex
 )
 
 func init() {
@@ -48,18 +48,18 @@ func init() {
 
 func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 	libraries := []ThirdPartyLibrary{}
-	
+
 	// 检查 pkglib 目录是否存在
 	if _, err := os.Stat(pkglibPath); os.IsNotExist(err) {
 		return libraries, nil // pkglib 不存在时返回空列表
 	}
-	
+
 	// 遍历 pkglib 目录中的所有子目录
 	entries, err := os.ReadDir(pkglibPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read pkglib directory: %w", err)
 	}
-	
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -106,7 +106,7 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 		libraries = append(libraries, libConfig)
 		fmt.Printf("Loaded third-party library: %s from %s\n", libConfig.Name, configFile)
 	}
-	
+
 	return libraries, nil
 }
 
@@ -139,7 +139,7 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 
 	for moduleName, rawData := range rawModules {
 		var moduleWithHeader struct {
-			Header    string                `json:"header"`
+			Header    string              `json:"header"`
 			Functions map[string]Function `json:"functions"`
 		}
 		if err := json.Unmarshal(rawData, &moduleWithHeader); err == nil && len(moduleWithHeader.Functions) > 0 {
@@ -159,7 +159,7 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 				}
 			}
 		}
-		
+
 		flatFunctions := make(map[string]Function)
 		if rawMap != nil {
 			for key, value := range rawMap {
@@ -178,7 +178,7 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 				}
 			}
 		}
-		
+
 		config.Modules[moduleName] = Module{
 			Header:    header,
 			Functions: flatFunctions,
@@ -197,7 +197,7 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 			}
 		}
 	}
-	
+
 	exePath, err := os.Executable()
 	if err != nil {
 		exePath = configPath
@@ -209,7 +209,7 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 		filepath.Join(exeDir, "..", "pkglib"),
 		"pkglib",
 	}
-	
+
 	for _, pkglibPath := range pkglibPaths {
 		if _, err := os.Stat(pkglibPath); err == nil {
 			pkgLibraries, loadErr := LoadPkgLibraries(pkglibPath)
@@ -257,7 +257,7 @@ func (sc *StdlibConfig) GetCFunctionName(moduleName, funcName string) string {
 		if module.Prefix != "" {
 			return module.Prefix + funcName
 		}
-		
+
 		// 通过后缀匹配查找
 		suffix := "_" + funcName
 		for cFuncName := range module.Functions {
@@ -265,7 +265,7 @@ func (sc *StdlibConfig) GetCFunctionName(moduleName, funcName string) string {
 				return cFuncName
 			}
 		}
-		
+
 		// 最后尝试直接匹配
 		if _, exists := module.Functions[funcName]; exists {
 			return funcName

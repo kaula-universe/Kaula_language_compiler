@@ -23,15 +23,15 @@ const (
 
 // Error 表示一个错误
 type Error struct {
-	Type     ErrorType
-	Message  string
-	Line     int
-	Column   int
-	File     string
-	Suggestion string
+	Type          ErrorType
+	Message       string
+	Line          int
+	Column        int
+	File          string
+	Suggestion    string
 	SourceContext string // 源码上下文
-	SourceLine      string // 错误所在的源码行
-	LineNumberStr   string // 行号字符串（用于对齐）
+	SourceLine    string // 错误所在的源码行
+	LineNumberStr string // 行号字符串（用于对齐）
 }
 
 // String 实现error接口
@@ -235,15 +235,15 @@ func FormatErrorPosition(file string, line, column int) string {
 // GenerateSuggestion 根据错误信息生成建议
 func GenerateSuggestion(message string) string {
 	suggestions := map[string]string{
-		"unterminated string": "Make sure to close all string literals with quotes",
-		"unexpected token": "Check for missing or extra punctuation",
-		"function name already exists": "Choose a different name for the function",
-		"prefix name already exists": "Choose a different name for the prefix",
-		"object statement missing type": "Add a type for the object",
-		"object statement missing name": "Add a name for the object",
-		"spend statement missing expression": "Add an expression to the spend statement",
+		"unterminated string":                     "Make sure to close all string literals with quotes",
+		"unexpected token":                        "Check for missing or extra punctuation",
+		"function name already exists":            "Choose a different name for the function",
+		"prefix name already exists":              "Choose a different name for the prefix",
+		"object statement missing type":           "Add a type for the object",
+		"object statement missing name":           "Add a name for the object",
+		"spend statement missing expression":      "Add an expression to the spend statement",
 		"spend statement missing call statements": "Add call statements to the spend block",
-		"prefix statement missing name": "Add a name for the prefix",
+		"prefix statement missing name":           "Add a name for the prefix",
 	}
 
 	for key, suggestion := range suggestions {

@@ -15,10 +15,10 @@ type Analyzer struct {
 
 // Scope 表示作用域
 type Scope struct {
-	name     string
-	parent   *Scope
-	symbols  map[string]*Symbol
-	depth    int
+	name    string
+	parent  *Scope
+	symbols map[string]*Symbol
+	depth   int
 }
 
 // Symbol 表示符号
@@ -71,7 +71,7 @@ func (a *Analyzer) ExitScope() {
 // AddSymbol 添加一个符号到当前作用域
 func (a *Analyzer) AddSymbol(name, typeName string, nullable bool, line, column int) {
 	if _, exists := a.currentScope.symbols[name]; exists {
-		a.errorCollector.AddSemanticError("Variable already declared: " + name, line, column, "", "Rename the variable or remove the duplicate declaration")
+		a.errorCollector.AddSemanticError("Variable already declared: "+name, line, column, "", "Rename the variable or remove the duplicate declaration")
 		return
 	}
 	a.currentScope.symbols[name] = &Symbol{
@@ -106,7 +106,7 @@ func (a *Analyzer) Analyze(program *ast.Program) bool {
 			a.importedModules[importStmt.Module] = true
 		}
 	}
-	
+
 	// 第二遍：分析所有语句
 	for _, stmt := range program.Statements {
 		a.analyzeStatement(stmt)
@@ -142,19 +142,19 @@ func (a *Analyzer) analyzeStatement(stmt ast.Statement) {
 func (a *Analyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclaration) {
 	// 检查变量名是否合法
 	if !isValidIdentifier(stmt.Name) {
-		a.errorCollector.AddSemanticError("Invalid variable name: " + stmt.Name, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid identifier starting with a letter or underscore")
+		a.errorCollector.AddSemanticError("Invalid variable name: "+stmt.Name, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid identifier starting with a letter or underscore")
 		return
 	}
-	
+
 	// 检查类型是否合法
 	if !isValidType(stmt.Type) {
-		a.errorCollector.AddSemanticError("Invalid type: " + stmt.Type, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid type (int, float, bool, string)")
+		a.errorCollector.AddSemanticError("Invalid type: "+stmt.Type, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid type (int, float, bool, string)")
 		return
 	}
-	
+
 	// 添加变量到符号表
 	a.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, stmt.Pos.Line, stmt.Pos.Column)
-	
+
 	// 分析初始化表达式
 	if stmt.Value != nil {
 		a.analyzeExpression(stmt.Value)
@@ -169,27 +169,27 @@ func (a *Analyzer) analyzeFunctionStatement(stmt *ast.FunctionStatement) {
 		a.errorCollector.AddError(errors.ErrorSemantic, "Invalid function name: "+stmt.Name, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid identifier starting with a letter or underscore")
 		return
 	}
-	
+
 	// 添加函数到符号表
 	a.AddSymbol(stmt.Name, "function", false, stmt.Pos.Line, stmt.Pos.Column)
-	
+
 	// 进入函数作用域
 	a.EnterScope("function_" + stmt.Name)
-	
+
 	// 分析函数参数
 	for _, param := range stmt.Params {
 		if !isValidIdentifier(param) {
-				a.errorCollector.AddError(errors.ErrorSemantic, "Invalid parameter name: "+param, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid identifier starting with a letter or underscore")
-				continue
-			}
+			a.errorCollector.AddError(errors.ErrorSemantic, "Invalid parameter name: "+param, stmt.Pos.Line, stmt.Pos.Column, "", "Use a valid identifier starting with a letter or underscore")
+			continue
+		}
 		a.AddSymbol(param, "void*", false, stmt.Pos.Line, stmt.Pos.Column)
 	}
-	
+
 	// 分析函数体
 	for _, bodyStmt := range stmt.Body {
 		a.analyzeStatement(bodyStmt)
 	}
-	
+
 	// 退出函数作用域
 	a.ExitScope()
 }
@@ -198,14 +198,14 @@ func (a *Analyzer) analyzeFunctionStatement(stmt *ast.FunctionStatement) {
 func (a *Analyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	// 分析条件表达式
 	a.analyzeExpression(stmt.Condition)
-	
+
 	// 分析if块
 	a.EnterScope("if")
 	for _, bodyStmt := range stmt.Body {
 		a.analyzeStatement(bodyStmt)
 	}
 	a.ExitScope()
-	
+
 	// 分析else块
 	if len(stmt.Else) > 0 {
 		a.EnterScope("else")
@@ -220,7 +220,7 @@ func (a *Analyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 func (a *Analyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	// 分析条件表达式
 	a.analyzeExpression(stmt.Condition)
-	
+
 	// 分析循环体
 	a.EnterScope("while")
 	for _, bodyStmt := range stmt.Body {
@@ -268,12 +268,12 @@ func isRangeCall(expr ast.Expression) bool {
 func (a *Analyzer) analyzeBlockStatement(stmt *ast.BlockStatement) {
 	// 进入块作用域
 	a.EnterScope("block")
-	
+
 	// 分析块内语句
 	for _, bodyStmt := range stmt.Statements {
 		a.analyzeStatement(bodyStmt)
 	}
-	
+
 	// 退出块作用域
 	a.ExitScope()
 }
@@ -324,10 +324,10 @@ func (a *Analyzer) analyzeIdentifier(expr *ast.Identifier) {
 func (a *Analyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) {
 	// 分析左操作数
 	a.analyzeExpression(expr.Left)
-	
+
 	// 分析右操作数
 	a.analyzeExpression(expr.Right)
-	
+
 	// TODO: 类型检查
 }
 
@@ -355,10 +355,10 @@ func (a *Analyzer) analyzeCallExpression(expr *ast.CallExpression) {
 			}
 		}
 	}
-	
+
 	// 分析函数表达式
 	a.analyzeExpression(expr.Function)
-	
+
 	// 分析参数表达式
 	for _, arg := range expr.Args {
 		a.analyzeExpression(arg)
@@ -369,7 +369,7 @@ func (a *Analyzer) analyzeCallExpression(expr *ast.CallExpression) {
 func (a *Analyzer) analyzeIndexExpression(expr *ast.IndexExpression) {
 	// 分析对象表达式
 	a.analyzeExpression(expr.Object)
-	
+
 	// 分析索引表达式
 	a.analyzeExpression(expr.Index)
 }
@@ -379,13 +379,13 @@ func isValidIdentifier(name string) bool {
 	if len(name) == 0 {
 		return false
 	}
-	
+
 	// 第一个字符必须是字母或下划线
 	firstChar := name[0]
 	if !((firstChar >= 'a' && firstChar <= 'z') || (firstChar >= 'A' && firstChar <= 'Z') || firstChar == '_') {
 		return false
 	}
-	
+
 	// 后续字符必须是字母、数字或下划线
 	for i := 1; i < len(name); i++ {
 		char := name[i]
@@ -393,7 +393,7 @@ func isValidIdentifier(name string) bool {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
@@ -405,6 +405,6 @@ func isValidType(typeName string) bool {
 		"bool":   true,
 		"string": true,
 	}
-	
+
 	return validTypes[typeName]
 }

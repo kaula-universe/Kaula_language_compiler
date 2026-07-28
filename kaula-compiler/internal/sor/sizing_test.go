@@ -90,9 +90,9 @@ func TestArrayType(t *testing.T) {
 		typeName string
 		expected int
 	}{
-		{"[10]int", 80},   // 10 * 8
-		{"[5]int64", 40},  // 5 * 8
-		{"[4]byte", 4},    // 4 * 1
+		{"[10]int", 80},  // 10 * 8
+		{"[5]int64", 40}, // 5 * 8
+		{"[4]byte", 4},   // 4 * 1
 	}
 
 	for _, tt := range tests {
@@ -203,7 +203,7 @@ func TestAlignOf(t *testing.T) {
 		{"int16", 2},
 		{"int32", 4},
 		{"int64", 8},
-		{"string", 8},   // 24 bytes, align = 8
+		{"string", 8}, // 24 bytes, align = 8
 		{"*int", 8},
 	}
 
