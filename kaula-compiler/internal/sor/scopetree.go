@@ -16,12 +16,12 @@ const (
 
 // ScopeNode 作用域树节点
 type ScopeNode struct {
-	Type       ScopeType     // 作用域类型
-	Stmts      []Stmt        // 该作用域内的语句
-	Children   []*ScopeNode  // 子作用域
-	Parent     *ScopeNode    // 父作用域
-	TotalSize  int           // 该作用域内所有对象的总大小
-	MaxSize    int           // 该作用域内单个最大对象的大小（用于分支互斥）
+	Type      ScopeType    // 作用域类型
+	Stmts     []Stmt       // 该作用域内的语句
+	Children  []*ScopeNode // 子作用域
+	Parent    *ScopeNode   // 父作用域
+	TotalSize int          // 该作用域内所有对象的总大小
+	MaxSize   int          // 该作用域内单个最大对象的大小（用于分支互斥）
 }
 
 // ScopeTreeAnalyzer 作用域树分析器
@@ -48,10 +48,10 @@ func (sta *ScopeTreeAnalyzer) BuildScopeTree(stmts []Stmt) *ScopeNode {
 // buildFromStmts 递归构建作用域树
 func (sta *ScopeTreeAnalyzer) buildFromStmts(stmts []Stmt, parent *ScopeNode) {
 	sequentialBlock := &ScopeNode{
-		Type:       ScopeSequential,
-		Stmts:      make([]Stmt, 0),
-		Children:   make([]*ScopeNode, 0),
-		Parent:     parent,
+		Type:     ScopeSequential,
+		Stmts:    make([]Stmt, 0),
+		Children: make([]*ScopeNode, 0),
+		Parent:   parent,
 	}
 
 	i := 0
@@ -70,10 +70,10 @@ func (sta *ScopeTreeAnalyzer) buildFromStmts(stmts []Stmt, parent *ScopeNode) {
 
 			// 收集 if body
 			ifBody := &ScopeNode{
-				Type:       ScopeSequential,
-				Stmts:      make([]Stmt, 0),
-				Children:   make([]*ScopeNode, 0),
-				Parent:     branchNode,
+				Type:     ScopeSequential,
+				Stmts:    make([]Stmt, 0),
+				Children: make([]*ScopeNode, 0),
+				Parent:   branchNode,
 			}
 			branchNode.Children = append(branchNode.Children, ifBody)
 
@@ -96,10 +96,10 @@ func (sta *ScopeTreeAnalyzer) buildFromStmts(stmts []Stmt, parent *ScopeNode) {
 						// if body 结束，开始 else body
 						i++
 						elseBody := &ScopeNode{
-							Type:       ScopeSequential,
-							Stmts:      make([]Stmt, 0),
-							Children:   make([]*ScopeNode, 0),
-							Parent:     branchNode,
+							Type:     ScopeSequential,
+							Stmts:    make([]Stmt, 0),
+							Children: make([]*ScopeNode, 0),
+							Parent:   branchNode,
 						}
 						branchNode.Children = append(branchNode.Children, elseBody)
 						// 收集 else body 的语句
@@ -146,10 +146,10 @@ func (sta *ScopeTreeAnalyzer) buildFromStmts(stmts []Stmt, parent *ScopeNode) {
 
 			// 收集循环体语句
 			loopBody := &ScopeNode{
-				Type:       ScopeSequential,
-				Stmts:      make([]Stmt, 0),
-				Children:   make([]*ScopeNode, 0),
-				Parent:     loopNode,
+				Type:     ScopeSequential,
+				Stmts:    make([]Stmt, 0),
+				Children: make([]*ScopeNode, 0),
+				Parent:   loopNode,
 			}
 			loopNode.Children = append(loopNode.Children, loopBody)
 

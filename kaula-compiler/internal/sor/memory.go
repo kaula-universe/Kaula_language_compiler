@@ -16,11 +16,11 @@ import (
 type AllocKind int
 
 const (
-	AllocStack      AllocKind = iota // 栈分配（编译器自动管理）
-	AllocBumpPool                  // KMM bump pool（作用域批量回收）
-	AllocArenaTiny                  // KMM tiny arena (≤64B)
-	AllocArenaSmall                 // KMM small arena (≤256B)
-	AllocArenaMedium                // KMM medium arena (≤2048B)
+	AllocStack       AllocKind = iota // 栈分配（编译器自动管理）
+	AllocBumpPool                     // KMM bump pool（作用域批量回收）
+	AllocArenaTiny                    // KMM tiny arena (≤64B)
+	AllocArenaSmall                   // KMM small arena (≤256B)
+	AllocArenaMedium                  // KMM medium arena (≤2048B)
 )
 
 func (k AllocKind) String() string {
@@ -64,13 +64,13 @@ func (a DropAction) String() string {
 
 // MemoryDecision 单个变量的内存管理决策
 type MemoryDecision struct {
-	VarName          string         // 变量名
-	ObjID            string         // SOR 对象 ID
-	FinalState       OwnershipState // 分析结束时的所有权状态
-	AllocKind        AllocKind      // 分配位置建议
-	DropAction       DropAction     // 释放动作
-	ScopeID          int            // 所属作用域
-	IsComposite      bool           // 是否复合类型
+	VarName           string          // 变量名
+	ObjID             string          // SOR 对象 ID
+	FinalState        OwnershipState  // 分析结束时的所有权状态
+	AllocKind         AllocKind       // 分配位置建议
+	DropAction        DropAction      // 释放动作
+	ScopeID           int             // 所属作用域
+	IsComposite       bool            // 是否复合类型
 	ExtractedChildren map[string]bool // extract 后的 hollow 子元素
 }
 
@@ -143,10 +143,10 @@ func (ma *MemoryAnalyzer) AnalyzeMemory(tracker *OwnershipTracker) []*MemoryDeci
 
 func (ma *MemoryAnalyzer) buildDecision(obj *SORObject) *MemoryDecision {
 	d := &MemoryDecision{
-		VarName:    obj.Name,
-		ObjID:      obj.ID,
-		FinalState: obj.State,
-		ScopeID:    obj.ScopeID,
+		VarName:     obj.Name,
+		ObjID:       obj.ID,
+		FinalState:  obj.State,
+		ScopeID:     obj.ScopeID,
 		IsComposite: obj.IsComposite,
 	}
 
@@ -245,24 +245,24 @@ func AnalyzeASTWithMemory(program interface {
 // PoolCapacityBreakdown 池容量分步计算明细
 // 用于诊断输出，展示每步优化的效果
 type PoolCapacityBreakdown struct {
-	RawSum            int // 原始求和（所有对象简单相加）
-	SharingAdjusted   int // 指针共享调整后（排除 release holder 重复计算）
+	RawSum             int // 原始求和（所有对象简单相加）
+	SharingAdjusted    int // 指针共享调整后（排除 release holder 重复计算）
 	ScopeTreeOptimized int // 作用域树优化后（分支互斥 + 循环复用）
-	DynamicAlloc      int // 动态分配估算
-	FinalWithMargin   int // 加安全余量后
-	Clamped           int // 边界限制后（最终值）
+	DynamicAlloc       int // 动态分配估算
+	FinalWithMargin    int // 加安全余量后
+	Clamped            int // 边界限制后（最终值）
 }
 
 // FullAnalysisResult 完整分析结果
 type FullAnalysisResult struct {
-	SORErrors    []SORError
-	Decisions    []*MemoryDecision
-	Escape       map[string]EscapeLevel
-	Liveness     *LivenessResult
-	InterProc    *InterProcResult
-	Sizes        map[string]int
-	ExecLog      []string
-	Stmts        []Stmt
+	SORErrors []SORError
+	Decisions []*MemoryDecision
+	Escape    map[string]EscapeLevel
+	Liveness  *LivenessResult
+	InterProc *InterProcResult
+	Sizes     map[string]int
+	ExecLog   []string
+	Stmts     []Stmt
 	// PoolCapacity 基于静态分析估算的 KMM V4 池容量（字节）
 	// 0 表示使用默认值
 	PoolCapacity int
@@ -702,14 +702,14 @@ func SerializeFullAnalysisResult(result *FullAnalysisResult) map[string]interfac
 	decisionsArr := make([]interface{}, 0, len(result.Decisions))
 	for _, d := range result.Decisions {
 		dm := map[string]interface{}{
-			"var_name":        d.VarName,
-			"obj_id":          d.ObjID,
-			"alloc_kind":      d.AllocKind.String(),
-			"alloc_kind_id":   int(d.AllocKind),
-			"drop_action":     d.DropAction.String(),
-			"drop_action_id":  int(d.DropAction),
-			"scope_id":        fmt.Sprintf("%d", d.ScopeID),
-			"scope_id_int":    d.ScopeID,
+			"var_name":       d.VarName,
+			"obj_id":         d.ObjID,
+			"alloc_kind":     d.AllocKind.String(),
+			"alloc_kind_id":  int(d.AllocKind),
+			"drop_action":    d.DropAction.String(),
+			"drop_action_id": int(d.DropAction),
+			"scope_id":       fmt.Sprintf("%d", d.ScopeID),
+			"scope_id_int":   d.ScopeID,
 		}
 		decisionsArr = append(decisionsArr, dm)
 	}
@@ -734,13 +734,13 @@ func SerializeFullAnalysisResult(result *FullAnalysisResult) map[string]interfac
 		livenessArr := make([]interface{}, 0)
 		for _, info := range result.Liveness.GetAllLastUses() {
 			lm := map[string]interface{}{
-				"var_name":      info.VarName,
-				"obj_id":        info.ObjID,
-				"last_use_line": info.LastUseLine,
-				"last_use_kind": info.LastUseKind,
-				"is_yield_src":  info.IsYieldSrc,
+				"var_name":       info.VarName,
+				"obj_id":         info.ObjID,
+				"last_use_line":  info.LastUseLine,
+				"last_use_kind":  info.LastUseKind,
+				"is_yield_src":   info.IsYieldSrc,
 				"is_extract_src": info.IsExtractSrc,
-				"is_in_loop":    info.IsInLoop,
+				"is_in_loop":     info.IsInLoop,
 			}
 			livenessArr = append(livenessArr, lm)
 		}

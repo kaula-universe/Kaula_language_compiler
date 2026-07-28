@@ -115,8 +115,8 @@ func (d *DAGChecker) dfsHasCycle(node string, color map[string]int) bool {
 //
 // 返回的路径格式：[A, B, C, A] 表示 A -> B -> C -> A 的环。
 func (d *DAGChecker) GetCyclePath() []string {
-	color := make(map[string]int) // 0=白, 1=灰, 2=黑
-	path := make([]string, 0)     // 当前 DFS 路径
+	color := make(map[string]int)   // 0=白, 1=灰, 2=黑
+	path := make([]string, 0)       // 当前 DFS 路径
 	pathSet := make(map[string]int) // 节点在 path 中的索引
 
 	// 初始化所有节点为白色

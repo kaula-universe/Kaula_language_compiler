@@ -10,11 +10,11 @@ import (
 
 // MirrorTestResult 镜像测速结果
 type MirrorTestResult struct {
-	URL      string
-	Latency  time.Duration // 延迟（RTT）
-	Speed    float64       // 速度（bytes/sec）
-	Success  bool
-	Error    error
+	URL     string
+	Latency time.Duration // 延迟（RTT）
+	Speed   float64       // 速度（bytes/sec）
+	Success bool
+	Error   error
 }
 
 // TestMirror 测试单个镜像的延迟和速度

@@ -12,8 +12,8 @@ func TestResourceRegistry_Basic(t *testing.T) {
 	}
 
 	registry.Register(&ResourceTypeInfo{
-		TypeName: "File",
-		Kind:     "file",
+		TypeName:    "File",
+		Kind:        "file",
 		ReleaseFunc: "close_file",
 		Description: "文件句柄",
 	})

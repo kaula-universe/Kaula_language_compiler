@@ -29,8 +29,8 @@ func (fg *FunctionGenerator) needsKMMScope(bodyCode string) bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" && 
-				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" &&
+					sym.Scope != "async_param" && sym.Scope != "task_param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -222,8 +222,8 @@ func (fg *FunctionGenerator) shouldUseKMMScope() bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" && 
-				   sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" &&
+					sym.Scope != "async_param" && sym.Scope != "task_param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -235,8 +235,8 @@ func (fg *FunctionGenerator) shouldUseKMMScope() bool {
 	currentScope := fg.codegen.GetCurrentScope()
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "parameter" || sym.Scope == "param" || 
-			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" ||
+				sym.Scope == "async_param" || sym.Scope == "task_param" {
 				continue
 			}
 			if needsKMMForType(sym.Type) {
@@ -250,18 +250,18 @@ func (fg *FunctionGenerator) shouldUseKMMScope() bool {
 // needsKMMScopeNonSOR 非 SOR 模式下的智能 KMM 判断
 // 基于符号表分析变量类型，判断是否需要 KMM scope
 func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
-	if !strings.Contains(bodyCode, "std_malloc") && 
-	   !strings.Contains(bodyCode, "kmm_v4") &&
-	   !strings.Contains(bodyCode, "string_concat") &&
-	   !strings.Contains(bodyCode, "string_dup") {
+	if !strings.Contains(bodyCode, "std_malloc") &&
+		!strings.Contains(bodyCode, "kmm_v4") &&
+		!strings.Contains(bodyCode, "string_concat") &&
+		!strings.Contains(bodyCode, "string_dup") {
 		return false
 	}
 
 	currentScope := fg.codegen.GetCurrentScope()
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "parameter" || sym.Scope == "param" || 
-			   sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" ||
+				sym.Scope == "async_param" || sym.Scope == "task_param" {
 				continue
 			}
 			if needsKMMForType(sym.Type) {
@@ -314,20 +314,20 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteString(attrPrefix)
 		builder.WriteByte(' ')
 	}
-	
+
 	safeName := stmt.Name
 	if safeName == "max" || safeName == "min" || safeName == "abs" {
 		safeName = "kaula_" + safeName
 	}
-	
+
 	if stmt.IsGeneric() {
 		fg.codegen.ExitScope()
 		return ""
 	}
-	
+
 	// 设置当前函数返回类型供 return 语句生成使用
 	fg.codegen.currentFunctionReturnType = stmt.ReturnType
-	
+
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
 	builder.WriteString(safeName)
@@ -403,33 +403,33 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			builder.WriteString(indent)
 			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
-		} else {
-			shouldUseKMM := !stmt.NoKMM && !stmt.Inline
-			if shouldUseKMM {
-				// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
-				// 跨函数分析：结合函数签名判断是否需要 KMM
-				useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
-				if useKMM {
-					fg.codegen.EnterKMMScope()
-				}
+	} else {
+		shouldUseKMM := !stmt.NoKMM && !stmt.Inline
+		if shouldUseKMM {
+			// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
+			// 跨函数分析：结合函数签名判断是否需要 KMM
+			useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
+			if useKMM {
+				fg.codegen.EnterKMMScope()
+			}
 
-				var bodyBuilder strings.Builder
-				bodyIndent := fg.codegen.indentString()
-				fg.codegen.indent++
-				for _, bodyStmt := range stmt.Body {
-					if bodyStmt == nil {
-						continue
-					}
-					bodyBuilder.WriteString(fg.codegen.indentString())
-					bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
+			var bodyBuilder strings.Builder
+			bodyIndent := fg.codegen.indentString()
+			fg.codegen.indent++
+			for _, bodyStmt := range stmt.Body {
+				if bodyStmt == nil {
+					continue
 				}
-				fg.codegen.indent--
+				bodyBuilder.WriteString(fg.codegen.indentString())
+				bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
+			}
+			fg.codegen.indent--
 
-				if useKMM {
-					fg.codegen.ExitKMMScope()
-				}
+			if useKMM {
+				fg.codegen.ExitKMMScope()
+			}
 
-				bodyCode := bodyBuilder.String()
+			bodyCode := bodyBuilder.String()
 
 			if useKMM {
 				// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
@@ -444,17 +444,17 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			} else {
 				builder.WriteString(bodyCode)
 			}
-			} else {
-				indent := fg.codegen.indentString()
-				for _, bodyStmt := range stmt.Body {
-					if bodyStmt == nil {
-						continue
-					}
-					builder.WriteString(indent)
-					builder.WriteString(fg.codegen.generateStatement(bodyStmt))
+		} else {
+			indent := fg.codegen.indentString()
+			for _, bodyStmt := range stmt.Body {
+				if bodyStmt == nil {
+					continue
 				}
+				builder.WriteString(indent)
+				builder.WriteString(fg.codegen.generateStatement(bodyStmt))
 			}
 		}
+	}
 
 	if !hasReturnStatement(stmt.Body) && stmt.ReturnType != "" && !isVoidType(stmt.ReturnType) {
 		builder.WriteString(fg.codegen.indentString())
@@ -645,14 +645,14 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code.WriteString(attrPrefix)
 		code.WriteByte(' ')
 	}
-	
+
 	funcName := "main"
 	if fg.codegen.config != nil && fg.codegen.config.Freestanding {
 		funcName = "kaula_main"
 	}
 	code.WriteString("int " + funcName + "() {\n")
 	fg.codegen.indent++
-	
+
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	useKMM := !stmt.NoKMM && fg.shouldUseKMMScopeForBody(stmt.Body)
 	if useKMM {
@@ -683,12 +683,12 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	} else {
 		code.WriteString(bodyCode)
 	}
-	
+
 	code.WriteString(fg.codegen.indentString())
 	code.WriteString("return 0;\n")
 	fg.codegen.indent--
 	code.WriteString("}\n")
-	
+
 	fg.codegen.ExitScope()
 	return code.String()
 }
@@ -697,7 +697,7 @@ func (fg *FunctionGenerator) mapReturnType(returnType string) string {
 	if returnType == "" {
 		return "void "
 	}
-	
+
 	switch returnType {
 	case "int":
 		return "int "

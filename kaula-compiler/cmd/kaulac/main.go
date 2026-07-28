@@ -119,9 +119,9 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 func extractFunctionDefs(cCode string) string {
 	lines := strings.Split(cCode, "\n")
 	var result []string
-	braceDepth := 0      // 当前大括号深度（追踪函数体）
-	inFunction := false  // 是否在函数体内
-	skipMain := false    // 是否在跳过 main 函数
+	braceDepth := 0     // 当前大括号深度（追踪函数体）
+	inFunction := false // 是否在函数体内
+	skipMain := false   // 是否在跳过 main 函数
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -572,11 +572,11 @@ func main() {
 	// 增量编译：检查缓存
 	var cacheFile string
 	var cacheHit bool
-	
+
 	if cacheManager != nil && !cfg.NoCache {
 		cacheKey := cacheManager.GetCacheKey(inputFile)
 		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
-		
+
 		// 检查缓存是否命中
 		cacheResult := cacheManager.Check(inputFile, data)
 		if cacheResult.Hit {
@@ -594,7 +594,7 @@ func main() {
 		// 无缓存模式，直接使用原来的路径
 		cacheFile = filepath.Join(cacheDir, inputName+".c")
 		cacheHit = false
-		
+
 		// 保存 C 代码到缓存文件
 		if err := os.WriteFile(cacheFile, []byte(output), 0644); err != nil {
 			fmt.Printf("Warning: Failed to save C code: %v\n", err)
@@ -893,9 +893,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		if exePath, err := os.Executable(); err == nil {
 			exeDir := filepath.Dir(filepath.Clean(exePath))
 			candidates := []string{
-				filepath.Join(exeDir, ".."),           // kaula-compiler/ 的上级 = kaula 根
-				filepath.Join(exeDir, "..", ".."),     // build/bin/ 的上两级 = kaula 根
-				exeDir,                                // 可执行文件所在目录就是 kaula 根
+				filepath.Join(exeDir, ".."),       // kaula-compiler/ 的上级 = kaula 根
+				filepath.Join(exeDir, "..", ".."), // build/bin/ 的上两级 = kaula 根
+				exeDir,                            // 可执行文件所在目录就是 kaula 根
 			}
 			for _, c := range candidates {
 				if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
@@ -1020,8 +1020,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 	// 收集所有需要编译的 std .c 文件
 	type moduleSource struct {
-		cPath    string
-		objPath  string
+		cPath        string
+		objPath      string
 		needsRebuild bool
 	}
 	var moduleSources []moduleSource
@@ -1056,8 +1056,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 						}
 
 						moduleSources = append(moduleSources, moduleSource{
-							cPath:       cFullPath,
-							objPath:     objFullPath,
+							cPath:        cFullPath,
+							objPath:      objFullPath,
 							needsRebuild: needsRebuild,
 						})
 					}
@@ -1093,18 +1093,18 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				defer func() { <-sem }()
 
 				compileCmd := exec.Command(clangPath, "-c", optLevel, cPath, "-o", objPath)
-			for _, p := range validSrcPaths {
-				compileCmd.Args = append(compileCmd.Args, "-I", p)
-			}
-			for _, p := range validStdPaths {
-				compileCmd.Args = append(compileCmd.Args, "-I", p)
-			}
-			if kaulaSrcPath != "" {
-				compileCmd.Args = append(compileCmd.Args, "-I", objectCacheDir)
-			}
-			if poolCapacity > 0 {
-				compileCmd.Args = append(compileCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-			}
+				for _, p := range validSrcPaths {
+					compileCmd.Args = append(compileCmd.Args, "-I", p)
+				}
+				for _, p := range validStdPaths {
+					compileCmd.Args = append(compileCmd.Args, "-I", p)
+				}
+				if kaulaSrcPath != "" {
+					compileCmd.Args = append(compileCmd.Args, "-I", objectCacheDir)
+				}
+				if poolCapacity > 0 {
+					compileCmd.Args = append(compileCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+				}
 				if output, err := compileCmd.CombinedOutput(); err != nil {
 					errMu.Lock()
 					rebuildErrors = append(rebuildErrors, fmt.Sprintf("  %s: %v", filepath.Base(cPath), string(output)))
@@ -1170,69 +1170,34 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）
 	// 裸机模式下跳过 std.lib（使用 -nostdlib，不需要标准库）
 	if cfg == nil || !cfg.Freestanding {
-	stdLibPath := filepath.Join(objectCacheDir, "std.lib")
-	// 计算当前模块集合的 hash，只有变化时才重新生成
-	libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4"
-	libKeyFile := filepath.Join(objectCacheDir, "std.lib.key")
-	rebuildLib := true
-	if keyData, err := os.ReadFile(libKeyFile); err == nil && string(keyData) == libModulesKey {
-		if _, err := os.Stat(stdLibPath); err == nil {
-			rebuildLib = false
-		}
-	}
-	if rebuildLib {
-		var objPaths []string
-		for _, ms := range moduleSources {
-			objPaths = append(objPaths, ms.objPath)
-		}
-		// Include kmm_v4.o in the lib
-		if _, err := os.Stat(kmmV4Obj); err == nil {
-			objPaths = append(objPaths, kmmV4Obj)
-		}
-		arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
-		arCmd.Args = append(arCmd.Args, objPaths...)
-		if _, err := arCmd.CombinedOutput(); err != nil {
-			// llvm-lib 不可用时回退到直接链接 .o 文件
-			fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
-			// 不写入 key 文件，下次继续尝试
-		} else {
-			os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
-			// 用 std.lib 替换所有 .o 文件
-			clangArgs = clangArgs[:0]
-			clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-			clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-			if poolCapacity > 0 {
-				clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+		stdLibPath := filepath.Join(objectCacheDir, "std.lib")
+		// 计算当前模块集合的 hash，只有变化时才重新生成
+		libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4"
+		libKeyFile := filepath.Join(objectCacheDir, "std.lib.key")
+		rebuildLib := true
+		if keyData, err := os.ReadFile(libKeyFile); err == nil && string(keyData) == libModulesKey {
+			if _, err := os.Stat(stdLibPath); err == nil {
+				rebuildLib = false
 			}
-			for _, p := range validSrcPaths {
-				clangArgs = append(clangArgs, "-I", p)
-			}
-			for _, p := range validStdPaths {
-				clangArgs = append(clangArgs, "-I", p)
-			}
-			clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-			fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
 		}
-	} else {
-		// std.lib 缓存命中，但需确认文件确实存在
-		if _, err := os.Stat(stdLibPath); err != nil {
-			// 文件不存在，清除 key 并重新构建
-			os.Remove(libKeyFile)
-			fmt.Printf("[Compile] Warning: std.lib key exists but file missing, rebuilding\n")
-			// 重新走 rebuild 逻辑
+		if rebuildLib {
 			var objPaths []string
 			for _, ms := range moduleSources {
 				objPaths = append(objPaths, ms.objPath)
 			}
+			// Include kmm_v4.o in the lib
 			if _, err := os.Stat(kmmV4Obj); err == nil {
 				objPaths = append(objPaths, kmmV4Obj)
 			}
 			arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
 			arCmd.Args = append(arCmd.Args, objPaths...)
 			if _, err := arCmd.CombinedOutput(); err != nil {
+				// llvm-lib 不可用时回退到直接链接 .o 文件
 				fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
+				// 不写入 key 文件，下次继续尝试
 			} else {
 				os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
+				// 用 std.lib 替换所有 .o 文件
 				clangArgs = clangArgs[:0]
 				clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
 				clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
@@ -1249,22 +1214,57 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
 			}
 		} else {
-			clangArgs = clangArgs[:0]
-			clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-			clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-			if poolCapacity > 0 {
-				clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+			// std.lib 缓存命中，但需确认文件确实存在
+			if _, err := os.Stat(stdLibPath); err != nil {
+				// 文件不存在，清除 key 并重新构建
+				os.Remove(libKeyFile)
+				fmt.Printf("[Compile] Warning: std.lib key exists but file missing, rebuilding\n")
+				// 重新走 rebuild 逻辑
+				var objPaths []string
+				for _, ms := range moduleSources {
+					objPaths = append(objPaths, ms.objPath)
+				}
+				if _, err := os.Stat(kmmV4Obj); err == nil {
+					objPaths = append(objPaths, kmmV4Obj)
+				}
+				arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
+				arCmd.Args = append(arCmd.Args, objPaths...)
+				if _, err := arCmd.CombinedOutput(); err != nil {
+					fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
+				} else {
+					os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
+					clangArgs = clangArgs[:0]
+					clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
+					clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+					if poolCapacity > 0 {
+						clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+					}
+					for _, p := range validSrcPaths {
+						clangArgs = append(clangArgs, "-I", p)
+					}
+					for _, p := range validStdPaths {
+						clangArgs = append(clangArgs, "-I", p)
+					}
+					clangArgs = append(clangArgs, "-x", "none", stdLibPath)
+					fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
+				}
+			} else {
+				clangArgs = clangArgs[:0]
+				clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
+				clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+				if poolCapacity > 0 {
+					clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+				}
+				for _, p := range validSrcPaths {
+					clangArgs = append(clangArgs, "-I", p)
+				}
+				for _, p := range validStdPaths {
+					clangArgs = append(clangArgs, "-I", p)
+				}
+				clangArgs = append(clangArgs, "-x", "none", stdLibPath)
+				fmt.Printf("[Compile] Using cached std.lib\n")
 			}
-			for _, p := range validSrcPaths {
-				clangArgs = append(clangArgs, "-I", p)
-			}
-			for _, p := range validStdPaths {
-				clangArgs = append(clangArgs, "-I", p)
-			}
-			clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-			fmt.Printf("[Compile] Using cached std.lib\n")
 		}
-	}
 	} // end if !cfg.Freestanding
 
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
