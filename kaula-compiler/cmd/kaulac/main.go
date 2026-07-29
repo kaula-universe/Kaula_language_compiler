@@ -885,6 +885,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
 		if _, err := os.Stat(filepath.Join(envHome, "src", "kaula.h")); err == nil {
 			kaulaRoot = envHome
+		} else if _, err := os.Stat(filepath.Join(envHome, "include", "kaula", "kaula.h")); err == nil {
+			kaulaRoot = envHome
 		}
 	}
 
@@ -899,6 +901,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			}
 			for _, c := range candidates {
 				if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
+					kaulaRoot = c
+					break
+				} else if _, err := os.Stat(filepath.Join(c, "include", "kaula", "kaula.h")); err == nil {
 					kaulaRoot = c
 					break
 				}
@@ -919,25 +924,63 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
 				kaulaRoot = c
 				break
+			} else if _, err := os.Stat(filepath.Join(c, "include", "kaula", "kaula.h")); err == nil {
+				kaulaRoot = c
+				break
 			}
 		}
 	}
 
+	stdLibraryName, runtimeLibraryName := installedLibraryNames()
+	installedRoot := ""
+	if cfg == nil || !cfg.Freestanding {
+		installedCandidates := []string{kaulaRoot}
+		if kaulaRoot != "" {
+			installedCandidates = append(installedCandidates, filepath.Join(kaulaRoot, "build"))
+		}
+		for _, candidate := range installedCandidates {
+			if candidate == "" {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(candidate, "include", "kaula", "kaula.h")); err != nil {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(candidate, "lib", stdLibraryName)); err != nil {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(candidate, "lib", runtimeLibraryName)); err == nil {
+				installedRoot = candidate
+				break
+			}
+		}
+	}
+	useInstalledLibraries := installedRoot != ""
+
 	var kaulaSrcPath string
-	if kaulaRoot != "" {
+	if useInstalledLibraries {
+		kaulaSrcPath = filepath.Join(installedRoot, "include", "kaula")
+	} else if kaulaRoot != "" {
 		kaulaSrcPath = filepath.Join(kaulaRoot, "src")
 	}
 
-	srcPaths := []string{
-		filepath.Join(workDir, "src"),
+	srcPaths := []string{}
+	if useInstalledLibraries {
+		srcPaths = append(srcPaths,
+			filepath.Join(installedRoot, "include", "kaula"),
+			filepath.Join(installedRoot, "include", "runtime"),
+		)
+	} else {
+		srcPaths = append(srcPaths, filepath.Join(workDir, "src"))
+		if kaulaSrcPath != "" {
+			srcPaths = append(srcPaths, kaulaSrcPath)
+		}
+		srcPaths = append(srcPaths, filepath.Join(workDir, "..", "src"))
 	}
-	if kaulaSrcPath != "" {
-		srcPaths = append(srcPaths, kaulaSrcPath)
-	}
-	srcPaths = append(srcPaths, filepath.Join(workDir, "..", "src"))
 
 	stdPaths := []string{}
-	if kaulaRoot != "" {
+	if useInstalledLibraries {
+		stdPaths = append(stdPaths, filepath.Join(installedRoot, "include", "std"))
+	} else if kaulaRoot != "" {
 		stdPaths = append(stdPaths, filepath.Join(kaulaRoot, "std"))
 	}
 	stdPaths = append(stdPaths,
@@ -1123,7 +1166,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	// 编译 KMM V4 runtime（src/kmm_scoped_allocator_v4.c）— std 模块依赖其符号
-	if kaulaSrcPath != "" {
+	if kaulaSrcPath != "" && !useInstalledLibraries {
 		kmmV4Src := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c")
 		kmmV4Obj := filepath.Join(objectCacheDir, "kmm_v4.o")
 		needsRebuild := true
@@ -1155,13 +1198,15 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 	// 使用预编译的 .o 文件链接，而不是重新编译 .c 文件
 	// 注意：必须在 .o 文件前用 -x none 重置语言类型，否则前面的 -x c 会让 clang 把 .o 当作 C 源码
-	clangArgs = append(clangArgs, "-x", "none")
-	for _, ms := range moduleSources {
-		clangArgs = append(clangArgs, ms.objPath)
+	if len(moduleSources) > 0 {
+		clangArgs = append(clangArgs, "-x", "none")
+		for _, ms := range moduleSources {
+			clangArgs = append(clangArgs, ms.objPath)
+		}
 	}
 	// 添加 kmm_v4.o（如果存在）— 裸机模式下跳过（kmm_v4 依赖 OS 调用）
 	kmmV4Obj := filepath.Join(objectCacheDir, "kmm_v4.o")
-	if cfg == nil || !cfg.Freestanding {
+	if !useInstalledLibraries && (cfg == nil || !cfg.Freestanding) {
 		if _, err := os.Stat(kmmV4Obj); err == nil {
 			clangArgs = append(clangArgs, kmmV4Obj)
 		}
@@ -1170,69 +1215,42 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）
 	// 裸机模式下跳过 std.lib（使用 -nostdlib，不需要标准库）
 	if cfg == nil || !cfg.Freestanding {
-		stdLibPath := filepath.Join(objectCacheDir, "std.lib")
-		// 计算当前模块集合的 hash，只有变化时才重新生成
-		libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4"
-		libKeyFile := filepath.Join(objectCacheDir, "std.lib.key")
-		rebuildLib := true
-		if keyData, err := os.ReadFile(libKeyFile); err == nil && string(keyData) == libModulesKey {
-			if _, err := os.Stat(stdLibPath); err == nil {
-				rebuildLib = false
-			}
-		}
-		if rebuildLib {
-			var objPaths []string
-			for _, ms := range moduleSources {
-				objPaths = append(objPaths, ms.objPath)
-			}
-			// Include kmm_v4.o in the lib
-			if _, err := os.Stat(kmmV4Obj); err == nil {
-				objPaths = append(objPaths, kmmV4Obj)
-			}
-			arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
-			arCmd.Args = append(arCmd.Args, objPaths...)
-			if _, err := arCmd.CombinedOutput(); err != nil {
-				// llvm-lib 不可用时回退到直接链接 .o 文件
-				fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
-				// 不写入 key 文件，下次继续尝试
-			} else {
-				os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
-				// 用 std.lib 替换所有 .o 文件
-				clangArgs = clangArgs[:0]
-				clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-				clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-				if poolCapacity > 0 {
-					clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-				}
-				for _, p := range validSrcPaths {
-					clangArgs = append(clangArgs, "-I", p)
-				}
-				for _, p := range validStdPaths {
-					clangArgs = append(clangArgs, "-I", p)
-				}
-				clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-				fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
-			}
+		if useInstalledLibraries {
+			clangArgs = append(clangArgs,
+				"-x", "none",
+				filepath.Join(installedRoot, "lib", stdLibraryName),
+				filepath.Join(installedRoot, "lib", runtimeLibraryName),
+			)
+			fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName)
 		} else {
-			// std.lib 缓存命中，但需确认文件确实存在
-			if _, err := os.Stat(stdLibPath); err != nil {
-				// 文件不存在，清除 key 并重新构建
-				os.Remove(libKeyFile)
-				fmt.Printf("[Compile] Warning: std.lib key exists but file missing, rebuilding\n")
-				// 重新走 rebuild 逻辑
+			stdLibPath := filepath.Join(objectCacheDir, "std.lib")
+			// 计算当前模块集合的 hash，只有变化时才重新生成
+			libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4"
+			libKeyFile := filepath.Join(objectCacheDir, "std.lib.key")
+			rebuildLib := true
+			if keyData, err := os.ReadFile(libKeyFile); err == nil && string(keyData) == libModulesKey {
+				if _, err := os.Stat(stdLibPath); err == nil {
+					rebuildLib = false
+				}
+			}
+			if rebuildLib {
 				var objPaths []string
 				for _, ms := range moduleSources {
 					objPaths = append(objPaths, ms.objPath)
 				}
+				// Include kmm_v4.o in the lib
 				if _, err := os.Stat(kmmV4Obj); err == nil {
 					objPaths = append(objPaths, kmmV4Obj)
 				}
 				arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
 				arCmd.Args = append(arCmd.Args, objPaths...)
 				if _, err := arCmd.CombinedOutput(); err != nil {
+					// llvm-lib 不可用时回退到直接链接 .o 文件
 					fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
+					// 不写入 key 文件，下次继续尝试
 				} else {
 					os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
+					// 用 std.lib 替换所有 .o 文件
 					clangArgs = clangArgs[:0]
 					clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
 					clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
@@ -1249,20 +1267,56 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
 				}
 			} else {
-				clangArgs = clangArgs[:0]
-				clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-				clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-				if poolCapacity > 0 {
-					clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+				// std.lib 缓存命中，但需确认文件确实存在
+				if _, err := os.Stat(stdLibPath); err != nil {
+					// 文件不存在，清除 key 并重新构建
+					os.Remove(libKeyFile)
+					fmt.Printf("[Compile] Warning: std.lib key exists but file missing, rebuilding\n")
+					// 重新走 rebuild 逻辑
+					var objPaths []string
+					for _, ms := range moduleSources {
+						objPaths = append(objPaths, ms.objPath)
+					}
+					if _, err := os.Stat(kmmV4Obj); err == nil {
+						objPaths = append(objPaths, kmmV4Obj)
+					}
+					arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
+					arCmd.Args = append(arCmd.Args, objPaths...)
+					if _, err := arCmd.CombinedOutput(); err != nil {
+						fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
+					} else {
+						os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
+						clangArgs = clangArgs[:0]
+						clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
+						clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+						if poolCapacity > 0 {
+							clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+						}
+						for _, p := range validSrcPaths {
+							clangArgs = append(clangArgs, "-I", p)
+						}
+						for _, p := range validStdPaths {
+							clangArgs = append(clangArgs, "-I", p)
+						}
+						clangArgs = append(clangArgs, "-x", "none", stdLibPath)
+						fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
+					}
+				} else {
+					clangArgs = clangArgs[:0]
+					clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
+					clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+					if poolCapacity > 0 {
+						clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+					}
+					for _, p := range validSrcPaths {
+						clangArgs = append(clangArgs, "-I", p)
+					}
+					for _, p := range validStdPaths {
+						clangArgs = append(clangArgs, "-I", p)
+					}
+					clangArgs = append(clangArgs, "-x", "none", stdLibPath)
+					fmt.Printf("[Compile] Using cached std.lib\n")
 				}
-				for _, p := range validSrcPaths {
-					clangArgs = append(clangArgs, "-I", p)
-				}
-				for _, p := range validStdPaths {
-					clangArgs = append(clangArgs, "-I", p)
-				}
-				clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-				fmt.Printf("[Compile] Using cached std.lib\n")
 			}
 		}
 	} // end if !cfg.Freestanding
@@ -1391,6 +1445,13 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 	fmt.Printf("[Compile] Successfully compiled: %s\n", outputFile)
 	return nil
+}
+
+func installedLibraryNames() (string, string) {
+	if runtime.GOOS == "windows" {
+		return "kaula_std.lib", "kaula_runtime.lib"
+	}
+	return "libkaula_std.a", "libkaula_runtime.a"
 }
 
 // findPkglibPath 查找 pkglib 目录路径
