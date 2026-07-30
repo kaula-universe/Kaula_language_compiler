@@ -11,6 +11,7 @@
 
 ### 编译器组件
 
+- [代码格式化工具 (kaulafmt)](kaulafmt.md) - 代码格式化、格式化规则、使用方法
 - [词法分析器 (Lexer)](lexer.md) - Token 类型、扫描策略、API
 - [语法分析器 (Parser)](parser.md) - 语法规则、递归下降解析、错误恢复
 - [抽象语法树 (AST)](ast.md) - 节点类型、层次结构、遍历机制
