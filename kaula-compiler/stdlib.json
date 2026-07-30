@@ -3899,6 +3899,13 @@
   },
   "std.web": {
     "header": "std/web/web.h",
+    "types": {
+      "HttpServer": {},
+      "HttpClient": {},
+      "HttpRequest": {},
+      "HttpResponse": {},
+      "UrlParts": {}
+    },
     "http_server_create": {
       "args": [
         "i32"

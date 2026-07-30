@@ -18,6 +18,7 @@ type Function struct {
 type Module struct {
 	Header    string              `json:"header"`
 	Prefix    string              `json:"prefix,omitempty"`
+	Types     map[string]struct{} `json:"types,omitempty"`
 	Functions map[string]Function `json:"functions"`
 }
 
@@ -140,11 +141,13 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 	for moduleName, rawData := range rawModules {
 		var moduleWithHeader struct {
 			Header    string              `json:"header"`
+			Types     map[string]struct{} `json:"types,omitempty"`
 			Functions map[string]Function `json:"functions"`
 		}
 		if err := json.Unmarshal(rawData, &moduleWithHeader); err == nil && len(moduleWithHeader.Functions) > 0 {
 			config.Modules[moduleName] = Module{
 				Header:    moduleWithHeader.Header,
+				Types:     moduleWithHeader.Types,
 				Functions: moduleWithHeader.Functions,
 			}
 			continue
@@ -160,10 +163,23 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 			}
 		}
 
+		// Parse types if present
+		var types map[string]struct{}
+		if rawMap != nil {
+			if typesRaw, ok := rawMap["types"]; ok {
+				if typesMap, ok := typesRaw.(map[string]interface{}); ok {
+					types = make(map[string]struct{})
+					for k := range typesMap {
+						types[k] = struct{}{}
+					}
+				}
+			}
+		}
+
 		flatFunctions := make(map[string]Function)
 		if rawMap != nil {
 			for key, value := range rawMap {
-				if key == "header" {
+				if key == "header" || key == "types" || key == "prefix" {
 					continue
 				}
 				valueJSON, err := json.Marshal(value)
@@ -181,6 +197,7 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 
 		config.Modules[moduleName] = Module{
 			Header:    header,
+			Types:     types,
 			Functions: flatFunctions,
 		}
 	}
@@ -281,6 +298,16 @@ func (sc *StdlibConfig) IsStdlibFunction(funcName string) bool {
 		}
 	}
 	return false
+}
+
+// GetFunctionByName 按函数名在所有模块中查找签名
+func (sc *StdlibConfig) GetFunctionByName(funcName string) *Function {
+	for _, module := range sc.Modules {
+		if fn, ok := module.Functions[funcName]; ok {
+			return &fn
+		}
+	}
+	return nil
 }
 
 func (sc *StdlibConfig) GetAllFunctions() []string {

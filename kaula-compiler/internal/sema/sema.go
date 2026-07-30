@@ -293,6 +293,10 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 				// 也注册无限定名，允许直接使用函数名
 				sa.symbolTable.AddSymbol(funcName, "stdlib_function", false, "global", 0, 0)
 			}
+			// 注册模块中声明的类型
+			for typeName := range mod.Types {
+				sa.symbolTable.AddSymbol(typeName, "type", false, "global", 0, 0)
+			}
 		} else if lib := sa.stdlibConfig.GetThirdPartyLibrary(moduleName); lib != nil {
 			// 检查是否是第三方库
 			for funcName := range lib.Functions {

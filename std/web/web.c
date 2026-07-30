@@ -86,7 +86,7 @@ static bool socket_write(SOCKET sock, const char* data, size_t len) {
     return true;
 }
 
-static char* socket_read(SOCKET sock, size_t* out_len) {
+static char* socket_read_all(SOCKET sock, size_t* out_len) {
     char* buffer = (char*)kmm_v4_malloc(HTTP_BUFFER_SIZE);
     if (!buffer) return NULL;
     size_t total = 0;
@@ -119,6 +119,64 @@ static char* socket_read(SOCKET sock, size_t* out_len) {
             return NULL;
         }
         total += result;
+    }
+
+    buffer[total] = '\0';
+    if (out_len) *out_len = total;
+    return buffer;
+}
+
+static char* socket_read_http_request(SOCKET sock, size_t* out_len) {
+    char* buffer = (char*)kmm_v4_malloc(HTTP_BUFFER_SIZE);
+    if (!buffer) return NULL;
+    size_t total = 0;
+    size_t capacity = HTTP_BUFFER_SIZE;
+
+    while (1) {
+        if (total >= capacity - 1) {
+            capacity *= 2;
+            char* new_buffer = (char*)kmm_v4_realloc(buffer, capacity);
+            if (!new_buffer) return NULL;
+            buffer = new_buffer;
+        }
+
+#if STD_PLATFORM_WINDOWS
+        int result = recv(sock, buffer + total, (int)(capacity - total - 1), 0);
+#else
+        int result = recv(sock, buffer + total, capacity - total - 1, 0);
+#endif
+        if (result == 0) break;
+        if (result < 0) {
+#if STD_PLATFORM_WINDOWS
+            if (WSAGetLastError() == WSAEWOULDBLOCK) {
+#else
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+#endif
+                continue;
+            }
+            return NULL;
+        }
+        total += result;
+        buffer[total] = '\0';
+
+        // 查找 \r\n\r\n 结束头部
+        char* header_end = strstr(buffer, "\r\n\r\n");
+        if (header_end) {
+            size_t header_len = header_end - buffer + 4;
+            // 解析 Content-Length
+            size_t body_length = 0;
+            const char* cl = strstr(buffer, "Content-Length: ");
+            if (!cl) cl = strstr(buffer, "content-length: ");
+            if (cl) {
+                cl += 16;
+                body_length = (size_t)atol(cl);
+            }
+            size_t total_needed = header_len + body_length;
+            if (total >= total_needed) {
+                if (out_len) *out_len = total;
+                return buffer;
+            }
+        }
     }
 
     buffer[total] = '\0';
@@ -203,7 +261,7 @@ bool http_server_start(HttpServer* server, HttpRequestHandler handler) {
         }
 
         size_t req_len = 0;
-        char* raw_request = socket_read(client_sock, &req_len);
+        char* raw_request = socket_read_http_request(client_sock, &req_len);
 
         if (raw_request) {
             HttpRequest* req = http_request_parse(raw_request, req_len);
@@ -419,6 +477,7 @@ void http_response_set_status(HttpResponse* res, HttpStatusCode code) {
 
 void http_response_set_body(HttpResponse* res, const char* body, size_t length) {
     if (!res) return;
+    if (length == 0 && body) length = strlen(body);
     res->body = (char*)kmm_v4_malloc(length + 1);
     if (res->body) {
         memcpy(res->body, body, length);
@@ -587,7 +646,7 @@ HttpResponse* http_client_get(HttpClient* client, const char* url) {
     }
 
     size_t resp_len = 0;
-    char* raw_response = socket_read(client->socket, &resp_len);
+    char* raw_response = socket_read_all(client->socket, &resp_len);
     CLOSE_SOCKET(client->socket);
     client->socket = INVALID_SOCKET;
 
@@ -657,7 +716,7 @@ HttpResponse* http_client_post(HttpClient* client, const char* url, const char* 
     }
 
     size_t resp_len = 0;
-    char* raw_response = socket_read(client->socket, &resp_len);
+    char* raw_response = socket_read_all(client->socket, &resp_len);
     CLOSE_SOCKET(client->socket);
     client->socket = INVALID_SOCKET;
 
@@ -713,7 +772,7 @@ HttpResponse* http_client_put(HttpClient* client, const char* url, const char* b
     }
 
     size_t resp_len = 0;
-    char* raw_response = socket_read(client->socket, &resp_len);
+    char* raw_response = socket_read_all(client->socket, &resp_len);
     CLOSE_SOCKET(client->socket);
     client->socket = INVALID_SOCKET;
 
@@ -757,7 +816,7 @@ HttpResponse* http_client_delete(HttpClient* client, const char* url) {
     socket_write(client->socket, request, strlen(request));
 
     size_t resp_len = 0;
-    char* raw_response = socket_read(client->socket, &resp_len);
+    char* raw_response = socket_read_all(client->socket, &resp_len);
     CLOSE_SOCKET(client->socket);
     client->socket = INVALID_SOCKET;
 

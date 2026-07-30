@@ -1,0 +1,42 @@
+import std.io
+import std.web
+import std.time
+
+fn handle_request(HttpRequest* req, HttpResponse* res) {
+    char* method = http_method_to_string(req.method)
+    char* path = req.path
+    println("Received: ", method, " ", path)
+
+    if (path == "/") {
+        http_response_set_status(res, 200)
+        http_response_set_content_type(res, "text/html")
+        http_response_set_html(res, "<html><body><h1>Kaula HTTP Server</h1><p><a href=\"/hello\">/hello</a></p><p><a href=\"/json\">/json</a></p><p><a href=\"/time\">/time</a></p></body></html>")
+    } else if (path == "/hello") {
+        http_response_set_status(res, 200)
+        http_response_set_content_type(res, "text/plain")
+        http_response_set_body(res, "Hello from Kaula!", 0)
+    } else if (path == "/json") {
+        http_response_set_status(res, 200)
+        http_response_set_json(res, "{\"msg\": \"ok\"}")
+    } else if (path == "/time") {
+        http_response_set_status(res, 200)
+        http_response_set_content_type(res, "text/plain")
+        http_response_set_body(res, time_format_now("%Y-%m-%d %H:%M:%S"), 0)
+    } else {
+        http_response_set_status(res, 404)
+        http_response_set_content_type(res, "text/plain")
+        http_response_set_body(res, "404 Not Found", 0)
+    }
+}
+
+fn main() {
+    HttpServer* server = http_server_create(8080)
+    if (server == null) {
+        println("Failed to create server")
+        return
+    }
+    http_server_enable_cors(server, "*")
+    println("Listening on http://localhost:8080")
+    http_server_start(server, handle_request)
+    http_server_destroy(server)
+}
