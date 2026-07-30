@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/comptime"
+	"kaula-compiler/internal/stdlib"
 	"regexp"
 	"strconv"
 	"strings"
@@ -396,8 +397,24 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	case "MOD", "%":
 		return wrapIfNeeded(left, "%", "left") + " % " + wrapIfNeeded(right, "%", "right")
 	case "EQ", "==":
+		leftType := eg.inferType(e.Left)
+		rightType := eg.inferType(e.Right)
+		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
+			return "strcmp(" + left + ", " + right + ".ptr) == 0"
+		}
+		if leftType == "cstr" && rightType == "cstr" {
+			return "strcmp(" + left + ", " + right + ") == 0"
+		}
 		return wrapIfNeeded(left, "==", "left") + " == " + wrapIfNeeded(right, "==", "right")
 	case "NE", "!=":
+		leftType := eg.inferType(e.Left)
+		rightType := eg.inferType(e.Right)
+		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
+			return "strcmp(" + left + ", " + right + ".ptr) != 0"
+		}
+		if leftType == "cstr" && rightType == "cstr" {
+			return "strcmp(" + left + ", " + right + ") != 0"
+		}
 		return wrapIfNeeded(left, "!=", "left") + " != " + wrapIfNeeded(right, "!=", "right")
 	case "LT", "<":
 		return wrapIfNeeded(left, "<", "left") + " < " + wrapIfNeeded(right, "<", "right")
@@ -524,17 +541,60 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		// 无参数调用
 		return funcName + "()"
 	} else {
-		// 直接传递参数列表（支持任意数量参数）
-		code := funcName + "("
-		for i, arg := range e.Args {
+		// 尝试查找 stdlib 函数签名以生成类型正确的参数
+		var sig *stdlib.Function
+		if eg.codegen.stdlibConfig != nil {
+			sig = eg.codegen.stdlibConfig.GetFunctionByName(funcName)
+		}
+		code := funcName + "(" + eg.generateStdlibArgs(e.Args, sig) + ")"
+		return code
+	}
+}
+
+// generateStdlibArgs 根据函数签名生成参数列表
+// 对于 const char* 参数，字符串字面量不包装为 String 结构体
+func (eg *ExpressionGenerator) generateStdlibArgs(args []ast.Expression, sig *stdlib.Function) string {
+	if sig == nil || len(sig.Args) == 0 {
+		// 无签名信息，退化为普通生成
+		code := ""
+		for i, arg := range args {
 			if i > 0 {
 				code += ", "
 			}
 			code += eg.GenerateExpression(arg)
 		}
-		code += ")"
 		return code
 	}
+
+	code := ""
+	for i, arg := range args {
+		if i > 0 {
+			code += ", "
+		}
+		if i < len(sig.Args) {
+			paramType := sig.Args[i]
+			if paramType == "const char*" || paramType == "char*" {
+				// 参数期望 C 字符串：字符串字面量直接输出，String 变量取 .ptr
+				if strLit, ok := arg.(*ast.StringLiteral); ok {
+					escaped := escapeCString(strLit.Value)
+					code += "\"" + escaped + "\""
+				} else {
+					argCode := eg.GenerateExpression(arg)
+					argType := eg.inferType(arg)
+					if argType == "s" {
+						code += argCode + ".ptr"
+					} else {
+						code += argCode
+					}
+				}
+			} else {
+				code += eg.GenerateExpression(arg)
+			}
+		} else {
+			code += eg.GenerateExpression(arg)
+		}
+	}
+	return code
 }
 
 // generateMethodCall 生成方法调用代码
@@ -574,7 +634,7 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 			}
 
 			// 检查 stdlib.json 中是否有这个函数
-			if _, funcExists := module.Functions[methodName]; funcExists {
+			if funcSig, funcExists := module.Functions[methodName]; funcExists {
 				// 追踪第三方库的使用
 				if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(methodName); isThirdParty {
 					eg.codegen.usedThirdPartyLibs[lib.Name] = true
@@ -592,14 +652,7 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 					}
 				}
 
-				code := cFuncName + "("
-				for i, arg := range args {
-					if i > 0 {
-						code += ", "
-					}
-					code += eg.GenerateExpression(arg)
-				}
-				code += ")"
+				code := cFuncName + "(" + eg.generateStdlibArgs(args, &funcSig) + ")"
 				return code
 			}
 		}
@@ -847,6 +900,9 @@ func (eg *ExpressionGenerator) generatePrintlnMulti(args []ast.Expression) strin
 		case "s":
 			b.WriteString("2, ")
 			b.WriteString(eg.maybeUnwrapString(argCode, "s"))
+		case "cstr":
+			b.WriteString("2, ")
+			b.WriteString(argCode)
 		default:
 			b.WriteString("0, (int64_t)(")
 			b.WriteString(argCode)
@@ -859,6 +915,7 @@ func (eg *ExpressionGenerator) generatePrintlnMulti(args []ast.Expression) strin
 }
 
 // maybeUnwrapString 对 string 类型表达式追加 .ptr 以匹配 C %s 约定
+// cstr 类型（char*）已经是 C 字符串指针，不需要 .ptr
 func (eg *ExpressionGenerator) maybeUnwrapString(code string, typeHint string) string {
 	if typeHint == "s" {
 		return code + ".ptr"
@@ -908,8 +965,14 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 				if strings.HasPrefix(t, "f") || t == "float" || t == "double" {
 					return "f"
 				}
-				if t == "string" || t == "char*" || strings.HasSuffix(t, "*") {
+				if t == "string" {
 					return "s"
+				}
+				if t == "char*" || t == "const char*" || t == "cstring" {
+					return "cstr"
+				}
+				if strings.HasSuffix(t, "*") {
+					return "cstr"
 				}
 				if t == "bool" {
 					return "d"
@@ -919,7 +982,7 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 					return "f"
 				}
 				if strings.Contains(cType, "char*") {
-					return "s"
+					return "cstr"
 				}
 			}
 		}
@@ -947,6 +1010,9 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 					if sig, ok := mod.Functions[funcName]; ok && sig.Return != "" {
 						if sig.Return == "string" {
 							return "s"
+						}
+						if sig.Return == "const char*" || sig.Return == "char*" || sig.Return == "cstring" {
+							return "cstr"
 						}
 						if sig.Return == "float" || sig.Return == "f64" || sig.Return == "f32" || sig.Return == "double" {
 							return "f"

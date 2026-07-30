@@ -646,6 +646,9 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code.WriteByte(' ')
 	}
 
+	// main 始终返回 int，设置返回类型供 return 语句生成使用
+	fg.codegen.currentFunctionReturnType = "int"
+
 	funcName := "main"
 	if fg.codegen.config != nil && fg.codegen.config.Freestanding {
 		funcName = "kaula_main"
@@ -690,6 +693,7 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	code.WriteString("}\n")
 
 	fg.codegen.ExitScope()
+	fg.codegen.currentFunctionReturnType = ""
 	return code.String()
 }
 
