@@ -8,7 +8,9 @@ import (
 	"kaula-compiler/internal/parser"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 )
 
 type Formatter struct {
@@ -24,11 +26,70 @@ func NewFormatter() *Formatter {
 }
 
 func (f *Formatter) FormatProgram(program *ast.Program) string {
-	for i, stmt := range program.Statements {
-		if i > 0 {
+	// 排序规则:
+	//   - 连续的 ImportStatement 块按 std 优先 / 其它 a-z 排列
+	//   - std 库 (模块名前缀 "std.") 强制第一组,内部无空行,a-z
+	//   - 其它 import 在空行后,a-z
+	//   - 非 import statement 保持原顺序
+	if len(program.Statements) == 0 {
+		return f.buf.String()
+	}
+
+	// 找开头连续的 import 块范围
+	importEnd := 0
+	for importEnd < len(program.Statements) {
+		if _, ok := program.Statements[importEnd].(*ast.ImportStatement); ok {
+			importEnd++
+		} else {
+			break
+		}
+	}
+
+	if importEnd > 0 {
+		// 收集该块所有 import,按 std vs 其它 分组
+		stdImports := []string{}
+		otherImports := []string{}
+		for i := 0; i < importEnd; i++ {
+			imp := program.Statements[i].(*ast.ImportStatement)
+			entry := imp.Module
+			if strings.HasPrefix(entry, "std.") {
+				stdImports = append(stdImports, entry)
+			} else {
+				otherImports = append(otherImports, entry)
+			}
+		}
+		sort.Strings(stdImports)
+		sort.Strings(otherImports)
+
+		// 输出排序后的 import
+		first := true
+		for _, m := range stdImports {
+			if !first {
+				f.buf.WriteString("\n")   // std 内部无空行
+			}
+			f.buf.WriteString("import " + m)
+			first = false
+		}
+		for _, m := range otherImports {
+			if !first {
+				f.buf.WriteString("\n\n") // std 与其它 / 其它之间空一行
+			}
+			f.buf.WriteString("import " + m)
+			first = false
+		}
+
+		// import 块之后如果有非 import statement,补空行分隔
+		if importEnd < len(program.Statements) {
 			f.buf.WriteString("\n\n")
 		}
-		f.formatStatement(stmt)
+	}
+
+	// 输出 import 块之后的剩余 statement
+	for i := importEnd; i < len(program.Statements); i++ {
+		if i > importEnd {
+			f.buf.WriteString("\n\n")
+		}
+		f.formatStatement(program.Statements[i])
 	}
 	return f.buf.String()
 }
@@ -55,6 +116,8 @@ func (f *Formatter) formatStatement(stmt ast.Statement) {
 		f.formatBlockStatement(s)
 	case *ast.VOStatement:
 		f.formatVOStatement(s)
+	case *ast.VariableDeclaration:
+		f.formatVariableDeclaration(s)
 	case *ast.SpendStatement:
 		f.formatSpendStatement(s)
 	case *ast.TaskStatement:
@@ -123,6 +186,11 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 		f.formatExpression(e.Object)
 		f.buf.WriteString(".")
 		f.buf.WriteString(e.Member)
+	case *ast.UnaryExpression:
+		// 前缀运算符,如 * 解引用 / & 取地址 / - 一元负号 / ~ 按位取反
+		// C 风格:操作符紧贴右操作数,无空格
+		f.buf.WriteString(e.Operator)
+		f.formatExpression(e.Right)
 	case *ast.PrefixCallExpression:
 		f.buf.WriteString("$")
 		f.buf.WriteString(e.Name)
@@ -188,6 +256,9 @@ func (f *Formatter) formatFunctionStatement(stmt *ast.FunctionStatement) {
 			f.buf.WriteString(", ")
 		}
 		f.buf.WriteString(param)
+		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+			f.buf.WriteString(": " + stmt.ParamTypes[i])
+		}
 	}
 	f.buf.WriteString(")")
 
@@ -307,6 +378,31 @@ func (f *Formatter) formatForStatement(stmt *ast.ForStatement) {
 		f.indent--
 		f.writeIndent()
 		f.buf.WriteString("}")
+	}
+}
+
+func (f *Formatter) formatVariableDeclaration(stmt *ast.VariableDeclaration) {
+	if stmt.IsPublic {
+		f.buf.WriteString("pub ")
+	}
+	if stmt.IsStatic {
+		f.buf.WriteString("static ")
+	}
+	if stmt.IsConst {
+		f.buf.WriteString("const ")
+	}
+	if stmt.Type != "" {
+		f.buf.WriteString(stmt.Type + " ")
+	} else if stmt.IsAuto {
+		f.buf.WriteString("auto ")
+	}
+	f.buf.WriteString(stmt.Name)
+	if stmt.Nullable {
+		f.buf.WriteString("?")
+	}
+	if stmt.Value != nil {
+		f.buf.WriteString(" = ")
+		f.formatExpression(stmt.Value)
 	}
 }
 
@@ -585,7 +681,8 @@ func (f *Formatter) formatTypeAliasStatement(stmt *ast.TypeAliasStatement) {
 }
 
 func (f *Formatter) formatImportStatement(stmt *ast.ImportStatement) {
-	f.buf.WriteString("import " + `"` + stmt.Module + `"`)
+	// Module 字段是裸名(如 "std.io" / "utils"),不加引号以匹配 parser 期望
+	f.buf.WriteString("import " + stmt.Module)
 }
 
 func (f *Formatter) formatExportStatement(stmt *ast.ExportStatement) {
