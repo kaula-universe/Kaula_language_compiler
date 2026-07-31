@@ -2136,6 +2136,9 @@ func (p *Parser) parseTypeString() string {
 
 	for {
 		switch p.curTok.Type {
+		case lexer.TOKEN_CONST:
+			typeStr.WriteString("const ")
+			p.nextToken()
 		case lexer.TOKEN_IDENT, lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
 			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING, lexer.TOKEN_TYPE_VOID:
 			typeStr.WriteString(p.curTok.Value)

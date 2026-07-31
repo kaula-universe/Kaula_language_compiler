@@ -126,11 +126,15 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	if stmt.IsConst {
 		if evaluated := sg.codegen.tryEvalConstExpr(stmt.Value); evaluated != "" {
 			sg.codegen.constTable[stmt.Name] = evaluated
-		} else if stmt.Value != nil {
-			// 非可求值常量表达式：仍跳过运行时分配，注册到常量表
-			sg.codegen.constTable[stmt.Name] = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			return ""
 		}
-		return ""
+		if stmt.Type == "" {
+			// 无显式类型的 const name = expr：无法求值则表达式注册到常量表
+			sg.codegen.constTable[stmt.Name] = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			return ""
+		}
+		// 有显式类型（C 风格 const type name = 运行时值，如 const char* s = fn()）：
+		// 无法编译期求值，按普通变量生成并注册符号
 	}
 
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)

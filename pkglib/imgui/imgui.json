@@ -1,0 +1,896 @@
+{
+  "name": "imgui",
+  "type": "multi_header",
+  "header": "imgui/imstb_rectpack.h",
+  "headers": [
+    "\"imgui/imstb_rectpack.h\"",
+    "\"imgui/imstb_truetype.h\"",
+    "\"imgui/kimgui.h\""
+  ],
+  "libraries": [
+    "imgui",
+    "stdc++",
+    "d3d11",
+    "dwmapi",
+    "d3dcompiler"
+  ],
+  "include_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib",
+  "library_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib\\imgui",
+  "functions": {
+    "kimgui_apply_dark_theme": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_apply_light_theme": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_begin_window": {
+      "args": [
+        "void*",
+        "const char*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "kimgui_button": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "kimgui_checkbox": {
+      "args": [
+        "void*",
+        "const char*",
+        "int*"
+      ],
+      "return": "int"
+    },
+    "kimgui_color_edit4": {
+      "args": [
+        "void*",
+        "const char*",
+        "float*"
+      ],
+      "return": "int"
+    },
+    "kimgui_end_frame": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_end_window": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_framerate": {
+      "args": [
+        "void*"
+      ],
+      "return": "float"
+    },
+    "kimgui_init": {
+      "args": [
+        "const char*",
+        "int",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kimgui_input_text": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "kimgui_input_text_value": {
+      "args": [
+        "void*"
+      ],
+      "return": "const char*"
+    },
+    "kimgui_new_frame": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_new_line": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_plot_sine": {
+      "args": [
+        "void*",
+        "const char*",
+        "float"
+      ],
+      "return": "int"
+    },
+    "kimgui_poll_events": {
+      "args": [
+        "void*"
+      ],
+      "return": "int"
+    },
+    "kimgui_pop_style_color": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kimgui_push_style_color": {
+      "args": [
+        "void*",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kimgui_same_line": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_separator": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_set_next_window_pos": {
+      "args": [
+        "void*",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kimgui_set_next_window_size": {
+      "args": [
+        "void*",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kimgui_show_demo_window": {
+      "args": [
+        "void*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "kimgui_shutdown": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_slider_float": {
+      "args": [
+        "void*",
+        "const char*",
+        "float*",
+        "float",
+        "float"
+      ],
+      "return": "int"
+    },
+    "kimgui_slider_int": {
+      "args": [
+        "void*",
+        "const char*",
+        "int*",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "kimgui_spacing": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kimgui_text": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kimgui_text_colored": {
+      "args": [
+        "void*",
+        "float",
+        "float",
+        "float",
+        "float",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kimgui_text_fmt": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "varargs": true,
+      "return": "void"
+    },
+    "stbrp_init_target": {
+      "args": [
+        "stbrp_context*",
+        "int",
+        "int",
+        "stbrp_node*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbrp_pack_rects": {
+      "args": [
+        "stbrp_context*",
+        "stbrp_rect*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbrp_setup_allow_out_of_mem": {
+      "args": [
+        "stbrp_context*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbrp_setup_heuristic": {
+      "args": [
+        "stbrp_context*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_BakeFontBitmap": {
+      "args": [
+        "const unsigned char*",
+        "int",
+        "float",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "int",
+        "stbtt_bakedchar*"
+      ],
+      "return": "int"
+    },
+    "stbtt_CompareUTF8toUTF16_bigendian": {
+      "args": [
+        "const char*",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_FindGlyphIndex": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_FindMatchingFont": {
+      "args": [
+        "const unsigned char*",
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_FindSVGDoc": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbtt_FreeBitmap": {
+      "args": [
+        "unsigned char*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "stbtt_FreeSDF": {
+      "args": [
+        "unsigned char*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "stbtt_FreeShape": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "stbtt_vertex*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetBakedQuad": {
+      "args": [
+        "const stbtt_bakedchar*",
+        "int",
+        "int",
+        "int",
+        "float*",
+        "float*",
+        "stbtt_aligned_quad*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetCodepointBitmap": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float",
+        "float",
+        "int",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbtt_GetCodepointBitmapBox": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "float",
+        "float",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetCodepointBitmapBoxSubpixel": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetCodepointBitmapSubpixel": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbtt_GetCodepointBox": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetCodepointHMetrics": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetCodepointKernAdvance": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetCodepointSDF": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float",
+        "int",
+        "int",
+        "unsigned char",
+        "float",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbtt_GetCodepointSVG": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "const char**"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetCodepointShape": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "stbtt_vertex**"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetFontBoundingBox": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetFontNameString": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int*",
+        "int",
+        "int",
+        "int",
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "stbtt_GetFontOffsetForIndex": {
+      "args": [
+        "const unsigned char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetFontVMetrics": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetFontVMetricsOS2": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetGlyphBitmap": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float",
+        "float",
+        "int",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbtt_GetGlyphBitmapBox": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "float",
+        "float",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetGlyphBitmapBoxSubpixel": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetGlyphBitmapSubpixel": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbtt_GetGlyphBox": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetGlyphHMetrics": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "int*",
+        "int*"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetGlyphKernAdvance": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetGlyphSDF": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float",
+        "int",
+        "int",
+        "unsigned char",
+        "float",
+        "int*",
+        "int*",
+        "int*",
+        "int*"
+      ],
+      "return": "unsigned char*"
+    },
+    "stbtt_GetGlyphSVG": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "const char**"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetGlyphShape": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int",
+        "stbtt_vertex**"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetKerningTable": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "stbtt_kerningentry*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetKerningTableLength": {
+      "args": [
+        "const stbtt_fontinfo*"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetNumberOfFonts": {
+      "args": [
+        "const unsigned char*"
+      ],
+      "return": "int"
+    },
+    "stbtt_GetPackedQuad": {
+      "args": [
+        "const stbtt_packedchar*",
+        "int",
+        "int",
+        "int",
+        "float*",
+        "float*",
+        "stbtt_aligned_quad*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_GetScaledFontVMetrics": {
+      "args": [
+        "const unsigned char*",
+        "int",
+        "float",
+        "float*",
+        "float*",
+        "float*"
+      ],
+      "return": "void"
+    },
+    "stbtt_InitFont": {
+      "args": [
+        "stbtt_fontinfo*",
+        "const unsigned char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_IsGlyphEmpty": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_MakeCodepointBitmap": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "float",
+        "float",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_MakeCodepointBitmapSubpixel": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_MakeCodepointBitmapSubpixelPrefilter": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int",
+        "int",
+        "float*",
+        "float*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_MakeGlyphBitmap": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "float",
+        "float",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_MakeGlyphBitmapSubpixel": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_MakeGlyphBitmapSubpixelPrefilter": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int",
+        "int",
+        "float*",
+        "float*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_PackBegin": {
+      "args": [
+        "stbtt_pack_context*",
+        "unsigned char*",
+        "int",
+        "int",
+        "int",
+        "int",
+        "void*"
+      ],
+      "return": "int"
+    },
+    "stbtt_PackEnd": {
+      "args": [
+        "stbtt_pack_context*"
+      ],
+      "return": "void"
+    },
+    "stbtt_PackFontRange": {
+      "args": [
+        "stbtt_pack_context*",
+        "const unsigned char*",
+        "int",
+        "float",
+        "int",
+        "int",
+        "stbtt_packedchar*"
+      ],
+      "return": "int"
+    },
+    "stbtt_PackFontRanges": {
+      "args": [
+        "stbtt_pack_context*",
+        "const unsigned char*",
+        "int",
+        "stbtt_pack_range*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "stbtt_PackFontRangesGatherRects": {
+      "args": [
+        "stbtt_pack_context*",
+        "const stbtt_fontinfo*",
+        "stbtt_pack_range*",
+        "int",
+        "stbrp_rect*"
+      ],
+      "return": "int"
+    },
+    "stbtt_PackFontRangesPackRects": {
+      "args": [
+        "stbtt_pack_context*",
+        "stbrp_rect*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_PackFontRangesRenderIntoRects": {
+      "args": [
+        "stbtt_pack_context*",
+        "const stbtt_fontinfo*",
+        "stbtt_pack_range*",
+        "int",
+        "stbrp_rect*"
+      ],
+      "return": "int"
+    },
+    "stbtt_PackSetOversampling": {
+      "args": [
+        "stbtt_pack_context*",
+        "unsigned int",
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "stbtt_PackSetSkipMissingCodepoints": {
+      "args": [
+        "stbtt_pack_context*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "stbtt_Rasterize": {
+      "args": [
+        "stbtt__bitmap*",
+        "float",
+        "stbtt_vertex*",
+        "int",
+        "float",
+        "float",
+        "float",
+        "float",
+        "int",
+        "int",
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "stbtt_ScaleForMappingEmToPixels": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float"
+      ],
+      "return": "float"
+    },
+    "stbtt_ScaleForPixelHeight": {
+      "args": [
+        "const stbtt_fontinfo*",
+        "float"
+      ],
+      "return": "float"
+    }
+  },
+  "auto_generated": true,
+  "generated_at": "2026-07-31T20:55:25+08:00"
+}

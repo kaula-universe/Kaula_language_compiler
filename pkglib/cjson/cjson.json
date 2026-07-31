@@ -1,0 +1,533 @@
+{
+  "name": "cjson",
+  "type": "single_header",
+  "header": "cjson/cJSON.h",
+  "headers": [
+    "\"cjson/cJSON.h\""
+  ],
+  "libraries": [
+    "cjson"
+  ],
+  "include_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib",
+  "library_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib\\cjson",
+  "functions": {
+    "cJSON_AddArrayToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddBoolToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const",
+        "const int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddFalseToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddItemReferenceToArray": {
+      "args": [
+        "cJSON*",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_AddItemReferenceToObject": {
+      "args": [
+        "cJSON*",
+        "const char*",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_AddItemToArray": {
+      "args": [
+        "cJSON*",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_AddItemToObject": {
+      "args": [
+        "cJSON*",
+        "const char*",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_AddItemToObjectCS": {
+      "args": [
+        "cJSON*",
+        "const char*",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_AddNullToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddNumberToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const",
+        "const double"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddObjectToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddRawToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddStringToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_AddTrueToObject": {
+      "args": [
+        "cJSON*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_Compare": {
+      "args": [
+        "const cJSON*const",
+        "const cJSON*const",
+        "const int"
+      ],
+      "return": "int"
+    },
+    "cJSON_CreateArray": {
+      "args": [],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateArrayReference": {
+      "args": [
+        "const cJSON*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateBool": {
+      "args": [
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateDoubleArray": {
+      "args": [
+        "const double*",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateFalse": {
+      "args": [],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateFloatArray": {
+      "args": [
+        "const float*",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateIntArray": {
+      "args": [
+        "const int*",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateNull": {
+      "args": [],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateNumber": {
+      "args": [
+        "double"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateObject": {
+      "args": [],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateObjectReference": {
+      "args": [
+        "const cJSON*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateRaw": {
+      "args": [
+        "const char*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateString": {
+      "args": [
+        "const char*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateStringArray": {
+      "args": [
+        "const char*const*",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateStringReference": {
+      "args": [
+        "const char*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_CreateTrue": {
+      "args": [],
+      "return": "cJSON*"
+    },
+    "cJSON_Delete": {
+      "args": [
+        "cJSON*"
+      ],
+      "return": "void"
+    },
+    "cJSON_DeleteItemFromArray": {
+      "args": [
+        "cJSON*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "cJSON_DeleteItemFromObject": {
+      "args": [
+        "cJSON*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "cJSON_DeleteItemFromObjectCaseSensitive": {
+      "args": [
+        "cJSON*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "cJSON_DetachItemFromArray": {
+      "args": [
+        "cJSON*",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_DetachItemFromObject": {
+      "args": [
+        "cJSON*",
+        "const char*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_DetachItemFromObjectCaseSensitive": {
+      "args": [
+        "cJSON*",
+        "const char*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_DetachItemViaPointer": {
+      "args": [
+        "cJSON*",
+        "cJSON*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_Duplicate": {
+      "args": [
+        "const cJSON*",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_GetArrayItem": {
+      "args": [
+        "const cJSON*",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_GetArraySize": {
+      "args": [
+        "const cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_GetErrorPtr": {
+      "args": [],
+      "return": "const char*"
+    },
+    "cJSON_GetNumberValue": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "double"
+    },
+    "cJSON_GetObjectItem": {
+      "args": [
+        "const cJSON*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_GetObjectItemCaseSensitive": {
+      "args": [
+        "const cJSON*const",
+        "const char*const"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_GetStringValue": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "char*"
+    },
+    "cJSON_HasObjectItem": {
+      "args": [
+        "const cJSON*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "cJSON_InitHooks": {
+      "args": [
+        "cJSON_Hooks*"
+      ],
+      "return": "void"
+    },
+    "cJSON_InsertItemInArray": {
+      "args": [
+        "cJSON*",
+        "int",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsArray": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsBool": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsFalse": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsInvalid": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsNull": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsNumber": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsObject": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsRaw": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsString": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_IsTrue": {
+      "args": [
+        "const cJSON*const"
+      ],
+      "return": "int"
+    },
+    "cJSON_Minify": {
+      "args": [
+        "char*"
+      ],
+      "return": "void"
+    },
+    "cJSON_Parse": {
+      "args": [
+        "const char*"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_ParseWithLength": {
+      "args": [
+        "const char*",
+        "unsigned long long"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_ParseWithLengthOpts": {
+      "args": [
+        "const char*",
+        "unsigned long long",
+        "const char**",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_ParseWithOpts": {
+      "args": [
+        "const char*",
+        "const char**",
+        "int"
+      ],
+      "return": "cJSON*"
+    },
+    "cJSON_Print": {
+      "args": [
+        "const cJSON*"
+      ],
+      "return": "char*"
+    },
+    "cJSON_PrintBuffered": {
+      "args": [
+        "const cJSON*",
+        "int",
+        "int"
+      ],
+      "return": "char*"
+    },
+    "cJSON_PrintPreallocated": {
+      "args": [
+        "cJSON*",
+        "char*",
+        "const int",
+        "const int"
+      ],
+      "return": "int"
+    },
+    "cJSON_PrintUnformatted": {
+      "args": [
+        "const cJSON*"
+      ],
+      "return": "char*"
+    },
+    "cJSON_ReplaceItemInArray": {
+      "args": [
+        "cJSON*",
+        "int",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_ReplaceItemInObject": {
+      "args": [
+        "cJSON*",
+        "const char*",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_ReplaceItemInObjectCaseSensitive": {
+      "args": [
+        "cJSON*",
+        "const char*",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_ReplaceItemViaPointer": {
+      "args": [
+        "cJSON*const",
+        "cJSON*const",
+        "cJSON*"
+      ],
+      "return": "int"
+    },
+    "cJSON_SetNumberHelper": {
+      "args": [
+        "cJSON*",
+        "double"
+      ],
+      "return": "double"
+    },
+    "cJSON_SetValuestring": {
+      "args": [
+        "cJSON*",
+        "const char*"
+      ],
+      "return": "char*"
+    },
+    "cJSON_Version": {
+      "args": [],
+      "return": "const char*"
+    },
+    "cJSON_free": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "cJSON_malloc": {
+      "args": [
+        "unsigned long long"
+      ],
+      "return": "void*"
+    }
+  },
+  "auto_generated": true,
+  "generated_at": "2026-07-31T21:13:12+08:00"
+}
