@@ -373,11 +373,14 @@ fn process_data() {
 ### Installation
 
 ```bash
-cd kaula-compiler
-go build -o kaulac.exe cmd/kaulac/main.go
+python toolkit_build.py            # Debug build (default)
+python toolkit_build.py --release # Release build
+python toolkit_build.py --target compiler # compiler only
 ```
 
-Dependencies: Go 1.21+, Clang
+Dependencies: Python 3.8+, Go 1.21+, Clang
+
+This script builds everything in one shot: standard library (kaula_std), runtime (kaula_runtime), compiler (kaulac), and formatter (kaulafmt). SHA256-based incremental cache skips unchanged sources in seconds.
 
 ### Compilation Pipeline
 
