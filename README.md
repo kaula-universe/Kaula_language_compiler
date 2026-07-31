@@ -373,11 +373,14 @@ fn process_data() {
 ### 安装
 
 ```bash
-cd kaula-compiler
-go build -o kaulac.exe cmd/kaulac/main.go
+python toolkit_build.py            # Debug 构建 (默认)
+python toolkit_build.py --release # Release 构建
+python toolkit_build.py --target compiler # 只构建编译器
 ```
 
-依赖：Go 1.21+、Clang
+依赖：Python 3.8+、Go 1.21+、Clang
+
+该脚本一次性构建：标准库 (kaula_std)、运行时 (kaula_runtime)、编译器 (kaulac)、格式化工具 (kaulafmt)。基于 SHA256 增量缓存，未变更的源文件秒级跳过。
 
 ### 编译流程
 
