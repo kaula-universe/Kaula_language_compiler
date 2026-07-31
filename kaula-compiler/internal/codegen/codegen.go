@@ -365,15 +365,17 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if varDecl == nil {
 				continue
 			}
-			// const 变量：纯编译期常量，不生成运行时 C 代码
-			// 存入常量表供后续编译期求值引用
+			// const 变量：可编译期求值的存入常量表（不生成 C 代码）；
+			// 显式类型且无法求值的（如 const char* s = fn()）按普通 C const 变量生成
 			if varDecl.IsConst {
 				if evaluated := cg.tryEvalConstExpr(varDecl.Value); evaluated != "" {
 					cg.constTable[varDecl.Name] = evaluated
-				} else if varDecl.Value != nil {
-					cg.constTable[varDecl.Name] = cg.expressionGenerator.GenerateExpression(varDecl.Value)
+					continue
 				}
-				continue
+				if varDecl.Type == "" {
+					cg.constTable[varDecl.Name] = cg.expressionGenerator.GenerateExpression(varDecl.Value)
+					continue
+				}
 			}
 			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
 			initValue := cg.generateExpression(varDecl.Value)

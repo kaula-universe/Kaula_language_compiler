@@ -1,46 +1,612 @@
 {
   "name": "zlib",
+  "type": "multi_header",
   "header": "zlib/zlib.h",
-  "headers": ["\"zlib/zlib.h\""],
-  "libraries": ["z"],
-  "include_path": "../pkglib",
-  "library_path": "",
+  "headers": [
+    "\"zlib/zlib.h\""
+  ],
+  "libraries": [
+    "z"
+  ],
+  "include_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib",
+  "library_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib\\zlib",
   "functions": {
-    "zlibVersion": {
-      "args": [],
-      "return": "const char*"
+    "adler32": {
+      "args": [
+        "unsigned long",
+        "const unsigned char*",
+        "unsigned int"
+      ],
+      "return": "unsigned long"
     },
-    "deflateInit_": {
-      "args": ["void*", "int", "const char*", "int"],
+    "adler32_combine": {
+      "args": [
+        "unsigned long",
+        "unsigned long",
+        "long"
+      ],
+      "return": "unsigned long"
+    },
+    "adler32_z": {
+      "args": [
+        "unsigned long",
+        "const unsigned char*",
+        "z_size_t"
+      ],
+      "return": "unsigned long"
+    },
+    "compress": {
+      "args": [
+        "unsigned char*",
+        "unsigned long*",
+        "const unsigned char*",
+        "unsigned long"
+      ],
       "return": "int"
     },
+    "compress2": {
+      "args": [
+        "unsigned char*",
+        "unsigned long*",
+        "const unsigned char*",
+        "unsigned long",
+        "int"
+      ],
+      "return": "int"
+    },
+    "compressBound": {
+      "args": [
+        "unsigned long"
+      ],
+      "return": "unsigned long"
+    },
+    "crc32": {
+      "args": [
+        "unsigned long",
+        "const unsigned char*",
+        "unsigned int"
+      ],
+      "return": "unsigned long"
+    },
+    "crc32_combine": {
+      "args": [
+        "unsigned long",
+        "unsigned long",
+        "long"
+      ],
+      "return": "unsigned long"
+    },
+    "crc32_combine_gen": {
+      "args": [
+        "long"
+      ],
+      "return": "unsigned long"
+    },
+    "crc32_combine_op": {
+      "args": [
+        "unsigned long",
+        "unsigned long",
+        "unsigned long"
+      ],
+      "return": "unsigned long"
+    },
+    "crc32_z": {
+      "args": [
+        "unsigned long",
+        "const unsigned char*",
+        "z_size_t"
+      ],
+      "return": "unsigned long"
+    },
     "deflate": {
-      "args": ["void*", "int"],
+      "args": [
+        "z_stream_s*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "deflateBound": {
+      "args": [
+        "z_stream_s*",
+        "unsigned long"
+      ],
+      "return": "unsigned long"
+    },
+    "deflateCopy": {
+      "args": [
+        "z_stream_s*",
+        "z_stream_s*"
+      ],
       "return": "int"
     },
     "deflateEnd": {
-      "args": ["void*"],
+      "args": [
+        "z_stream_s*"
+      ],
       "return": "int"
     },
-    "inflateInit_": {
-      "args": ["void*", "const char*", "int"],
+    "deflateGetDictionary": {
+      "args": [
+        "z_stream_s*",
+        "unsigned char*",
+        "unsigned int*"
+      ],
+      "return": "int"
+    },
+    "deflateInit2_": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "int",
+        "int",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "deflateInit_": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "deflateParams": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "deflatePending": {
+      "args": [
+        "z_stream_s*",
+        "unsigned int*",
+        "int*"
+      ],
+      "return": "int"
+    },
+    "deflatePrime": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "deflateReset": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "int"
+    },
+    "deflateResetKeep": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "int"
+    },
+    "deflateSetDictionary": {
+      "args": [
+        "z_stream_s*",
+        "const unsigned char*",
+        "unsigned int"
+      ],
+      "return": "int"
+    },
+    "deflateSetHeader": {
+      "args": [
+        "z_stream_s*",
+        "gz_header_s*"
+      ],
+      "return": "int"
+    },
+    "deflateTune": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "int",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "get_crc_table": {
+      "args": [],
+      "return": "const z_crc_t*"
+    },
+    "gzbuffer": {
+      "args": [
+        "gzFile_s*",
+        "unsigned int"
+      ],
+      "return": "int"
+    },
+    "gzclearerr": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "void"
+    },
+    "gzclose": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzclose_r": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzclose_w": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzdirect": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzdopen": {
+      "args": [
+        "int",
+        "const char*"
+      ],
+      "return": "gzFile_s*"
+    },
+    "gzeof": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzerror": {
+      "args": [
+        "gzFile_s*",
+        "int*"
+      ],
+      "return": "const char*"
+    },
+    "gzflush": {
+      "args": [
+        "gzFile_s*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "gzfread": {
+      "args": [
+        "void*",
+        "z_size_t",
+        "z_size_t",
+        "gzFile_s*"
+      ],
+      "return": "z_size_t"
+    },
+    "gzfwrite": {
+      "args": [
+        "const void*",
+        "z_size_t",
+        "z_size_t",
+        "gzFile_s*"
+      ],
+      "return": "z_size_t"
+    },
+    "gzgetc": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzgetc_": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzgets": {
+      "args": [
+        "gzFile_s*",
+        "char*",
+        "int"
+      ],
+      "return": "char*"
+    },
+    "gzoffset": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "long"
+    },
+    "gzopen": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "gzFile_s*"
+    },
+    "gzopen_w": {
+      "args": [
+        "const wchar_t*",
+        "const char*"
+      ],
+      "return": "gzFile_s*"
+    },
+    "gzprintf": {
+      "args": [
+        "gzFile_s*",
+        "const char*"
+      ],
+      "varargs": true,
+      "return": "int"
+    },
+    "gzputc": {
+      "args": [
+        "gzFile_s*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "gzputs": {
+      "args": [
+        "gzFile_s*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "gzread": {
+      "args": [
+        "gzFile_s*",
+        "void*",
+        "unsigned int"
+      ],
+      "return": "int"
+    },
+    "gzrewind": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzseek": {
+      "args": [
+        "gzFile_s*",
+        "long",
+        "int"
+      ],
+      "return": "long"
+    },
+    "gzsetparams": {
+      "args": [
+        "gzFile_s*",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "gztell": {
+      "args": [
+        "gzFile_s*"
+      ],
+      "return": "long"
+    },
+    "gzungetc": {
+      "args": [
+        "int",
+        "gzFile_s*"
+      ],
+      "return": "int"
+    },
+    "gzvprintf": {
+      "args": [
+        "gzFile_s*",
+        "const char*",
+        "va_list"
+      ],
+      "return": "int"
+    },
+    "gzwrite": {
+      "args": [
+        "gzFile_s*",
+        "const void*",
+        "unsigned int"
+      ],
       "return": "int"
     },
     "inflate": {
-      "args": ["void*", "int"],
+      "args": [
+        "z_stream_s*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "inflateBack": {
+      "args": [
+        "z_stream_s*",
+        "unsigned int (*)(void*, unsigned char**)",
+        "void*",
+        "int (*)(void*, unsigned char*, unsigned int)",
+        "void*"
+      ],
+      "return": "int"
+    },
+    "inflateBackEnd": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "int"
+    },
+    "inflateBackInit_": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "unsigned char*",
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "inflateCodesUsed": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "unsigned long"
+    },
+    "inflateCopy": {
+      "args": [
+        "z_stream_s*",
+        "z_stream_s*"
+      ],
       "return": "int"
     },
     "inflateEnd": {
-      "args": ["void*"],
+      "args": [
+        "z_stream_s*"
+      ],
       "return": "int"
     },
-    "compress": {
-      "args": ["void*", "unsigned long*", "const void*", "unsigned long"],
+    "inflateGetDictionary": {
+      "args": [
+        "z_stream_s*",
+        "unsigned char*",
+        "unsigned int*"
+      ],
+      "return": "int"
+    },
+    "inflateGetHeader": {
+      "args": [
+        "z_stream_s*",
+        "gz_header_s*"
+      ],
+      "return": "int"
+    },
+    "inflateInit2_": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "inflateInit_": {
+      "args": [
+        "z_stream_s*",
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "inflateMark": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "long"
+    },
+    "inflatePrime": {
+      "args": [
+        "z_stream_s*",
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "inflateReset": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "int"
+    },
+    "inflateReset2": {
+      "args": [
+        "z_stream_s*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "inflateResetKeep": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "int"
+    },
+    "inflateSetDictionary": {
+      "args": [
+        "z_stream_s*",
+        "const unsigned char*",
+        "unsigned int"
+      ],
+      "return": "int"
+    },
+    "inflateSync": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "int"
+    },
+    "inflateSyncPoint": {
+      "args": [
+        "z_stream_s*"
+      ],
+      "return": "int"
+    },
+    "inflateUndermine": {
+      "args": [
+        "z_stream_s*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "inflateValidate": {
+      "args": [
+        "z_stream_s*",
+        "int"
+      ],
       "return": "int"
     },
     "uncompress": {
-      "args": ["void*", "unsigned long*", "const void*", "unsigned long"],
+      "args": [
+        "unsigned char*",
+        "unsigned long*",
+        "const unsigned char*",
+        "unsigned long"
+      ],
       "return": "int"
+    },
+    "uncompress2": {
+      "args": [
+        "unsigned char*",
+        "unsigned long*",
+        "const unsigned char*",
+        "unsigned long*"
+      ],
+      "return": "int"
+    },
+    "zError": {
+      "args": [
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "zlibCompileFlags": {
+      "args": [],
+      "return": "unsigned long"
+    },
+    "zlibVersion": {
+      "args": [],
+      "return": "const char*"
     }
-  }
+  },
+  "auto_generated": true,
+  "generated_at": "2026-07-31T21:08:11+08:00"
 }

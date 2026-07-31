@@ -310,6 +310,19 @@ func (sc *StdlibConfig) GetFunctionByName(funcName string) *Function {
 	return nil
 }
 
+// GetAnyFunctionSignature 在标准库模块和第三方库（pkglib）中查找函数签名
+func (sc *StdlibConfig) GetAnyFunctionSignature(funcName string) *Function {
+	if fn := sc.GetFunctionByName(funcName); fn != nil {
+		return fn
+	}
+	for _, lib := range sc.ThirdParty {
+		if fn, ok := lib.Functions[funcName]; ok {
+			return &fn
+		}
+	}
+	return nil
+}
+
 func (sc *StdlibConfig) GetAllFunctions() []string {
 	functions := make([]string, 0)
 	for _, module := range sc.Modules {

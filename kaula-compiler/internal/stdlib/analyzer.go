@@ -20,6 +20,7 @@ type ClangASTNode struct {
 	IsUsed       bool           `json:"isUsed,omitempty"`
 	StorageClass string         `json:"storageClass,omitempty"`
 	Loc          *ClangLoc      `json:"loc,omitempty"`
+	Range        *ClangRange    `json:"range,omitempty"`
 	MangledName  string         `json:"mangledName,omitempty"`
 }
 
@@ -37,6 +38,61 @@ type ClangLoc struct {
 	IncludedFrom *struct {
 		File string `json:"file"`
 	} `json:"includedFrom,omitempty"`
+}
+
+// ClangRange 表示 clang AST 中的范围信息（含真实文件位置，loc 省略 file 时用于定位）
+type ClangRange struct {
+	Begin *ClangRangeLoc `json:"begin,omitempty"`
+	End   *ClangRangeLoc `json:"end,omitempty"`
+}
+
+// ClangRangeLoc 表示范围端点位置（可含 spellingLoc/expansionLoc 完整定位）
+type ClangRangeLoc struct {
+	SpellingLoc  *ClangLoc `json:"spellingLoc,omitempty"`
+	ExpansionLoc *ClangLoc `json:"expansionLoc,omitempty"`
+	IncludedFrom *struct {
+		File string `json:"file"`
+	} `json:"includedFrom,omitempty"`
+}
+
+// resolveLocFile 解析节点声明的真实文件：
+// loc.file → range.begin.expansionLoc（宏展开处=实际声明位置）
+// → range.begin.spellingLoc（宏拼写处，<built-in> 等内置位置跳过）
+// → 各层 includedFrom.file 兜底（clang 对同文件后续节点会省略 file 字段，
+//    includedFrom 仍指向声明所在文件；全为空时推断与根文件同文件，返回 ""）
+// 注意：不使用 loc.includedFrom——它指向的是包含链的根文件而非声明所在文件
+func resolveLocFile(node *ClangASTNode) string {
+	// 辅助：优先取 File，为空或内置位置时取 includedFrom
+	pick := func(loc *ClangLoc) string {
+		if loc == nil {
+			return ""
+		}
+		if loc.File != "" && !strings.HasPrefix(loc.File, "<") {
+			return loc.File
+		}
+		if loc.IncludedFrom != nil && !strings.HasPrefix(loc.IncludedFrom.File, "<") {
+			return loc.IncludedFrom.File
+		}
+		return ""
+	}
+	if node.Loc != nil && node.Loc.File != "" {
+		return node.Loc.File
+	}
+	if node.Range != nil && node.Range.Begin != nil {
+		b := node.Range.Begin
+		// 宏展开位置优先（函数由 CJSON_PUBLIC 等宏包裹时，
+		// spellingLoc 指向宏定义处而 expansionLoc 指向真实声明处）
+		if f := pick(b.ExpansionLoc); f != "" {
+			return f
+		}
+		if f := pick(b.SpellingLoc); f != "" {
+			return f
+		}
+		if b.IncludedFrom != nil && !strings.HasPrefix(b.IncludedFrom.File, "<") {
+			return b.IncludedFrom.File
+		}
+	}
+	return ""
 }
 
 // LibAnalysisResult 表示库分析结果
@@ -87,6 +143,11 @@ func classifyLibrary(libDir string) (string, []string, error) {
 		}
 		name := entry.Name()
 		if strings.HasSuffix(name, ".h") || strings.HasSuffix(name, ".hpp") {
+			// 跳过扩展 API 头（sqlite3ext.h / glext.h 等）：
+			// 它们要求特殊的编译上下文（如 SQLITE_EXTENSION_INIT），不能作为普通头 include
+			if strings.HasSuffix(strings.ToLower(name), "ext.h") {
+				continue
+			}
 			headerFiles = append(headerFiles, name)
 		}
 	}
@@ -302,8 +363,8 @@ func extractTypedefsRecursive(node *ClangASTNode, sourceFile string, typedefs ma
 			return
 		}
 		// 只提取来自目标文件或其包含文件的 typedef
-		if node.Loc != nil && node.Loc.File != "" {
-			locFile := node.Loc.File
+		locFile := resolveLocFile(node)
+		if locFile != "" {
 			if strings.HasPrefix(locFile, "<") {
 				return
 			}
@@ -378,19 +439,33 @@ func isIdentChar(c byte) bool {
 }
 
 // extractFunctionDecls 从 clang AST JSON 中递归提取函数声明
-func extractFunctionDecls(node *ClangASTNode, sourceFile string, typedefs map[string]string) map[string]Function {
+func extractFunctionDecls(node *ClangASTNode, sourceFile string, typedefs map[string]string, isCpp bool) map[string]Function {
 	functions := make(map[string]Function)
-	extractFunctionDeclsRecursive(node, sourceFile, functions, typedefs)
+	extractFunctionDeclsRecursive(node, sourceFile, functions, typedefs, isCpp)
 	return functions
 }
 
-func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functions map[string]Function, typedefs map[string]string) {
+func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functions map[string]Function, typedefs map[string]string, isCpp bool) {
 	if node.Kind == "FunctionDecl" && node.Name != "" {
 		if node.IsImplicit {
 			return
 		}
-		if node.Loc != nil && node.Loc.File != "" {
-			locFile := node.Loc.File
+		// C++ 模式下的函数模板（如 template ImClamp）没有 mangledName，
+		// 也没有对应的 C 链接符号，无法从 Kaula 生成的 C 代码调用，跳过
+		if isCpp && node.MangledName == "" {
+			return
+		}
+		// C++ 类方法/重载具有 mangled 名称（如 _ZN5ImGui4TextEPKcz），
+		// 无法从 Kaula 生成的 C 代码按原名调用，跳过
+		if node.MangledName != "" && node.MangledName != node.Name {
+			return
+		}
+		// 位置过滤：只保留声明在目标头文件（或其所在目录）中的函数。
+		// clang 的 JSON dump 对同文件后续节点会省略 loc.file，
+		// 此时用 range 内的 spellingLoc/expansionLoc 定位真实文件；
+		// 全部省略说明声明就在根文件本身，直接保留
+		locFile := resolveLocFile(node)
+		if locFile != "" {
 			if strings.HasPrefix(locFile, "<") {
 				return
 			}
@@ -425,7 +500,7 @@ func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functi
 
 	// 递归处理子节点
 	for i := range node.Inner {
-		extractFunctionDeclsRecursive(&node.Inner[i], sourceFile, functions, typedefs)
+		extractFunctionDeclsRecursive(&node.Inner[i], sourceFile, functions, typedefs, isCpp)
 	}
 }
 
@@ -519,14 +594,12 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 	// 2. 扫描链接库
 	libraries, _ := scanLinkLibraries(pkgDir)
 
-	// 3. 读取主头文件内容检测宏
+	// 3. 选择主头文件并读取内容用于宏检测
+	//    单头：唯一头文件；多头：优先与目录同名的头文件
 	var mainHeader string
-	var headers []string
 	if libType == "single_header" && len(headerFiles) == 1 {
 		mainHeader = libName + "/" + headerFiles[0]
-		headers = []string{fmt.Sprintf(`"%s/%s"`, libName, headerFiles[0])}
 	} else {
-		// 多头文件：选择与目录同名的头文件为主头文件
 		mainHeaderFound := false
 		for _, h := range headerFiles {
 			baseName := strings.TrimSuffix(h, filepath.Ext(h))
@@ -539,27 +612,74 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 		if !mainHeaderFound && len(headerFiles) > 0 {
 			mainHeader = libName + "/" + headerFiles[0]
 		}
-		for _, h := range headerFiles {
-			headers = append(headers, fmt.Sprintf(`"%s/%s"`, libName, h))
+	}
+
+	// 4. 使用 clang AST dump 逐个头文件提取函数签名并合并
+	//    多头文件库遍历所有顶层头文件；解析失败或提取不到函数的头
+	//    （如 C++ 类头）自动跳过，只保留可被 C 代码调用的声明
+	functions := make(map[string]Function)
+	implementMacro := ""
+	var effectiveHeaders []string
+	var lastExtractErr error
+
+	for _, h := range headerFiles {
+		headerPath := filepath.Join(pkgDir, h)
+		headerContent, rerr := os.ReadFile(headerPath)
+		if rerr != nil {
+			lastExtractErr = rerr
+			continue
+		}
+		fns, mcr, usedCpp, cerr := extractFunctionsWithClang(pkgDir, headerPath, string(headerContent), libType)
+		if cerr != nil {
+			fmt.Printf("[Analyze] Skipping header %s: %v\n", h, cerr)
+			lastExtractErr = cerr
+			continue
+		}
+		if usedCpp {
+			// C++ 模式才能解析的头文件无法被生成的 C 代码 #include，
+			// 其中的 C 链接函数（如 extern "C" 包装）也无法获得声明，整体跳过
+			fmt.Printf("[Analyze] Skipping C++ header %s (not C-compatible)\n", h)
+			continue
+		}
+		if len(fns) > 0 {
+			for name, fn := range fns {
+				functions[name] = fn
+			}
+			effectiveHeaders = append(effectiveHeaders, h)
+			if mcr != "" {
+				implementMacro = mcr
+			}
 		}
 	}
 
-	// 如果有 libraries 字段，主头文件使用带目录前缀的形式
-	if len(libraries) > 0 {
-		headers = []string{fmt.Sprintf("\"%s\"", mainHeader)}
+	if len(functions) == 0 {
+		if lastExtractErr != nil {
+			return nil, fmt.Errorf("extract functions from %s: %w", libName, lastExtractErr)
+		}
+		return nil, fmt.Errorf("no callable C functions found in %s headers", libName)
 	}
 
-	// 4. 读取主头文件内容用于宏检测
-	mainHeaderPath := filepath.Join(pkgDir, filepath.Base(mainHeader))
-	headerContent, err := os.ReadFile(mainHeaderPath)
-	if err != nil {
-		return nil, fmt.Errorf("read header %s: %w", mainHeaderPath, err)
+	// 主头文件没有提取到函数时，用第一个成功提取的头文件作为主头
+	if mainHeader != "" {
+		mainBase := filepath.Base(mainHeader)
+		mainHasFunctions := false
+		for _, h := range effectiveHeaders {
+			if h == mainBase {
+				mainHasFunctions = true
+				break
+			}
+		}
+		if !mainHasFunctions && len(effectiveHeaders) > 0 {
+			fmt.Printf("[Analyze] Main header %s yielded no functions, using %s (%d functions)\n", mainBase, effectiveHeaders[0], len(functions))
+			mainHeader = libName + "/" + effectiveHeaders[0]
+		}
 	}
 
-	// 5. 使用 clang AST dump 提取函数签名
-	functions, implementMacro, err := extractFunctionsWithClang(pkgDir, mainHeaderPath, string(headerContent), libType)
-	if err != nil {
-		return nil, fmt.Errorf("extract functions from %s: %w", libName, err)
+	// 5. 构建 headers 列表：只包含成功提取出函数的 C 兼容头文件
+	//    （C++ 头无法被生成的 C 代码包含，已在上面跳过）
+	var headers []string
+	for _, h := range effectiveHeaders {
+		headers = append(headers, fmt.Sprintf(`"%s/%s"`, libName, h))
 	}
 
 	return &LibAnalysisResult{
@@ -570,18 +690,20 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 		ImplementMacro: implementMacro,
 		Functions:      functions,
 		Libraries:      libraries,
-		IncludePath:    "../pkglib",
-		LibraryPath:    "../pkglib/" + libName,
+		// 使用绝对路径，避免相对路径随 clang 工作目录变化而失效
+		IncludePath:    filepath.Dir(pkgDir),
+		LibraryPath:    pkgDir,
 		AutoGenerated:  true,
 		GeneratedAt:    time.Now().Format(time.RFC3339),
 	}, nil
 }
 
 // extractFunctionsWithClang 使用 clang AST dump 提取函数签名
-func extractFunctionsWithClang(pkgDir, mainHeaderPath, headerContent, libType string) (map[string]Function, string, error) {
+// 返回函数表、IMPLEMENTATION 宏、是否使用了 C++ 模式解析
+func extractFunctionsWithClang(pkgDir, mainHeaderPath, headerContent, libType string) (map[string]Function, string, bool, error) {
 	clangPath, err := findClangPath()
 	if err != nil {
-		return nil, "", fmt.Errorf("clang not found: %w", err)
+		return nil, "", false, fmt.Errorf("clang not found: %w", err)
 	}
 
 	// 检测 IMPLEMENTATION 宏
@@ -610,40 +732,57 @@ func extractFunctionsWithClang(pkgDir, mainHeaderPath, headerContent, libType st
 	args = append(args, mainHeaderPath)
 
 	cmd := exec.Command(clangPath, args...)
+	cppMode := false
 	output, err := cmd.Output()
-	if err != nil {
+	if err != nil && len(extraDefines) > 0 {
 		// 如果带导出宏失败，尝试不带导出宏
-		if len(extraDefines) > 0 {
-			args2 := []string{
-				"-Xclang", "-ast-dump=json",
-				"-fsyntax-only",
-				"-I", filepath.Dir(pkgDir),
-				mainHeaderPath,
-			}
-			cmd2 := exec.Command(clangPath, args2...)
-			output2, err2 := cmd2.Output()
-			if err2 != nil {
-				return nil, "", fmt.Errorf("clang ast-dump failed: %w\nstderr: %s", err, string(output))
-			}
-			output = output2
-		} else {
-			return nil, "", fmt.Errorf("clang ast-dump failed: %w", err)
+		args2 := []string{
+			"-Xclang", "-ast-dump=json",
+			"-fsyntax-only",
+			"-I", filepath.Dir(pkgDir),
+			mainHeaderPath,
 		}
+		cmd2 := exec.Command(clangPath, args2...)
+		output2, err2 := cmd2.Output()
+		if err2 == nil {
+			output = output2
+			err = nil
+		} else {
+			output = output2
+			err = err2
+		}
+	}
+	if err != nil {
+		// C 模式失败，可能是 C++ 头文件，重试 C++ 模式
+		argsCpp := []string{
+			"-Xclang", "-ast-dump=json",
+			"-fsyntax-only",
+			"-x", "c++",
+			"-I", filepath.Dir(pkgDir),
+			mainHeaderPath,
+		}
+		cmdCpp := exec.Command(clangPath, argsCpp...)
+		outputCpp, errCpp := cmdCpp.Output()
+		if errCpp != nil {
+			return nil, "", false, fmt.Errorf("clang ast-dump failed (C and C++ modes): %v\nstderr: %s", err, string(outputCpp))
+		}
+		output = outputCpp
+		cppMode = true
 	}
 
 	// 解析 AST JSON
 	var astRoot ClangASTNode
 	if err := json.Unmarshal(output, &astRoot); err != nil {
-		return nil, "", fmt.Errorf("parse clang AST JSON: %w", err)
+		return nil, "", false, fmt.Errorf("parse clang AST JSON: %w", err)
 	}
 
 	// 先提取 typedef 映射
 	typedefs := extractTypedefs(&astRoot, mainHeaderPath)
 
 	// 再提取函数声明（展开 typedef）
-	functions := extractFunctionDecls(&astRoot, mainHeaderPath, typedefs)
+	functions := extractFunctionDecls(&astRoot, mainHeaderPath, typedefs, cppMode)
 
-	return functions, implementMacro, nil
+	return functions, implementMacro, cppMode, nil
 }
 
 // GenerateConfig 生成 JSON 配置文件

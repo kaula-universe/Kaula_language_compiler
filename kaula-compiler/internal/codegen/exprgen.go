@@ -78,9 +78,11 @@ func wrapIfNeeded(expr string, op string, side string) string {
 
 	return expr
 }
+// escapeCString 转义字符串为 C 字符串字面量
+// 词法器保留 Kaula 转义序列的原始形式（\" \n \\ 等），这些序列透传到 C
+// 源码中与 Kaula 语义完全一致（\" 仍是转义引号、\n 仍是换行），
+// 因此只处理源码中不可能出现、但 C 里必须转义的真实控制字符。
 func escapeCString(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "\"", "\\\"")
 	s = strings.ReplaceAll(s, "\n", "\\n")
 	s = strings.ReplaceAll(s, "\r", "\\r")
 	s = strings.ReplaceAll(s, "\t", "\\t")
@@ -544,11 +546,19 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		// 尝试查找 stdlib 函数签名以生成类型正确的参数
 		var sig *stdlib.Function
 		if eg.codegen.stdlibConfig != nil {
-			sig = eg.codegen.stdlibConfig.GetFunctionByName(funcName)
+			sig = eg.codegen.stdlibConfig.GetAnyFunctionSignature(funcName)
 		}
 		code := funcName + "(" + eg.generateStdlibArgs(e.Args, sig) + ")"
 		return code
 	}
+}
+
+// normalizePtrType 规范化 C 指针类型字符串：去除 const 与空格，用于宽松匹配
+// 如 "const char * const" -> "char*"，"char *" -> "char*"
+func normalizePtrType(t string) string {
+	n := strings.ReplaceAll(t, "const", "")
+	n = strings.ReplaceAll(n, " ", "")
+	return n
 }
 
 // generateStdlibArgs 根据函数签名生成参数列表
@@ -573,7 +583,7 @@ func (eg *ExpressionGenerator) generateStdlibArgs(args []ast.Expression, sig *st
 		}
 		if i < len(sig.Args) {
 			paramType := sig.Args[i]
-			if paramType == "const char*" || paramType == "char*" {
+			if normalizePtrType(paramType) == "char*" {
 				// 参数期望 C 字符串：字符串字面量直接输出，String 变量取 .ptr
 				if strLit, ok := arg.(*ast.StringLiteral); ok {
 					escaped := escapeCString(strLit.Value)
@@ -788,7 +798,12 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 		if argType == "d" && isIntegerLiteral(argCode) {
 			return "printf(\"" + argCode + "\\n\")"
 		}
-		return "printf(\"%" + argType + "\\n\", " + eg.maybeUnwrapString(argCode, argType) + ")"
+		// cstr 类型（char*）对应 %s
+		formatSpec := argType
+		if formatSpec == "cstr" {
+			formatSpec = "s"
+		}
+		return "printf(\"%" + formatSpec + "\\n\", " + eg.maybeUnwrapString(argCode, argType) + ")"
 	} else {
 		return eg.generatePrintlnMulti(args)
 	}
@@ -968,7 +983,7 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 				if t == "string" {
 					return "s"
 				}
-				if t == "char*" || t == "const char*" || t == "cstring" {
+				if normalizePtrType(t) == "char*" || t == "cstring" {
 					return "cstr"
 				}
 				if strings.HasSuffix(t, "*") {
@@ -1004,14 +1019,45 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 		return "s"
 	case *ast.CallExpression:
 		if ident, ok := e.Function.(*ast.Identifier); ok {
+			funcName := ident.Name
+			// 优先查本地符号表：extern fn 声明以返回类型注册符号，
+			// 本地函数定义同理；查不到再查 stdlib
+			if sym := eg.codegen.currentScope.GetSymbol(funcName); sym != nil {
+				switch sym.Type {
+				case "string", "str":
+					return "s"
+				case "float", "float64", "float32", "f32", "f64", "double", "single":
+					return "f"
+				case "bool":
+					return "d"
+				}
+				t := strings.ToLower(sym.Type)
+				if normalizePtrType(t) == "char*" || t == "cstring" {
+					return "cstr"
+				}
+			}
 			if eg.codegen.stdlibConfig != nil {
-				funcName := ident.Name
 				for _, mod := range eg.codegen.stdlibConfig.Modules {
 					if sig, ok := mod.Functions[funcName]; ok && sig.Return != "" {
 						if sig.Return == "string" {
 							return "s"
 						}
-						if sig.Return == "const char*" || sig.Return == "char*" || sig.Return == "cstring" {
+						if normalizePtrType(sig.Return) == "char*" || sig.Return == "cstring" {
+							return "cstr"
+						}
+						if sig.Return == "float" || sig.Return == "f64" || sig.Return == "f32" || sig.Return == "double" {
+							return "f"
+						}
+						return "d"
+					}
+				}
+				// 第三方库（pkglib）的函数签名单独存放
+				for _, lib := range eg.codegen.stdlibConfig.ThirdParty {
+					if sig, ok := lib.Functions[funcName]; ok && sig.Return != "" {
+						if sig.Return == "string" {
+							return "s"
+						}
+						if normalizePtrType(sig.Return) == "char*" || sig.Return == "cstring" {
 							return "cstr"
 						}
 						if sig.Return == "float" || sig.Return == "f64" || sig.Return == "f32" || sig.Return == "double" {
