@@ -20,6 +20,7 @@ import os
 import sys
 import subprocess
 import argparse
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -36,6 +37,7 @@ class BuildConfig:
 
         self.build_dir = self.project_root / "build"
         self.obj_dir = self.build_dir / "obj"
+        self.hash_dir = self.build_dir / "hash"  # 增量编译缓存(每个 .c 一个 .sha256)
         self.bin_dir = self.build_dir / "bin"
         self.lib_dir = self.build_dir / "lib"
         self.include_dir = self.build_dir / "include"
@@ -213,10 +215,26 @@ class CBuilder:
         return sources
 
     def _compile_one(self, src_file, out_obj=None):
+        rel = src_file.relative_to(self.config.project_root)
+        rel_key = str(rel).replace(os.sep, "_")
         if out_obj is None:
-            rel = src_file.relative_to(self.config.project_root)
-            out_obj = self.config.obj_dir / (str(rel).replace(os.sep, "_") + self.obj_ext)
+            out_obj = self.config.obj_dir / (rel_key + self.obj_ext)
         out_obj.parent.mkdir(parents=True, exist_ok=True)
+
+        # 增量编译:hash = sha256(src | flags),命中且 .o 存在则跳过
+        hash_path = self.config.hash_dir / (rel_key + ".sha256")
+        try:
+            digest = hashlib.sha256(
+                src_file.read_bytes() + b"\0" + "\n".join(self.flags).encode()
+            ).hexdigest()
+        except OSError:
+            digest = None
+
+        if digest and out_obj.exists() and hash_path.exists():
+            if hash_path.read_text(encoding="ascii").strip() == digest:
+                self.obj_files.append(out_obj)
+                print(f"  [cached]  {src_file.name}")
+                return True
 
         if self.is_msvc:
             cmd = [self.compiler] + self.flags
@@ -234,11 +252,13 @@ class CBuilder:
             if result.returncode != 0:
                 err = result.stderr if result.stderr else result.stdout
                 print(f"  [-] 失败: {src_file.name}")
-                for line in err.strip().split('\n')[:5]:
+                for line in err.strip().split("\n")[:5]:
                     print(f"      {line}")
                 return False
             self.obj_files.append(out_obj)
-            print(f"  [\u2713] {src_file.name}")
+            print(f"  [✓] {src_file.name}")
+            if digest:
+                hash_path.write_text(digest, encoding="ascii")
             return True
         except subprocess.TimeoutExpired:
             print(f"  [-] 超时: {src_file.name}")
@@ -442,6 +462,7 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
 
     config.build_dir.mkdir(parents=True, exist_ok=True)
     config.obj_dir.mkdir(parents=True, exist_ok=True)
+    config.hash_dir.mkdir(parents=True, exist_ok=True)
     config.bin_dir.mkdir(parents=True, exist_ok=True)
     config.lib_dir.mkdir(parents=True, exist_ok=True)
 

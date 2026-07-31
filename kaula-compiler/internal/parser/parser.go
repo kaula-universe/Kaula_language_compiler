@@ -2630,7 +2630,8 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 
 	// 使用迭代方式处理相同优先级的运算符
 	for {
-		op := p.curTok.Type
+		opTok := p.curTok
+		op := opTok.Type
 		opPrecedence := p.precedence(op)
 
 		// 如果没有运算符或优先级不够高，退出循环
@@ -2662,9 +2663,16 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 		}
 
 		// 构建新的二元表达式
+		// 优先用 token 自身的 Value(源码字面,如 "==","+","<=")
+		// Kaula 0.1.0-alpha 历史上用 TokenTypeToString 拿类型名("EQ","PLUS"),导致
+		// kaulafmt 输出 "path EQ \"/\"" 这种怪东西
+		operator := opTok.Value
+		if operator == "" {
+			operator = lexer.TokenTypeToString(op)
+		}
 		left = &ast.BinaryExpression{
 			Left:     left,
-			Operator: lexer.TokenTypeToString(op),
+			Operator: operator,
 			Right:    right,
 		}
 	}
