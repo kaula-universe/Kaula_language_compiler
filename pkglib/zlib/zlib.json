@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "zlib",
   "type": "multi_header",
   "header": "zlib/zlib.h",
@@ -286,7 +286,7 @@
     },
     "gzfread": {
       "args": [
-        "void*",
+        "void()",
         "z_size_t",
         "z_size_t",
         "gzFile_s*"
@@ -295,7 +295,7 @@
     },
     "gzfwrite": {
       "args": [
-        "const void*",
+        "const void()",
         "z_size_t",
         "z_size_t",
         "gzFile_s*"
@@ -367,7 +367,7 @@
     "gzread": {
       "args": [
         "gzFile_s*",
-        "void*",
+        "void()",
         "unsigned int"
       ],
       "return": "int"
@@ -418,7 +418,7 @@
     "gzwrite": {
       "args": [
         "gzFile_s*",
-        "const void*",
+        "const void()",
         "unsigned int"
       ],
       "return": "int"
@@ -434,9 +434,9 @@
       "args": [
         "z_stream_s*",
         "unsigned int (*)(void*, unsigned char**)",
-        "void*",
+        "void()",
         "int (*)(void*, unsigned char*, unsigned int)",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },

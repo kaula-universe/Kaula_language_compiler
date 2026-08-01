@@ -31,8 +31,6 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	}
 
 	switch s := stmt.(type) {
-	case *ast.GenericInstance:
-		return sg.generateGenericInstantiation(s)
 	case *ast.VOStatement:
 		return sg.generateVOStatement(s)
 	case *ast.SpendStatement:
@@ -272,98 +270,6 @@ func (sg *StatementGenerator) generateExpressionInMain(expr ast.Expression) stri
 		}
 	}
 	return sg.codegen.expressionGenerator.GenerateExpression(expr) + ";\n"
-}
-
-// generateGenericInstantiation 生成泛型实例化代码（编译期特化，零成本）
-func (sg *StatementGenerator) generateGenericInstantiation(inst *ast.GenericInstance) string {
-	var code string
-
-	// 1. 查找原始泛型函数定义
-	origFunc := sg.codegen.findFunctionByName(inst.OriginalName)
-	if origFunc == nil {
-		return fmt.Sprintf("// Error: Generic function '%s' not found for instantiation\n", inst.OriginalName)
-	}
-
-	// 2. 将 TypeArguments 转换为字符串数组
-	typeArgStrings := make([]string, len(inst.TypeArguments))
-	for i, ta := range inst.TypeArguments {
-		typeArgStrings[i] = ta.Type
-	}
-
-	// 3. 生成特化后的函数名（添加 kaula_ 前缀避免与 C 宏冲突）
-	specializedName := "kaula_" + inst.OriginalName + "_" + strings.Join(typeArgStrings, "_")
-
-	// 4. 检查是否已实例化过（避免重复生成）
-	if sg.codegen.IsGenericInstantiated(specializedName) {
-		return ""
-	}
-	sg.codegen.MarkGenericInstantiated(specializedName)
-
-	// 5. 构建类型映射
-	typeMap := make(map[string]string)
-	for i, tp := range origFunc.TypeParams {
-		if i < len(typeArgStrings) {
-			typeMap[tp.Name] = typeArgStrings[i]
-		}
-	}
-
-	// 6. 实例化返回类型
-	specializedReturnType := sg.resolveSpecializedType(origFunc.ReturnType, typeArgStrings)
-
-	// 7. 生成特化函数签名
-	code += fmt.Sprintf("// 泛型特化实例: %s<%s>\n", inst.OriginalName, strings.Join(typeArgStrings, ", "))
-	code += fmt.Sprintf("static inline %s %s(", specializedReturnType, specializedName)
-
-	// 8. 生成特化后的参数列表
-	for i, param := range origFunc.Params {
-		if i > 0 {
-			code += ", "
-		}
-		// 参数名保持不变，但类型需要特化
-		// 注意：这里的 param 是参数名，类型信息需要从原函数获取
-		// 简化处理：使用 int64_t 作为默认类型（实际应该从 AST 获取参数类型）
-		code += fmt.Sprintf("int64_t %s", param)
-	}
-	code += ") {\n"
-
-	// 9. 生成函数体（精确替换泛型类型，避免误替换）
-	sg.codegen.indent++
-	for _, bodyStmt := range origFunc.Body {
-		generated := sg.generateStatementForGeneric(bodyStmt, typeMap)
-		code += sg.codegen.indentString() + generated
-	}
-	sg.codegen.indent--
-
-	code += "}\n\n"
-	return code
-}
-
-// generateStatementForGeneric 在泛型实例化中生成语句代码（精确类型替换）
-func (sg *StatementGenerator) generateStatementForGeneric(stmt ast.Statement, typeMap map[string]string) string {
-	generated := sg.codegen.generateStatement(stmt)
-
-	// 精确替换类型声明中的泛型参数
-	// 匹配模式： "T " (类型后跟空格) 或 "T*" (类型后跟指针) 或 "T;" (类型后跟分号)
-	for origType, newType := range typeMap {
-		// 替换变量声明中的类型
-		generated = strings.ReplaceAll(generated, origType+" ", newType+" ")
-		generated = strings.ReplaceAll(generated, origType+"*", newType+"*")
-		generated = strings.ReplaceAll(generated, origType+";", newType+";")
-	}
-
-	return generated
-}
-
-// resolveSpecializedType 解析特化后的类型
-func (sg *StatementGenerator) resolveSpecializedType(typeName string, typeArgs []string) string {
-	for i, tp := range sg.codegen.currentFuncTypeParams {
-		if typeName == tp.Name {
-			if i < len(typeArgs) {
-				return typeArgs[i]
-			}
-		}
-	}
-	return typeName
 }
 
 // generateVOStatement 生成 VO 语句代码
@@ -1121,6 +1027,10 @@ func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 // - 值类型 (int, bool, float, double, etc.) 不需要 KMM
 func needsKMMForType(typeName string) bool {
 	if typeName == "" {
+		return false
+	}
+	// void(T...)R 签名记法：运行时为裸 void*/函数指针，不由 KMM 托管
+	if strings.HasPrefix(typeName, "void(") {
 		return false
 	}
 	t := strings.ToLower(typeName)

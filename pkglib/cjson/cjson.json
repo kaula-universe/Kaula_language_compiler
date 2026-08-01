@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "cjson",
   "type": "single_header",
   "header": "cjson/cJSON.h",
@@ -517,7 +517,7 @@
     },
     "cJSON_free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
@@ -525,7 +525,7 @@
       "args": [
         "unsigned long long"
       ],
-      "return": "void*"
+      "return": "void()"
     }
   },
   "auto_generated": true,

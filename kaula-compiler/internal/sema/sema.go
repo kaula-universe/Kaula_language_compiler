@@ -782,6 +782,15 @@ func (sa *SemanticAnalyzer) analyzeTypeAliasStatement(stmt *ast.TypeAliasStateme
 func (sa *SemanticAnalyzer) analyzeExternStatement(stmt *ast.ExternStatement) {
 	if stmt.IsFunction {
 		// extern fn 函数声明
+		// FFI 边界约束：禁止泛型参数外露（void(T) 中 T 为单字母大写 = 疑似泛型参数）
+		// extern 对应 C ABI，C 函数非泛型，签名必须全部为具体类型
+		if voidSignatureHasGenericParam(stmt.ReturnType) {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("extern fn 返回类型 '%s' 含泛型参数，FFI 边界禁止泛型外露", stmt.ReturnType),
+				stmt.Pos.Line, stmt.Pos.Column, "",
+				"extern 对应 C ABI，签名必须为具体类型；请用具体类型或 type 别名替换泛型参数",
+			)
+		}
 		// 检查返回类型
 		if stmt.ReturnType != "" && stmt.ReturnType != "void" && !sa.isTypeValid(stmt.ReturnType) {
 			sa.errorCollector.AddSemanticError(
@@ -794,6 +803,13 @@ func (sa *SemanticAnalyzer) analyzeExternStatement(stmt *ast.ExternStatement) {
 		}
 		// 检查参数类型
 		for i, pType := range stmt.ParamTypes {
+			if voidSignatureHasGenericParam(pType) {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("extern fn 参数 %d 类型 '%s' 含泛型参数，FFI 边界禁止泛型外露", i+1, pType),
+					stmt.Pos.Line, stmt.Pos.Column, "",
+					"extern 对应 C ABI，签名必须为具体类型；请用具体类型或 type 别名替换泛型参数",
+				)
+			}
 			if !sa.isTypeValid(pType) {
 				sa.errorCollector.AddSemanticError(
 					fmt.Sprintf("extern fn 参数 %d 类型 '%s' 未知", i+1, pType),
@@ -861,6 +877,13 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 
 // isTypeValid 检查类型是否有效
 func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
+	// void(T...)R 签名记法：数据指针或函数指针
+	// 数据指针 void() / void(T) → 合法（T 仅类型系统跟踪，运行时 void*）
+	// 函数指针 void(T1,T2)R → 递归校验参数与返回类型
+	if strings.HasPrefix(typeName, "void(") {
+		return sa.isVoidSignatureValid(typeName)
+	}
+
 	// 基本类型
 	basicTypes := map[string]bool{
 		"int":     true,
@@ -945,6 +968,106 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 	}
 
 	return false
+}
+
+// voidSignatureHasGenericParam 检测类型字符串中是否含疑似泛型参数：
+// void(...)R 记法内的独立单字母大写标识符（如 T、E、A、B）。
+// 用于 FFI 边界约束：extern 签名必须为具体类型，禁止泛型参数外露到 C ABI。
+// 例：void(T) → true；void(i32) → false；void(A,B)R → true；void(sqlite3) → false。
+func voidSignatureHasGenericParam(typeName string) bool {
+	isWordChar := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+	}
+	for i := 0; i < len(typeName); i++ {
+		c := typeName[i]
+		if c < 'A' || c > 'Z' {
+			continue
+		}
+		// 检查是否为独立单字母大写标识符（前后非单词字符）
+		prev := byte(0)
+		if i > 0 {
+			prev = typeName[i-1]
+		}
+		next := byte(0)
+		if i+1 < len(typeName) {
+			next = typeName[i+1]
+		}
+		if !isWordChar(prev) && !isWordChar(next) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitTopLevelCommasSem 在顶层（不计嵌套括号/尖括号/方括号）按逗号分割。
+// 用于解析 void(T1,T2,...)R 的参数列表，正确处理嵌套签名 void(void(i32)i32, i32)。
+func splitTopLevelCommasSem(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '<', '[':
+			depth++
+		case ')', '>', ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
+// isVoidSignatureValid 校验 void(T...)R 签名记法。
+//
+//   - 数据指针 void() / void(T)：合法。T 作为幻影类型标记可为任意标识符
+//     （典型用法：void(sqlite3) 中 sqlite3 是不透明类型，无需预先定义）。
+//   - 函数指针 void(T1,T2)R：递归校验每个参数类型与返回类型 R 均合法。
+//
+// 判定：')' 后无返回类型 → 数据指针；有 → 函数指针。
+func (sa *SemanticAnalyzer) isVoidSignatureValid(typeName string) bool {
+	// 定位匹配 void( 的右括号
+	depth := 1
+	i := 5 // 跳过 "void("
+	for i < len(typeName) {
+		switch typeName[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				goto foundClose
+			}
+		}
+		i++
+	}
+	return false // 括号不匹配
+
+foundClose:
+	argsStr := typeName[5:i]
+	retStr := strings.TrimSpace(typeName[i+1:])
+
+	// 数据指针：')' 后无返回类型 → 合法（不校验幻影 T）
+	if retStr == "" {
+		return true
+	}
+
+	// 函数指针：递归校验参数类型
+	if argsStr != "" {
+		for _, part := range splitTopLevelCommasSem(argsStr) {
+			if !sa.isTypeValid(strings.TrimSpace(part)) {
+				return false
+			}
+		}
+	}
+	// 递归校验返回类型
+	return sa.isTypeValid(retStr)
 }
 
 // analyzeIfStatement 分析 if 语句
