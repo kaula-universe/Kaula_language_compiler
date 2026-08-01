@@ -1207,7 +1207,9 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 					)
 				}
 			case "==", "!=", "<", ">", "<=", ">=":
-				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) {
+				isEquality := expr.Operator == "==" || expr.Operator == "!="
+				isNullCompare := isEquality && (leftType == "null" || rightType == "null")
+				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare {
 					sa.errorCollector.AddSemanticError(
 						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
 						expr.Pos.Line,

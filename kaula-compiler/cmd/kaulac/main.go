@@ -1244,6 +1244,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 				arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
 				arCmd.Args = append(arCmd.Args, objPaths...)
+				if runtime.GOOS != "windows" {
+					// 非 Windows 平台使用 ar 归档（llvm-lib 是 Windows 工具）
+					arArgs := append([]string{"rcs", stdLibPath}, objPaths...)
+					arCmd = exec.Command("ar", arArgs...)
+				}
 				if _, err := arCmd.CombinedOutput(); err != nil {
 					// llvm-lib 不可用时回退到直接链接 .o 文件
 					fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
@@ -1282,6 +1287,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					}
 					arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
 					arCmd.Args = append(arCmd.Args, objPaths...)
+					if runtime.GOOS != "windows" {
+						// 非 Windows 平台使用 ar 归档（llvm-lib 是 Windows 工具）
+						arArgs := append([]string{"rcs", stdLibPath}, objPaths...)
+						arCmd = exec.Command("ar", arArgs...)
+					}
 					if _, err := arCmd.CombinedOutput(); err != nil {
 						fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
 					} else {
@@ -1330,6 +1340,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		clangArgs = append(clangArgs, "-lgdi32")
 		clangArgs = append(clangArgs, "-luser32")
 		clangArgs = append(clangArgs, "-ladvapi32")
+	}
+
+	// 非 Windows 平台链接 libm（pow/sqrt 等数学函数；Windows 在 CRT 中提供）
+	if runtime.GOOS != "windows" && (cfg == nil || !cfg.Freestanding) {
+		clangArgs = append(clangArgs, "-lm")
 	}
 
 	// 消费 pkglib 第三方库的 libraries/include_path/library_path 字段
