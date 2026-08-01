@@ -1,3 +1,4 @@
+// user-test: 增量编译手工验证注释 (请勿删除, 用户自行测试用)
 package main
 
 import (
@@ -148,6 +149,24 @@ func (f *Formatter) formatStatement(stmt ast.Statement) {
 		f.formatMethodStatement(s)
 	case *ast.ConstructorStatement:
 		f.formatConstructorStatement(s)
+	case *ast.BreakStatement:
+		f.buf.WriteString("break")
+	case *ast.ContinueStatement:
+		f.buf.WriteString("continue")
+	case *ast.ForInStatement:
+		f.formatForInStatement(s)
+	case *ast.YieldStatement:
+		f.formatYieldStatement(s)
+	case *ast.ReleaseStatement:
+		f.formatReleaseStatement(s)
+	case *ast.ExtractStatement:
+		f.formatExtractStatement(s)
+	case *ast.ExternStatement:
+		f.formatExternStatement(s)
+	case *ast.EnumStatement:
+		f.formatEnumStatement(s)
+	case *ast.PackageStatement:
+		f.buf.WriteString("package " + s.Name)
 	default:
 		f.buf.WriteString(fmt.Sprintf("/* unknown statement: %T */", stmt))
 	}
@@ -192,21 +211,68 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 		f.buf.WriteString(e.Operator)
 		f.formatExpression(e.Right)
 	case *ast.PrefixCallExpression:
-		f.buf.WriteString("$")
-		f.buf.WriteString(e.Name)
-		f.buf.WriteString("{...}")
+		f.formatPrefixCallExpression(e)
 	case *ast.TypeCastExpression:
 		// as<T>(e) 格式化输出（唯一允许的强转形式）
 		f.buf.WriteString("as<" + e.TargetType + ">(")
 		f.formatExpression(e.Expression)
 		f.buf.WriteString(")")
+	case *ast.CharLiteral:
+		f.buf.WriteString("'" + e.Value + "'")
+	case *ast.StructLiteral:
+		f.formatStructLiteral(e)
+	case *ast.LambdaExpression:
+		f.formatLambdaExpression(e)
+	case *ast.SizeOfExpression:
+		f.buf.WriteString("sizeof(" + e.TargetType + ")")
+	case *ast.AlignOfExpression:
+		f.buf.WriteString("alignof(" + e.TargetType + ")")
+	case *ast.OffsetOfExpression:
+		f.buf.WriteString("offsetof(" + e.TargetType + ", " + e.FieldName + ")")
+	case *ast.ComptimeExpression:
+		f.buf.WriteString("comptime ")
+		f.formatExpression(e.Inner)
+	case *ast.TypeNameExpression:
+		f.buf.WriteString("type_name(" + e.TargetType + ")")
+	case *ast.FieldCountExpression:
+		f.buf.WriteString("field_count(" + e.TargetType + ")")
+	case *ast.FieldNameExpression:
+		f.buf.WriteString("field_name(" + e.TargetType + ", ")
+		f.formatExpression(e.Index)
+		f.buf.WriteString(")")
+	case *ast.FieldTypeExpression:
+		f.buf.WriteString("field_type(" + e.TargetType + ", ")
+		f.formatExpression(e.Index)
+		f.buf.WriteString(")")
+	case *ast.TypeKindExpression:
+		f.buf.WriteString("type_kind(" + e.TargetType + ")")
+	case *ast.MatchExpression:
+		f.formatMatchExpression(e)
+	case *ast.AttributeExpression:
+		f.formatAttributeExpression(e)
 	default:
 		f.buf.WriteString(fmt.Sprintf("/* unknown expression: %T */", expr))
 	}
 }
 
 func (f *Formatter) formatFunctionStatement(stmt *ast.FunctionStatement) {
-	if stmt.Annotation != ast.TreeAnnotationNone {
+	// 统一属性列表优先(#[sor] / #[no_kmm] / #[inline] / #[section(...)] / prefix/tree 等)
+	// 只有 Attributes 为空时才回退到旧 Annotation 字段, 避免 #[sor] 等注解被丢弃
+	if len(stmt.Attributes) > 0 {
+		for _, attr := range stmt.Attributes {
+			if attr == nil {
+				continue
+			}
+			f.buf.WriteString("#[" + attr.Name)
+			if len(attr.Args) > 0 {
+				f.buf.WriteString("(")
+				f.buf.WriteString(strings.Join(attr.Args, ", "))
+				f.buf.WriteString(")")
+			}
+			f.buf.WriteString("]\n")
+			f.writeIndent()
+		}
+	} else if stmt.Annotation != ast.TreeAnnotationNone {
 		var annotationStr string
 		switch stmt.Annotation {
 		case ast.TreeAnnotationPrefix:
@@ -601,6 +667,8 @@ func (f *Formatter) formatClassStatement(stmt *ast.ClassStatement) {
 		f.indent--
 		f.writeIndent()
 		f.buf.WriteString("}")
+	} else {
+		f.buf.WriteString(" {}")
 	}
 }
 
@@ -634,6 +702,8 @@ func (f *Formatter) formatInterfaceStatement(stmt *ast.InterfaceStatement) {
 		f.indent--
 		f.writeIndent()
 		f.buf.WriteString("}")
+	} else {
+		f.buf.WriteString(" {}")
 	}
 }
 
@@ -655,6 +725,8 @@ func (f *Formatter) formatStructStatement(stmt *ast.StructStatement) {
 		f.indent--
 		f.writeIndent()
 		f.buf.WriteString("}")
+	} else {
+		f.buf.WriteString(" {}")
 	}
 }
 
@@ -763,6 +835,281 @@ func (f *Formatter) formatConstructorStatement(stmt *ast.ConstructorStatement) {
 	}
 }
 
+func (f *Formatter) formatForInStatement(stmt *ast.ForInStatement) {
+	f.buf.WriteString("for ")
+	if stmt.Variable != nil {
+		f.buf.WriteString(stmt.Variable.Name)
+	}
+	f.buf.WriteString(" in ")
+	f.formatExpression(stmt.Iterable)
+	if len(stmt.Body) > 0 {
+		f.buf.WriteString(" {\n")
+		f.indent++
+		for _, bodyStmt := range stmt.Body {
+			f.writeIndent()
+			f.formatStatement(bodyStmt)
+			f.buf.WriteString("\n")
+		}
+		f.indent--
+		f.writeIndent()
+		f.buf.WriteString("}")
+	}
+}
+
+func (f *Formatter) formatYieldStatement(stmt *ast.YieldStatement) {
+	f.buf.WriteString("yield ")
+	f.formatExpression(stmt.Source)
+	if stmt.Target != "" {
+		f.buf.WriteString(" -> " + stmt.Target)
+	}
+}
+
+func (f *Formatter) formatReleaseStatement(stmt *ast.ReleaseStatement) {
+	f.buf.WriteString("release ")
+	f.formatExpression(stmt.Source)
+	f.buf.WriteString(" -> [")
+	for i, h := range stmt.Holders {
+		if i > 0 {
+			f.buf.WriteString(", ")
+		}
+		f.buf.WriteString(h)
+	}
+	f.buf.WriteString("]")
+}
+
+func (f *Formatter) formatExtractStatement(stmt *ast.ExtractStatement) {
+	f.buf.WriteString("extract ")
+	f.formatExpression(stmt.Source)
+	if stmt.Index != nil {
+		f.buf.WriteString("[")
+		f.formatExpression(stmt.Index)
+		f.buf.WriteString("]")
+	}
+	if stmt.Target != "" {
+		f.buf.WriteString(" -> " + stmt.Target)
+	}
+}
+
+func (f *Formatter) formatExternStatement(stmt *ast.ExternStatement) {
+	f.buf.WriteString("extern ")
+	if stmt.IsFunction {
+		f.buf.WriteString("fn " + stmt.Name + "(")
+		for i, param := range stmt.Params {
+			if i > 0 {
+				f.buf.WriteString(", ")
+			}
+			f.buf.WriteString(param)
+			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+				f.buf.WriteString(": " + stmt.ParamTypes[i])
+			}
+		}
+		f.buf.WriteString(")")
+		if stmt.ReturnType != "" && stmt.ReturnType != "void" {
+			f.buf.WriteString(" -> " + stmt.ReturnType)
+		}
+	} else {
+		f.buf.WriteString(stmt.Name + ": " + stmt.Type)
+	}
+}
+
+func (f *Formatter) formatEnumStatement(stmt *ast.EnumStatement) {
+	f.buf.WriteString("enum ")
+	f.buf.WriteString(stmt.Name)
+	if len(stmt.TypeParams) > 0 {
+		f.buf.WriteString("[")
+		for i, tp := range stmt.TypeParams {
+			if i > 0 {
+				f.buf.WriteString(", ")
+			}
+			if tp != nil {
+				f.buf.WriteString(tp.Name)
+				if tp.Constraint != "" {
+					f.buf.WriteString(": " + tp.Constraint)
+				}
+			}
+		}
+		f.buf.WriteString("]")
+	}
+	f.buf.WriteString(" {")
+	if len(stmt.Variants) > 0 {
+		f.buf.WriteString("\n")
+		f.indent++
+		for _, v := range stmt.Variants {
+			f.writeIndent()
+			f.buf.WriteString(v.Name)
+			if len(v.FieldTypes) > 0 {
+				f.buf.WriteString("(")
+				for i, ft := range v.FieldTypes {
+					if i > 0 {
+						f.buf.WriteString(", ")
+					}
+					f.buf.WriteString(ft)
+				}
+				f.buf.WriteString(")")
+			}
+			f.buf.WriteString("\n")
+		}
+		f.indent--
+		f.writeIndent()
+	}
+	f.buf.WriteString("}")
+}
+
+func (f *Formatter) formatStructLiteral(expr *ast.StructLiteral) {
+	f.buf.WriteString("{ ")
+	for i, field := range expr.Fields {
+		if i > 0 {
+			f.buf.WriteString(", ")
+		}
+		f.buf.WriteString("." + field.Name)
+		if field.Value != nil {
+			f.buf.WriteString(" = ")
+			f.formatExpression(field.Value)
+		}
+	}
+	f.buf.WriteString(" }")
+}
+
+func (f *Formatter) formatLambdaExpression(expr *ast.LambdaExpression) {
+	f.buf.WriteString("fn(")
+	for i, param := range expr.Params {
+		if i > 0 {
+			f.buf.WriteString(", ")
+		}
+		f.buf.WriteString(param)
+		if i < len(expr.ParamTypes) && expr.ParamTypes[i] != "" && expr.ParamTypes[i] != "auto" {
+			f.buf.WriteString(": " + expr.ParamTypes[i])
+		}
+	}
+	f.buf.WriteString(")")
+	if expr.ReturnType != "" {
+		f.buf.WriteString(" -> " + expr.ReturnType)
+	}
+	if len(expr.Body) > 0 {
+		f.buf.WriteString(" {\n")
+		f.indent++
+		for _, bodyStmt := range expr.Body {
+			f.writeIndent()
+			f.formatStatement(bodyStmt)
+			f.buf.WriteString("\n")
+		}
+		f.indent--
+		f.writeIndent()
+		f.buf.WriteString("}")
+	} else {
+		f.buf.WriteString(" {}")
+	}
+}
+
+func (f *Formatter) formatMatchExpression(expr *ast.MatchExpression) {
+	f.buf.WriteString("match(")
+	f.formatExpression(expr.Target)
+	f.buf.WriteString(") {\n")
+	f.indent++
+	for _, arm := range expr.Arms {
+		f.writeIndent()
+		f.formatMatchPattern(arm.Pattern)
+		f.buf.WriteString(" => ")
+		if len(arm.Body) > 0 {
+			if len(arm.Body) == 1 {
+				f.formatStatement(arm.Body[0])
+			} else {
+				f.buf.WriteString("{\n")
+				f.indent++
+				for _, bodyStmt := range arm.Body {
+					f.writeIndent()
+					f.formatStatement(bodyStmt)
+					f.buf.WriteString("\n")
+				}
+				f.indent--
+				f.writeIndent()
+				f.buf.WriteString("}")
+			}
+		}
+		f.buf.WriteString("\n")
+	}
+	f.indent--
+	f.writeIndent()
+	f.buf.WriteString("}")
+}
+
+func (f *Formatter) formatMatchPattern(p *ast.MatchPattern) {
+	if p == nil {
+		f.buf.WriteString("_")
+		return
+	}
+	switch p.Kind {
+	case ast.PatternWildcard:
+		f.buf.WriteString("_")
+	case ast.PatternVariant:
+		f.buf.WriteString(p.VariantName)
+		if len(p.Bindings) > 0 {
+			f.buf.WriteString("(")
+			for i, b := range p.Bindings {
+				if i > 0 {
+					f.buf.WriteString(", ")
+				}
+				f.buf.WriteString(b)
+			}
+			f.buf.WriteString(")")
+		}
+	case ast.PatternInteger:
+		f.buf.WriteString(strconv.FormatInt(p.IntValue, 10))
+	case ast.PatternString:
+		f.buf.WriteString(`"` + p.StrValue + `"`)
+	case ast.PatternVariable:
+		f.buf.WriteString(strings.Join(p.Bindings, ", "))
+	case ast.PatternBoolean:
+		f.buf.WriteString(p.VariantName)
+	default:
+		f.buf.WriteString("_")
+	}
+}
+
+func (f *Formatter) formatAttributeExpression(expr *ast.AttributeExpression) {
+	if expr.Attr == nil {
+		f.buf.WriteString("#[]")
+		return
+	}
+	f.buf.WriteString("#[" + expr.Attr.Name)
+	if len(expr.Attr.Args) > 0 {
+		f.buf.WriteString("(")
+		f.buf.WriteString(strings.Join(expr.Attr.Args, ", "))
+		f.buf.WriteString(")")
+	}
+	f.buf.WriteString("]")
+}
+
+func (f *Formatter) formatPrefixCallExpression(expr *ast.PrefixCallExpression) {
+	f.buf.WriteString("@")
+	f.buf.WriteString(expr.Name)
+	if len(expr.Params) > 0 {
+		f.buf.WriteString("(")
+		first := true
+		for name, val := range expr.Params {
+			if !first {
+				f.buf.WriteString(", ")
+			}
+			f.buf.WriteString(name + " = ")
+			f.formatExpression(val)
+			first = false
+		}
+		f.buf.WriteString(")")
+	}
+	if len(expr.Body) > 0 {
+		f.buf.WriteString(" {\n")
+		f.indent++
+		for _, bodyStmt := range expr.Body {
+			f.writeIndent()
+			f.formatStatement(bodyStmt)
+			f.buf.WriteString("\n")
+		}
+		f.indent--
+		f.writeIndent()
+		f.buf.WriteString("}")
+	}
+}
+
 func (f *Formatter) formatBinaryExpression(expr *ast.BinaryExpression) {
 	f.formatExpression(expr.Left)
 	f.buf.WriteString(" " + expr.Operator + " ")
@@ -828,6 +1175,7 @@ func main() {
 	lex := lexer.NewLexer(source)
 	p := parser.NewParser(lex)
 	p.SetFile(inputFile)
+	p.SetSkipMainCheck(true)
 	program := p.Parse()
 
 	if p.HasErrors() {
@@ -848,4 +1196,5 @@ func main() {
 	} else {
 		fmt.Println(formatted)
 	}
+
 }

@@ -1,0 +1,19 @@
+import std.io
+import std.web
+
+fn handle_request(req: HttpRequest*, res: HttpResponse*) {
+    char* method = http_method_to_string(req.method)
+    char* path = req.path
+    http_response_set_status(res, 200)
+    http_response_set_content_type(res, "text/plain")
+    http_response_set_body(res, path, 0)
+    println(method)
+}
+
+fn probe_params(a: i32, b: i32, name: char*) {
+    println(a, b, name)
+}
+
+fn main() {
+    probe_params(1, 2, 0)
+}
