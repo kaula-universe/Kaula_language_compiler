@@ -685,7 +685,7 @@ func (fg *FunctionGenerator) mapReturnType(returnType string) string {
 	case "f64":
 		return "double "
 	case "bool":
-		return "int "
+		return "bool "
 	case "char":
 		return "char "
 	case "void":

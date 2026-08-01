@@ -1,0 +1,39 @@
+import std.io
+import std.web
+
+fn probe_conditions() {
+    bool flag = true
+    if flag {
+        println("bool var")
+    }
+    if true {
+        println("true literal")
+    }
+    int x = 5
+    if x > 0 {
+        println("numeric compare")
+    }
+    if x != 0 {
+        println("numeric ne")
+    }
+    while x > 0 {
+        x = x - 1
+    }
+    char* s = url_decode("/hello")
+    if s == "/" {
+        println("str compare")
+    }
+    if s != null {
+        println("ptr null compare")
+    }
+    HttpServer* server = http_server_create(8080)
+    if server == null {
+        println("server null")
+    } else {
+        http_server_destroy(server)
+    }
+}
+
+fn main() {
+    probe_conditions()
+}
