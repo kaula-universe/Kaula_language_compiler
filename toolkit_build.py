@@ -390,6 +390,42 @@ class GoBuilder:
         self.go_cmd = go_cmd
         self.release = release
 
+    def _go_source_digest(self, cmd_dir):
+        """计算 Go 二进制的增量 hash。
+
+        覆盖: cmd/<name>/*.go + internal/**/*.go + go.mod/go.sum + release 标志。
+        任何一个 .go 源码变化都会触发该二进制重建;只改 kaulafmt 的
+        cmd 源码不会让 kaulac 重编(各自独立 digest)。
+        """
+        files = []
+        cmd_path = self.config.compiler_dir / "cmd" / cmd_dir
+        if cmd_path.exists():
+            for root, _dirs, fs in os.walk(cmd_path):
+                for f in sorted(fs):
+                    if f.endswith(".go"):
+                        files.append(Path(root) / f)
+        internal_path = self.config.compiler_dir / "internal"
+        if internal_path.exists():
+            for root, _dirs, fs in os.walk(internal_path):
+                for f in sorted(fs):
+                    if f.endswith(".go"):
+                        files.append(Path(root) / f)
+        for name in ("go.mod", "go.sum"):
+            p = self.config.compiler_dir / name
+            if p.exists():
+                files.append(p)
+
+        files.sort(key=lambda p: str(p))
+        h = hashlib.sha256()
+        for f in files:
+            try:
+                h.update(f.read_bytes())
+            except OSError:
+                continue
+            h.update(b"\0")
+        h.update(("release" if self.release else "debug").encode())
+        return h.hexdigest()
+
     def _build_go_binary(self, cmd_dir, output_name):
         cmd_path = self.config.compiler_dir / "cmd" / cmd_dir
         if not cmd_path.exists():
@@ -401,6 +437,15 @@ class GoBuilder:
 
         ext = ".exe" if self.config.is_windows else ""
         out_file = self.config.bin_dir / (output_name + ext)
+
+        # 增量编译:hash = sha256(源码 | release 标志),命中且 exe 存在则跳过
+        digest = self._go_source_digest(cmd_dir)
+        hash_path = self.config.hash_dir / f"go_{output_name}.sha256"
+        if digest and out_file.exists() and hash_path.exists():
+            if hash_path.read_text(encoding="ascii").strip() == digest:
+                sz = out_file.stat().st_size
+                print(f"  [cached]  {output_name}.exe (源码未变化, 跳过, {sz / 1024:.1f} KB)")
+                return True
 
         ldflags = ""
         if self.release:
@@ -426,6 +471,9 @@ class GoBuilder:
                 return False
             sz = out_file.stat().st_size
             print(f"[\u2713] {output_name}: {out_file} ({sz / 1024:.1f} KB)")
+            if digest:
+                self.config.hash_dir.mkdir(parents=True, exist_ok=True)
+                hash_path.write_text(digest, encoding="ascii")
             return True
         except subprocess.TimeoutExpired:
             print(f"[-] 构建 {output_name} 超时")

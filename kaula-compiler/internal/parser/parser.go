@@ -534,7 +534,17 @@ func (p *Parser) parseExternFunctionIterative(stmt *ast.ExternStatement) *ast.Ex
 	p.nextToken() // 跳过 )
 
 	// 解析返回类型: -> type
-	if p.curTok.Type == lexer.TOKEN_ARROW {
+	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+		p.nextToken() // 跳过 -
+		p.nextToken() // 跳过 >
+		returnType := p.parseTypeStringForDecl()
+		if returnType == "" {
+			p.error("extern fn 返回类型无效")
+			return nil
+		}
+		stmt.ReturnType = returnType
+		stmt.Type = returnType
+	} else if p.curTok.Type == lexer.TOKEN_ARROW {
 		p.nextToken()
 		returnType := p.parseTypeStringForDecl()
 		if returnType == "" {
@@ -1248,6 +1258,21 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 				}
 				// 如果解析失败且 token 没有前进，手动跳过当前 token 避免死循环
 				if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+					p.nextToken()
+				}
+				continue
+			}
+
+			if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
+				// name: Type 形式（与 extern fn 参数一致）
+				paramName := p.curTok.Value
+				p.nextToken() // 跳过 name
+				p.nextToken() // 跳过 :
+				paramType := p.parseTypeStringForDecl()
+				stmt.Params = append(stmt.Params, paramName)
+				stmt.ParamTypes = append(stmt.ParamTypes, paramType)
+				p.log("解析参数：%s (类型：%s)", paramName, paramType)
+				if p.curTok.Type == lexer.TOKEN_COMMA {
 					p.nextToken()
 				}
 				continue
@@ -2265,6 +2290,13 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 
 	// 解析类型（支持 [N]byte 数组语法和普通类型）
 	typeName := ""
+	typePrefix := ""
+
+	// const 前缀（与 parseTypeString 一致）: const char* name
+	if p.curTok.Type == lexer.TOKEN_CONST {
+		typePrefix = "const "
+		p.nextToken()
+	}
 
 	// 检查是否是数组类型 [N]type
 	if p.curTok.Type == lexer.TOKEN_LBRACKET {
@@ -2297,7 +2329,7 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 			return nil
 		}
 		p.nextToken()
-		typeName = "[" + arraySize + "]" + elemType
+		typeName = typePrefix + "[" + arraySize + "]" + elemType
 	} else {
 		// 普通类型
 		isTypeKeyword := false
@@ -2314,7 +2346,7 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 			return nil
 		}
 
-		typeName = p.curTok.Value
+		typeName = typePrefix + p.curTok.Value
 		p.nextToken()
 
 		// 处理指针后缀（如 ListNode* → "ListNode*"）
