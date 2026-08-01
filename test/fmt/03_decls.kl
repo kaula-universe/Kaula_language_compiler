@@ -1,0 +1,21 @@
+import std.io
+
+enum Color {
+    Red
+    Green(i32)
+    Blue(i32, i32)
+}
+
+extern stack_top: u64
+
+extern fn boot_main()
+
+fn probe_decls() {
+    @Timer(ms = 100) {
+        println("tick")
+    }
+}
+
+fn main() {
+    probe_decls()
+}
