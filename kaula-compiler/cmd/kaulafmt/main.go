@@ -196,7 +196,8 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 		f.buf.WriteString(e.Name)
 		f.buf.WriteString("{...}")
 	case *ast.TypeCastExpression:
-		f.buf.WriteString("(" + e.TargetType + ")(")
+		// as<T>(e) 格式化输出（唯一允许的强转形式）
+		f.buf.WriteString("as<" + e.TargetType + ">(")
 		f.formatExpression(e.Expression)
 		f.buf.WriteString(")")
 	default:

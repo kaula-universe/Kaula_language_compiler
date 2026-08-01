@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "sqlite3",
   "type": "single_header",
   "header": "sqlite3/sqlite3.h",
@@ -22,7 +22,7 @@
         "sqlite3_context*",
         "int"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_aggregate_count": {
       "args": [
@@ -40,7 +40,7 @@
       "args": [
         "sqlite3*",
         "unsigned int (*)(void*, const char*, unsigned int, unsigned int, unsigned int)",
-        "void*",
+        "void()",
         "void (*)(void*)"
       ],
       "return": "int"
@@ -83,7 +83,7 @@
       "args": [
         "sqlite3_stmt*",
         "int",
-        "const void*",
+        "const void()",
         "int",
         "void (*)(void*)"
       ],
@@ -93,7 +93,7 @@
       "args": [
         "sqlite3_stmt*",
         "int",
-        "const void*",
+        "const void()",
         "unsigned long long",
         "void (*)(void*)"
       ],
@@ -154,7 +154,7 @@
       "args": [
         "sqlite3_stmt*",
         "int",
-        "void*",
+        "void()",
         "const char*",
         "void (*)(void*)"
       ],
@@ -174,7 +174,7 @@
       "args": [
         "sqlite3_stmt*",
         "int",
-        "const void*",
+        "const void()",
         "int",
         "void (*)(void*)"
       ],
@@ -242,7 +242,7 @@
     "sqlite3_blob_read": {
       "args": [
         "sqlite3_blob*",
-        "void*",
+        "void()",
         "int",
         "int"
       ],
@@ -258,7 +258,7 @@
     "sqlite3_blob_write": {
       "args": [
         "sqlite3_blob*",
-        "const void*",
+        "const void()",
         "int",
         "int"
       ],
@@ -268,7 +268,7 @@
       "args": [
         "sqlite3*",
         "int (*)(void*, int)",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -289,7 +289,7 @@
       "args": [
         "sqlite3_stmt*",
         "int",
-        "void*",
+        "void()",
         "int",
         "int",
         "void (*)(void*)"
@@ -300,11 +300,11 @@
       "args": [
         "sqlite3_stmt*",
         "int",
-        "void*",
+        "void()",
         "int",
         "int",
         "void (*)(void*)",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -341,7 +341,7 @@
     "sqlite3_collation_needed": {
       "args": [
         "sqlite3*",
-        "void*",
+        "void()",
         "void (*)(void*, sqlite3*, int, const char*)"
       ],
       "return": "int"
@@ -349,7 +349,7 @@
     "sqlite3_collation_needed16": {
       "args": [
         "sqlite3*",
-        "void*",
+        "void()",
         "void (*)(void*, sqlite3*, int, const void*)"
       ],
       "return": "int"
@@ -359,7 +359,7 @@
         "sqlite3_stmt*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_column_bytes": {
       "args": [
@@ -393,7 +393,7 @@
         "sqlite3_stmt*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_column_decltype": {
       "args": [
@@ -407,7 +407,7 @@
         "sqlite3_stmt*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_column_double": {
       "args": [
@@ -442,7 +442,7 @@
         "sqlite3_stmt*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_column_origin_name": {
       "args": [
@@ -456,7 +456,7 @@
         "sqlite3_stmt*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_column_table_name": {
       "args": [
@@ -470,7 +470,7 @@
         "sqlite3_stmt*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_column_text": {
       "args": [
@@ -484,7 +484,7 @@
         "sqlite3_stmt*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_column_type": {
       "args": [
@@ -504,9 +504,9 @@
       "args": [
         "sqlite3*",
         "int (*)(void*)",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_compileoption_get": {
       "args": [
@@ -528,7 +528,7 @@
     },
     "sqlite3_complete16": {
       "args": [
-        "const void*"
+        "const void()"
       ],
       "return": "int"
     },
@@ -550,7 +550,7 @@
         "sqlite3*",
         "const char*",
         "int",
-        "void*",
+        "void()",
         "int (*)(void*, int, const void*, int, const void*)"
       ],
       "return": "int"
@@ -558,9 +558,9 @@
     "sqlite3_create_collation16": {
       "args": [
         "sqlite3*",
-        "const void*",
+        "const void()",
         "int",
-        "void*",
+        "void()",
         "int (*)(void*, int, const void*, int, const void*)"
       ],
       "return": "int"
@@ -570,7 +570,7 @@
         "sqlite3*",
         "const char*",
         "int",
-        "void*",
+        "void()",
         "int (*)(void*, int, const void*, int, const void*)",
         "void (*)(void*)"
       ],
@@ -592,7 +592,7 @@
         "const char*",
         "int",
         "int",
-        "void*",
+        "void()",
         "void (*)(sqlite3_context*, int, sqlite3_value**)",
         "void (*)(sqlite3_context*, int, sqlite3_value**)",
         "void (*)(sqlite3_context*)"
@@ -602,10 +602,10 @@
     "sqlite3_create_function16": {
       "args": [
         "sqlite3*",
-        "const void*",
+        "const void()",
         "int",
         "int",
-        "void*",
+        "void()",
         "void (*)(sqlite3_context*, int, sqlite3_value**)",
         "void (*)(sqlite3_context*, int, sqlite3_value**)",
         "void (*)(sqlite3_context*)"
@@ -618,7 +618,7 @@
         "const char*",
         "int",
         "int",
-        "void*",
+        "void()",
         "void (*)(sqlite3_context*, int, sqlite3_value**)",
         "void (*)(sqlite3_context*, int, sqlite3_value**)",
         "void (*)(sqlite3_context*)",
@@ -631,7 +631,7 @@
         "sqlite3*",
         "const char*",
         "const sqlite3_module*",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -640,7 +640,7 @@
         "sqlite3*",
         "const char*",
         "const sqlite3_module*",
-        "void*",
+        "void()",
         "void (*)(void*)"
       ],
       "return": "int"
@@ -651,7 +651,7 @@
         "const char*",
         "int",
         "int",
-        "void*",
+        "void()",
         "void (*)(sqlite3_context*, int, sqlite3_value**)",
         "void (*)(sqlite3_context*)",
         "void (*)(sqlite3_context*)",
@@ -799,7 +799,7 @@
       "args": [
         "sqlite3*"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_error_offset": {
       "args": [
@@ -818,7 +818,7 @@
         "sqlite3*",
         "const char*",
         "int (*)(void*, int, char**, char**)",
-        "void*",
+        "void()",
         "char**"
       ],
       "return": "int"
@@ -853,7 +853,7 @@
         "sqlite3*",
         "const char*",
         "int",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -883,7 +883,7 @@
     },
     "sqlite3_free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
@@ -910,14 +910,14 @@
         "sqlite3_context*",
         "int"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_get_clientdata": {
       "args": [
         "sqlite3*",
         "const char*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_get_table": {
       "args": [
@@ -1018,18 +1018,18 @@
       "args": [
         "int"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_malloc64": {
       "args": [
         "unsigned long long"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_memory_alarm": {
       "args": [
         "void (*)(void*, long long, int)",
-        "void*",
+        "void()",
         "long long"
       ],
       "return": "int"
@@ -1053,7 +1053,7 @@
     },
     "sqlite3_msize": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "unsigned long long"
     },
@@ -1121,7 +1121,7 @@
     },
     "sqlite3_open16": {
       "args": [
-        "const void*",
+        "const void()",
         "sqlite3**"
       ],
       "return": "int"
@@ -1164,7 +1164,7 @@
     "sqlite3_prepare16": {
       "args": [
         "sqlite3*",
-        "const void*",
+        "const void()",
         "int",
         "sqlite3_stmt**",
         "const void**"
@@ -1174,7 +1174,7 @@
     "sqlite3_prepare16_v2": {
       "args": [
         "sqlite3*",
-        "const void*",
+        "const void()",
         "int",
         "sqlite3_stmt**",
         "const void**"
@@ -1184,7 +1184,7 @@
     "sqlite3_prepare16_v3": {
       "args": [
         "sqlite3*",
-        "const void*",
+        "const void()",
         "int",
         "unsigned int",
         "sqlite3_stmt**",
@@ -1235,9 +1235,9 @@
       "args": [
         "sqlite3*",
         "void (*)(void*, sqlite3*, int, const char*, const char*, long long, long long)",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_preupdate_new": {
       "args": [
@@ -1259,39 +1259,39 @@
       "args": [
         "sqlite3*",
         "void (*)(void*, const char*, unsigned long long)",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_progress_handler": {
       "args": [
         "sqlite3*",
         "int",
         "int (*)(void*)",
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "sqlite3_randomness": {
       "args": [
         "int",
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "sqlite3_realloc": {
       "args": [
-        "void*",
+        "void()",
         "int"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_realloc64": {
       "args": [
-        "void*",
+        "void()",
         "unsigned long long"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_release_memory": {
       "args": [
@@ -1312,7 +1312,7 @@
     "sqlite3_result_blob": {
       "args": [
         "sqlite3_context*",
-        "const void*",
+        "const void()",
         "int",
         "void (*)(void*)"
       ],
@@ -1321,7 +1321,7 @@
     "sqlite3_result_blob64": {
       "args": [
         "sqlite3_context*",
-        "const void*",
+        "const void()",
         "unsigned long long",
         "void (*)(void*)"
       ],
@@ -1345,7 +1345,7 @@
     "sqlite3_result_error16": {
       "args": [
         "sqlite3_context*",
-        "const void*",
+        "const void()",
         "int"
       ],
       "return": "void"
@@ -1392,7 +1392,7 @@
     "sqlite3_result_pointer": {
       "args": [
         "sqlite3_context*",
-        "void*",
+        "void()",
         "const char*",
         "void (*)(void*)"
       ],
@@ -1417,7 +1417,7 @@
     "sqlite3_result_text16": {
       "args": [
         "sqlite3_context*",
-        "const void*",
+        "const void()",
         "int",
         "void (*)(void*)"
       ],
@@ -1426,7 +1426,7 @@
     "sqlite3_result_text16be": {
       "args": [
         "sqlite3_context*",
-        "const void*",
+        "const void()",
         "int",
         "void (*)(void*)"
       ],
@@ -1435,7 +1435,7 @@
     "sqlite3_result_text16le": {
       "args": [
         "sqlite3_context*",
-        "const void*",
+        "const void()",
         "int",
         "void (*)(void*)"
       ],
@@ -1476,16 +1476,16 @@
       "args": [
         "sqlite3*",
         "void (*)(void*)",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_rtree_geometry_callback": {
       "args": [
         "sqlite3*",
         "const char*",
         "int (*)(sqlite3_rtree_geometry*, int, double*, int*)",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1494,7 +1494,7 @@
         "sqlite3*",
         "const char*",
         "int (*)(sqlite3_rtree_query_info*)",
-        "void*",
+        "void()",
         "void (*)(void*)"
       ],
       "return": "int"
@@ -1512,7 +1512,7 @@
       "args": [
         "sqlite3*",
         "int (*)(void*, int, const char*, const char*, const char*, const char*)",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1520,7 +1520,7 @@
       "args": [
         "sqlite3_context*",
         "int",
-        "void*",
+        "void()",
         "void (*)(void*)"
       ],
       "return": "void"
@@ -1529,7 +1529,7 @@
       "args": [
         "sqlite3*",
         "const char*",
-        "void*",
+        "void()",
         "void (*)(void*)"
       ],
       "return": "int"
@@ -1688,7 +1688,7 @@
         "sqlite3_stmt*",
         "int",
         "int",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1704,7 +1704,7 @@
         "int",
         "int",
         "int",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1885,16 +1885,16 @@
       "args": [
         "sqlite3*",
         "void (*)(void*, const char*)",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_trace_v2": {
       "args": [
         "sqlite3*",
         "unsigned int",
         "int (*)(unsigned int, void*, void*, void*)",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1916,7 +1916,7 @@
       "args": [
         "sqlite3*",
         "void (*)(void**, int)",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1924,9 +1924,9 @@
       "args": [
         "sqlite3*",
         "void (*)(void*, int, const char*, const char*, long long)",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_uri_boolean": {
       "args": [
@@ -1962,13 +1962,13 @@
       "args": [
         "sqlite3_context*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_value_blob": {
       "args": [
         "sqlite3_value*"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_value_bytes": {
       "args": [
@@ -2041,7 +2041,7 @@
         "sqlite3_value*",
         "const char*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_value_subtype": {
       "args": [
@@ -2059,19 +2059,19 @@
       "args": [
         "sqlite3_value*"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_value_text16be": {
       "args": [
         "sqlite3_value*"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_value_text16le": {
       "args": [
         "sqlite3_value*"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "sqlite3_value_type": {
       "args": [
@@ -2205,21 +2205,21 @@
       "args": [
         "sqlite3*",
         "int (*)(void*, sqlite3*, const char*, int)",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sqlite3_win32_set_directory": {
       "args": [
         "unsigned long",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
     "sqlite3_win32_set_directory16": {
       "args": [
         "unsigned long",
-        "const void*"
+        "const void()"
       ],
       "return": "int"
     },

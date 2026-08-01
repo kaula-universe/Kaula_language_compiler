@@ -344,11 +344,17 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 
 	// 检查是否是基本类型关键字（int, float, string 等）
 	if p.isTypeToken(p.curTok.Type) {
-		typeName = lexer.TokenTypeToString(p.curTok.Type)
-		typeName = strings.TrimPrefix(typeName, "TYPE_")
-		// 转换为小写（如 "INT" -> "int"）
-		typeName = strings.ToLower(typeName)
-		p.nextToken()
+		// void(T...)R 签名记法：必须交由 parseTypeString 完整解析，否则 () 会被误判
+		// 用 non-greedy 版本：不吃尾部返回类型（避免把变量名误当返回类型）
+		if p.curTok.Type == lexer.TOKEN_TYPE_VOID && p.peekTok.Type == lexer.TOKEN_LPAREN {
+			typeName = p.parseTypeStringForDecl()
+		} else {
+			typeName = lexer.TokenTypeToString(p.curTok.Type)
+			typeName = strings.TrimPrefix(typeName, "TYPE_")
+			// 转换为小写（如 "INT" -> "int"）
+			typeName = strings.ToLower(typeName)
+			p.nextToken()
+		}
 	} else if p.curTok.Type == lexer.TOKEN_IDENT {
 		// 可能是自定义类型（如类名、结构体名等）
 		typeName = p.curTok.Value
@@ -507,7 +513,7 @@ func (p *Parser) parseExternFunctionIterative(stmt *ast.ExternStatement) *ast.Ex
 		}
 		p.nextToken() // 跳过 :
 
-		paramType := p.parseTypeString()
+		paramType := p.parseTypeStringForDecl()
 		if paramType == "" {
 			p.error("extern fn 参数需要有效的类型")
 			return nil
@@ -530,7 +536,7 @@ func (p *Parser) parseExternFunctionIterative(stmt *ast.ExternStatement) *ast.Ex
 	// 解析返回类型: -> type
 	if p.curTok.Type == lexer.TOKEN_ARROW {
 		p.nextToken()
-		returnType := p.parseTypeString()
+		returnType := p.parseTypeStringForDecl()
 		if returnType == "" {
 			p.error("extern fn 返回类型无效")
 			return nil
@@ -1785,6 +1791,7 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 		if p.curTok.Type == lexer.TOKEN_GT {
 			p.nextToken()
 		}
+		stmt.Generic = true // 标记为泛型类
 	}
 	if p.curTok.Type == lexer.TOKEN_IMPLEMENTS {
 		p.nextToken()
@@ -2131,7 +2138,19 @@ func (p *Parser) parseTypeFuncParam() *ast.TypeFuncParam {
 }
 
 // parseTypeString 解析类型字符串（支持指针、数组等复合类型）
+// greedyReturn=true：void(T...)R 记法在 ) 后贪婪吃返回类型（用于独立类型位置：type 别名、函数返回类型、泛型实参）
 func (p *Parser) parseTypeString() string {
+	return p.parseTypeStringImpl(true)
+}
+
+// parseTypeStringForDecl 用于"类型后跟名字"的上下文（变量声明、字段、函数参数）。
+// void(T...)R 记法不吃尾部返回类型——因为返回类型与变量名均为 IDENT，无法区分。
+// 需要带返回类型的函数指针在这些上下文请用 type 别名声明。
+func (p *Parser) parseTypeStringForDecl() string {
+	return p.parseTypeStringImpl(false)
+}
+
+func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 	var typeStr strings.Builder
 
 	for {
@@ -2141,6 +2160,40 @@ func (p *Parser) parseTypeString() string {
 			p.nextToken()
 		case lexer.TOKEN_IDENT, lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
 			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING, lexer.TOKEN_TYPE_VOID:
+			// void(T...)R 签名记法：
+			//   void()        - 完全不透明指针 (void*)
+			//   void(T)       - 幻影类型化数据指针 (void*, 类型系统记 T)
+			//   void(T1,T2)R  - 带签名函数指针 (R (*)(T1,T2))，仅 greedyReturn=true 时吃 R
+			//   void(T1,T2)   - 无返回值函数指针 (void (*)(T1,T2))
+			if p.curTok.Type == lexer.TOKEN_TYPE_VOID && p.peekTok.Type == lexer.TOKEN_LPAREN {
+				typeStr.WriteString("void(")
+				p.nextToken() // void -> (
+				p.nextToken() // ( -> 首个参数或 )
+				first := true
+				for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+					if !first {
+						typeStr.WriteString(",")
+						if p.curTok.Type == lexer.TOKEN_COMMA {
+							p.nextToken()
+						}
+					}
+					if p.curTok.Type == lexer.TOKEN_RPAREN {
+						break
+					}
+					// 参数类型递归用 greedy=true（参数列表内类型独立）
+					typeStr.WriteString(p.parseTypeString())
+					first = false
+				}
+				if p.curTok.Type == lexer.TOKEN_RPAREN {
+					typeStr.WriteString(")")
+					p.nextToken()
+				}
+				// 返回类型：仅 greedyReturn=true 且 ) 后跟类型起始 token 时吃 → 函数指针；否则数据指针
+				if greedyReturn && p.isIdentOrTypeToken(p.curTok.Type) {
+					typeStr.WriteString(p.parseTypeString())
+				}
+				return typeStr.String()
+			}
 			typeStr.WriteString(p.curTok.Value)
 			p.nextToken()
 		case lexer.TOKEN_MULTIPLY:
@@ -2915,6 +2968,9 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		return nil
 	case lexer.TOKEN_LBRACE:
 		return p.parseStructLiteralExpression()
+	case lexer.TOKEN_AS:
+		// as<T>(e) 类型转换表达式（唯一允许的强转形式，禁止裸 (T)e）
+		return p.parseAsCastExpressionIterative()
 	case lexer.TOKEN_RBRACE, lexer.TOKEN_DOT, lexer.TOKEN_ASSIGN, lexer.TOKEN_LT, lexer.TOKEN_GT, lexer.TOKEN_LSHIFT, lexer.TOKEN_RSHIFT, lexer.TOKEN_RPAREN, lexer.TOKEN_COMMA:
 		return nil
 	default:
@@ -3053,10 +3109,54 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 }
 
 // looksLikeGenericArgs 检查当前 < 是否是泛型类型参数列表
-// 规则：< 后跟类型关键字（int/float/bool/char/string/void/double）则是泛型
-// 后跟 IDENT 可能是比较运算（i < j），保守跳过以避免回归
+// 规则：
+//   - < 后跟类型关键字（int/float/bool/char/string/void/double）→ 泛型
+//   - < 后跟标识符（i64/u32/用户自定义类型），需进一步确认后跟 > ( 模式
+//     以区分比较运算（a < b）
 func (p *Parser) looksLikeGenericArgs() bool {
-	return p.isTypeToken(p.peekTok.Type)
+	// 类型关键字：直接判定为泛型参数
+	if p.isTypeToken(p.peekTok.Type) {
+		return true
+	}
+	// 标识符：投机扫描 < ... > ( 模式以区分比较运算
+	if p.peekTok.Type == lexer.TOKEN_IDENT {
+		return p.speculativeMatchGenericArgs()
+	}
+	return false
+}
+
+// speculativeMatchGenericArgs 投机扫描判断 < 后是否为 < typeargs > ( 模式。
+// 保存 lexer 状态，向前扫描类型参数标记，遇到 > 后若跟 ( 则判定为泛型调用。
+// 无论结果如何，恢复 lexer 状态，不影响后续解析。
+func (p *Parser) speculativeMatchGenericArgs() bool {
+	// 保存 lexer 状态（pos/line/column 是 Lexer 的全部可变状态）
+	savedState := p.lexer.SaveState()
+	defer func() {
+		p.lexer.RestoreState(savedState)
+	}()
+
+	// 向前扫描类型参数：接受 IDENT、类型关键字、逗号、[]*等类型构造符
+	// 直到遇到 > 或不匹配的 token
+	for {
+		tok := p.lexer.Next()
+		switch tok.Type {
+		case lexer.TOKEN_IDENT:
+			// 标识符类型参数（i64, MyType 等），继续
+		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+			lexer.TOKEN_TYPE_VOID:
+			// 类型关键字，继续
+		case lexer.TOKEN_LBRACKET, lexer.TOKEN_RBRACKET, lexer.TOKEN_COMMA, lexer.TOKEN_LT:
+			// []T, *T, 逗号分隔, 嵌套 < 等，继续
+		case lexer.TOKEN_GT:
+			// 闭合 > ：检查后续是否为 ( ，是则为泛型调用
+			next := p.lexer.Next()
+			return next.Type == lexer.TOKEN_LPAREN
+		default:
+			// 遇到非类型参数 token，判定为比较运算
+			return false
+		}
+	}
 }
 
 // parseIntegerLiteralIterative 迭代解析整数字面量
@@ -3117,76 +3217,64 @@ func (p *Parser) parseStringLiteralIterative() *ast.StringLiteral {
 	return literal
 }
 
-// isTypeCastExpression 检查当前是否是类型转换表达式 (type)(expr)
-func (p *Parser) isTypeCastExpression() bool {
-	// 保存当前状态
-	savedCur := p.curTok
-	savedPeek := p.peekTok
-
-	// 尝试向前看：需要是 (类型)( 的形式
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		p.nextToken()
-		// 检查是否是类型关键字或标识符
-		isType := p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT
-		if isType {
-			p.nextToken()
-			// 检查是否紧跟 )
-			if p.curTok.Type == lexer.TOKEN_RPAREN {
-				p.nextToken()
-				// 检查是否紧跟 (
-				isCast := p.curTok.Type == lexer.TOKEN_LPAREN
-				// 恢复状态
-				p.curTok = savedCur
-				p.peekTok = savedPeek
-				return isCast
-			}
-		}
-	}
-	// 恢复状态
-	p.curTok = savedCur
-	p.peekTok = savedPeek
-	return false
-}
-
-// parseTypeCastExpressionIterative 解析类型转换表达式 (type)(expr)
-func (p *Parser) parseTypeCastExpressionIterative() *ast.TypeCastExpression {
+// parseAsCastExpressionIterative 解析 as<T>(e) 类型转换表达式。
+//
+// 语法: as<T>(expr)
+//
+// 作为唯一允许的强转形式，取代裸 (T)e 语法。
+// 运行时零开销：直接映射为 C 的 ((T)(e))。
+// 语义上统一处理：相容类型走安全转换，指针/不同族走位重解释，
+// 具体安全检查由 sema 阶段负责（codegen 无差别生成 C 强转）。
+func (p *Parser) parseAsCastExpressionIterative() ast.Expression {
 	pos := ast.Position{
 		Line:   p.curTok.Line,
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
 
-	// 跳过 (
+	// 跳过 as
 	p.nextToken()
 
-	// 解析目标类型
-	targetType := ""
-	if p.isTypeToken(p.curTok.Type) {
-		targetType = lexer.TokenTypeToString(p.curTok.Type)
-		targetType = strings.TrimPrefix(targetType, "TYPE_")
-		targetType = strings.ToLower(targetType)
-	} else if p.curTok.Type == lexer.TOKEN_IDENT {
-		targetType = p.curTok.Value
+	// 期望 <类型>
+	if p.curTok.Type != lexer.TOKEN_LT {
+		p.error(fmt.Sprintf("expected '<' after 'as', got %s", lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
 	}
 	p.nextToken()
 
-	// 跳过 )
-	if p.curTok.Type == lexer.TOKEN_RPAREN {
-		p.nextToken()
+	// 解析目标类型：接受类型关键字、标识符、void(T...)R 签名记法、复合类型
+	targetType := p.parseTypeStringForDecl()
+	if targetType == "" {
+		p.error(fmt.Sprintf("expected type after 'as<', got %s", lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
 	}
 
-	// 跳过 (
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		p.nextToken()
+	// 期望 >
+	if p.curTok.Type != lexer.TOKEN_GT {
+		p.error(fmt.Sprintf("expected '>' to close 'as<%s', got %s", targetType, lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
 	}
+	p.nextToken()
 
-	// 解析内部表达式
+	// 期望 (expr)  —— 强制括号包裹，避免优先级歧义
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error(fmt.Sprintf("expected '(' after 'as<%s>', got %s (use syntax: as<%s>(expr))",
+			targetType, lexer.TokenTypeToString(p.curTok.Type), targetType))
+		return nil
+	}
+	p.nextToken()
+
 	expr := p.parseExpressionIterative()
-
-	// 跳过 )
-	if p.curTok.Type == lexer.TOKEN_RPAREN {
-		p.nextToken()
+	if expr == nil {
+		p.error(fmt.Sprintf("expected expression in as<%s>(...)", targetType))
+		return nil
 	}
+
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error(fmt.Sprintf("expected ')' to close 'as<%s>(...', got %s", targetType, lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
+	p.nextToken()
 
 	return &ast.TypeCastExpression{
 		TargetType: targetType,

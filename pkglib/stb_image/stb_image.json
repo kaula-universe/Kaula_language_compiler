@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "stb_image",
   "type": "single_header",
   "header": "stb_image/stb_image.h",
@@ -74,7 +74,7 @@
     },
     "__mingw_str_free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
@@ -564,20 +564,20 @@
     },
     "bsearch": {
       "args": [
-        "const void*",
-        "const void*",
+        "const void()",
+        "const void()",
         "size_t",
         "size_t",
         "int (*)(const void*, const void*) __attribute__((cdecl))"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "calloc": {
       "args": [
         "size_t",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "clearerr": {
       "args": [
@@ -774,7 +774,7 @@
     },
     "free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
@@ -939,7 +939,7 @@
       "args": [
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "mblen": {
       "args": [
@@ -1036,7 +1036,7 @@
     },
     "qsort": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "size_t",
         "int (*)(const void*, const void*) __attribute__((cdecl))"
@@ -1055,10 +1055,10 @@
     },
     "realloc": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "remove": {
       "args": [
@@ -1167,7 +1167,7 @@
     },
     "stbi_image_free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
@@ -1183,7 +1183,7 @@
     "stbi_info_from_callbacks": {
       "args": [
         "const stbi_io_callbacks*",
-        "void*",
+        "void()",
         "int*",
         "int*",
         "int*"
@@ -1218,7 +1218,7 @@
     "stbi_is_16_bit_from_callbacks": {
       "args": [
         "const stbi_io_callbacks*",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1244,7 +1244,7 @@
     "stbi_is_hdr_from_callbacks": {
       "args": [
         "const stbi_io_callbacks*",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -1296,7 +1296,7 @@
     "stbi_load_16_from_callbacks": {
       "args": [
         "const stbi_io_callbacks*",
-        "void*",
+        "void()",
         "int*",
         "int*",
         "int*",
@@ -1318,7 +1318,7 @@
     "stbi_load_from_callbacks": {
       "args": [
         "const stbi_io_callbacks*",
-        "void*",
+        "void()",
         "int*",
         "int*",
         "int*",
@@ -1383,7 +1383,7 @@
     "stbi_loadf_from_callbacks": {
       "args": [
         "const stbi_io_callbacks*",
-        "void*",
+        "void()",
         "int*",
         "int*",
         "int*",

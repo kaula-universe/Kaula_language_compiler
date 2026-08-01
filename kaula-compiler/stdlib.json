@@ -74,7 +74,7 @@
     "file_read": {
       "args": [
         "File",
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "size_t"
@@ -82,7 +82,7 @@
     "file_write": {
       "args": [
         "File",
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "size_t"
@@ -531,18 +531,18 @@
       "args": [
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "kaula_scope_free": {
       "args": [
-        "void*"
+        "void()"
       ]
     },
     "fast_alloc": {
       "args": [
         "size_t"
       ],
-      "return": "void*",
+      "return": "void()",
       "deprecated": "use kmm_v4_alloc instead"
     },
     "fast_calloc": {
@@ -550,12 +550,12 @@
         "size_t",
         "size_t"
       ],
-      "return": "void*",
+      "return": "void()",
       "deprecated": "use kmm_v4_calloc instead"
     },
     "fast_free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "deprecated": "no-op, use KMM scope instead"
     },
@@ -563,12 +563,12 @@
       "args": [
         "size_t"
       ],
-      "return": "void*",
+      "return": "void()",
       "deprecated": "use kmm_v4_alloc instead"
     },
     "std_free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "deprecated": "use KMM scope instead"
     },
@@ -576,45 +576,45 @@
       "args": [
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "kmm_v4_free": {
       "args": [
-        "void*"
+        "void()"
       ]
     },
     "kmm_v4_alloc": {
       "args": [
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "kmm_v4_calloc": {
       "args": [
         "size_t",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "kmm_v4_realloc": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "kmm_v4_alloc_aligned": {
       "args": [
         "size_t",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "kmm_v4_bump": {
       "args": [
         "size_t"
       ],
-      "return": "void*",
+      "return": "void()",
       "description": "batch allocate total_size bytes with single atomic op"
     },
     "kmm_v4_offset_save": {
@@ -651,16 +651,16 @@
     },
     "std_release": {
       "args": [
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "std_yield": {
       "args": [
-        "void*",
-        "void*"
+        "void()",
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     }
   },
   "std.format": {
@@ -737,7 +737,7 @@
       "args": [
         "char*",
         "size_t",
-        "const void*"
+        "const void()"
       ],
       "return": "int"
     },
@@ -823,7 +823,7 @@
     "vector_push_back": {
       "args": [
         "Vector*",
-        "void*"
+        "void()"
       ]
     },
     "vector_get": {
@@ -831,13 +831,13 @@
         "Vector*",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "vector_set": {
       "args": [
         "Vector*",
         "size_t",
-        "void*"
+        "void()"
       ]
     },
     "vector_remove": {
@@ -881,33 +881,33 @@
     "linked_list_push_front": {
       "args": [
         "LinkedList*",
-        "void*"
+        "void()"
       ]
     },
     "linked_list_push_back": {
       "args": [
         "LinkedList*",
-        "void*"
+        "void()"
       ]
     },
     "linked_list_pop_front": {
       "args": [
         "LinkedList*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "linked_list_pop_back": {
       "args": [
         "LinkedList*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "linked_list_get": {
       "args": [
         "LinkedList*",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "linked_list_remove": {
       "args": [
@@ -935,8 +935,8 @@
     "hash_map_create": {
       "args": [
         "size_t",
-        "void*",
-        "void*"
+        "void()",
+        "void()"
       ],
       "return": "HashMap*"
     },
@@ -948,21 +948,21 @@
     "hash_map_put": {
       "args": [
         "HashMap*",
-        "void*",
-        "void*"
+        "void()",
+        "void()"
       ]
     },
     "hash_map_get": {
       "args": [
         "HashMap*",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "hash_map_remove": {
       "args": [
         "HashMap*",
-        "void*"
+        "void()"
       ]
     },
     "hash_map_size": {
@@ -985,7 +985,7 @@
     "hash_map_contains": {
       "args": [
         "HashMap*",
-        "void*"
+        "void()"
       ],
       "return": "bool"
     },
@@ -1003,20 +1003,20 @@
     "stack_push": {
       "args": [
         "Stack*",
-        "void*"
+        "void()"
       ]
     },
     "stack_pop": {
       "args": [
         "Stack*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "stack_peek": {
       "args": [
         "Stack*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "stack_size": {
       "args": [
@@ -1761,14 +1761,14 @@
       "args": [
         "VO*",
         "int",
-        "void*"
+        "void()"
       ]
     },
     "std_vo_code_load": {
       "args": [
         "VO*",
         "int",
-        "void*"
+        "void()"
       ]
     },
     "std_vo_associate": {
@@ -1783,7 +1783,7 @@
         "VO*",
         "int"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "std_vo_get_cache_max": {
       "args": [
@@ -1815,12 +1815,12 @@
     },
     "prefix_set_data": {
       "args": [
-        "void*"
+        "void()"
       ]
     },
     "prefix_get_data": {
       "args": [],
-      "return": "void*"
+      "return": "void()"
     },
     "prefix_find": {
       "args": [
@@ -1837,8 +1837,8 @@
     "header": "std/task/task.h",
     "task_create": {
       "args": [
-        "void*",
-        "void*",
+        "void()",
+        "void()",
         "int"
       ],
       "return": "Task"
@@ -1974,22 +1974,22 @@
       "args": [
         "PriorityQueue*",
         "int",
-        "void*",
-        "void*"
+        "void()",
+        "void()"
       ]
     },
     "priority_queue_execute_next": {
       "args": [
         "PriorityQueue*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "priority_queue_batch_add": {
       "args": [
         "PriorityQueue*",
         "int",
-        "void*",
-        "void**",
+        "void()",
+        "*void()",
         "int"
       ],
       "return": "int"
@@ -2019,7 +2019,7 @@
     "thread_create": {
       "args": [
         "ThreadFunction",
-        "void*"
+        "void()"
       ],
       "return": "Thread"
     },
@@ -2273,14 +2273,14 @@
     "channel_send": {
       "args": [
         "Channel*",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
     "channel_send_timeout": {
       "args": [
         "Channel*",
-        "void*",
+        "void()",
         "uint64_t"
       ],
       "return": "bool_t"
@@ -2289,19 +2289,19 @@
       "args": [
         "Channel*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "channel_receive_timeout": {
       "args": [
         "Channel*",
         "uint64_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "channel_try_receive": {
       "args": [
         "Channel*",
-        "void**"
+        "*void()"
       ],
       "return": "bool_t"
     },
@@ -2340,7 +2340,7 @@
     "promise_set_result": {
       "args": [
         "Promise*",
-        "void*"
+        "void()"
       ]
     },
     "promise_set_error": {
@@ -2374,14 +2374,14 @@
       "args": [
         "Future*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "future_get_timeout": {
       "args": [
         "Future*",
         "uint64_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "future_is_done": {
       "args": [
@@ -2404,7 +2404,7 @@
     "future_map": {
       "args": [
         "Future*",
-        "void*(*)(void*)"
+        "void(void())void()"
       ],
       "return": "Future*"
     },
@@ -2919,7 +2919,7 @@
     "win_service_open": {
       "args": [
         "char*",
-        "void**"
+        "*void()"
       ],
       "return": "bool_t"
     },
@@ -2999,7 +2999,7 @@
     "system_syscall_read": {
       "args": [
         "int",
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "ssize_t"
@@ -3007,7 +3007,7 @@
     "system_syscall_write": {
       "args": [
         "int",
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "ssize_t"
@@ -3051,27 +3051,27 @@
       "args": [
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "system_syscall_free": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "system_syscall_realloc": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "system_syscall_calloc": {
       "args": [
         "size_t",
         "size_t"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "header": "syscall/syscall.h",
     "sys_open": {
@@ -3091,7 +3091,7 @@
     "sys_read": {
       "args": [
         "sys_fd_t",
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "i64"
@@ -3099,7 +3099,7 @@
     "sys_write": {
       "args": [
         "sys_fd_t",
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "i64"
@@ -3334,25 +3334,25 @@
     },
     "sys_mmap": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "int",
         "int",
         "sys_fd_t",
         "i64"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "sys_munmap": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "int"
     },
     "sys_mprotect": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "int"
       ],
@@ -3381,7 +3381,7 @@
       "args": [
         "sys_fd_t",
         "unsigned long",
-        "void*"
+        "void()"
       ],
       "return": "int"
     }
@@ -3415,8 +3415,8 @@
     "light_async_loop_add": {
       "args": [
         "LightAsyncLoop*",
-        "void* (*)(void*)",
-        "void*"
+        "void(void())void()",
+        "void()"
       ],
       "return": "int"
     },
@@ -3465,7 +3465,7 @@
       "args": [
         "AsyncNode*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "light_timer_manager_create": {
       "args": [],
@@ -3480,8 +3480,8 @@
       "args": [
         "LightTimerManager*",
         "uint64_t",
-        "void (*)(void*)",
-        "void*"
+        "void(void())void",
+        "void()"
       ],
       "return": "int"
     },
@@ -3504,8 +3504,8 @@
     "async_event_loop_add": {
       "args": [
         "AsyncEventLoop*",
-        "void* (*)(void*)",
-        "void*"
+        "void(void())void()",
+        "void()"
       ],
       "return": "int"
     },
@@ -3546,8 +3546,8 @@
     "async_event_loop_post": {
       "args": [
         "AsyncEventLoop*",
-        "void* (*)(void*)",
-        "void*"
+        "void(void())void()",
+        "void()"
       ]
     }
   },
@@ -3915,7 +3915,7 @@
     "http_server_start": {
       "args": [
         "HttpServer*",
-        "void*"
+        "void()"
       ],
       "return": "bool"
     },
@@ -4277,7 +4277,7 @@
     },
     "csprng_bytes": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "bool_t"
@@ -4367,7 +4367,7 @@
     "sha256_ctx_update": {
       "args": [
         "SHA256Context*",
-        "const void*",
+        "const void()",
         "size_t"
       ]
     },
@@ -4384,38 +4384,38 @@
     },
     "sha256_hash": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "u8[32]"
       ]
     },
     "sha256_hex": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "hmac_sha256_hex": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "crypto_constant_time_compare": {
       "args": [
-        "const void*",
-        "const void*",
+        "const void()",
+        "const void()",
         "size_t"
       ],
       "return": "bool_t"
     },
     "crypto_secure_zero": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ]
     }
@@ -5022,7 +5022,7 @@
     },
     "test_assert_null": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "const char*",
         "int"
@@ -5031,7 +5031,7 @@
     },
     "test_assert_not_null": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "const char*",
         "int"
@@ -5139,7 +5139,7 @@
     "header": "algorithm/algorithm.h",
     "algo_sort": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5147,7 +5147,7 @@
     },
     "algo_sort_desc": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5155,7 +5155,7 @@
     },
     "algo_is_sorted": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5164,8 +5164,8 @@
     },
     "algo_binary_search": {
       "args": [
-        "const void*",
-        "const void*",
+        "const void()",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5174,8 +5174,8 @@
     },
     "algo_lower_bound": {
       "args": [
-        "const void*",
-        "const void*",
+        "const void()",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5184,8 +5184,8 @@
     },
     "algo_upper_bound": {
       "args": [
-        "const void*",
-        "const void*",
+        "const void()",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5194,8 +5194,8 @@
     },
     "algo_find": {
       "args": [
-        "const void*",
-        "const void*",
+        "const void()",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5204,18 +5204,18 @@
     },
     "algo_find_if": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "PredicateFunc",
-        "void*"
+        "void()"
       ],
       "return": "size_t"
     },
     "algo_count": {
       "args": [
-        "const void*",
-        "const void*",
+        "const void()",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5224,31 +5224,31 @@
     },
     "algo_count_if": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "PredicateFunc",
-        "void*"
+        "void()"
       ],
       "return": "size_t"
     },
     "algo_reverse": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "size_t"
       ]
     },
     "algo_swap": {
       "args": [
-        "void*",
-        "void*",
+        "void()",
+        "void()",
         "size_t"
       ]
     },
     "algo_min_max": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc",
@@ -5258,7 +5258,7 @@
     },
     "algo_min_element": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5267,7 +5267,7 @@
     },
     "algo_max_element": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "CompareFunc"
@@ -5276,62 +5276,62 @@
     },
     "algo_fill": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "size_t",
-        "const void*"
+        "const void()"
       ]
     },
     "algo_copy": {
       "args": [
-        "const void*",
-        "void*",
+        "const void()",
+        "void()",
         "size_t",
         "size_t"
       ]
     },
     "algo_for_each": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "ForEachFunc",
-        "void*"
+        "void()"
       ]
     },
     "algo_all_of": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "PredicateFunc",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
     "algo_any_of": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "PredicateFunc",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
     "algo_none_of": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
         "size_t",
         "PredicateFunc",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
     "algo_unique": {
       "args": [
-        "void*",
+        "void()",
         "size_t*",
         "size_t",
         "CompareFunc"
@@ -5339,29 +5339,29 @@
     },
     "algo_compare_int": {
       "args": [
-        "const void*",
-        "const void*"
+        "const void()",
+        "const void()"
       ],
       "return": "int"
     },
     "algo_compare_int_desc": {
       "args": [
-        "const void*",
-        "const void*"
+        "const void()",
+        "const void()"
       ],
       "return": "int"
     },
     "algo_compare_float": {
       "args": [
-        "const void*",
-        "const void*"
+        "const void()",
+        "const void()"
       ],
       "return": "int"
     },
     "algo_compare_string": {
       "args": [
-        "const void*",
-        "const void*"
+        "const void()",
+        "const void()"
       ],
       "return": "int"
     }
@@ -5849,7 +5849,7 @@
         "DBConnection*",
         "char*",
         "DBRowCallback",
-        "void*",
+        "void()",
         "char**"
       ],
       "return": "DBStatus"
@@ -5925,7 +5925,7 @@
         "DBStatement*",
         "int"
       ],
-      "return": "const void*"
+      "return": "const void()"
     },
     "db_column_bytes": {
       "args": [
@@ -5962,7 +5962,7 @@
       "args": [
         "DBStatement*",
         "int",
-        "const void*",
+        "const void()",
         "int"
       ],
       "return": "DBStatus"
@@ -6076,90 +6076,90 @@
     "header": "hash/hash_ext.h",
     "sha1_hash": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "SHA1Digest"
     },
     "sha1_hex": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "sha384_hash": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "SHA384Digest"
     },
     "sha384_hex": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "sha512_hash": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "SHA512Digest"
     },
     "sha512_hex": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "crc64_hash": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "CRC64Digest"
     },
     "crc64_hex": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "crc64_compute": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "u64"
     },
     "hmac_sha512": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "const void*",
+        "const void()",
         "size_t",
         "u8[64]"
       ]
     },
     "hmac_sha512_hex": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "pbkdf2_sha512": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "const void*",
+        "const void()",
         "size_t",
         "int",
         "u8*",
@@ -6169,7 +6169,7 @@
     "hash_compute": {
       "args": [
         "const char*",
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
@@ -6179,7 +6179,7 @@
     "header": "encoding/encoding.h",
     "hex_encode": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
@@ -6189,18 +6189,18 @@
         "const char*",
         "size_t*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "hex_encode_upper": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
     },
     "base32_encode": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
@@ -6210,11 +6210,11 @@
         "const char*",
         "size_t*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "base64_encode": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t"
       ],
       "return": "String"
@@ -6224,7 +6224,7 @@
         "const char*",
         "size_t*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "url_encode": {
       "args": [
@@ -6292,36 +6292,36 @@
     "header": "compress/compress.h",
     "rle_compress": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "size_t"
     },
     "rle_decompress": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "size_t"
     },
     "lz77_compress": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "size_t"
     },
     "lz77_decompress": {
       "args": [
-        "const void*",
+        "const void()",
         "size_t",
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "size_t"
@@ -6348,9 +6348,9 @@
     "compress_stream_process": {
       "args": [
         "CompressStream*",
-        "const void*",
+        "const void()",
         "size_t",
-        "void*",
+        "void()",
         "size_t",
         "bool_t"
       ],
@@ -6406,7 +6406,7 @@
     "serialize_write_bin": {
       "args": [
         "Serializer*",
-        "const void*",
+        "const void()",
         "size_t"
       ]
     },
@@ -6493,7 +6493,7 @@
         "Deserializer*",
         "size_t*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "deserialize_read_array_header": {
       "args": [
@@ -6524,7 +6524,7 @@
     "header": "option/option.h",
     "option_some": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "Option"
@@ -6549,20 +6549,20 @@
       "args": [
         "Option"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "option_unwrap_or": {
       "args": [
         "Option",
-        "void*"
+        "void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "option_map": {
       "args": [
         "Option",
         "OptionMapFunc",
-        "void*"
+        "void()"
       ],
       "return": "Option"
     },
@@ -6570,13 +6570,13 @@
       "args": [
         "Option",
         "OptionBindFunc",
-        "void*"
+        "void()"
       ],
       "return": "Option"
     },
     "result_ok": {
       "args": [
-        "void*",
+        "void()",
         "size_t"
       ],
       "return": "Result"
@@ -6603,7 +6603,7 @@
       "args": [
         "Result"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "result_unwrap_err": {
       "args": [
@@ -6615,7 +6615,7 @@
       "args": [
         "Result",
         "ResultMapFunc",
-        "void*"
+        "void()"
       ],
       "return": "Result"
     },
@@ -6623,7 +6623,7 @@
       "args": [
         "Result",
         "ResultBindFunc",
-        "void*"
+        "void()"
       ],
       "return": "Result"
     }
@@ -6811,21 +6811,21 @@
     "hashset_insert": {
       "args": [
         "HashSet*",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
     "hashset_remove": {
       "args": [
         "HashSet*",
-        "const void*"
+        "const void()"
       ],
       "return": "bool_t"
     },
     "hashset_contains": {
       "args": [
         "HashSet*",
-        "const void*"
+        "const void()"
       ],
       "return": "bool_t"
     },
@@ -6849,24 +6849,24 @@
     "treemap_insert": {
       "args": [
         "TreeMap*",
-        "void*",
-        "void*"
+        "void()",
+        "void()"
       ],
       "return": "bool_t"
     },
     "treemap_remove": {
       "args": [
         "TreeMap*",
-        "const void*"
+        "const void()"
       ],
       "return": "bool_t"
     },
     "treemap_get": {
       "args": [
         "TreeMap*",
-        "const void*"
+        "const void()"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "treemap_size": {
       "args": [
@@ -6889,21 +6889,21 @@
     "ringbuf_push": {
       "args": [
         "RingBuffer*",
-        "const void*"
+        "const void()"
       ],
       "return": "bool_t"
     },
     "ringbuf_pop": {
       "args": [
         "RingBuffer*",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
     "ringbuf_peek": {
       "args": [
         "RingBuffer*",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
@@ -6940,21 +6940,21 @@
     "pq_push": {
       "args": [
         "PriorityQueue*",
-        "const void*"
+        "const void()"
       ],
       "return": "bool_t"
     },
     "pq_pop": {
       "args": [
         "PriorityQueue*",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
     "pq_peek": {
       "args": [
         "PriorityQueue*",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },
@@ -7026,14 +7026,14 @@
       "args": [
         "const char*",
         "int",
-        "const void*"
+        "const void()"
       ]
     },
     "test_assert_not_null": {
       "args": [
         "const char*",
         "int",
-        "const void*"
+        "const void()"
       ]
     },
     "test_fail": {
@@ -7263,7 +7263,7 @@
       "args": [
         "Graph*",
         "const char*",
-        "void*"
+        "void()"
       ],
       "return": "GraphNode*"
     },
@@ -7323,16 +7323,16 @@
       "args": [
         "const Graph*",
         "const char*",
-        "void (*)(const GraphNode*, i64, void*)",
-        "void*"
+        "void(const GraphNode*, i64, void())void",
+        "void()"
       ]
     },
     "graph_dfs": {
       "args": [
         "const Graph*",
         "const char*",
-        "void (*)(const GraphNode*, i64, void*)",
-        "void*"
+        "void(const GraphNode*, i64, void())void",
+        "void()"
       ]
     },
     "graph_dijkstra": {
@@ -7377,7 +7377,7 @@
     "header": "std/heap/heap.h",
     "heap_create": {
       "args": [
-        "int (*)(const void*, const void*)"
+        "void(const void(), const void())cint"
       ],
       "return": "Heap*"
     },
@@ -7389,35 +7389,35 @@
     "heap_push": {
       "args": [
         "Heap*",
-        "void*"
+        "void()"
       ]
     },
     "heap_pop": {
       "args": [
         "Heap*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "heap_peek": {
       "args": [
         "const Heap*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "heap_build": {
       "args": [
-        "void**",
+        "*void()",
         "size_t",
         "size_t",
-        "int (*)(const void*, const void*)"
+        "void(const void(), const void())cint"
       ]
     },
     "heap_sort": {
       "args": [
-        "void**",
+        "*void()",
         "size_t",
         "size_t",
-        "int (*)(const void*, const void*)"
+        "void(const void(), const void())cint"
       ]
     },
     "heap_merge": {
@@ -7437,14 +7437,14 @@
       "args": [
         "Heap*",
         "size_t",
-        "void*"
+        "void()"
       ]
     },
     "heap_increase_key": {
       "args": [
         "Heap*",
         "size_t",
-        "void*"
+        "void()"
       ]
     },
     "heap_size": {
@@ -7461,22 +7461,22 @@
     },
     "heap_compare_int": {
       "args": [
-        "const void*",
-        "const void*"
+        "const void()",
+        "const void()"
       ],
       "return": "int"
     },
     "heap_compare_int_desc": {
       "args": [
-        "const void*",
-        "const void*"
+        "const void()",
+        "const void()"
       ],
       "return": "int"
     },
     "heap_compare_float": {
       "args": [
-        "const void*",
-        "const void*"
+        "const void()",
+        "const void()"
       ],
       "return": "int"
     }
@@ -7496,7 +7496,7 @@
       "args": [
         "Trie*",
         "const char*",
-        "void*"
+        "void()"
       ]
     },
     "trie_search": {
@@ -7504,7 +7504,7 @@
         "const Trie*",
         "const char*"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "trie_delete": {
       "args": [
@@ -7531,8 +7531,8 @@
       "args": [
         "const Trie*",
         "const char*",
-        "void (*)(const char*, void*, void*)",
-        "void*"
+        "void(const char*, void(), void())void",
+        "void()"
       ]
     },
     "trie_size": {
@@ -7555,8 +7555,8 @@
     "trie_traverse": {
       "args": [
         "const Trie*",
-        "void (*)(const char*, void*, void*)",
-        "void*"
+        "void(const char*, void(), void())void",
+        "void()"
       ]
     }
   },
@@ -8355,8 +8355,8 @@
       "args": [
         "size_t",
         "size_t",
-        "void (*)(void*, size_t)",
-        "void*"
+        "void(void(), size_t)void",
+        "void()"
       ]
     },
     "parallel_for_chunked": {
@@ -8364,8 +8364,8 @@
         "size_t",
         "size_t",
         "size_t",
-        "void (*)(void*, size_t)",
-        "void*"
+        "void(void(), size_t)void",
+        "void()"
       ]
     },
     "parallel_reduce": {
@@ -8385,10 +8385,10 @@
     },
     "parallel_sort_with_compare": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "size_t",
-        "int (*)(const void*, const void*)"
+        "void(const void(), const void())cint"
       ]
     },
     "parallel_map": {
@@ -8416,18 +8416,18 @@
     },
     "parallel_copy": {
       "args": [
-        "void*",
-        "void*",
+        "void()",
+        "void()",
         "size_t",
         "size_t"
       ]
     },
     "parallel_fill": {
       "args": [
-        "void*",
+        "void()",
         "size_t",
         "size_t",
-        "const void*"
+        "const void()"
       ]
     },
     "parallel_count_if": {
@@ -8724,7 +8724,7 @@
       "args": [
         "SSHChannel*",
         "const char*",
-        "void*"
+        "void()"
       ],
       "return": "bool_t"
     },

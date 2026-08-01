@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "imgui",
   "type": "multi_header",
   "header": "imgui/imstb_rectpack.h",
@@ -19,19 +19,19 @@
   "functions": {
     "kimgui_apply_dark_theme": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_apply_light_theme": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_begin_window": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "int*"
       ],
@@ -39,14 +39,14 @@
     },
     "kimgui_button": {
       "args": [
-        "void*",
+        "void()",
         "const char*"
       ],
       "return": "int"
     },
     "kimgui_checkbox": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "int*"
       ],
@@ -54,7 +54,7 @@
     },
     "kimgui_color_edit4": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "float*"
       ],
@@ -62,19 +62,19 @@
     },
     "kimgui_end_frame": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_end_window": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_framerate": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "float"
     },
@@ -84,36 +84,36 @@
         "int",
         "int"
       ],
-      "return": "void*"
+      "return": "void()"
     },
     "kimgui_input_text": {
       "args": [
-        "void*",
+        "void()",
         "const char*"
       ],
       "return": "int"
     },
     "kimgui_input_text_value": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "const char*"
     },
     "kimgui_new_frame": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_new_line": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_plot_sine": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "float"
       ],
@@ -121,20 +121,20 @@
     },
     "kimgui_poll_events": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
     "kimgui_pop_style_color": {
       "args": [
-        "void*",
+        "void()",
         "int"
       ],
       "return": "void"
     },
     "kimgui_push_style_color": {
       "args": [
-        "void*",
+        "void()",
         "int",
         "float",
         "float",
@@ -145,19 +145,19 @@
     },
     "kimgui_same_line": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_separator": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_set_next_window_pos": {
       "args": [
-        "void*",
+        "void()",
         "float",
         "float"
       ],
@@ -165,7 +165,7 @@
     },
     "kimgui_set_next_window_size": {
       "args": [
-        "void*",
+        "void()",
         "float",
         "float"
       ],
@@ -173,20 +173,20 @@
     },
     "kimgui_show_demo_window": {
       "args": [
-        "void*",
+        "void()",
         "int*"
       ],
       "return": "void"
     },
     "kimgui_shutdown": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_slider_float": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "float*",
         "float",
@@ -196,7 +196,7 @@
     },
     "kimgui_slider_int": {
       "args": [
-        "void*",
+        "void()",
         "const char*",
         "int*",
         "int",
@@ -206,20 +206,20 @@
     },
     "kimgui_spacing": {
       "args": [
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "kimgui_text": {
       "args": [
-        "void*",
+        "void()",
         "const char*"
       ],
       "return": "void"
     },
     "kimgui_text_colored": {
       "args": [
-        "void*",
+        "void()",
         "float",
         "float",
         "float",
@@ -230,7 +230,7 @@
     },
     "kimgui_text_fmt": {
       "args": [
-        "void*",
+        "void()",
         "const char*"
       ],
       "varargs": true,
@@ -316,14 +316,14 @@
     "stbtt_FreeBitmap": {
       "args": [
         "unsigned char*",
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
     "stbtt_FreeSDF": {
       "args": [
         "unsigned char*",
-        "void*"
+        "void()"
       ],
       "return": "void"
     },
@@ -784,7 +784,7 @@
         "int",
         "int",
         "int",
-        "void*"
+        "void()"
       ],
       "return": "int"
     },
@@ -872,7 +872,7 @@
         "int",
         "int",
         "int",
-        "void*"
+        "void()"
       ],
       "return": "void"
     },

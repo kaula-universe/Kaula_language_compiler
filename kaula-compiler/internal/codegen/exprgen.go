@@ -501,19 +501,10 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 
 	// 通用泛型适配：如果存在类型参数，则触发实例化
 	if len(e.TypeArgs) > 0 {
-		// 触发泛型实例化
-		code, err := eg.codegen.InstantiateGeneric(funcName, e.TypeArgs, e.Pos.Line)
-		if err != nil {
-			// 如果实例化失败，回退到简单拼接
-			funcName = "kaula_" + funcName + "_" + strings.Join(e.TypeArgs, "_")
-		} else if code != "" {
-			// 实例化成功，在代码生成早期阶段注入实例化代码
-			// 这里我们只返回实例化后的函数名
-			funcName = "kaula_" + funcName + "_" + strings.Join(e.TypeArgs, "_")
-		} else {
-			// 已经实例化过，直接使用
-			funcName = "kaula_" + funcName + "_" + strings.Join(e.TypeArgs, "_")
-		}
+		// 触发泛型实例化（实例化代码写入 genericFuncCode 缓冲区，最终前置注入）
+		_, _ = eg.codegen.InstantiateGeneric(funcName, e.TypeArgs, e.Pos.Line)
+		// 无论首次实例化还是已缓存，调用点都使用 mangled 名称
+		funcName = MangleGenericName(funcName, e.TypeArgs)
 	}
 
 	// 避免与C标准库宏冲突（如 max, min）

@@ -49,7 +49,11 @@ type CodeGenerator struct {
 	genericCache          map[string]*GenericInstanceCache
 	genericInstantiated   map[string]bool
 	genericFuncCode       strings.Builder // 泛型实例化函数代码
-	currentFuncTypeParams []*ast.TypeParameter
+	genericInstDepth      int             // 当前实例化深度（防止无限递归）
+
+	genericTypeCache      map[string]string // 泛型类型实例缓存：Box<int> → K_Box_int
+	genericTypeCode       strings.Builder   // 泛型类型实例化代码（typedef 定义）
+	genericTypeInstDepth  int               // 泛型类型实例化深度（防止无限递归）
 
 	currentFunctionName       string
 	currentFunctionReturnType string
@@ -225,6 +229,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		localImportFuncs:    make(map[string]bool),
 		genericCache:        make(map[string]*GenericInstanceCache),
 		genericInstantiated: make(map[string]bool),
+		genericTypeCache:    make(map[string]string),
 		sourceMap:           NewSourceMap("", ""),
 		constTable:          make(map[string]string),
 	}
@@ -454,6 +459,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.usedModules = make([]string, 0, len(importedModules))
 	for moduleName := range importedModules {
 		cg.usedModules = append(cg.usedModules, moduleName)
+	}
+
+	// 将泛型类型实例化代码注入到 typeCode 之前，
+	// 确保实例化类型定义在引用之前（如 Box<int> 的 typedef 必须先于使用它的代码）
+	if cg.genericTypeCode.Len() > 0 {
+		combined := cg.genericTypeCode.String() + typeCode.String()
+		typeCode.Reset()
+		typeCode.WriteString(combined)
 	}
 
 	// 将 lambda 定义插入到 functionCode 之前
@@ -755,8 +768,40 @@ func (cg *CodeGenerator) HasLocalSymbol(name string) bool {
 	return cg.currentScope.HasLocalSymbol(name)
 }
 
+// MangleGenericName 生成泛型实例化后的 C 函数名。
+// 规则：kaula_<funcName>_<mangled_typeargs>，类型参数中的非字母数字字符
+// 转义为 _<codepoint>_ 以保证生成合法的 C 标识符。
+// 例：identity<int>      → kaula_identity_int
+//     identity<[]int>    → kaula_identity__91__93_int
+func MangleGenericName(funcName string, typeArgs []string) string {
+	name := "kaula_" + funcName + "_"
+	for i, arg := range typeArgs {
+		if i > 0 {
+			name += "_"
+		}
+		for _, ch := range arg {
+			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+				name += string(ch)
+			} else {
+				name += fmt.Sprintf("_%d_", ch)
+			}
+		}
+	}
+	return name
+}
+
+// MaxGenericInstantiationDepth 泛型实例化深度上限，防止无限递归实例化
+// （如 fn f<T>(T x) { f<[]T>([x]) } 会无限展开）
+const MaxGenericInstantiationDepth = 32
+
 // InstantiateGeneric 实例化泛型函数
 func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, line int) (string, error) {
+	// 深度限制：防止无限递归实例化
+	if cg.genericInstDepth >= MaxGenericInstantiationDepth {
+		return "", fmt.Errorf("generic instantiation depth limit (%d) exceeded at %s<%s> (line %d): possible infinite recursion",
+			MaxGenericInstantiationDepth, funcName, strings.Join(typeArgs, ","), line)
+	}
+
 	// 生成缓存键
 	cacheKey := funcName + "<"
 	for i, arg := range typeArgs {
@@ -773,20 +818,7 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	}
 
 	// 生成实例化后的函数名: kaula_max_int64 (添加 kaula_ 前缀避免与 C 宏冲突)
-	instName := "kaula_" + funcName + "_"
-	for i, arg := range typeArgs {
-		if i > 0 {
-			instName += "_"
-		}
-		// 替换类型参数中的特殊字符，避免冲突
-		for _, ch := range arg {
-			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
-				instName += string(ch)
-			} else {
-				instName += fmt.Sprintf("_%d_", ch)
-			}
-		}
-	}
+	instName := MangleGenericName(funcName, typeArgs)
 
 	if cg.genericInstantiated[instName] {
 		return "", nil // 已经实例化过
@@ -804,10 +836,16 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	}
 
 	// 创建实例化后的函数（复制并替换类型参数）
-	instFunc := cg.instantiateGenericFunction(fnStmt, typeArgs, instName)
+	instFunc, typeMap := cg.instantiateGenericFunction(fnStmt, typeArgs, instName)
 
-	// 生成代码
+	// 设置活跃类型映射，使函数体内的类型参数引用（T、[]T、*T 等）
+	// 在 convertType 时被替换为具体类型。生成后恢复，避免污染其他函数。
+	// 同时递增实例化深度，防止无限递归实例化。
+	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
+	cg.genericInstDepth++
 	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
+	cg.genericInstDepth--
+	cg.typeGenerator.PopActiveTypeMap(oldTypeMap)
 
 	// 写入泛型实例化代码缓冲区，稍后插入到 functionCode 之前
 	if code != "" {
@@ -827,9 +865,9 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	return code, nil
 }
 
-// instantiateGenericFunction 创建泛型函数的实例化版本
-func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatement, typeArgs []string, instName string) *ast.FunctionStatement {
-	// 创建类型参数映射：T -> int64_t
+// instantiateGenericFunction 创建泛型函数的实例化版本，返回实例化函数及类型参数映射
+func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatement, typeArgs []string, instName string) (*ast.FunctionStatement, map[string]string) {
+	// 创建类型参数映射：T -> int（Kaula 类型名，由 convertType 进一步映射为 C 类型）
 	typeMap := make(map[string]string)
 	for i, tp := range fnStmt.TypeParams {
 		if i < len(typeArgs) {
@@ -867,12 +905,131 @@ func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatemen
 		}
 	}
 
-	return instFunc
+	return instFunc, typeMap
 }
 
 // getProgram 获取程序 AST（简化实现，实际需要从编译器获取）
 func (cg *CodeGenerator) getProgram() *ast.Program {
 	return cg.program
+}
+
+// MangleGenericTypeName 生成泛型类型实例化后的 C 类型名（不含 K_ 前缀）。
+// 规则：baseName_<mangled_typeargs>，类型参数中的非字母数字字符
+// 转义为 _<codepoint>_ 以保证生成合法的 C 标识符。
+// 例：Box<int>           → Box_int
+//     Result<int, string> → Result_int_string
+//     Pair<[]int, *T>     → Pair__91__93_int__42_T
+func MangleGenericTypeName(baseName string, typeArgs []string) string {
+	name := baseName
+	for _, arg := range typeArgs {
+		name += "_"
+		for _, ch := range arg {
+			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+				name += string(ch)
+			} else {
+				name += fmt.Sprintf("_%d_", ch)
+			}
+		}
+	}
+	return name
+}
+
+// InstantiateGenericType 实例化泛型类型（类/结构体/枚举），返回 C 类型名（含 K_ 前缀）。
+// 如 Box<int> → K_Box_int，同时生成对应的 C 类型定义写入 genericTypeCode 缓冲区。
+// 机制：找到泛型类型定义，构建类型参数映射（T→具体类型），复制 AST 节点并清除 Generic
+// 标记，设置 activeTypeMap 后调用常规 Generate*Statement 路径生成实例化代码。
+func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []string, line int) (string, error) {
+	// 深度限制：防止无限递归实例化（如 struct Node<T> { Node<T>* next; }）
+	if cg.genericTypeInstDepth >= MaxGenericInstantiationDepth {
+		return "", fmt.Errorf("generic type instantiation depth limit (%d) exceeded at %s<%s> (line %d): possible infinite recursion",
+			MaxGenericInstantiationDepth, typeName, strings.Join(typeArgs, ","), line)
+	}
+
+	// 生成缓存键
+	cacheKey := typeName + "<"
+	for i, arg := range typeArgs {
+		if i > 0 {
+			cacheKey += ","
+		}
+		cacheKey += arg
+	}
+	cacheKey += ">"
+
+	// 检查缓存
+	if cached, ok := cg.genericTypeCache[cacheKey]; ok {
+		return cached, nil
+	}
+
+	if cg.program == nil {
+		return "", fmt.Errorf("program not set for generic type instantiation")
+	}
+
+	// 查找泛型类型定义（类/结构体/枚举），构建类型参数映射和生成器
+	var typeParams []*ast.TypeParameter
+	var generate func(instName string) string
+
+	if classStmt := cg.program.FindClass(typeName); classStmt != nil && classStmt.Generic {
+		typeParams = classStmt.TypeParams
+		generate = func(instName string) string {
+			inst := *classStmt // 浅拷贝：Fields/Methods/Constructors 共享（只读）
+			inst.Name = instName
+			inst.Generic = false
+			inst.TypeParams = nil
+			return cg.typeGenerator.GenerateClassStatement(&inst)
+		}
+	} else if structStmt := cg.program.FindStruct(typeName); structStmt != nil && structStmt.Generic {
+		typeParams = structStmt.TypeParams
+		generate = func(instName string) string {
+			inst := *structStmt
+			inst.Name = instName
+			inst.Generic = false
+			inst.TypeParams = nil
+			return cg.typeGenerator.GenerateStructStatement(&inst)
+		}
+	} else if enumStmt := cg.program.FindEnum(typeName); enumStmt != nil && enumStmt.Generic {
+		typeParams = enumStmt.TypeParams
+		generate = func(instName string) string {
+			inst := *enumStmt
+			inst.Name = instName
+			inst.Generic = false
+			inst.TypeParams = nil
+			return cg.typeGenerator.GenerateEnumStatement(&inst)
+		}
+	} else {
+		return "", fmt.Errorf("generic type %s not found or not generic", typeName)
+	}
+
+	// 构建类型参数映射：T -> 具体类型（Kaula 类型名，由 MapKaulaTypeToC 进一步映射为 C 类型）
+	typeMap := make(map[string]string)
+	for i, tp := range typeParams {
+		if i < len(typeArgs) {
+			typeMap[tp.Name] = typeArgs[i]
+		}
+	}
+
+	// 实例化后的类型名：Box_int → C tag K_Box_int
+	instName := MangleGenericTypeName(typeName, typeArgs)
+	cName := kaulaStructTag(instName)
+
+	// 设置活跃类型映射，使字段/方法/构造函数中的类型参数引用被替换为具体类型。
+	// 生成后恢复，避免污染其他类型。同时递增实例化深度，防止无限递归实例化。
+	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
+	cg.typeGenerator.structTypes[instName] = true
+	cg.genericTypeInstDepth++
+	code := generate(instName)
+	cg.genericTypeInstDepth--
+	cg.typeGenerator.PopActiveTypeMap(oldTypeMap)
+
+	// 写入泛型类型实例化代码缓冲区，稍后前置注入到 typeCode 之前
+	if code != "" {
+		cg.genericTypeCode.WriteString(code)
+		if !strings.HasSuffix(code, "\n") {
+			cg.genericTypeCode.WriteByte('\n')
+		}
+	}
+
+	cg.genericTypeCache[cacheKey] = cName
+	return cName, nil
 }
 
 // findFunctionByName 在程序中查找函数声明

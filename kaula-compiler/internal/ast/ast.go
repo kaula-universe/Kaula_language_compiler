@@ -1773,9 +1773,11 @@ type MemberAccessExpression struct {
 }
 
 // TypeCastExpression 表示类型转换表达式
-// 语法: (type)(expr) 例如 (i64)(result)
+// 语法: as<T>(expr) 例如 as<i64>(result)
+// 作为唯一允许的强转形式，取代裸 (T)e 语法。
+// 运行时零开销：直接映射为 C 的 ((T)(e))。
 type TypeCastExpression struct {
-	TargetType string     // 目标类型，如 "i64", "f64" 等
+	TargetType string     // 目标类型，如 "i64", "f64", "void()" 等
 	Expression Expression // 被转换的表达式
 	Pos        Position
 }
@@ -1795,7 +1797,7 @@ func (t *TypeCastExpression) SetPosition(pos Position) {
 
 // String 实现Node接口
 func (t *TypeCastExpression) String() string {
-	return fmt.Sprintf("(%s)(%s)", t.TargetType, t.Expression.String())
+	return fmt.Sprintf("as<%s>(%s)", t.TargetType, t.Expression.String())
 }
 
 // expressionNode 实现Expression接口
