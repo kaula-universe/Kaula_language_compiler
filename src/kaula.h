@@ -100,7 +100,6 @@ typedef struct {
 #endif
 
 // ==================== Configuration Constants ====================
-#define VO_CACHE_SIZE 2048
 #define QUEUE_CAPACITY 100000
 #define SPENDABLE_CAPACITY 2048
 #define HIGH_PRIORITY 0
@@ -113,38 +112,16 @@ typedef struct {
 // ==================== KMM 内存管理 ====================
 #include "kmm_scoped_allocator_v4.h"
 
-// ==================== VO 模块 ====================
-typedef struct VOData {
-    void* value;
-    void* (*code)(void*);
-    int has_code;
-    int code_index;
-    int lru_prev;
-    int lru_next;
-} VOData;
-
-typedef struct VOModule {
-    int cache_max;
-    VOData* data_cache;
-    void* (**code_cache)(void*);
-    int lru_head;
-    int lru_tail;
-    uint64_t access_counter;
-} VOModule;
-
-VOModule* vo_create(int cache_max);
-void vo_destroy(VOModule* vo);
-void vo_data_load(VOModule* vo, int index, void* value);
-void vo_code_load(VOModule* vo, int index, void* (*func)(void*));
-void vo_associate(VOModule* vo, int data_index, int code_index);
-void* vo_access(VOModule* vo, int index);
-
 // ==================== Spend/Call 模块 ====================
+// 强制消费流：spend_lock 锁定后，spend_call 必须恰好消费全部元素（编译期证明 + 运行时校验）
+// consumed 为消费标记位，remaining 为剩余未消费数；spend_unlock 时校验 remaining==0
 typedef struct Spendable {
     void** components;
-    size_t count;
-    size_t call_counter;
-    bool is_locked;
+    size_t count;      // 已添加的元素数
+    size_t capacity;   // components/consumed 分配容量
+    uint8_t* consumed; // 消费标记位（consumed[i]=1 表示第 i 个元素已被消费）
+    size_t remaining;  // 剩余未消费元素数
+    bool is_locked;    // 是否已锁定（spend_lock 后为 true）
 } Spendable;
 
 Spendable* spendable_create(size_t size);
@@ -152,13 +129,16 @@ void spendable_destroy(Spendable* sp);
 void spendable_add(Spendable* sp, void* component);
 void* spendable_call(Spendable* sp);
 
-// 新 API: spend_lock - 锁定目标并开始消费流程
+// 锁定目标并开始消费流程
 void spend_lock(void* target);
 
-// 新 API: spend_call - 消费指定索引的元素
+// 消费指定索引的元素（1-based）；校验锁定/越界/重复消费
 void* spend_call(void* target, int index);
 
-// 新 API: spend_unlock - 解除锁定
+// 消费全部剩余元素（call(default) 兜底）
+void spend_consume_all(void* target);
+
+// 解除锁定；校验所有元素均已消费（未全消费 = 资源泄漏，立即终止）
 void spend_unlock(void* target);
 
 // ==================== Priority Queue 模块 ====================

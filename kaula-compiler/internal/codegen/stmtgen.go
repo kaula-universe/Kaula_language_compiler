@@ -31,12 +31,8 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	}
 
 	switch s := stmt.(type) {
-	case *ast.VOStatement:
-		return sg.generateVOStatement(s)
 	case *ast.SpendStatement:
 		return sg.generateSpendStatement(s)
-	case *ast.TaskStatement:
-		return sg.generateTaskStatement(s)
 	case *ast.PrefixStatement:
 		return sg.generatePrefixStatement(s)
 	case *ast.TreeStatement:
@@ -120,6 +116,11 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		return sg.generateAutoDeclaration(stmt)
 	}
 
+	// 记录数组字面量长度，供 spend 强制消费流使用
+	if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok {
+		sg.codegen.arrayLens[stmt.Name] = len(arrLit.Elements)
+	}
+
 	// const 变量：纯编译期常量，不参与运行时内存分配
 	if stmt.IsConst {
 		if evaluated := sg.codegen.tryEvalConstExpr(stmt.Value); evaluated != "" {
@@ -195,6 +196,11 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 	}
 
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+
+	// 记录数组字面量长度，供 spend 强制消费流使用
+	if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok {
+		sg.codegen.arrayLens[stmt.Name] = len(arrLit.Elements)
+	}
 
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, false)
 
@@ -272,62 +278,153 @@ func (sg *StatementGenerator) generateExpressionInMain(expr ast.Expression) stri
 	return sg.codegen.expressionGenerator.GenerateExpression(expr) + ";\n"
 }
 
-// generateVOStatement 生成 VO 语句代码
-func (sg *StatementGenerator) generateVOStatement(stmt *ast.VOStatement) string {
-	code := "/* vo block */\n"
-	if stmt.Value != nil {
-		code += "/* data: "
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
-		code += " */\n"
-	}
-	if stmt.Code != nil {
-		code += "/* code: "
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Code)
-		code += " */\n"
-	}
-	code += "/* end vo */\n"
-	return code
-}
-
-// generateSpendStatement 生成 spend 语句代码
+// generateSpendStatement 生成 spend 强制消费流代码
+// 数组模式：将目标包装为 Spendable → spend_lock → 逐子句 spend_call（标记消费并校验）
+//          → call(default) 时 spend_consume_all → spend_unlock（校验全消费）→ destroy
+// 枚举模式：生成 switch 穷尽分发，default 分支为运行时安全网（编译期已证明不可达）
 func (sg *StatementGenerator) generateSpendStatement(stmt *ast.SpendStatement) string {
-	code := "/* spend block */\n"
-
-	if stmt.Target != nil {
-		code += "/* target: "
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Target)
-		code += " */\n"
+	count, enumName, targetCode := sg.resolveSpendTarget(stmt.Target)
+	if enumName != "" {
+		return sg.generateSpendEnum(stmt, enumName, targetCode)
 	}
-
-	for i, callClause := range stmt.Calls {
-		indexCode := sg.codegen.expressionGenerator.GenerateExpression(callClause.Index)
-		code += fmt.Sprintf("/* call %d: index %s */\n", i+1, indexCode)
-		for _, bodyStmt := range callClause.Body {
-			code += sg.codegen.generateStatement(bodyStmt)
-		}
-		code += "/* end call */\n"
-	}
-
-	code += "/* end spend */\n"
-	return code
+	return sg.generateSpendArray(stmt, count, targetCode)
 }
 
-// generateTaskStatement 生成 task 语句代码
-func (sg *StatementGenerator) generateTaskStatement(stmt *ast.TaskStatement) string {
-	code := "/* task */\n"
-	code += fmt.Sprintf("/* priority: %d */\n", stmt.Priority)
-	if stmt.Func != nil {
-		code += "/* func: "
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Func)
-		code += " */\n"
+// resolveSpendTarget 解析 spend 目标
+// 返回: (count, enumName, targetC)；enumName 非空表示枚举模式；count<=0 表示未知长度（带 default 兜底）
+func (sg *StatementGenerator) resolveSpendTarget(target ast.Expression) (int, string, string) {
+	switch t := target.(type) {
+	case *ast.ArrayLiteral:
+		return len(t.Elements), "", ""
+	case *ast.Identifier:
+		if sym := sg.codegen.GetSymbol(t.Name); sym != nil {
+			if sg.codegen.IsEnumType(sym.Type) {
+				return 0, sym.Type, t.Name
+			}
+		}
+		if n, ok := sg.codegen.arrayLens[t.Name]; ok {
+			return n, "", t.Name
+		}
+		return 0, "", ""
+	default:
+		return 0, "", ""
 	}
-	if stmt.Arg != nil {
-		code += "/* arg: "
-		code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Arg)
-		code += " */\n"
+}
+
+// generateSpendArray 数组消费模式
+func (sg *StatementGenerator) generateSpendArray(stmt *ast.SpendStatement, count int, targetCode string) string {
+	sg.codegen.spendCounter++
+	spdName := fmt.Sprintf("_spd_%d", sg.codegen.spendCounter)
+
+	var builder strings.Builder
+	builder.Grow(512)
+	builder.WriteString("/* spend block: 强制消费流 */\n")
+
+	// 数组字面量目标：提升为具名临时数组，避免子表达式重复求值
+	arrTemp := ""
+	if arrLit, ok := stmt.Target.(*ast.ArrayLiteral); ok {
+		arrTemp = spdName + "_arr"
+		elems := make([]string, len(arrLit.Elements))
+		for i, elem := range arrLit.Elements {
+			elems[i] = sg.codegen.expressionGenerator.GenerateExpression(elem)
+		}
+		builder.WriteString(fmt.Sprintf("int64_t* %s = ((int64_t[]){ %s });\n", arrTemp, strings.Join(elems, ", ")))
+		targetCode = arrTemp
 	}
-	code += "/* end task */\n"
-	return code
+
+	if targetCode == "" {
+		// 未知长度：sema 已强制要求 call(default)；这里生成纯语义流（无元素可枚举）
+		builder.WriteString("/* 未知长度目标：仅执行 default 兜底 */\n")
+		for _, call := range stmt.Calls {
+			if call.IsDefault {
+				builder.WriteString("{\n")
+				for _, bodyStmt := range call.Body {
+					builder.WriteString(sg.codegen.generateStatement(bodyStmt))
+				}
+				builder.WriteString("}\n")
+			}
+		}
+		builder.WriteString("/* end spend */\n")
+		return builder.String()
+	}
+
+	// 包装元素指针到 Spendable
+	builder.WriteString(fmt.Sprintf("Spendable* %s = spendable_create(%d);\n", spdName, count))
+	for i := 0; i < count; i++ {
+		builder.WriteString(fmt.Sprintf("spendable_add(%s, &(%s)[%d]);\n", spdName, targetCode, i))
+	}
+	builder.WriteString(fmt.Sprintf("spend_lock(%s);\n", spdName))
+
+	// 逐子句消费
+	for _, call := range stmt.Calls {
+		if call.IsDefault {
+			builder.WriteString(fmt.Sprintf("/* call(default): 消费全部剩余元素 */\n"))
+			builder.WriteString(fmt.Sprintf("spend_consume_all(%s);\n", spdName))
+		} else {
+			index := 0
+			if intLit, ok := call.Index.(*ast.IntegerLiteral); ok {
+				index = int(intLit.Value)
+			}
+			builder.WriteString(fmt.Sprintf("/* call(%d) */\n", index))
+			builder.WriteString(fmt.Sprintf("spend_call(%s, %d);\n", spdName, index))
+		}
+		builder.WriteString("{\n")
+		for _, bodyStmt := range call.Body {
+			builder.WriteString(sg.codegen.generateStatement(bodyStmt))
+		}
+		builder.WriteString("}\n")
+	}
+
+	builder.WriteString(fmt.Sprintf("spend_unlock(%s);\n", spdName))
+	builder.WriteString(fmt.Sprintf("spendable_destroy(%s);\n", spdName))
+	builder.WriteString("/* end spend */\n")
+	return builder.String()
+}
+
+// generateSpendEnum 枚举穷尽消费模式：switch 分发 + 安全网
+func (sg *StatementGenerator) generateSpendEnum(stmt *ast.SpendStatement, enumName, targetCode string) string {
+	enumStmt := sg.codegen.program.FindEnum(enumName)
+	if enumStmt == nil {
+		return "/* spend: enum " + enumName + " not found */\n"
+	}
+
+	var builder strings.Builder
+	builder.Grow(512)
+	builder.WriteString("/* spend block: 枚举穷尽消费 */\n")
+	builder.WriteString(fmt.Sprintf("switch ((int)(%s)) {\n", targetCode))
+
+	variantLabel := map[string]string{}
+	for _, v := range enumStmt.Variants {
+		variantLabel[v.Name] = enumName + "_Kind_" + v.Name
+	}
+
+	for _, call := range stmt.Calls {
+		if call.IsDefault || call.Index == nil {
+			continue
+		}
+		var label string
+		if id, ok := call.Index.(*ast.Identifier); ok {
+			label = variantLabel[id.Name]
+		}
+		if label == "" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("case %s:\n", label))
+		builder.WriteString("{\n")
+		for _, bodyStmt := range call.Body {
+			builder.WriteString(sg.codegen.generateStatement(bodyStmt))
+		}
+		builder.WriteString("}\n")
+		builder.WriteString("break;\n")
+	}
+
+	// 编译期已穷尽证明；default 为运行时安全网
+	builder.WriteString("default:\n")
+	builder.WriteString("    /* unreachable: exhaustiveness proven at compile time */\n")
+	builder.WriteString("    abort();\n")
+	builder.WriteString("}\n")
+	builder.WriteString("/* end spend */\n")
+	return builder.String()
 }
 
 // generatePrefixStatement 生成 prefix 语句代码
@@ -707,8 +804,7 @@ func (sg *StatementGenerator) needsKMMScope(bodyCode string) bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" &&
-					sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -736,8 +832,7 @@ func (sg *StatementGenerator) shouldUseKMMScope() bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" &&
-					sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -749,8 +844,7 @@ func (sg *StatementGenerator) shouldUseKMMScope() bool {
 	currentScope := sg.codegen.GetCurrentScope()
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "parameter" || sym.Scope == "param" ||
-				sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" {
 				continue
 			}
 			if needsKMMForType(sym.Type) {
@@ -1001,8 +1095,7 @@ func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
 			// 排除函数参数
-			if sym.Scope == "parameter" || sym.Scope == "param" ||
-				sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" {
 				continue
 			}
 			// 检查变量类型是否需要 KMM

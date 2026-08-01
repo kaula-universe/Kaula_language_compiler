@@ -115,14 +115,10 @@ func (f *Formatter) formatStatement(stmt ast.Statement) {
 		f.formatExpressionStatement(s)
 	case *ast.BlockStatement:
 		f.formatBlockStatement(s)
-	case *ast.VOStatement:
-		f.formatVOStatement(s)
 	case *ast.VariableDeclaration:
 		f.formatVariableDeclaration(s)
 	case *ast.SpendStatement:
 		f.formatSpendStatement(s)
-	case *ast.TaskStatement:
-		f.formatTaskStatement(s)
 	case *ast.PrefixStatement:
 		f.formatPrefixStatement(s)
 	case *ast.TreeStatement:
@@ -221,6 +217,8 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 		f.buf.WriteString("'" + e.Value + "'")
 	case *ast.StructLiteral:
 		f.formatStructLiteral(e)
+	case *ast.ObjectLiteral:
+		f.formatObjectLiteral(e)
 	case *ast.LambdaExpression:
 		f.formatLambdaExpression(e)
 	case *ast.SizeOfExpression:
@@ -498,21 +496,6 @@ func (f *Formatter) formatBlockStatement(stmt *ast.BlockStatement) {
 	f.buf.WriteString("}")
 }
 
-func (f *Formatter) formatVOStatement(stmt *ast.VOStatement) {
-	f.buf.WriteString("vo")
-
-	if stmt.Value != nil {
-		f.buf.WriteString(" {\n")
-		f.indent++
-		f.writeIndent()
-		f.formatExpression(stmt.Value)
-		f.buf.WriteString("\n")
-		f.indent--
-		f.writeIndent()
-		f.buf.WriteString("}")
-	}
-}
-
 func (f *Formatter) formatSpendStatement(stmt *ast.SpendStatement) {
 	f.buf.WriteString("spend ")
 	if stmt.Target != nil {
@@ -545,18 +528,6 @@ func (f *Formatter) formatSpendStatement(stmt *ast.SpendStatement) {
 		f.indent--
 		f.writeIndent()
 		f.buf.WriteString("}")
-	}
-}
-
-func (f *Formatter) formatTaskStatement(stmt *ast.TaskStatement) {
-	f.buf.WriteString("task")
-	if stmt.Func != nil {
-		f.buf.WriteString(" ")
-		f.formatExpression(stmt.Func)
-	}
-	if stmt.Arg != nil {
-		f.buf.WriteString(" ")
-		f.formatExpression(stmt.Arg)
 	}
 }
 
@@ -968,6 +939,21 @@ func (f *Formatter) formatStructLiteral(expr *ast.StructLiteral) {
 		}
 	}
 	f.buf.WriteString(" }")
+}
+
+func (f *Formatter) formatObjectLiteral(expr *ast.ObjectLiteral) {
+	f.buf.WriteString("object {")
+	for i, field := range expr.Fields {
+		if i > 0 {
+			f.buf.WriteString(", ")
+		}
+		f.buf.WriteString(" " + field.Name + ": ")
+		f.formatExpression(field.Value)
+	}
+	if len(expr.Fields) > 0 {
+		f.buf.WriteString(" ")
+	}
+	f.buf.WriteString("}")
 }
 
 func (f *Formatter) formatLambdaExpression(expr *ast.LambdaExpression) {

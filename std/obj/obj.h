@@ -7,5 +7,6 @@
 #include "float_object.h"
 #include "bool_object.h"
 #include "string_object.h"
+#include "dynobj.h"
 
 #endif // STD_OBJ_H

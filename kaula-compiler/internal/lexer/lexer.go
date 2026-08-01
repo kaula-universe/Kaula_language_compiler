@@ -12,12 +12,10 @@ type TokenType int
 
 const (
 	// 关键字
-	TOKEN_VO TokenType = iota
-	TOKEN_SPEND
+	TOKEN_SPEND TokenType = iota
 	TOKEN_CALL
 	TOKEN_SPEND_CALL
-	TOKEN_TASK
-	TOKEN_ASYNC
+	TOKEN_DEFAULT
 	TOKEN_PREFIX
 	TOKEN_TREE
 	TOKEN_OBJECT
@@ -450,16 +448,12 @@ func (l *Lexer) scanIdentifier() Token {
 
 	// 检查关键字
 	switch value {
-	case "vo":
-		tokenType = TOKEN_VO
 	case "spend":
 		tokenType = TOKEN_SPEND
 	case "call":
 		tokenType = TOKEN_CALL
-	case "task":
-		tokenType = TOKEN_TASK
-	case "async":
-		tokenType = TOKEN_ASYNC
+	case "default":
+		tokenType = TOKEN_DEFAULT
 	case "prefix":
 		tokenType = TOKEN_PREFIX
 	case "tree":
@@ -563,8 +557,6 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_STATIC
 	case "const":
 		tokenType = TOKEN_CONST
-	case "this":
-		tokenType = TOKEN_IDENT
 	case "true":
 		tokenType = TOKEN_TRUE
 	case "false":
@@ -820,16 +812,12 @@ func (l *Lexer) ScanUntilRbrace() string {
 // TokenTypeToString 将token类型转换为字符串
 func TokenTypeToString(tokenType TokenType) string {
 	switch tokenType {
-	case TOKEN_VO:
-		return "VO"
 	case TOKEN_SPEND:
 		return "SPEND"
 	case TOKEN_CALL:
 		return "CALL"
-	case TOKEN_TASK:
-		return "TASK"
-	case TOKEN_ASYNC:
-		return "ASYNC"
+	case TOKEN_DEFAULT:
+		return "DEFAULT"
 	case TOKEN_PREFIX:
 		return "PREFIX"
 	case TOKEN_TREE:

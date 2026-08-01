@@ -19,7 +19,6 @@ kaulac.exe --init
   "include_path": "../std",
   "target_language": "c",
   "sor": false,
-  "vo_cache_size": 2048,
   "queue_size": 100,
   "spendable_size": 10,
   "memory_limit_mb": 4096,
@@ -78,7 +77,6 @@ kaulac.exe --sor main.kl
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `vo_cache_size` | int | `2048` | VO 缓存大小 |
 | `queue_size` | int | `100` | 任务队列大小 |
 | `spendable_size` | int | `10` | 可花费组件大小 |
 
@@ -127,7 +125,6 @@ kaulac.exe --sor main.kl
   "release": false,
   "no_cache": false,
 
-  "vo_cache_size": 4096,
   "queue_size": 200,
   "spendable_size": 20,
 
@@ -171,7 +168,6 @@ kaulac.exe --sor main.kl              # SOR 模式，默认 O3
 | `--sor` | `sor` | 启用 SOR |
 | `--release` | `release` | Release 模式 |
 | `--no-cache` | `no_cache` | 禁用缓存 |
-| `--vo-cache <size>` | `vo_cache_size` | VO 缓存大小 |
 | `--queue <size>` | `queue_size` | 队列大小 |
 | `--spendable <size>` | `spendable_size` | 可花费组件大小 |
 | `--memory-limit <MB>` | `memory_limit_mb` | 内存限制 |

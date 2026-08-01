@@ -1,0 +1,72 @@
+// dynobj_comprehensive: 动态对象全面测试
+import std.obj
+
+fn main() {
+    // 1. 基本对象字面量
+    object user = object {
+        name: "kaula",
+        age: 3,
+        score: 97.5,
+        active: true,
+    }
+    println(object_to_string(user.name))
+    println(object_to_string(user.age))
+    println(object_to_string(user.score))
+    println(object_to_string(user.active))
+
+    // 2. 动态字段添加
+    user.country = "china"
+    println(object_to_string(user.country))
+
+    // 3. 索引访问
+    println(object_to_string(user["name"]))
+    println(object_to_string(user["country"]))
+
+    // 4. 索引写入
+    user["version"] = 42
+    println(object_to_string(user["version"]))
+
+    // 5. 嵌套对象
+    user.config = object {
+        debug: true,
+        level: 2,
+    }
+    println(object_to_string(user.config["level"]))
+
+    // 6. 方法 - lambda 表达式
+    user.greet = fn(name: string) string {
+        return "hello " + name
+    }
+    println(object_to_string(user.greet("world")))
+
+    // 7. 方法 - 内联 lambda
+    user.double = fn(x: int) int {
+        return x * 2
+    }
+    println(object_to_string(user.double(21)))
+
+    // 8. 内联方法在字面量中
+    object counter = object {
+        step: 5,
+        add: fn(x: int) int {
+            return x + 10
+        },
+    }
+    println(object_to_string(counter.add(1)))
+
+    // 9. 空对象
+    object empty = object()
+    println(dynobj_size(empty))
+
+    // 10. 对象重新赋值
+    object user2 = object {
+        name: "updated",
+    }
+    println(object_to_string(user2.name))
+
+    // 11. 字段覆盖
+    user2.name = "modified"
+    println(object_to_string(user2.name))
+
+    println("all dynobj tests done")
+}

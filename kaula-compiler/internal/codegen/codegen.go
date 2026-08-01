@@ -73,6 +73,34 @@ type CodeGenerator struct {
 	// 编译期常量表：const 变量名 → 求值后的字面量
 	// 用于在 codegen 阶段将 const 引用内联为字面量，实现编译期常量求值
 	constTable map[string]string
+
+	// 数组变量名 → 元素个数（spend 强制消费流的代码生成依据）
+	arrayLens map[string]int
+
+	// spend 语句包装器命名计数器
+	spendCounter int
+
+	// 动态对象运行时（std/obj/dynobj）是否需要注入头文件和 std 模块
+	needsObjRuntime bool
+
+	// 动态对象字面量计数器（独立于 lambda 计数器，避免变量名冲突）
+	objectLiteralCounter int
+
+	// 对象字面量静态变量声明（文件作用域）
+	objectDeclCode strings.Builder
+
+	// 对象字面量初始化代码（注入 main 函数体内）
+	preludeInitCode strings.Builder
+}
+
+// AddObjectDecl 添加动态对象字面量的静态变量声明（文件作用域）
+func (cg *CodeGenerator) AddObjectDecl(code string) {
+	cg.objectDeclCode.WriteString(code)
+}
+
+// AddPreludeInit 添加动态对象字面量的初始化代码（注入 main 函数体内）
+func (cg *CodeGenerator) AddPreludeInit(code string) {
+	cg.preludeInitCode.WriteString(code)
 }
 
 func (cg *CodeGenerator) error(message string) {
@@ -232,6 +260,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		genericTypeCache:    make(map[string]string),
 		sourceMap:           NewSourceMap("", ""),
 		constTable:          make(map[string]string),
+		arrayLens:           make(map[string]int),
 	}
 
 	cg.typeGenerator = NewTypeGenerator(cg)
@@ -246,7 +275,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.program = program
 	cg.usedThirdPartyLibs = make(map[string]bool)
 	cg.lambdaCounter = 0
+	cg.objectLiteralCounter = 0
 	cg.lambdaDefinitions = nil
+	cg.objectDeclCode.Reset()
+	cg.preludeInitCode.Reset()
 
 	type rawEntry struct {
 		section string
@@ -456,9 +488,29 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		}
 	}
 
-	cg.usedModules = make([]string, 0, len(importedModules))
+	// 注入对象字面量声明（文件作用域）到 functionCode 开头
+	if cg.objectDeclCode.Len() > 0 {
+		var newFuncCode strings.Builder
+		newFuncCode.Grow(functionCode.Len() + cg.objectDeclCode.Len() + 64)
+		newFuncCode.WriteString("// --- dynobj object declarations ---\n")
+		newFuncCode.WriteString(cg.objectDeclCode.String())
+		newFuncCode.WriteString("// --- end declarations ---\n\n")
+		newFuncCode.WriteString(functionCode.String())
+		functionCode.Reset()
+		functionCode.WriteString(newFuncCode.String())
+	}
+
+	// 注意：preludeInitCode 已在 generateMainFunction 中注入到 main 函数体中
+	// （不再在此处重复注入，以免重复代码）
+
+	cg.usedModules = make([]string, 0, len(importedModules)+1)
 	for moduleName := range importedModules {
 		cg.usedModules = append(cg.usedModules, moduleName)
+	}
+	// 动态对象运行时依赖 std/obj 模块（dynobj.c），需要预编译链接
+	if cg.needsObjRuntime {
+		cg.usedModules = append(cg.usedModules, "std.obj")
+		// std.string 仅使用头文件声明，不链接实现（避免 Windows C 运行时兼容性问题）
 	}
 
 	// 将泛型类型实例化代码注入到 typeCode 之前，
@@ -535,6 +587,43 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		}
 	}
 
+	// 动态对象运行时头文件（仅在代码中使用了 object 功能时注入）
+	if cg.needsObjRuntime {
+		allIncludes.WriteString("#include \"obj/obj.h\"\n")
+		// 注入字符串运行时的最小内联实现（仅依赖 KMM 分配器，避免链接整个 std.string 模块）
+		allIncludes.WriteString(`
+// --- inline string minimal runtime ---
+#ifndef KAULA_INLINE_STRING_RUNTIME
+#define KAULA_INLINE_STRING_RUNTIME
+#include "base/types.h"
+#include "memory/memory.h"
+#include <string.h>
+
+static inline String string_create(const char* str) {
+    if (!str) { String r = {0, NULL}; return r; }
+    size_t len = strlen(str);
+    char* data = (char*)kmm_v4_malloc(len + 1);
+    if (data) { data[len] = '\0'; if (len > 0) memcpy(data, str, len); }
+    String r = {len, data};
+    return r;
+}
+
+static inline String string_concat(String str1, String str2) {
+    size_t total = str1.len + str2.len;
+    char* data = (char*)kmm_v4_malloc(total + 1);
+    if (data) {
+        data[total] = '\0';
+        if (str1.len > 0) memcpy(data, str1.ptr, str1.len);
+        if (str2.len > 0) memcpy(data + str1.len, str2.ptr, str2.len);
+    }
+    String r = {total, data};
+    return r;
+}
+#endif
+// --- end inline string runtime ---
+`)
+	}
+
 	var forwardDecls strings.Builder
 	forwardDecls.Grow(1024)
 	for _, stmt := range program.Statements {
@@ -575,6 +664,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	useFreestanding := cg.config != nil && cg.config.Freestanding
 
 	if useFreestanding || !hasMain {
+		fmt.Printf("[DEBUG] Template path: useFreestanding=%v, hasMain=%v\n", useFreestanding, hasMain)
 		templateName := "main"
 		if useFreestanding {
 			templateName = "freestanding"
@@ -642,6 +732,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			_ = idxForward
 		}
 	} else {
+		fmt.Printf("[DEBUG] No-main path: hasMain=%v\n", hasMain)
 		var resultBuilder strings.Builder
 		resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + 16)
 		resultBuilder.WriteString(allIncludes.String())
@@ -1163,11 +1254,7 @@ func getStmtPos(stmt ast.Statement) *ast.Position {
 		return &s.Pos
 	case *ast.ExpressionStatement:
 		return &s.Pos
-	case *ast.VOStatement:
-		return &s.Pos
 	case *ast.SpendStatement:
-		return &s.Pos
-	case *ast.TaskStatement:
 		return &s.Pos
 	case *ast.PrefixStatement:
 		return &s.Pos

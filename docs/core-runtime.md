@@ -6,66 +6,10 @@
 
 ```
 core/
-├── vo.go           # VO (Virtual Object) 系统
 ├── spendcall.go    # Spend/Call 机制
 ├── prefix.go       # 前缀系统
 ├── tree.go         # 树系统
 └── task.go         # 任务调度
-```
-
-## VO 系统 (vo.go)
-
-Virtual Object 系统提供数据/代码缓存机制。
-
-### 核心类型
-
-```go
-type VOData struct {
-    Data   interface{}  // 数据内容
-    Code   func() interface{}  // 代码（懒执行）
-    Loaded bool         // 是否已加载
-}
-
-type VOModule struct {
-    DataCache  map[int]*VOData  // 数据缓存
-    CodeCache  map[int]*VOData  // 代码缓存
-    CacheSize  int              // 缓存大小
-    LRU        []int            // LRU 顺序
-}
-```
-
-### API
-
-```go
-// 创建 VO 模块
-module := core.NewVOModule(100)
-
-// 加载数据
-module.DataLoad(1, data)
-
-// 加载代码
-module.CodeLoad(-1, func() interface{} {
-    return computeExpensiveValue()
-})
-
-// 关联数据和代码
-module.Associate(1, -1)
-
-// 访问（自动执行代码）
-result := module.Access(1)
-```
-
-### LRU 淘汰
-
-当缓存满时，使用 LRU 策略淘汰最久未使用的条目：
-
-```go
-func (vm *VOModule) evict() {
-    // 移除最久未使用的条目
-    oldest := vm.LRU[0]
-    vm.LRU = vm.LRU[1:]
-    delete(vm.DataCache, oldest)
-}
 ```
 
 ## Spend/Call 机制 (spendcall.go)
@@ -378,21 +322,21 @@ func (q *SimpleQueue) Add(item interface{}) bool {
 
 ```go
 // 使用 sync.RWMutex
-type VOModule struct {
+type Spendable struct {
     mu         sync.RWMutex
-    DataCache  map[int]*VOData
+    Components []interface{}
     // ...
 }
 
-func (vm *VOModule) DataLoad(id int, data interface{}) {
-    vm.mu.Lock()
-    defer vm.mu.Unlock()
+func (sp *Spendable) Add(component interface{}) {
+    sp.mu.Lock()
+    defer sp.mu.Unlock()
     // ...
 }
 
-func (vm *VOModule) Access(id int) interface{} {
-    vm.mu.RLock()
-    defer vm.mu.RUnlock()
+func (sp *Spendable) Call() interface{} {
+    sp.mu.RLock()
+    defer sp.mu.RUnlock()
     // ...
 }
 ```
@@ -400,17 +344,6 @@ func (vm *VOModule) Access(id int) interface{} {
 ## 使用示例
 
 ```kaula
-// VO 系统
-import std.vo
-
-fn main() {
-    vo create(100)
-    vo_data_load(vo, 1, data)
-    vo_code_load(vo, -1, fn)
-    vo_associate(vo, 1, -1)
-    result = vo_access(vo, 1)
-}
-
 // Spend/Call 系统
 spend(component1, component2) {
     call(1) {

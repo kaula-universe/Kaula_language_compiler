@@ -20,8 +20,10 @@ type TypeGenerator struct {
 
 func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 	return &TypeGenerator{
-		codegen:       cg,
-		clibTypeMap:   make(map[string]string),
+		codegen: cg,
+		clibTypeMap: map[string]string{
+			"File": "FILE*",
+		},
 		structTypes:   make(map[string]bool),
 		activeTypeMap: nil,
 	}
@@ -93,6 +95,7 @@ var globalTypeMap = map[string]string{
 	"uintptr":    "uintptr_t",
 	"size":       "size_t",
 	"ssize":      "ssize_t",
+	"object":     "Object*",
 }
 
 // splitTopLevelCommas 在顶层（不计嵌套括号/尖括号/方括号）按逗号分割字符串。
@@ -240,9 +243,10 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 		return cType
 	}
 	// 处理固定大小数组类型 [N]type → 转换为 C 的 "elemType[N]" 格式
+	// 注意：[N] 中 N 必须非空，否则是动态数组 []type → 指针（见下方 [] 分支）
 	if len(typeLower) > 0 && typeLower[0] == '[' {
 		closeBracket := strings.Index(typeLower, "]")
-		if closeBracket > 0 {
+		if closeBracket > 1 {
 			arraySize := typeLower[1:closeBracket]
 			elemType := typeLower[closeBracket+1:]
 			cElemType := tg.MapKaulaTypeToC(elemType)
@@ -287,7 +291,8 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 		if cType, ok := globalTypeMap[baseType]; ok {
 			return cType + "*"
 		}
-		return kaulaType[:len(kaulaType)-1] + "*"
+		// 对于 struct 类型，内部递归 tg.MapKaulaTypeToC 会添加 struct 前缀
+		return tg.MapKaulaTypeToC(kaulaType[:len(kaulaType)-1]) + "*"
 	}
 	if strings.HasPrefix(typeLower, "const ") {
 		innerType := kaulaType[6:] // 保留原始大小写，用户定义类型可能含大写
