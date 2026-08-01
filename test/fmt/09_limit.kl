@@ -1,0 +1,21 @@
+import std.io
+import std.limit
+
+fn main() {
+    println(limit_max_i32())
+    println(limit_min_i32())
+    println(limit_max_i64())
+    println(limit_min_i64())
+    println(limit_max_u8())
+    println(limit_min_u8())
+    println(limit_max_u64())
+    println(limit_min_u64())
+    println(limit_max_f32())
+    println(limit_min_f32())
+    println(neg_max_f32())
+    println(neg_min_f32())
+    println(limit_max_f64())
+    println(limit_min_f64())
+    println(neg_max_f64())
+    println(neg_min_f64())
+}

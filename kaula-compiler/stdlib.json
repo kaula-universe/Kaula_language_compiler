@@ -1418,6 +1418,105 @@
       "return": "f64"
     }
   },
+  "std.limit": {
+    "header": "std/limit/limit.h",
+    "limit_max_i8": {
+      "args": [],
+      "return": "i8"
+    },
+    "limit_min_i8": {
+      "args": [],
+      "return": "i8"
+    },
+    "limit_max_i16": {
+      "args": [],
+      "return": "i16"
+    },
+    "limit_min_i16": {
+      "args": [],
+      "return": "i16"
+    },
+    "limit_max_i32": {
+      "args": [],
+      "return": "i32"
+    },
+    "limit_min_i32": {
+      "args": [],
+      "return": "i32"
+    },
+    "limit_max_i64": {
+      "args": [],
+      "return": "i64"
+    },
+    "limit_min_i64": {
+      "args": [],
+      "return": "i64"
+    },
+    "limit_max_u8": {
+      "args": [],
+      "return": "u8"
+    },
+    "limit_min_u8": {
+      "args": [],
+      "return": "u8"
+    },
+    "limit_max_u16": {
+      "args": [],
+      "return": "u16"
+    },
+    "limit_min_u16": {
+      "args": [],
+      "return": "u16"
+    },
+    "limit_max_u32": {
+      "args": [],
+      "return": "u32"
+    },
+    "limit_min_u32": {
+      "args": [],
+      "return": "u32"
+    },
+    "limit_max_u64": {
+      "args": [],
+      "return": "u64"
+    },
+    "limit_min_u64": {
+      "args": [],
+      "return": "u64"
+    },
+    "limit_max_f32": {
+      "args": [],
+      "return": "f32"
+    },
+    "limit_min_f32": {
+      "args": [],
+      "return": "f32"
+    },
+    "limit_max_f64": {
+      "args": [],
+      "return": "f64"
+    },
+    "limit_min_f64": {
+      "args": [],
+      "return": "f64"
+    },
+    "neg_max_f32": {
+      "args": [],
+      "return": "f32"
+    },
+    "neg_min_f32": {
+      "args": [],
+      "return": "f32"
+    },
+    "neg_max_f64": {
+      "args": [],
+      "return": "f64"
+    },
+    "neg_min_f64": {
+      "args": [],
+      "return": "f64"
+    }
+  },
   "std.time": {
     "header": "std/time/time.h",
     "time_now_i64": {

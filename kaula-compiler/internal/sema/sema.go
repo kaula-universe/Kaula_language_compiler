@@ -159,6 +159,7 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 			sa.error(fmt.Sprintf("duplicate parameter %s in function %s", param, stmt.Name), stmt.Pos.Line, stmt.Pos.Column)
 		} else {
 			paramMap[param] = true
+			// 用参数声明的实际类型注册(而非硬编码 void*)
 			paramType := "void*"
 			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
 				paramType = stmt.ParamTypes[i]
@@ -990,6 +991,18 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	// 3. 分析初始化表达式
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
+		// true/false 右值限布尔语境: 只能赋给布尔变量
+		if !stmt.IsAuto {
+			declType := stmt.Type
+			isDeclBool := declType == "bool" || declType == "boolean"
+			if isBoolLiteralValue(stmt.Value) && !isDeclBool {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("true/false 只能赋给布尔类型变量, 不能赋给 '%s'", declType),
+					stmt.Pos.Line, stmt.Pos.Column, "bool_value",
+					"布尔值只能用于布尔变量、布尔参数或比较表达式",
+				)
+			}
+		}
 	}
 
 	// 4. const 必须有初始值
@@ -1350,8 +1363,8 @@ func (sa *SemanticAnalyzer) collectTypeName(set map[string]bool, typeStr string)
 func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	if stmt.Condition != nil {
 		sa.analyzeExpression(stmt.Condition)
-		// 条件类型检查：只允许布尔表达式（bool 变量/true/false 或比较/逻辑运算）
-		sa.checkConditionType(stmt.Condition, stmt.Pos.Line, stmt.Pos.Column)
+		// 条件类型检查: 只允许布尔表达式 (bool 变量/true/false 或比较/逻辑运算)
+		sa.validateCondition(stmt.Condition)
 		// 空指针安全：检测 if x != null 模式，标记 x 为已检查
 		sa.markNullCheckedInCondition(stmt.Condition)
 	}
@@ -1361,23 +1374,6 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	// 退出 if body 后，null checked 标记不再有效（简化实现：不清除，因为 else 分支可能也需要）
 	for _, elseStmt := range stmt.Else {
 		sa.analyzeStatement(elseStmt)
-	}
-}
-
-// checkConditionType 检查 if/while 条件的类型
-// 规则：条件只允许布尔表达式——bool 变量、true/false 字面量、双目比较(== != < > <= >=)、
-// 逻辑运算(&& ||) 与布尔函数调用；禁止裸变量名（数值/指针/字符串等）与数字字面量作条件
-func (sa *SemanticAnalyzer) checkConditionType(cond ast.Expression, line, column int) {
-	if cond == nil {
-		return
-	}
-	condType := sa.inferExpressionType(cond)
-	if condType != "bool" {
-		sa.error(
-			fmt.Sprintf("条件必须是布尔表达式，不能直接使用类型为 '%s' 的值（请用双目比较，如 x != null / x > 0）", condType),
-			line,
-			column,
-		)
 	}
 }
 
@@ -1423,10 +1419,112 @@ func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	if stmt.Condition != nil {
 		sa.analyzeExpression(stmt.Condition)
 		// 条件类型检查：只允许布尔表达式
-		sa.checkConditionType(stmt.Condition, stmt.Pos.Line, stmt.Pos.Column)
+		sa.validateCondition(stmt.Condition)
 	}
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
+	}
+}
+
+// validateCondition 校验 if/while 条件的合法性。
+// 规则:
+//   - 允许: bool 变量裸名、true/false 字面量、比较表达式(== != < > <= >=)
+//   - 比较表达式的左操作数必须是变量/成员/调用等非字面量
+//   - 右操作数可以是数字字面量或变量, 但不能是 true/false
+//   - 禁止: 非 bool 变量裸名、数字字面量裸名、字面量作比较左值
+func (sa *SemanticAnalyzer) validateCondition(cond ast.Expression) {
+	if cond == nil {
+		return
+	}
+	switch e := cond.(type) {
+	case *ast.Identifier:
+		// true / false 字面量直接允许
+		if e.Name == "true" || e.Name == "false" {
+			return
+		}
+		// 数字字面量裸名禁止 (如 if (1))
+		if _, err := strconv.ParseInt(e.Name, 10, 64); err == nil {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("if/while 条件不能是数字字面量 '%s'", e.Name),
+				e.Pos.Line, e.Pos.Column, "condition_type",
+				"请使用比较表达式, 如: if (x != 0)、if (x > 0)")
+			return
+		}
+		// bool 变量裸名允许
+		t := sa.inferExpressionType(cond)
+		if t == "bool" {
+			return
+		}
+		// 其余裸名禁止, 给出改写建议
+		suggestion := fmt.Sprintf("请使用比较表达式, 如: if (%s != null)", e.Name)
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("if/while 条件必须是布尔值, 不能直接使用变量 '%s' (类型: %s)", e.Name, t),
+			e.Pos.Line, e.Pos.Column, "condition_type",
+			suggestion)
+	case *ast.BinaryExpression:
+		// 比较表达式允许
+		switch e.Operator {
+		case "==", "!=", "<", ">", "<=", ">=":
+			// 左操作数必须是变量/成员/调用等, 不能是字面量
+			if isLiteralExpr(e.Left) {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("比较表达式的左侧不能是字面量 (运算符 '%s')", e.Operator),
+					e.Pos.Line, e.Pos.Column, "condition_type",
+					"请把字面量放到比较运算符右侧, 如: if (x == 5)")
+			}
+			// 右操作数不能是 true/false
+			if isBoolLiteralValue(e.Right) {
+				sa.errorCollector.AddSemanticError(
+					"比较表达式的右侧不能使用 true/false, 直接使用布尔变量或比较结果",
+					e.Pos.Line, e.Pos.Column, "condition_type",
+					"如: if (flag)、if (a > b)")
+			}
+		default:
+			// 算术/赋值等表达式禁止作为条件
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("if/while 条件不能是算术/赋值表达式 (运算符 '%s')", e.Operator),
+				e.Pos.Line, e.Pos.Column, "condition_type",
+				"请使用比较表达式或布尔变量")
+		}
+	default:
+		// 其他表达式 (函数调用返回非 bool、索引、成员访问等) 需推断类型
+		t := sa.inferExpressionType(cond)
+		if t == "bool" {
+			return
+		}
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("if/while 条件必须是布尔值, 当前表达式类型: %s", t),
+			e.GetPosition().Line, e.GetPosition().Column, "condition_type",
+			"请使用比较表达式或布尔变量")
+	}
+}
+
+// isLiteralExpr 判断表达式是否为字面量 (数字/字符串/布尔/null)
+func isLiteralExpr(expr ast.Expression) bool {
+	switch expr.(type) {
+	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.StringLiteral, *ast.BooleanLiteral:
+		return true
+	case *ast.Identifier:
+		id := expr.(*ast.Identifier)
+		return id.Name == "true" || id.Name == "false" || id.Name == "null"
+	case *ast.LiteralExpression:
+		return true
+	default:
+		return false
+	}
+}
+
+// isBoolLiteralValue 判断表达式是否为 true/false 字面量
+func isBoolLiteralValue(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.BooleanLiteral:
+		return true
+	case *ast.Identifier:
+		return e.Name == "true" || e.Name == "false"
+	case *ast.LiteralExpression:
+		return e.Kind == "bool" || e.Kind == "boolean"
+	default:
+		return false
 	}
 }
 
@@ -1566,6 +1664,8 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 				)
 			}
 		}
+	case *ast.TypeCastExpression:
+		sa.analyzeTypeCastExpression(e)
 	}
 }
 
@@ -1644,16 +1744,29 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 						"确保运算符两侧的类型兼容",
 					)
 				}
-			case "==", "!=", "<", ">", "<=", ">=":
-				isEquality := expr.Operator == "==" || expr.Operator == "!="
+			case "==", "!=":
+				isEquality := true
 				isNullCompare := isEquality && (leftType == "null" || rightType == "null")
-				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare {
+				isStrCompare := isEquality && isStringLikeType(leftType) && isStringLikeType(rightType)
+				isPtrCompare := isEquality && isPointerType(leftType) && isPointerType(rightType)
+				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare && !isStrCompare && !isPtrCompare {
 					sa.errorCollector.AddSemanticError(
 						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
 						expr.Pos.Line,
 						expr.Pos.Column,
 						"type_mismatch",
 						"比较运算符两侧的类型必须兼容",
+					)
+				}
+			case "<", ">", "<=", ">=":
+				// 关系比较只允许数值类型
+				if !(isNumericType(leftType) && isNumericType(rightType)) {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("关系运算符 '%s' 只能用于数值类型, 当前 '%s' 和 '%s'", expr.Operator, leftType, rightType),
+						expr.Pos.Line,
+						expr.Pos.Column,
+						"type_mismatch",
+						"关系比较仅支持数值; 字符串/指针请用 ==/!= 比较",
 					)
 				}
 			}
@@ -1667,6 +1780,30 @@ func (sa *SemanticAnalyzer) analyzeUnaryExpression(expr *ast.UnaryExpression) {
 		return
 	}
 	sa.analyzeExpression(expr.Right)
+}
+
+// analyzeTypeCastExpression 分析类型转换表达式 as<T>(expr)
+// 规则: 禁止布尔与其他类型互转 (bool 只能来自布尔字面量/变量/比较表达式)
+func (sa *SemanticAnalyzer) analyzeTypeCastExpression(expr *ast.TypeCastExpression) {
+	if expr == nil {
+		return
+	}
+	sa.analyzeExpression(expr.Expression)
+	targetType := expr.TargetType
+	srcType := sa.inferExpressionType(expr.Expression)
+	if srcType == "" {
+		return
+	}
+	isTargetBool := targetType == "bool" || targetType == "boolean"
+	isSrcBool := srcType == "bool"
+	if isTargetBool != isSrcBool {
+		// 布尔与非布尔互转一律禁止
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("禁止布尔与其他类型互相转换: as<%s>(%s 类型)", targetType, srcType),
+			expr.Pos.Line, expr.Pos.Column, "bool_cast",
+			"布尔值只能来自布尔字面量、布尔变量或比较表达式; 请使用 if (x != null)、if (x > 0) 等比较形式",
+		)
+	}
 }
 
 // analyzeCallExpression 分析函数调用表达式
@@ -2011,6 +2148,28 @@ func isNumericType(typeName string) bool {
 		typeName == "i32" || typeName == "i16" || typeName == "i8" ||
 		typeName == "u64" || typeName == "u32" || typeName == "u16" ||
 		typeName == "u8" || typeName == "f64" || typeName == "f32"
+}
+
+// isStringLikeType 检查类型是否为字符串类型 (string/cstr/char*)
+func isStringLikeType(typeName string) bool {
+	return typeName == "string" || typeName == "cstring" || typeName == "cstr" ||
+		typeName == "char*" || strings.HasSuffix(typeName, "char*")
+}
+
+// isPointerType 检查类型是否为指针类型 (以 * 结尾, 但不含 char* 之类已归为字符串的)
+func isPointerType(typeName string) bool {
+	if typeName == "" {
+		return false
+	}
+	if isStringLikeType(typeName) {
+		return false
+	}
+	// 排除函数类型 void(...)R 记法
+	if strings.HasPrefix(typeName, "void(") {
+		return false
+	}
+	return strings.HasSuffix(typeName, "*") || typeName == "void()" ||
+		strings.HasPrefix(typeName, "const ")
 }
 
 func (sa *SemanticAnalyzer) error(msg string, line, column int) {
