@@ -112,6 +112,52 @@ fn example() {
 #[tree] fn orphan() { ... }         // 孤儿树，警告
 ```
 
+#### 动态对象字面量分析
+
+```go
+// 检查字段重名
+object { x: 1, x: 2 }  // 错误：字段 x 重复定义
+
+// 类型推导
+object { x: 10 }  // 推导为 object 类型
+obj.field         // 动态对象成员访问，类型为 object
+```
+
+#### Spend 语句强制消费流分析
+
+spend 语句在编译期进行全消费证明（Full Consumption Proof）：
+
+```go
+// 数组模式：检查所有索引是否被覆盖
+spend(arr) {
+    call(1) { ... }  // 消费索引 1
+    call(2) { ... }  // 消费索引 2
+    // 编译期证明：arr 长度为 2，所有元素被消费
+}
+
+// 枚举模式：检查所有变体是否被穷尽
+enum Color { Red, Green, Blue }
+spend(color) {
+    call(Red)   { ... }
+    call(Green) { ... }
+    // 错误：未穷尽枚举 'Color'，变体 Blue 未被消费
+}
+
+// 枚举模式：不允许 call(default) 代替穷尽
+spend(color) {
+    call(default) { ... }
+    // 错误：枚举消费模式必须穷尽所有变体，不允许 call(default)
+}
+```
+
+分析规则：
+- `resolveSpendTarget` 解析消费目标类型，确定是否为数组/枚举模式
+- 数组模式：编译期确定元素总数，验证每个索引都被 `call(index)` 覆盖
+- 枚举模式：枚举所有变体，验证每个变体都被 `call(VariantName)` 覆盖
+- 带数据的枚举变体暂不支持，需使用 `match` 表达式
+- `call(default)` 仅允许在数组模式中作为兜底，覆盖剩余未消费元素
+- 强制消费流禁止在 `call` 子句内提前退出（return/break/continue 跳过剩余元素消费）
+
 ### 核心类型
 
 ```go
@@ -124,6 +170,7 @@ type SemanticAnalyzer struct {
     sorEnabled         bool                            // SOR 模式
     currentPrefix      string                          // 当前前缀
     currentFunction    string                          // 当前函数
+    arrayLens          map[string]int                 // 数组变量名 → 元素个数（用于 spend 全集证明）
 }
 
 // 两遍分析
@@ -147,6 +194,9 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 - 泛型约束违反
 - 前缀变量遮蔽
 - SOR 所有权违规
+- 动态对象字段重名
+- spend 语句未全量消费
+- 枚举模式不允许 call(default)
 ```
 
 ## 简化版语义分析器 (semantic)
