@@ -193,8 +193,12 @@ result = vo_access(vo, 1)
 
 ### Spend/Call 系统
 
+spend 语句实现强制消费流（Forced Consumption Flow），用于确保数组/枚举的所有元素被消费。
+
+**数组模式**：按索引消费元素
+
 ```
-// spend/call 语句
+// spend/call 语句 - 数组模式
 spend(component1) {
     call(1) {
         return 1
@@ -203,7 +207,24 @@ spend(component1) {
         return 2
     }
 }
+// 编译期证明：所有元素（1..N）被消费
 ```
+
+**枚举模式**：按变体名穷尽消费
+
+```
+// spend/call 语句 - 枚举模式
+enum Color { Red, Green, Blue }
+
+spend(color) {
+    call(Red)   { println("red") }
+    call(Green) { println("green") }
+    call(Blue)  { println("blue") }
+}
+// 编译期证明：所有枚举变体被覆盖
+```
+
+**default 兜底**：数组模式支持 `call(default)` 覆盖剩余元素
 
 ### 前缀系统
 
@@ -261,6 +282,11 @@ array[index]
 
 // 前缀调用表达式
 @prefixName(param1=value1) { body }
+
+// 动态对象字面量
+object { name: "value", count: 42 }
+object()  // 空对象
+object { name: "hello", fn: func() { println("world") } }
 ```
 
 ## 核心类型
