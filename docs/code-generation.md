@@ -121,11 +121,32 @@ a + b        → (a + b)
 a == b       → (a == b)
 !a           → (!a)
 &a           → (&a)
-obj.field    → (obj->field)
+obj.field    → (obj->field)           // 静态对象
+obj.field    → dynobj_get(obj, "field") // 动态对象
 arr[i]       → (arr[i])
 func(a, b)   → func(a, b)
 (i64)(x)     → ((i64)(x))
 ```
+
+### 动态对象字面量 (exprgen.go)
+
+动态对象字面量 `object { name: value, ... }` 生成运行时动态对象创建代码：
+
+```c
+// Kaula: object { x: 10, y: 20 }
+// 生成的 C 代码
+static Object* _dynobj_lit_0 = NULL;
+if (_dynobj_lit_0 == NULL) {
+    _dynobj_lit_0 = (Object*)dynobj_create();
+    dynobj_set(_dynobj_lit_0, "x", dynobj_box_i64(10));
+    dynobj_set(_dynobj_lit_0, "y", dynobj_box_i64(20));
+}
+```
+
+- 空对象：`object()` → `(Object*)dynobj_create()`
+- 字段值自动装箱：整数 → `dynobj_box_i64`，浮点 → `dynobj_box_f64`，字符串 → 直接 `string`，布尔 → `dynobj_box_bool`
+- 对象字面量缓存在静态变量中，多次执行只初始化一次
+- 成员访问 `obj.field` 自动检测动态对象类型，生成 `dynobj_get(obj, "field")`
 
 ## 语句生成 (stmtgen.go)
 
@@ -146,6 +167,58 @@ continue                          → continue;
 ```
 
 注：Kaula 不再支持 C 风格 `for(init; cond; update)`。所有计数循环通过 `range(...)` 表达，索引变量 `_i_` 由编译器管理，用户代码不可见。
+
+### Spend 语句 (stmtgen.go)
+
+spend 语句生成强制消费流代码，支持数组模式和枚举模式：
+
+**数组模式**：将目标包装为 Spendable → `spend_lock` → 逐子句 `spend_call`（标记消费并校验）→ `call(default)` 时 `spend_consume_all` → `spend_unlock`（校验全消费）→ destroy
+
+```c
+// Kaula: spend(arr) { call(1) { ... } call(2) { ... } }
+// 生成的 C 代码
+Spendable _sp_0 = spend_lock(arr, 2);
+// 若 arr 为数组字面量，spend_lock 的 count 参数为编译期确定值
+{
+    spend_call(&_sp_0, 1);
+    // ... 元素 1 的消费逻辑 ...
+}
+{
+    spend_call(&_sp_0, 2);
+    // ... 元素 2 的消费逻辑 ...
+}
+spend_unlock(&_sp_0);
+spend_destroy(&_sp_0);
+```
+
+**枚举模式**：生成 `switch` 穷尽分发，`default` 分支为运行时安全网
+
+```c
+// Kaula: spend(color) { call(Red) { ... } call(Green) { ... } call(Blue) { ... } }
+// 生成的 C 代码
+{
+    Color_Kind _sp_kind = color.kind;
+    switch (_sp_kind) {
+        case Color_Kind_Red:
+            // ... 消费逻辑 ...
+            break;
+        case Color_Kind_Green:
+            // ... 消费逻辑 ...
+            break;
+        case Color_Kind_Blue:
+            // ... 消费逻辑 ...
+            break;
+        default:
+            spend_unreachable();
+            break;
+    }
+}
+```
+
+- 数组模式：`resolveSpendTarget` 解析目标类型，编译期确定元素个数
+- 枚举模式：`generateSpendEnum` 生成 switch-case 穷尽分发
+- `spend_unreachable()` 是枚举 default 分支的运行时安全网（编译期已证明不可达）
+- `arrayLens` 记录数组字面量长度，供 spend 强制消费流使用
 
 ## 模板管理 (template.go)
 

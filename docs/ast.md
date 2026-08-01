@@ -67,7 +67,10 @@ Node (接口)
     ├── TypeCastExpression         // 类型转换
     ├── PrefixCallExpression       // 前缀调用
     ├── LiteralExpression          // 字面量表达式
-    └── ParenExpression            // 括号表达式
+    ├── ParenExpression            // 括号表达式
+    ├── ObjectLiteral              // 动态对象字面量
+    │   └── ObjectLiteralField     // 动态对象字段（字段名 + 值）
+    └── FieldCountExpression       // 字段计数表达式
 ```
 
 ## 关键节点详解
@@ -177,6 +180,30 @@ type PrefixCallExpression struct {
     Pos        Position
 }
 ```
+
+### ObjectLiteral（动态对象字面量）
+
+```go
+type ObjectLiteralField struct {
+    Name  string      // 字段名
+    Value Expression  // 字段值（任意表达式）
+    Pos   Position
+}
+
+type ObjectLiteral struct {
+    Fields []ObjectLiteralField  // 字段列表
+    Pos    Position
+}
+```
+
+动态对象字面量在语言层面模拟 JS/Python 风格的动态对象，字段可读可写可动态增删，方法存为函数字段。
+
+语法：`object { name: value, ... }` 或 `object()`（空对象）
+
+代码生成映射：
+- `object { name: value }` → `dynobj_create()` + `dynobj_set(obj, "name", boxed_value)`
+- 字段访问 `obj.field` → `dynobj_get(obj, "field")`
+- 字段赋值 `obj.field = value` → `dynobj_set(obj, "field", boxed_value)`
 
 ## 泛型支持
 
