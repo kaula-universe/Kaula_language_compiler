@@ -173,6 +173,11 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		if objType == "s" {
 			return eg.GenerateExpression(e.Object) + ".ptr[" + eg.GenerateExpression(e.Index) + "]"
 		}
+		if eg.isObjectTyped(e.Object) {
+			// 动态对象下标读取 obj["key"] → dynobj_get(obj, key)
+			eg.codegen.needsObjRuntime = true
+			return "dynobj_get(" + eg.GenerateExpression(e.Object) + ", " + eg.objectKeyCode(e.Index) + ")"
+		}
 		return eg.GenerateExpression(e.Object) + "[" + eg.GenerateExpression(e.Index) + "]"
 	case *ast.PrefixCallExpression:
 		return eg.generatePrefixCallExpression(e)
@@ -213,6 +218,9 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.GenerateLambdaExpression(e)
 	case *ast.MatchExpression:
 		return eg.generateMatchExpression(e)
+	case *ast.ObjectLiteral:
+		// 动态对象字面量 object { name: value, ... } / object()
+		return eg.generateObjectLiteral(e)
 	case *ast.AttributeExpression:
 		return eg.generateAttributeExpression(e)
 	case *ast.StructLiteral:
@@ -286,9 +294,20 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		}
 	}
 
-	// 处理赋值操作（已经处理，不应该再次进入这里）
+	// 动态对象字段写入 obj.field = value → dynobj_set(obj, "field", box(value))
+	// 必须在预先计算左右表达式之前检查，避免 value 被生成两次（如 lambda 表达式）
+	if e.Operator == "ASSIGN" || e.Operator == "=" {
+		if memberAccess, ok := e.Left.(*ast.MemberAccessExpression); ok && eg.isObjectTyped(memberAccess.Object) {
+			eg.codegen.needsObjRuntime = true
+			return "dynobj_set(" + eg.GenerateExpression(memberAccess.Object) + ", \"" + escapeCString(memberAccess.Member) + "\", " + eg.boxDynamicValue(e.Right) + ")"
+		}
+		if indexExpr, ok := e.Left.(*ast.IndexExpression); ok && eg.isObjectTyped(indexExpr.Object) {
+			eg.codegen.needsObjRuntime = true
+			return "dynobj_set(" + eg.GenerateExpression(indexExpr.Object) + ", " + eg.objectKeyCode(indexExpr.Index) + ", " + eg.boxDynamicValue(e.Right) + ")"
+		}
+	}
 
-	// 预先计算左右表达式，减少重复调用
+	// 预先计算左右表达式
 	left := eg.GenerateExpression(e.Left)
 	right := eg.GenerateExpression(e.Right)
 
@@ -386,10 +405,10 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 
 	// 生成正常的二元表达式（直接字符串拼接，避免 fmt.Sprintf 开销）
 	switch e.Operator {
-	case "ASSIGN":
+	case "ASSIGN", "=":
 		return left + " = " + right
 	case "PLUS", "+":
-		return wrapIfNeeded(left, "+", "left") + " + " + wrapIfNeeded(right, "+", "right")
+		return eg.generatePlusOperation(e.Left, e.Right)
 	case "MINUS", "-":
 		return wrapIfNeeded(left, "-", "left") + " - " + wrapIfNeeded(right, "-", "right")
 	case "MULTIPLY", "*":
@@ -469,8 +488,18 @@ func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression)
 		return "string_concat(" + leftStr + ", " + rightStr + ")"
 	}
 
-	// 整数加法
-	return "int_object_add(" + leftStr + ", " + rightStr + ")"
+	// 动态对象整数加法（obj 类型装箱的整数）
+	if leftType == "obj" || rightType == "obj" {
+		return "int_object_add(" + leftStr + ", " + rightStr + ")"
+	}
+
+	// 浮点加法
+	if leftType == "f" || rightType == "f" {
+		return leftStr + " + " + rightStr
+	}
+
+	// 原始整数加法
+	return leftStr + " + " + rightStr
 }
 
 // generateCallExpression 生成函数调用表达式代码（支持泛型调用）
@@ -600,6 +629,17 @@ func (eg *ExpressionGenerator) generateStdlibArgs(args []ast.Expression, sig *st
 
 // generateMethodCall 生成方法调用代码
 func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccessExpression, args []ast.Expression) string {
+	// 动态对象方法调用 obj.method(args) → dynobj_invoke(obj, "method", nargs, box(arg)...)
+	if eg.isObjectTyped(memberAccess.Object) {
+		eg.codegen.needsObjRuntime = true
+		code := "dynobj_invoke(" + eg.GenerateExpression(memberAccess.Object) + ", \"" + escapeCString(memberAccess.Member) + "\", " + strconv.Itoa(len(args))
+		for _, arg := range args {
+			code += ", " + eg.boxDynamicValue(arg)
+		}
+		code += ")"
+		return code
+	}
+
 	object := eg.GenerateExpression(memberAccess.Object)
 	methodName := memberAccess.Member
 
@@ -951,6 +991,8 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 		return "s"
 	case *ast.BooleanLiteral:
 		return "d"
+	case *ast.ObjectLiteral:
+		return "obj"
 	case *ast.Identifier:
 		sym := eg.codegen.currentScope.GetSymbol(e.Name)
 		if sym != nil {
@@ -963,6 +1005,8 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 				return "s"
 			case "bool":
 				return "d"
+			case "object", "Object":
+				return "obj"
 			default:
 				t := strings.ToLower(sym.Type)
 				if strings.HasPrefix(t, "i") || strings.HasPrefix(t, "u") || t == "int" || t == "int64" || t == "int32" {
@@ -1186,8 +1230,175 @@ func (eg *ExpressionGenerator) generatePrefixCallExpression(e *ast.PrefixCallExp
 	return "// ERROR: PrefixCallExpression should be handled as a statement\n"
 }
 
+// isObjectTyped 检查表达式是否为动态对象类型
+// 判断依据：ObjectLiteral、标识符声明为 object 类型、成员/索引访问基于对象
+func (eg *ExpressionGenerator) isObjectTyped(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.ObjectLiteral:
+		return true
+	case *ast.Identifier:
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil {
+			if sym.Type == "object" || sym.Type == "Object" {
+				return true
+			}
+		}
+		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
+			if sym.Type == "object" || sym.Type == "Object" {
+				return true
+			}
+		}
+	case *ast.MemberAccessExpression:
+		return eg.isObjectTyped(e.Object)
+	case *ast.IndexExpression:
+		return eg.isObjectTyped(e.Object)
+	case *ast.CallExpression:
+		if ident, ok := e.Function.(*ast.Identifier); ok {
+			if ident.Name == "object" || ident.Name == "object_create" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// objectKeyCode 将索引表达式转换为 C 字符串键
+// 字符串索引直接用；整数索引用 itoa 转换
+func (eg *ExpressionGenerator) objectKeyCode(index ast.Expression) string {
+	if strLit, ok := index.(*ast.StringLiteral); ok {
+		return "\"" + escapeCString(strLit.Value) + "\""
+	}
+	if intLit, ok := index.(*ast.IntegerLiteral); ok {
+		return strconv.FormatUint(intLit.Value, 10)
+	}
+	return eg.GenerateExpression(index)
+}
+
+// boxDynamicValue 将 Kaula 值装箱为 Object*（用于 dynobj_set 存储）
+func (eg *ExpressionGenerator) boxDynamicValue(expr ast.Expression) string {
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral:
+		return "dynobj_box_i64(" + strconv.FormatUint(e.Value, 10) + ")"
+	case *ast.FloatLiteral:
+		return "dynobj_box_f64(" + strconv.FormatFloat(e.Value, 'f', -1, 64) + ")"
+	case *ast.BooleanLiteral:
+		if e.Value {
+			return "dynobj_box_bool(1)"
+		}
+		return "dynobj_box_bool(0)"
+	case *ast.StringLiteral:
+		return "dynobj_box_cstr(\"" + escapeCString(e.Value) + "\")"
+	case *ast.LambdaExpression:
+		eg.codegen.needsObjRuntime = true
+		lambdaName := eg.GenerateLambdaExpression(e)
+		trampName := eg.generateLambdaTrampoline(e, lambdaName)
+		return "(Object*)func_object_create((void*)" + trampName + ")"
+	case *ast.ObjectLiteral:
+		// 对象字面量已经返回 Object*，无需装箱
+		return eg.GenerateExpression(expr)
+	case *ast.IndexExpression:
+		// 动态对象索引访问返回 Object*，无需再次装箱
+		if eg.isObjectTyped(e.Object) {
+			return eg.GenerateExpression(expr)
+		}
+	case *ast.MemberAccessExpression:
+		// 动态对象成员访问返回 Object*，无需再次装箱
+		if eg.isObjectTyped(e.Object) {
+			return eg.GenerateExpression(expr)
+		}
+	case *ast.CallExpression:
+		// 动态对象方法调用返回 Object*，无需再次装箱
+		if memberAccess, ok := e.Function.(*ast.MemberAccessExpression); ok && eg.isObjectTyped(memberAccess.Object) {
+			return eg.GenerateExpression(expr)
+		}
+	case *ast.Identifier:
+		sym := eg.codegen.GetSymbol(e.Name)
+		if sym == nil {
+			sym = eg.codegen.currentScope.GetSymbol(e.Name)
+		}
+		if sym != nil {
+			switch sym.Type {
+			case "int", "int64", "int32", "i8", "i16", "i32", "i64":
+				return "dynobj_box_i64(" + e.Name + ")"
+			case "float", "float64", "float32", "f32", "f64", "double":
+				return "dynobj_box_f64(" + e.Name + ")"
+			case "bool":
+				return "dynobj_box_bool(" + e.Name + ")"
+			case "string", "str":
+				return "dynobj_box_cstr(" + e.Name + ".ptr)"
+			case "object", "Object":
+				return e.Name
+			}
+		}
+		return eg.boxDynamicValueFallback(expr)
+	}
+	return eg.boxDynamicValueFallback(expr)
+}
+
+// boxDynamicValueFallback 默认装箱逻辑（处理非特殊类型）
+func (eg *ExpressionGenerator) boxDynamicValueFallback(expr ast.Expression) string {
+	ty := eg.inferType(expr)
+	switch ty {
+	case "d":
+		return "dynobj_box_i64(" + eg.GenerateExpression(expr) + ")"
+	case "f":
+		return "dynobj_box_f64(" + eg.GenerateExpression(expr) + ")"
+	case "s":
+		return "dynobj_box_cstr(" + eg.GenerateExpression(expr) + ".ptr)"
+	case "cstr":
+		return "dynobj_box_cstr(" + eg.GenerateExpression(expr) + ")"
+	case "obj":
+		return eg.GenerateExpression(expr)
+	default:
+		return "dynobj_box_i64(" + eg.GenerateExpression(expr) + ")"
+	}
+}
+
+// generateObjectLiteral 生成动态对象字面量的 C 代码
+// object { name: value, ... } → dynobj_create() + dynobj_set() for each field
+// object() → dynobj_create() (空对象)
+func (eg *ExpressionGenerator) generateObjectLiteral(e *ast.ObjectLiteral) string {
+	eg.codegen.needsObjRuntime = true
+
+	if len(e.Fields) == 0 {
+		return "(Object*)dynobj_create()"
+	}
+
+	objIndex := eg.codegen.objectLiteralCounter
+	eg.codegen.objectLiteralCounter++
+	varName := fmt.Sprintf("_dynobj_lit_%d", objIndex)
+
+	var builder strings.Builder
+	builder.WriteString("(Object*)")
+	builder.WriteString(varName)
+
+	// 1. 生成静态变量声明（文件作用域，放在 functionCode 开头）
+	eg.codegen.AddObjectDecl(fmt.Sprintf("static Object* %s = NULL;\n", varName))
+
+	// 2. 生成初始化代码（放在 main 函数体内）
+	var initCode strings.Builder
+	initCode.WriteString(fmt.Sprintf("if (%s == NULL) {\n", varName))
+	initCode.WriteString(fmt.Sprintf("    %s = (Object*)dynobj_create();\n", varName))
+
+	for _, field := range e.Fields {
+		fieldKey := "\"" + escapeCString(field.Name) + "\""
+		fieldBoxed := eg.boxDynamicValue(field.Value)
+		initCode.WriteString(fmt.Sprintf("    dynobj_set(%s, %s, %s);\n", varName, fieldKey, fieldBoxed))
+	}
+	initCode.WriteString("}\n")
+
+	eg.codegen.AddPreludeInit(initCode.String())
+
+	return builder.String()
+}
+
 // generateMemberAccessExpression 生成成员访问表达式代码
 func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAccessExpression) string {
+	// 动态对象字段读取 obj.field → dynobj_get(obj, "field")
+	if eg.isObjectTyped(e.Object) {
+		eg.codegen.needsObjRuntime = true
+		return "dynobj_get(" + eg.GenerateExpression(e.Object) + ", \"" + escapeCString(e.Member) + "\")"
+	}
+
 	object := eg.GenerateExpression(e.Object)
 
 	if object == "self" {
@@ -1250,7 +1461,7 @@ func (eg *ExpressionGenerator) generateArrayLiteral(e *ast.ArrayLiteral) string 
 	for i, elem := range e.Elements {
 		elems[i] = eg.GenerateExpression(elem)
 	}
-	return "((int[]){ " + strings.Join(elems, ", ") + " })"
+	return "((int64_t[]){ " + strings.Join(elems, ", ") + " })"
 }
 
 func (eg *ExpressionGenerator) generateComptimeExpression(e *ast.ComptimeExpression) string {
@@ -1452,6 +1663,16 @@ func (eg *ExpressionGenerator) GenerateLambdaExpression(expr *ast.LambdaExpressi
 		returnType = eg.codegen.typeGenerator.convertType(expr.ReturnType, false)
 	}
 
+	// 将 lambda 参数添加到当前作用域，使 inferType 等函数能正确推断类型
+	eg.codegen.EnterScope("lambda")
+	for i, param := range expr.Params {
+		paramKaulaType := "int"
+		if i < len(expr.ParamTypes) && expr.ParamTypes[i] != "" && expr.ParamTypes[i] != "auto" {
+			paramKaulaType = expr.ParamTypes[i]
+		}
+		eg.codegen.AddSymbol(param, paramKaulaType, false, "lambda_param", 0, 0)
+	}
+
 	// 生成函数体
 	// 保存并设置当前函数返回类型，使 return 语句正确生成返回值
 	savedReturnType := eg.codegen.currentFunctionReturnType
@@ -1461,6 +1682,8 @@ func (eg *ExpressionGenerator) GenerateLambdaExpression(expr *ast.LambdaExpressi
 		bodyCode.WriteString(eg.codegen.statementGenerator.GenerateStatement(stmt))
 	}
 	eg.codegen.currentFunctionReturnType = savedReturnType
+
+	eg.codegen.ExitScope()
 
 	// 构建完整函数定义，存入延迟输出队列
 	var funcDef strings.Builder
@@ -1473,6 +1696,82 @@ func (eg *ExpressionGenerator) GenerateLambdaExpression(expr *ast.LambdaExpressi
 
 	// 返回函数指针
 	return lambdaName
+}
+
+// generateLambdaTrampoline 生成 lambda 的 trampoline 函数
+// trampoline 签名: Object* (*)(Object* self, size_t nargs, Object** argv)
+// 负责：拆箱参数 → 调用 lambda → 装箱返回值
+func (eg *ExpressionGenerator) generateLambdaTrampoline(expr *ast.LambdaExpression, lambdaName string) string {
+	trampName := fmt.Sprintf("_kaula_tramp_%d", eg.codegen.lambdaCounter)
+	eg.codegen.lambdaCounter++
+
+	var funcDef strings.Builder
+	funcDef.WriteString(fmt.Sprintf("static Object* %s(Object* self, size_t nargs, Object** argv) {\n", trampName))
+	funcDef.WriteString("    (void)self; (void)nargs;\n")
+
+	// 生成参数拆箱代码
+	for i, param := range expr.Params {
+		var unboxCode string
+		if i < len(expr.ParamTypes) {
+			switch expr.ParamTypes[i] {
+			case "int", "int64", "int32", "i8", "i16", "i32", "i64":
+				unboxCode = fmt.Sprintf("int64_t %s = dynobj_unbox_i64(argv[%d]);", param, i)
+			case "float", "float64", "float32", "f32", "f64", "double":
+				unboxCode = fmt.Sprintf("double %s = dynobj_unbox_f64(argv[%d]);", param, i)
+			case "bool":
+				unboxCode = fmt.Sprintf("int %s = dynobj_unbox_bool(argv[%d]);", param, i)
+			case "string", "str":
+				unboxCode = fmt.Sprintf("String %s = string_create(dynobj_unbox_cstr(argv[%d]));", param, i)
+			default:
+				unboxCode = fmt.Sprintf("int64_t %s = dynobj_unbox_i64(argv[%d]);", param, i)
+			}
+		} else {
+			unboxCode = fmt.Sprintf("int64_t %s = dynobj_unbox_i64(argv[%d]);", param, i)
+		}
+		funcDef.WriteString("    " + unboxCode + "\n")
+	}
+
+	// 生成 lambda 调用和返回值装箱
+	if expr.ReturnType != "" && expr.ReturnType != "void" {
+		callCode := fmt.Sprintf("%s(", lambdaName)
+		for i, param := range expr.Params {
+			if i > 0 {
+				callCode += ", "
+			}
+			callCode += param
+		}
+		callCode += ")"
+
+		switch expr.ReturnType {
+		case "int", "int64", "int32", "i8", "i16", "i32", "i64":
+			funcDef.WriteString(fmt.Sprintf("    return dynobj_box_i64(%s);\n", callCode))
+		case "float", "float64", "float32", "f32", "f64", "double":
+			funcDef.WriteString(fmt.Sprintf("    return dynobj_box_f64(%s);\n", callCode))
+		case "bool":
+			funcDef.WriteString(fmt.Sprintf("    return dynobj_box_bool(%s);\n", callCode))
+		case "string", "str":
+			funcDef.WriteString(fmt.Sprintf("    String _tmp = %s;\n", callCode))
+			funcDef.WriteString("    return dynobj_box_cstr(_tmp.ptr);\n")
+		default:
+			funcDef.WriteString(fmt.Sprintf("    return dynobj_box_i64((int64_t)%s);\n", callCode))
+		}
+	} else {
+		callCode := fmt.Sprintf("%s(", lambdaName)
+		for i, param := range expr.Params {
+			if i > 0 {
+				callCode += ", "
+			}
+			callCode += param
+		}
+		callCode += ")"
+		funcDef.WriteString(fmt.Sprintf("    %s;\n", callCode))
+		funcDef.WriteString("    return NULL;\n")
+	}
+
+	funcDef.WriteString("}\n")
+	eg.codegen.lambdaDefinitions = append(eg.codegen.lambdaDefinitions, funcDef.String())
+
+	return trampName
 }
 
 // generateMatchExpression 生成 match 表达式的 C 代码

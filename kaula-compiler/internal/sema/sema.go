@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"kaula-compiler/internal/ast"
@@ -34,6 +35,9 @@ type SemanticAnalyzer struct {
 	currentPrefixTable *symbol.SymbolTable            // 当前 @前缀块 的符号表
 	comptime           *comptime.Evaluator            // 编译期表达式评估器
 	importedModules    map[string]bool                // 记录实际导入的模块
+	thirdPartyTypeSet  map[string]bool                // 第三方库签名中的类型名缓存（lazy 构建）
+	funcReturnTypes    map[string]string              // 函数名 -> 返回类型（用于调用表达式类型推断）
+	arrayLens          map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -65,7 +69,6 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 
 	globalSymbolTable.AddSymbol("std", "any", false, "global", 0, 0)
 	globalSymbolTable.AddSymbol("std.io", "any", false, "global", 0, 0)
-	globalSymbolTable.AddSymbol("std.vo", "any", false, "global", 0, 0)
 	globalSymbolTable.AddSymbol("std.prefix", "any", false, "global", 0, 0)
 
 	stdlibConfig, err := stdlib.LoadStdlibConfig(configPath)
@@ -95,6 +98,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		prefixSymbolTables: make(map[string]*symbol.SymbolTable),
 		comptime:           nil,
 		importedModules:    make(map[string]bool),
+		arrayLens:          make(map[string]int),
 	}
 }
 
@@ -111,7 +115,11 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 	sa.comptime = comptime.NewEvaluator()
 
 	// 第一遍：将所有函数和变量添加到符号表（不分析函数体）
+	sa.funcReturnTypes = make(map[string]string)
 	for _, stmt := range program.Statements {
+		if funcStmt, ok := stmt.(*ast.FunctionStatement); ok {
+			sa.funcReturnTypes[funcStmt.Name] = funcStmt.ReturnType
+		}
 		sa.analyzeStatement(stmt)
 	}
 
@@ -146,12 +154,16 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 	}
 
 	paramMap := make(map[string]bool)
-	for _, param := range stmt.Params {
+	for i, param := range stmt.Params {
 		if paramMap[param] {
 			sa.error(fmt.Sprintf("duplicate parameter %s in function %s", param, stmt.Name), stmt.Pos.Line, stmt.Pos.Column)
 		} else {
 			paramMap[param] = true
-			sa.symbolTable.AddSymbol(param, "void*", false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+			paramType := "void*"
+			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+				paramType = stmt.ParamTypes[i]
+			}
+			sa.symbolTable.AddSymbol(param, paramType, false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 		}
 	}
 
@@ -186,12 +198,8 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		return
 	}
 	switch s := s.(type) {
-	case *ast.VOStatement:
-		sa.analyzeVOStatement(s)
 	case *ast.SpendStatement:
 		sa.analyzeSpendStatement(s)
-	case *ast.TaskStatement:
-		sa.analyzeTaskStatement(s)
 	case *ast.PrefixStatement:
 		sa.analyzePrefixStatement(s)
 	case *ast.TreeStatement:
@@ -350,6 +358,8 @@ func (sa *SemanticAnalyzer) tryAnalyzeMissingPackage(moduleName string) {
 			if err != nil {
 				return
 			}
+			// 剥离 UTF-8 BOM（json.Unmarshal 不识别 BOM）
+			data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 			var libConfig stdlib.ThirdPartyLibrary
 			if err := json.Unmarshal(data, &libConfig); err != nil {
 				return
@@ -389,64 +399,280 @@ func (sa *SemanticAnalyzer) analyzeExportStatement(stmt *ast.ExportStatement) {
 	sa.exportedSymbols[stmt.Name] = true
 }
 
-// analyzeVOStatement 分析 VO 语句
-func (sa *SemanticAnalyzer) analyzeVOStatement(stmt *ast.VOStatement) {
-	if stmt.Value != nil {
-		sa.analyzeExpression(stmt.Value)
-	}
-	if stmt.Code != nil {
-		sa.analyzeExpression(stmt.Code)
-	}
-	if stmt.Access != nil {
-		sa.analyzeExpression(stmt.Access)
-	}
-}
-
-// analyzeSpendStatement 分析spend语句 - 锁定并开启消费流程
+// analyzeSpendStatement 分析spend语句 - 强制消费流全集证明
+// 保证：target 的所有元素必须被 call 子句恰好覆盖一次；无法在编译期证明全消费则报错
 func (sa *SemanticAnalyzer) analyzeSpendStatement(stmt *ast.SpendStatement) {
 	if stmt.Target != nil {
 		sa.analyzeExpression(stmt.Target)
 	}
 
-	// 分析每个 call 子句
-	for _, call := range stmt.Calls {
-		if call.Index != nil {
-			sa.analyzeExpression(call.Index)
-		}
-		for _, bodyStmt := range call.Body {
-			sa.analyzeStatement(bodyStmt)
+	// 1. 解析消费目标：确定元素总数（编译期可知）与消费模式
+	count, known, enumName := sa.resolveSpendTarget(stmt.Target)
+	enumMode := enumName != ""
+	if enumName == "" {
+		// 首次出现枚举变体时确定枚举模式
+		for _, call := range stmt.Calls {
+			if call.IsDefault || call.Index == nil {
+				continue
+			}
+			if id, ok := call.Index.(*ast.Identifier); ok {
+				if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil &&
+					strings.HasPrefix(sym.Type, "enum_variant:") {
+					enumName = strings.TrimPrefix(sym.Type, "enum_variant:")
+					enumMode = true
+					break
+				}
+			}
 		}
 	}
 
-	// 验证 call 次数与目标元素数量匹配
-	// 这需要在运行时验证，但可以做一些静态检查
-	expectedCalls := -1 // -1 表示未知，需要运行时确定
-	for _, call := range stmt.Calls {
-		// 检查索引是否为常量
-		if intLit, ok := call.Index.(*ast.IntegerLiteral); ok {
-			index := int(intLit.Value)
-			if expectedCalls == -1 {
-				expectedCalls = index
-			} else if index > expectedCalls {
-				sa.errorCollector.AddSemanticWarning(
-					fmt.Sprintf("call index %d exceeds expected number of calls", index),
-					call.Pos.Line,
-					call.Pos.Column,
-					"spend_call_mismatch",
-					"ensure call indices match target element count",
+	// 2. 逐个子句：索引合法性 + 唯一性
+	used := make(map[int]bool)   // 已使用的元素序号（1-based）
+	hasDefault := false          // 是否存在兜底子句
+	maxIndex := 0
+	enumVariantOrder := map[string]int{} // 变体名 -> 序号（1-based）
+	if enumName != "" {
+		enumStmt := sa.program.FindEnum(enumName)
+		if enumStmt != nil {
+			for i, v := range enumStmt.Variants {
+				enumVariantOrder[v.Name] = i + 1
+			}
+		}
+	}
+
+	for i, call := range stmt.Calls {
+		if call.IsDefault {
+			if hasDefault {
+				sa.errorCollector.AddSemanticError(
+					"spend 语句中最多只能有一个 call(default) 子句",
+					call.Pos.Line, call.Pos.Column, "spend_multiple_default",
+					"删除多余的 call(default) 子句",
 				)
 			}
+			if enumMode {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("枚举消费模式（%s）必须穷尽所有变体，不允许 call(default)", enumName),
+					call.Pos.Line, call.Pos.Column, "spend_default_on_enum",
+					"为每个枚举变体编写 call 子句",
+				)
+			}
+			hasDefault = true
+		} else {
+			sa.analyzeCallIndex(call, enumMode, used, enumVariantOrder, &maxIndex)
+		}
+
+		// 分析子句体
+		for _, bodyStmt := range call.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
+		// 强制消费流：禁止提前退出（跳过剩余元素消费）
+		sa.checkSpendBodyExit(i, len(stmt.Calls), call)
+	}
+
+	// 3. 全集覆盖证明
+	if enumMode {
+		// 枚举模式：所有变体必须被覆盖；不支持带数据的变体
+		enumStmt := sa.program.FindEnum(enumName)
+		if enumStmt != nil {
+			for _, v := range enumStmt.Variants {
+				if len(v.FieldTypes) > 0 {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("spend 枚举模式暂不支持带数据的变体：%s.%s", enumName, v.Name),
+						stmt.Pos.Line, stmt.Pos.Column, "spend_enum_with_data",
+						"带数据的枚举请使用 match 表达式",
+					)
+				}
+				idx := enumVariantOrder[v.Name]
+				if idx == 0 {
+					// 变体序列表在循环后才确定时，回退线性查找
+					for i, ev := range enumStmt.Variants {
+						if ev.Name == v.Name {
+							idx = i + 1
+							break
+						}
+					}
+				}
+				if !used[idx] {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("spend 未穷尽枚举 '%s'：变体 %s 未被消费", enumName, v.Name),
+						stmt.Pos.Line, stmt.Pos.Column, "spend_missing_variant",
+						fmt.Sprintf("添加 call(%s) 子句", v.Name),
+					)
+				}
+			}
+		}
+		return
+	}
+
+	// 数组模式：1..count 必须全部覆盖
+	if known {
+		if !hasDefault {
+			for i := 1; i <= count; i++ {
+				if !used[i] {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("spend 未全量消费：元素 %d 未被消费（共 %d 个元素）", i, count),
+						stmt.Pos.Line, stmt.Pos.Column, "spend_missing_element",
+						fmt.Sprintf("添加 call(%d) 子句，或使用 call(default) 兜底", i),
+					)
+				}
+			}
+		}
+		if maxIndex > count {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("call 索引 %d 超出元素总数 %d", maxIndex, count),
+				stmt.Pos.Line, stmt.Pos.Column, "spend_index_out_of_range",
+				"call 索引必须是 1..元素总数 范围内的元素",
+			)
+		}
+	} else {
+		// 编译期无法确定元素总数：必须有兜底子句
+		if !hasDefault {
+			sa.errorCollector.AddSemanticError(
+				"spend 目标元素数量无法在编译期确定，必须提供 call(default) 子句",
+				stmt.Pos.Line, stmt.Pos.Column, "spend_unknown_count",
+				"使用数组字面量目标，或添加 call(default) 兜底子句",
+			)
 		}
 	}
 }
 
-// analyzeTaskStatement 分析 task 语句
-func (sa *SemanticAnalyzer) analyzeTaskStatement(stmt *ast.TaskStatement) {
-	if stmt.Func != nil {
-		sa.analyzeExpression(stmt.Func)
+// resolveSpendTarget 解析 spend 目标的元素总数与模式
+// 返回: (count, known, enumName)；known=true 表示 count 有效；enumName 非空表示枚举模式
+func (sa *SemanticAnalyzer) resolveSpendTarget(target ast.Expression) (int, bool, string) {
+	switch t := target.(type) {
+	case *ast.ArrayLiteral:
+		return len(t.Elements), true, ""
+	case *ast.Identifier:
+		sym := sa.symbolTable.GetSymbol(t.Name)
+		if sym == nil {
+			return 0, false, ""
+		}
+		if sa.program.FindEnum(sym.Type) != nil {
+			enumStmt := sa.program.FindEnum(sym.Type)
+			return len(enumStmt.Variants), true, sym.Type
+		}
+		if n, ok := sa.arrayLens[t.Name]; ok {
+			return n, true, ""
+		}
+		return 0, false, ""
+	default:
+		return 0, false, ""
 	}
-	if stmt.Arg != nil {
-		sa.analyzeExpression(stmt.Arg)
+}
+
+// analyzeCallIndex 分析单个 call 子句的索引
+func (sa *SemanticAnalyzer) analyzeCallIndex(call *ast.CallClause, enumMode bool, used map[int]bool, enumVariantOrder map[string]int, maxIndex *int) {
+	if call.Index == nil {
+		return
+	}
+	sa.analyzeExpression(call.Index)
+
+	switch idx := call.Index.(type) {
+	case *ast.IntegerLiteral:
+		if enumMode {
+			sa.errorCollector.AddSemanticError(
+				"枚举消费模式必须使用变体名作为索引（如 call(Red)）",
+				call.Pos.Line, call.Pos.Column, "spend_int_on_enum",
+				"使用枚举变体名替换整数字面量",
+			)
+			return
+		}
+		index := int(idx.Value)
+		if index < 1 {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("call 索引 %d 必须 >= 1", index),
+				call.Pos.Line, call.Pos.Column, "spend_index_less_than_one",
+				"call 索引从 1 开始",
+			)
+			return
+		}
+		if used[index] {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("call 索引 %d 重复消费", index),
+				call.Pos.Line, call.Pos.Column, "spend_duplicate_index",
+				"每个元素只能被消费一次，删除重复的 call 子句",
+			)
+			return
+		}
+		used[index] = true
+		if index > *maxIndex {
+			*maxIndex = index
+		}
+	case *ast.Identifier:
+		sym := sa.symbolTable.GetSymbol(idx.Name)
+		if sym == nil || !strings.HasPrefix(sym.Type, "enum_variant:") {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("call 索引 '%s' 必须是整数字面量、枚举变体或 default", idx.Name),
+				call.Pos.Line, call.Pos.Column, "spend_invalid_index",
+				"使用 call(<数字>) 或 call(<枚举变体>)",
+			)
+			return
+		}
+		// 枚举变体索引：定位变体序号
+		variantEnum := strings.TrimPrefix(sym.Type, "enum_variant:")
+		ordinal := enumVariantOrder[idx.Name]
+		if ordinal == 0 {
+			// 变体所属枚举尚未解析为枚举模式（首个变体），回退查找
+			enumStmt := sa.program.FindEnum(variantEnum)
+			if enumStmt != nil {
+				for i, v := range enumStmt.Variants {
+					if v.Name == idx.Name {
+						ordinal = i + 1
+						break
+					}
+				}
+			}
+		}
+		if ordinal == 0 {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("枚举变体 '%s' 未找到", idx.Name),
+				call.Pos.Line, call.Pos.Column, "spend_unknown_variant",
+				"检查枚举定义",
+			)
+			return
+		}
+		if used[ordinal] {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("call(%s) 重复消费", idx.Name),
+				call.Pos.Line, call.Pos.Column, "spend_duplicate_index",
+				"每个变体只能被消费一次",
+			)
+			return
+		}
+		used[ordinal] = true
+		if ordinal > *maxIndex {
+			*maxIndex = ordinal
+		}
+	default:
+		sa.errorCollector.AddSemanticError(
+			"call 索引必须是整数字面量、枚举变体或 default",
+			call.Pos.Line, call.Pos.Column, "spend_dynamic_index",
+			"spend 的强制消费证明需要静态索引；元素数量编译期未知时请使用 call(default)",
+		)
+	}
+}
+
+// checkSpendBodyExit 检查 call 子句体中的提前退出
+// 规则：break/continue 禁止；return 只允许出现在最后一个 call 子句（后面没有未消费元素）
+func (sa *SemanticAnalyzer) checkSpendBodyExit(clauseIdx, totalClauses int, call *ast.CallClause) {
+	lastClause := clauseIdx == totalClauses-1
+	for _, bodyStmt := range call.Body {
+		switch s := bodyStmt.(type) {
+		case *ast.BreakStatement, *ast.ContinueStatement:
+			sa.errorCollector.AddSemanticError(
+				"spend 消费流内不允许 break/continue（会跳过剩余元素消费）",
+				call.Pos.Line, call.Pos.Column, "spend_early_exit",
+				"移除 break/continue；spend 必须消费全部元素后才能退出",
+			)
+		case *ast.ReturnStatement:
+			if !lastClause {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("call 子句 %d 内不允许 return（会跳过后续元素的消费）", clauseIdx+1),
+					s.Pos.Line, s.Pos.Column, "spend_early_return",
+					"return 只允许出现在最后一个 call 子句中",
+				)
+			}
+		}
 	}
 }
 
@@ -756,6 +982,11 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	// 2. 添加变量到符号表
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 
+	// 记录数组字面量长度，供 spend 全集证明使用
+	if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok {
+		sa.arrayLens[stmt.Name] = len(arrLit.Elements)
+	}
+
 	// 3. 分析初始化表达式
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
@@ -871,6 +1102,11 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 
 	stmt.Type = inferredType
 
+	// 记录数组字面量长度，供 spend 全集证明使用
+	if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok {
+		sa.arrayLens[stmt.Name] = len(arrLit.Elements)
+	}
+
 	// 添加到符号表
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
 }
@@ -930,6 +1166,8 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 		"ssize":   true,
 		"intptr":  true,
 		"uintptr": true,
+		"File":    true, // std.io 的文件句柄类型（C FILE*）
+		"object":  true, // 动态对象类型（Object*）
 	}
 
 	// 检查是否是基本类型
@@ -958,6 +1196,24 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 	// 检查符号表中是否有该类型（类、结构体、枚举、接口等）
 	symbol := sa.symbolTable.GetSymbol(typeName)
 	if symbol != nil && (symbol.Type == "class" || symbol.Type == "struct" || symbol.Type == "enum" || symbol.Type == "interface" || symbol.Type == "type") {
+		return true
+	}
+
+	// 检查是否是第三方库函数签名中出现的类型（如 C 库 typedef：cJSON、sqlite3 等）
+	if sa.thirdPartyTypeSet == nil {
+		sa.thirdPartyTypeSet = map[string]bool{}
+		if sa.stdlibConfig != nil {
+			for _, lib := range sa.stdlibConfig.ThirdParty {
+				for _, fn := range lib.Functions {
+					sa.collectTypeName(sa.thirdPartyTypeSet, fn.Return)
+					for _, arg := range fn.Args {
+						sa.collectTypeName(sa.thirdPartyTypeSet, arg)
+					}
+				}
+			}
+		}
+	}
+	if sa.thirdPartyTypeSet[typeName] {
 		return true
 	}
 
@@ -1070,10 +1326,32 @@ foundClose:
 	return sa.isTypeValid(retStr)
 }
 
+// collectTypeName 提取类型字符串中的基础类型名（剥 const/指针后缀），
+// 用于把第三方库函数签名中的 C typedef 类型登记为合法类型
+func (sa *SemanticAnalyzer) collectTypeName(set map[string]bool, typeStr string) {
+	t := strings.TrimSpace(typeStr)
+	if t == "" {
+		return
+	}
+	set[t] = true
+	t = strings.TrimPrefix(t, "const ")
+	for strings.HasSuffix(t, "*") || strings.HasSuffix(t, "const") {
+		t = strings.TrimSuffix(strings.TrimSpace(t), "*")
+		t = strings.TrimSuffix(strings.TrimSpace(t), "const")
+		t = strings.TrimSpace(t)
+		if t == "" {
+			break
+		}
+		set[t] = true
+	}
+}
+
 // analyzeIfStatement 分析 if 语句
 func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	if stmt.Condition != nil {
 		sa.analyzeExpression(stmt.Condition)
+		// 条件类型检查：只允许布尔表达式（bool 变量/true/false 或比较/逻辑运算）
+		sa.checkConditionType(stmt.Condition, stmt.Pos.Line, stmt.Pos.Column)
 		// 空指针安全：检测 if x != null 模式，标记 x 为已检查
 		sa.markNullCheckedInCondition(stmt.Condition)
 	}
@@ -1083,6 +1361,23 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	// 退出 if body 后，null checked 标记不再有效（简化实现：不清除，因为 else 分支可能也需要）
 	for _, elseStmt := range stmt.Else {
 		sa.analyzeStatement(elseStmt)
+	}
+}
+
+// checkConditionType 检查 if/while 条件的类型
+// 规则：条件只允许布尔表达式——bool 变量、true/false 字面量、双目比较(== != < > <= >=)、
+// 逻辑运算(&& ||) 与布尔函数调用；禁止裸变量名（数值/指针/字符串等）与数字字面量作条件
+func (sa *SemanticAnalyzer) checkConditionType(cond ast.Expression, line, column int) {
+	if cond == nil {
+		return
+	}
+	condType := sa.inferExpressionType(cond)
+	if condType != "bool" {
+		sa.error(
+			fmt.Sprintf("条件必须是布尔表达式，不能直接使用类型为 '%s' 的值（请用双目比较，如 x != null / x > 0）", condType),
+			line,
+			column,
+		)
 	}
 }
 
@@ -1127,6 +1422,8 @@ func (sa *SemanticAnalyzer) markNullCheckedInCondition(cond ast.Expression) {
 func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	if stmt.Condition != nil {
 		sa.analyzeExpression(stmt.Condition)
+		// 条件类型检查：只允许布尔表达式
+		sa.checkConditionType(stmt.Condition, stmt.Pos.Line, stmt.Pos.Column)
 	}
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
@@ -1219,6 +1516,24 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 	case *ast.ArrayLiteral:
 		for _, elem := range e.Elements {
 			sa.analyzeExpression(elem)
+		}
+	case *ast.ObjectLiteral:
+		// 动态对象字面量：检查字段重名，分析字段值
+		seen := make(map[string]bool)
+		for _, field := range e.Fields {
+			if seen[field.Name] {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("动态对象字面量中字段 '%s' 重复定义", field.Name),
+					field.Pos.Line,
+					field.Pos.Column,
+					"duplicate_object_field",
+					"删除重复的字段或改名",
+				)
+			}
+			seen[field.Name] = true
+			if field.Value != nil {
+				sa.analyzeExpression(field.Value)
+			}
 		}
 	case *ast.PrefixCallExpression:
 		// 前缀调用表达式已在 analyzePrefixCallExpression 中处理
@@ -1496,6 +1811,11 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	case *ast.LiteralExpression:
 		return sa.inferLiteralType(e)
 	case *ast.BinaryExpression:
+		// 比较/逻辑运算符的结果类型是 bool（不是数值）
+		switch e.Operator {
+		case "==", "!=", "<", ">", "<=", ">=", "&&", "||":
+			return "bool"
+		}
 		leftType := sa.inferExpressionType(e.Left)
 		rightType := sa.inferExpressionType(e.Right)
 		if leftType != "" && rightType != "" {
@@ -1539,6 +1859,9 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	case *ast.CallExpression:
 		funcExpr := e.Function
 		if ident, ok := funcExpr.(*ast.Identifier); ok {
+			if retType, ok := sa.funcReturnTypes[ident.Name]; ok && retType != "" {
+				return retType
+			}
 			symbol := sa.symbolTable.GetSymbol(ident.Name)
 			if symbol != nil && symbol.Type == "function" {
 				return "int"
@@ -1558,6 +1881,10 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	case *ast.ArrayLiteral:
 		if len(e.Elements) > 0 {
 			elemType := sa.inferExpressionType(e.Elements[0])
+			// C 端数组字面量固定生成 int[]（见 exprgen），小整数类型统一提升为 int
+			if elemType == "u8" || elemType == "u16" || elemType == "u32" {
+				elemType = "int"
+			}
 			if elemType != "" {
 				return "[]" + elemType
 			}
@@ -1583,6 +1910,21 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		return "u64"
 	case *ast.StructLiteral:
 		return "struct"
+	case *ast.ObjectLiteral:
+		// 动态对象字面量：类型为 object
+		return "object"
+	case *ast.MemberAccessExpression:
+		// 动态对象成员访问（obj.field）的类型是 object
+		if sa.inferExpressionType(e.Object) == "object" {
+			return "object"
+		}
+		return ""
+	case *ast.IndexExpression:
+		// 动态对象下标访问（obj["key"]）的类型是 object
+		if sa.inferExpressionType(e.Object) == "object" {
+			return "object"
+		}
+		return ""
 	default:
 		return ""
 	}

@@ -1,0 +1,17 @@
+﻿# 璐熶緥锛氶潪鏈熬 call 鍐呮彁鍓?return锛堝簲澶辫触锛?import std.io
+fn main() {
+    auto items = [10, 20, 30]
+    int total = 0
+    spend(items) {
+        call(1) {
+            return
+        }
+        call(2) {
+            total = total + items[1]
+        }
+        call(3) {
+            total = total + items[2]
+        }
+    }
+}
+

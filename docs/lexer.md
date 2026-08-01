@@ -14,7 +14,6 @@
 
 | Token | 语法 | 说明 |
 |-------|------|------|
-| `TOKEN_VO` | `vo` | VO 系统 |
 | `TOKEN_SPEND` | `spend` | 消费语句 |
 | `TOKEN_CALL` | `call` | 调用语句 |
 | `TOKEN_TASK` | `task` | 任务语句 |

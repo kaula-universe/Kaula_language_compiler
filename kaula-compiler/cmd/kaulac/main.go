@@ -1165,33 +1165,47 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		fmt.Printf("[Compile] All %d std modules cached, skipping pre-compilation\n", len(moduleSources))
 	}
 
+	// 非安装模式下需要链接的运行时对象（kmm_v4：KMM 分配器；spend_call：强制消费流；allocator：fast_alloc 系列符号）
+	runtimeObjs := []string{"kmm_v4.o", "spend_call.o", "allocator.o"}
+
 	// 编译 KMM V4 runtime（src/kmm_scoped_allocator_v4.c）— std 模块依赖其符号
+	// 同时编译 spend_call.c（Spend/Call 强制消费流）与 allocator.c（fast_alloc 系列符号）
 	if kaulaSrcPath != "" && !useInstalledLibraries {
-		kmmV4Src := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c")
-		kmmV4Obj := filepath.Join(objectCacheDir, "kmm_v4.o")
-		needsRebuild := true
-		if cInfo, cErr := os.Stat(kmmV4Src); cErr == nil {
-			if oInfo, oErr := os.Stat(kmmV4Obj); oErr == nil {
-				if oInfo.ModTime().After(cInfo.ModTime()) || oInfo.ModTime().Equal(cInfo.ModTime()) {
-					needsRebuild = false
+		runtimeSources := []struct {
+			cName string
+			oName string
+		}{
+			{"kmm_scoped_allocator_v4.c", "kmm_v4.o"},
+			{"spend_call.c", "spend_call.o"},
+			{"allocator.c", "allocator.o"},
+		}
+		for _, rs := range runtimeSources {
+			rsSrc := filepath.Join(kaulaSrcPath, rs.cName)
+			rsObj := filepath.Join(objectCacheDir, rs.oName)
+			needsRebuild := true
+			if cInfo, cErr := os.Stat(rsSrc); cErr == nil {
+				if oInfo, oErr := os.Stat(rsObj); oErr == nil {
+					if oInfo.ModTime().After(cInfo.ModTime()) || oInfo.ModTime().Equal(cInfo.ModTime()) {
+						needsRebuild = false
+					}
 				}
 			}
-		}
-		if needsRebuild {
-			kmmCmd := exec.Command(clangPath, "-c", optLevel, kmmV4Src, "-o", kmmV4Obj)
-			for _, p := range validSrcPaths {
-				kmmCmd.Args = append(kmmCmd.Args, "-I", p)
-			}
-			for _, p := range validStdPaths {
-				kmmCmd.Args = append(kmmCmd.Args, "-I", p)
-			}
-			if poolCapacity > 0 {
-				kmmCmd.Args = append(kmmCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-			}
-			if output, err := kmmCmd.CombinedOutput(); err != nil {
-				fmt.Printf("[Compile] Warning: kmm_v4.o compilation failed: %s\n", string(output))
-			} else {
-				fmt.Printf("[Compile] kmm_v4.o compiled\n")
+			if needsRebuild {
+				rsCmd := exec.Command(clangPath, "-c", optLevel, rsSrc, "-o", rsObj)
+				for _, p := range validSrcPaths {
+					rsCmd.Args = append(rsCmd.Args, "-I", p)
+				}
+				for _, p := range validStdPaths {
+					rsCmd.Args = append(rsCmd.Args, "-I", p)
+				}
+				if poolCapacity > 0 {
+					rsCmd.Args = append(rsCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+				}
+				if output, err := rsCmd.CombinedOutput(); err != nil {
+					fmt.Printf("[Compile] Warning: %s compilation failed: %s\n", rs.oName, string(output))
+				} else {
+					fmt.Printf("[Compile] %s compiled\n", rs.oName)
+				}
 			}
 		}
 	}
@@ -1204,11 +1218,13 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			clangArgs = append(clangArgs, ms.objPath)
 		}
 	}
-	// 添加 kmm_v4.o（如果存在）— 裸机模式下跳过（kmm_v4 依赖 OS 调用）
-	kmmV4Obj := filepath.Join(objectCacheDir, "kmm_v4.o")
+	// 添加 kmm_v4.o/spend_call.o/allocator.o（如果存在）— 裸机模式下跳过（依赖 OS 调用）
 	if !useInstalledLibraries && (cfg == nil || !cfg.Freestanding) {
-		if _, err := os.Stat(kmmV4Obj); err == nil {
-			clangArgs = append(clangArgs, kmmV4Obj)
+		for _, objName := range runtimeObjs {
+			runtimeObj := filepath.Join(objectCacheDir, objName)
+			if _, err := os.Stat(runtimeObj); err == nil {
+				clangArgs = append(clangArgs, runtimeObj)
+			}
 		}
 	}
 
@@ -1225,7 +1241,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		} else {
 			stdLibPath := filepath.Join(objectCacheDir, "std.lib")
 			// 计算当前模块集合的 hash，只有变化时才重新生成
-			libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4"
+			libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4|spend_call|allocator"
 			libKeyFile := filepath.Join(objectCacheDir, "std.lib.key")
 			rebuildLib := true
 			if keyData, err := os.ReadFile(libKeyFile); err == nil && string(keyData) == libModulesKey {
@@ -1238,9 +1254,12 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				for _, ms := range moduleSources {
 					objPaths = append(objPaths, ms.objPath)
 				}
-				// Include kmm_v4.o in the lib
-				if _, err := os.Stat(kmmV4Obj); err == nil {
-					objPaths = append(objPaths, kmmV4Obj)
+				// Include runtime objects in the lib
+				for _, objName := range runtimeObjs {
+					runtimeObj := filepath.Join(objectCacheDir, objName)
+					if _, err := os.Stat(runtimeObj); err == nil {
+						objPaths = append(objPaths, runtimeObj)
+					}
 				}
 				arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
 				arCmd.Args = append(arCmd.Args, objPaths...)
@@ -1282,8 +1301,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					for _, ms := range moduleSources {
 						objPaths = append(objPaths, ms.objPath)
 					}
-					if _, err := os.Stat(kmmV4Obj); err == nil {
-						objPaths = append(objPaths, kmmV4Obj)
+					for _, objName := range runtimeObjs {
+						runtimeObj := filepath.Join(objectCacheDir, objName)
+						if _, err := os.Stat(runtimeObj); err == nil {
+							objPaths = append(objPaths, runtimeObj)
+						}
 					}
 					arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
 					arCmd.Args = append(arCmd.Args, objPaths...)
@@ -1363,11 +1385,27 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			}
 			// 添加 include 路径
 			if lib.IncludePath != "" {
-				clangArgs = append(clangArgs, "-I", lib.IncludePath)
+				incPath := lib.IncludePath
+				// 跨平台兼容：json 中记录的绝对路径在当前机器不存在时，
+				// 回退到工作目录下的 pkglib 目录
+				if _, err := os.Stat(incPath); err != nil {
+					fallbackInc := filepath.Join(workDir, "pkglib")
+					if _, fbErr := os.Stat(fallbackInc); fbErr == nil {
+						incPath = fallbackInc
+					}
+				}
+				clangArgs = append(clangArgs, "-I", incPath)
 			}
 			// 添加库搜索路径
 			if lib.LibraryPath != "" {
-				clangArgs = append(clangArgs, "-L", lib.LibraryPath)
+				libPath := lib.LibraryPath
+				if _, err := os.Stat(libPath); err != nil {
+					fallbackLib := filepath.Join(workDir, "pkglib", lib.Name)
+					if _, fbErr := os.Stat(fallbackLib); fbErr == nil {
+						libPath = fallbackLib
+					}
+				}
+				clangArgs = append(clangArgs, "-L", libPath)
 			}
 			// 添加链接库
 			for _, libName := range lib.Libraries {

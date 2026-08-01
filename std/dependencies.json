@@ -18,7 +18,6 @@
   "net":       ["base", "string", "memory"],
   "crypto":    ["base", "string", "memory"],
   "gui":       ["base"],
-  "vo":        ["base"],
   "prefix":    ["base"],
   "task":      ["base", "memory"],
   "i18n":      ["base", "memory"],

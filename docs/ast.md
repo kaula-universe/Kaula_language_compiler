@@ -35,7 +35,6 @@ Node (接口)
 │   ├── NonLocalStatement          // nonlocal 语句
 │   ├── ExpressionStatement        // 表达式语句
 │   ├── BlockStatement             // 块语句
-│   ├── VOStatement                // VO 语句
 │   ├── SpendStatement             // spend 语句
 │   ├── CallClause                 // call 子句
 │   ├── CallStatement              // call 语句

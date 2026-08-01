@@ -29,8 +29,7 @@ func (fg *FunctionGenerator) needsKMMScope(bodyCode string) bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" &&
-					sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -222,8 +221,7 @@ func (fg *FunctionGenerator) shouldUseKMMScope() bool {
 		var varNames []string
 		if currentScope != nil {
 			for name, sym := range currentScope.GetAllSymbols() {
-				if sym.Scope != "parameter" && sym.Scope != "param" &&
-					sym.Scope != "async_param" && sym.Scope != "task_param" {
+				if sym.Scope != "parameter" && sym.Scope != "param" {
 					varNames = append(varNames, name)
 				}
 			}
@@ -235,8 +233,7 @@ func (fg *FunctionGenerator) shouldUseKMMScope() bool {
 	currentScope := fg.codegen.GetCurrentScope()
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "parameter" || sym.Scope == "param" ||
-				sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" {
 				continue
 			}
 			if needsKMMForType(sym.Type) {
@@ -260,8 +257,7 @@ func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 	currentScope := fg.codegen.GetCurrentScope()
 	if currentScope != nil {
 		for _, sym := range currentScope.GetAllSymbols() {
-			if sym.Scope == "parameter" || sym.Scope == "param" ||
-				sym.Scope == "async_param" || sym.Scope == "task_param" {
+			if sym.Scope == "parameter" || sym.Scope == "param" {
 				continue
 			}
 			if needsKMMForType(sym.Type) {
@@ -302,9 +298,6 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		return fg.generateMainFunction(stmt)
 	}
 
-	hasTaskParams := len(stmt.TaskParams) > 0
-	hasAsyncParams := len(stmt.AsyncParams) > 0
-
 	var builder strings.Builder
 	builder.Grow(1024)
 
@@ -331,128 +324,74 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
 	builder.WriteString(safeName)
-	if hasTaskParams || hasAsyncParams {
-		// 生成正常函数签名（task/async 参数元数据通过注释保留）
-		builder.WriteString("(")
-		for i, param := range stmt.Params {
-			if i > 0 {
-				builder.WriteString(", ")
-			}
-			paramType := "int64_t"
-			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-				paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
-			}
-			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
-			fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+	// 生成原生 C 参数列表
+	builder.WriteString("(")
+	for i, param := range stmt.Params {
+		if i > 0 {
+			builder.WriteString(", ")
 		}
-		if len(stmt.Params) == 0 {
-			builder.WriteString("void")
+		// 获取参数类型
+		paramType := "int64_t" // 默认类型
+		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
 		}
-		builder.WriteString(") {\n")
-	} else if hasAsyncParams {
-		builder.WriteString("_async(void* arg) {\n")
-	} else {
-		// 生成原生 C 参数列表
-		builder.WriteString("(")
-		for i, param := range stmt.Params {
-			if i > 0 {
-				builder.WriteString(", ")
-			}
-			// 获取参数类型
-			paramType := "int64_t" // 默认类型
-			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-				paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
-			}
-			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
-			fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
-		}
-		if len(stmt.Params) == 0 {
-			builder.WriteString("void")
-		}
-		builder.WriteString(") {\n")
+		builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
+		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
+	if len(stmt.Params) == 0 {
+		builder.WriteString("void")
+	}
+	builder.WriteString(") {\n")
 	fg.codegen.indent++
 
-	if hasTaskParams {
-		indent := fg.codegen.indentString()
-		for i := range stmt.TaskParams {
-			priorityCode := fg.codegen.expressionGenerator.GenerateExpression(stmt.TaskParams[i].Priority)
-			builder.WriteString(indent)
-			fmt.Fprintf(&builder, "// task param %d: priority=%s\n", i+1, priorityCode)
+	shouldUseKMM := !stmt.NoKMM && !stmt.Inline
+	if shouldUseKMM {
+		// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
+		// 跨函数分析：结合函数签名判断是否需要 KMM
+		useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
+		if useKMM {
+			fg.codegen.EnterKMMScope()
 		}
 
+		var bodyBuilder strings.Builder
+		bodyIndent := fg.codegen.indentString()
+		fg.codegen.indent++
 		for _, bodyStmt := range stmt.Body {
 			if bodyStmt == nil {
 				continue
 			}
-			builder.WriteString(indent)
-			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
+			bodyBuilder.WriteString(fg.codegen.indentString())
+			bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
-	} else if hasAsyncParams {
-		indent := fg.codegen.indentString()
-		for i := range stmt.AsyncParams {
-			valueCode := fg.codegen.expressionGenerator.GenerateExpression(stmt.AsyncParams[i].Value)
-			builder.WriteString(indent)
-			fmt.Fprintf(&builder, "// async param %d: value=%s\n", i+1, valueCode)
+		fg.codegen.indent--
+
+		if useKMM {
+			fg.codegen.ExitKMMScope()
 		}
 
-		for _, bodyStmt := range stmt.Body {
-			if bodyStmt == nil {
-				continue
-			}
-			builder.WriteString(indent)
-			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
+		bodyCode := bodyBuilder.String()
+
+		if useKMM {
+			// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
+			// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
+			// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
+			// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
+			builder.WriteString(bodyIndent)
+			builder.WriteString("KMM_V4_SCOPE_START {\n")
+			builder.WriteString(bodyCode)
+			builder.WriteString(bodyIndent)
+			builder.WriteString("} KMM_V4_SCOPE_END;\n")
+		} else {
+			builder.WriteString(bodyCode)
 		}
 	} else {
-		shouldUseKMM := !stmt.NoKMM && !stmt.Inline
-		if shouldUseKMM {
-			// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
-			// 跨函数分析：结合函数签名判断是否需要 KMM
-			useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
-			if useKMM {
-				fg.codegen.EnterKMMScope()
+		indent := fg.codegen.indentString()
+		for _, bodyStmt := range stmt.Body {
+			if bodyStmt == nil {
+				continue
 			}
-
-			var bodyBuilder strings.Builder
-			bodyIndent := fg.codegen.indentString()
-			fg.codegen.indent++
-			for _, bodyStmt := range stmt.Body {
-				if bodyStmt == nil {
-					continue
-				}
-				bodyBuilder.WriteString(fg.codegen.indentString())
-				bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
-			}
-			fg.codegen.indent--
-
-			if useKMM {
-				fg.codegen.ExitKMMScope()
-			}
-
-			bodyCode := bodyBuilder.String()
-
-			if useKMM {
-				// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
-				// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
-				// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
-				// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
-				builder.WriteString(bodyIndent)
-				builder.WriteString("KMM_V4_SCOPE_START {\n")
-				builder.WriteString(bodyCode)
-				builder.WriteString(bodyIndent)
-				builder.WriteString("} KMM_V4_SCOPE_END;\n")
-			} else {
-				builder.WriteString(bodyCode)
-			}
-		} else {
-			indent := fg.codegen.indentString()
-			for _, bodyStmt := range stmt.Body {
-				if bodyStmt == nil {
-					continue
-				}
-				builder.WriteString(indent)
-				builder.WriteString(fg.codegen.generateStatement(bodyStmt))
-			}
+			builder.WriteString(indent)
+			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
 	}
 
@@ -677,14 +616,30 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 
 	bodyCode := bodyBuilder.String()
 
+	// 注入动态对象初始化代码（在函数体生成后，确保 AddPreludeInit 已被调用）
+	var finalBody strings.Builder
+	finalBody.Grow(len(bodyCode) + 256)
+	if fg.codegen.preludeInitCode.Len() > 0 {
+		finalBody.WriteString(fg.codegen.indentString())
+		finalBody.WriteString("// --- dynobj init ---\n")
+		finalBody.WriteString(fg.codegen.indentString())
+		finalBody.WriteString(fg.codegen.preludeInitCode.String())
+		finalBody.WriteString(fg.codegen.indentString())
+		finalBody.WriteString("// --- end init ---\n")
+	}
+	finalBody.WriteString(bodyCode)
+
+	// 重置 preludeInitCode 避免重复注入
+	fg.codegen.preludeInitCode.Reset()
+
 	if useKMM {
 		code.WriteString(fg.codegen.indentString())
 		code.WriteString("KMM_V4_SCOPE_START {\n")
-		code.WriteString(bodyCode)
+		code.WriteString(finalBody.String())
 		code.WriteString(fg.codegen.indentString())
 		code.WriteString("} KMM_V4_SCOPE_END;\n")
 	} else {
-		code.WriteString(bodyCode)
+		code.WriteString(finalBody.String())
 	}
 
 	code.WriteString(fg.codegen.indentString())

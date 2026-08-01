@@ -1,6 +1,7 @@
 package stdlib
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -92,6 +93,8 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 			fmt.Printf("Warning: Failed to read %s: %v\n", configFile, err)
 			continue
 		}
+		// 剥离 UTF-8 BOM（部分编辑器/工具写入 json 时带 BOM，json.Unmarshal 会拒绝）
+		data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 
 		var libConfig ThirdPartyLibrary
 		if err := json.Unmarshal(data, &libConfig); err != nil {

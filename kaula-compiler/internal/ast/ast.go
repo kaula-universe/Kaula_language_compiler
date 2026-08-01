@@ -148,16 +148,6 @@ func traverseNode(node Node, visitor func(Node)) {
 		for _, stmt := range n.Statements {
 			traverseNode(stmt, visitor)
 		}
-	case *VOStatement:
-		if n.Value != nil {
-			traverseNode(n.Value, visitor)
-		}
-		if n.Code != nil {
-			traverseNode(n.Code, visitor)
-		}
-		if n.Access != nil {
-			traverseNode(n.Access, visitor)
-		}
 	case *SpendStatement:
 		if n.Target != nil {
 			traverseNode(n.Target, visitor)
@@ -167,13 +157,6 @@ func traverseNode(node Node, visitor func(Node)) {
 			for _, stmt := range call.Body {
 				traverseNode(stmt, visitor)
 			}
-		}
-	case *TaskStatement:
-		if n.Func != nil {
-			traverseNode(n.Func, visitor)
-		}
-		if n.Arg != nil {
-			traverseNode(n.Arg, visitor)
 		}
 	case *PrefixStatement:
 		for _, stmt := range n.Body {
@@ -348,6 +331,12 @@ func traverseNode(node Node, visitor func(Node)) {
 		for _, stmt := range n.Body {
 			traverseNode(stmt, visitor)
 		}
+	case *ObjectLiteral:
+		for _, field := range n.Fields {
+			if field.Value != nil {
+				traverseNode(field.Value, visitor)
+			}
+		}
 	case *MemberAccessExpression:
 		if n.Object != nil {
 			traverseNode(n.Object, visitor)
@@ -404,32 +393,6 @@ type Expression interface {
 	expressionNode()
 }
 
-// VOStatement 表示VO语句
-type VOStatement struct {
-	Value  Expression
-	Code   Expression
-	Access Expression
-	Pos    Position
-}
-
-// statementNode 实现Statement接口
-func (v *VOStatement) statementNode() {}
-
-// String 实现Node接口
-func (v *VOStatement) String() string {
-	return "VOStatement"
-}
-
-// GetPosition 实现Node接口
-func (v *VOStatement) GetPosition() Position {
-	return v.Pos
-}
-
-// SetPosition 实现Node接口
-func (v *VOStatement) SetPosition(pos Position) {
-	v.Pos = pos
-}
-
 // SpendStatement 表示spend语句 - 锁定并开启一个对象的消费流程
 // spend 用于锁定对象，call 必须被调用与元素数量对应的次数
 type SpendStatement struct {
@@ -439,11 +402,12 @@ type SpendStatement struct {
 }
 
 // CallClause 表示call子句 - 消费一个元素
-// index 是从 1 开始的元素索引
+// index 是从 1 开始的元素索引（或枚举变体名）；IsDefault=true 时表示 call(default) 兜底子句
 type CallClause struct {
-	Index Expression  // 元素索引（1-based）
-	Body  []Statement // 处理逻辑
-	Pos   Position
+	Index     Expression  // 元素索引（1-based），default 子句为 nil
+	IsDefault bool        // 是否为 call(default) 兜底子句（消费全部剩余元素）
+	Body      []Statement // 处理逻辑
+	Pos       Position
 }
 
 // statementNode 实现Statement接口
@@ -480,32 +444,6 @@ func (c *CallClause) GetPosition() Position {
 // SetPosition 实现Node接口
 func (c *CallClause) SetPosition(pos Position) {
 	c.Pos = pos
-}
-
-// TaskStatement 表示task语句
-type TaskStatement struct {
-	Priority int
-	Func     Expression
-	Arg      Expression
-	Pos      Position
-}
-
-// statementNode 实现Statement接口
-func (t *TaskStatement) statementNode() {}
-
-// String 实现Node接口
-func (t *TaskStatement) String() string {
-	return "TaskStatement"
-}
-
-// GetPosition 实现Node接口
-func (t *TaskStatement) GetPosition() Position {
-	return t.Pos
-}
-
-// SetPosition 实现Node接口
-func (t *TaskStatement) SetPosition(pos Position) {
-	t.Pos = pos
 }
 
 // PrefixStatement 表示prefix语句
@@ -664,6 +602,38 @@ func (o *ObjectStatement) SetPosition(pos Position) {
 	o.Pos = pos
 }
 
+// ObjectLiteralField 表示动态对象字面量中的一个字段（字段名 + 值）
+type ObjectLiteralField struct {
+	Name  string
+	Value Expression
+	Pos   Position
+}
+
+// ObjectLiteral 表示动态对象字面量 object { name: value, ... }
+// 在语言层面模拟动态对象（JS/Python 风格）：字段可读可写可动态增删，方法存为函数字段
+type ObjectLiteral struct {
+	Fields []ObjectLiteralField
+	Pos    Position
+}
+
+// expressionNode 实现Expression接口
+func (o *ObjectLiteral) expressionNode() {}
+
+// String 实现Node接口
+func (o *ObjectLiteral) String() string {
+	return "ObjectLiteral"
+}
+
+// GetPosition 实现Node接口
+func (o *ObjectLiteral) GetPosition() Position {
+	return o.Pos
+}
+
+// SetPosition 实现Node接口
+func (o *ObjectLiteral) SetPosition(pos Position) {
+	o.Pos = pos
+}
+
 // TypeParameter 表示泛型类型参数
 type TypeParameter struct {
 	Name       string
@@ -750,24 +720,8 @@ type FunctionStatement struct {
 	Attributes  []*Attribute       // 统一属性列表（新）
 	IsPublic    bool               // pub 修饰符：导出给其他 .kl 文件
 	PrefixName  string             // 如果使用prefix，记录prefix名称
-	TaskParams  []*TaskParam       // 任务参数列表（如 task(1)）
-	AsyncParams []*AsyncParam      // 异步参数列表（如 async(value)）
 	IsAsm       bool               // 是否是 asm 函数（#[asm] 注解）
 	Pos         Position
-}
-
-// TaskParam 表示任务参数
-// 用于函数定义中的 task(优先级) 语法
-type TaskParam struct {
-	Priority Expression // 优先级表达式
-	Pos      Position
-}
-
-// AsyncParam 表示异步参数
-// 用于函数定义中的 async(值) 语法
-type AsyncParam struct {
-	Value Expression // 异步值表达式
-	Pos   Position
 }
 
 // statementNode 实现Statement接口

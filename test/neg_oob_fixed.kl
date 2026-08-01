@@ -1,0 +1,18 @@
+# 负面：越界索引（应报错）
+import std.io
+fn main() {
+    auto items = [10, 20, 30]
+    int total = 0
+    spend(items) {
+        call(1) {
+            total = total + items[0]
+        }
+        call(2) {
+            total = total + items[1]
+        }
+        call(4) {
+            total = total + items[2]
+        }
+    }
+    println("unreachable")
+}

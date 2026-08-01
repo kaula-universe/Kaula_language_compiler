@@ -41,8 +41,7 @@ type Config struct {
 	// ====== 缓存选项 ======
 	NoCache bool `json:"no_cache,omitempty"`
 
-	// ====== VO / 队列 / 可花费组件 ======
-	VOCacheSize   int `json:"vo_cache_size"`
+	// ====== 队列 / 可花费组件 ======
 	QueueSize     int `json:"queue_size"`
 	SpendableSize int `json:"spendable_size"`
 
@@ -71,7 +70,6 @@ func DefaultConfig() *Config {
 		TemplatePath:   "templates",
 		IncludePath:    "../std",
 		TargetLanguage: "c",
-		VOCacheSize:    2048,
 		QueueSize:      100,
 		SpendableSize:  10,
 		MemoryLimitMB:  4096,
@@ -182,7 +180,6 @@ func loadFlags(config *Config) {
 	flag.BoolVar(&config.NoCache, "no-cache", config.NoCache, "禁用增量编译缓存")
 
 	// 运行时配置
-	flag.IntVar(&config.VOCacheSize, "vo-cache", config.VOCacheSize, "VO 缓存大小")
 	flag.IntVar(&config.QueueSize, "queue", config.QueueSize, "队列大小")
 	flag.IntVar(&config.SpendableSize, "spendable", config.SpendableSize, "可花费组件大小")
 

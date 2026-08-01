@@ -1744,54 +1744,6 @@
       "return": "int"
     }
   },
-  "std.vo": {
-    "header": "std/vo/vo.h",
-    "std_vo_create": {
-      "args": [
-        "int"
-      ],
-      "return": "VO*"
-    },
-    "std_vo_destroy": {
-      "args": [
-        "VO*"
-      ]
-    },
-    "std_vo_data_load": {
-      "args": [
-        "VO*",
-        "int",
-        "void()"
-      ]
-    },
-    "std_vo_code_load": {
-      "args": [
-        "VO*",
-        "int",
-        "void()"
-      ]
-    },
-    "std_vo_associate": {
-      "args": [
-        "VO*",
-        "int",
-        "int"
-      ]
-    },
-    "std_vo_access": {
-      "args": [
-        "VO*",
-        "int"
-      ],
-      "return": "void()"
-    },
-    "std_vo_get_cache_max": {
-      "args": [
-        "VO*"
-      ],
-      "return": "int"
-    }
-  },
   "std.prefix": {
     "header": "std/prefix/prefix.h",
     "prefix_system_create": {
@@ -4565,6 +4517,46 @@
         "Object*"
       ],
       "return": "const char*"
+    },
+    "dynobj_size": {
+      "args": [
+        "Object*"
+      ],
+      "return": "size_t"
+    },
+    "dynobj_get": {
+      "args": [
+        "Object*",
+        "const char*"
+      ],
+      "return": "Object*"
+    },
+    "dynobj_set": {
+      "args": [
+        "Object*",
+        "const char*",
+        "Object*"
+      ],
+      "return": "Object*"
+    },
+    "dynobj_contains": {
+      "args": [
+        "Object*",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "dynobj_delete": {
+      "args": [
+        "Object*",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "dynobj_clear": {
+      "args": [
+        "Object*"
+      ]
     },
     "int_object_create": {
       "args": [
