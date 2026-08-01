@@ -673,6 +673,10 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 	if !hasDataVariants {
 		// 简单枚举（无数据），直接生成 C enum
 		code.WriteString(fmt.Sprintf("typedef enum {\n"))
+		if len(stmt.Variants) == 0 {
+			// C 标准不允许空 enum, 生成占位成员
+			code.WriteString(fmt.Sprintf("    %s_Kind__empty\n", stmt.Name))
+		}
 		for i, variant := range stmt.Variants {
 			code.WriteString(fmt.Sprintf("    %s_Kind_%s", stmt.Name, variant.Name))
 			if i < len(stmt.Variants)-1 {
@@ -686,6 +690,10 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 
 	// 生成 kind 枚举
 	code.WriteString(fmt.Sprintf("typedef enum {\n"))
+	if len(stmt.Variants) == 0 {
+		// C 标准不允许空 enum, 生成占位成员
+		code.WriteString(fmt.Sprintf("    %s_Kind__empty\n", stmt.Name))
+	}
 	for i, variant := range stmt.Variants {
 		code.WriteString(fmt.Sprintf("    %s_Kind_%s", stmt.Name, variant.Name))
 		if i < len(stmt.Variants)-1 {

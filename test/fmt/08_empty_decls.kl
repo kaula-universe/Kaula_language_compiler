@@ -1,0 +1,13 @@
+import std.io
+
+class EmptyClass {}
+
+struct EmptyStruct {}
+
+enum EmptyEnum {}
+
+fn empty_function() {}
+
+fn main() {
+    println("empty declarations ok")
+}
