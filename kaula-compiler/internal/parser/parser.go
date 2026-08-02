@@ -3786,23 +3786,35 @@ func (p *Parser) Validate(program *ast.Program) {
 				p.error("import 语句缺少模块名称")
 			} else if !validModules[importStmt.Module] {
 				// 检查是否是本地 .kl 文件
-				localPath := importStmt.Module + ".kl"
-				if _, err := os.Stat(localPath); err == nil {
-					importStmt.IsLocal = true
-					importStmt.LocalPath = localPath
-				} else {
-					// 尝试在同级目录查找
-					dir := filepath.Dir(p.file)
-					if dir == "" {
-						dir = "."
-					}
-					localPath2 := filepath.Join(dir, importStmt.Module+".kl")
-					if _, err := os.Stat(localPath2); err == nil {
+				// 查找顺序:
+				//   1. 点号转路径分隔符: import my.util -> my/util.kl (目录查询)
+				//   2. 单文件带点: import my.util -> my.util.kl (兼容旧写法)
+				var localCandidates []string
+				dir := filepath.Dir(p.file)
+				if dir == "" {
+					dir = "."
+				}
+				// 路径分隔形式: my.util -> my/util.kl (仅在含点号时)
+				if strings.Contains(importStmt.Module, ".") {
+					relPath := strings.ReplaceAll(importStmt.Module, ".", string(os.PathSeparator)) + ".kl"
+					localCandidates = append(localCandidates, relPath)
+					localCandidates = append(localCandidates, filepath.Join(dir, relPath))
+				}
+				// 单文件带点形式: my.util.kl
+				localCandidates = append(localCandidates, importStmt.Module+".kl")
+				localCandidates = append(localCandidates, filepath.Join(dir, importStmt.Module+".kl"))
+
+				found := false
+				for _, cand := range localCandidates {
+					if _, err := os.Stat(cand); err == nil {
 						importStmt.IsLocal = true
-						importStmt.LocalPath = localPath2
-					} else {
-						p.error(fmt.Sprintf("导入的模块不存在：%s", importStmt.Module))
+						importStmt.LocalPath = cand
+						found = true
+						break
 					}
+				}
+				if !found {
+					p.error(fmt.Sprintf("导入的模块不存在：%s", importStmt.Module))
 				}
 			}
 		}
