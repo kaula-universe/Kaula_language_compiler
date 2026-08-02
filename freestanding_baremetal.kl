@@ -1,0 +1,110 @@
+// Kaula 裸机 + freestanding 库测试
+// 在 QEMU 中运行，通过 COM1 串口输出
+// 编译: kaulac --freestanding --boot pvh --template kaula-compiler\templates freestanding_baremetal.kl
+
+import freestanding.base
+import freestanding.memory
+import freestanding.string
+import freestanding.math
+import freestanding.io
+
+// x86 串口 COM1 端口地址
+const SERIAL_PORT = 0x3F8
+const UART_THR = 0
+const UART_LSR = 5
+const UART_LCR = 3
+const UART_DLL = 0
+const UART_DLM = 1
+const LSR_THRE = 0x20
+const LCR_DLAB = 0x80
+
+// 向 I/O 端口写入字节
+#[inline, asm]
+fn outb(u16 port, u8 val) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(val), "d"(port));
+}
+
+// 从 I/O 端口读取字节
+#[inline]
+fn inb(u16 port) u8 {
+    u8 ret
+    #[asm("inb %1, %0", "=a"(ret), "d"(port))]
+    return ret
+}
+
+// 等待发送缓冲区空
+fn serial_wait_ready() {
+    u8 status = inb(SERIAL_PORT + UART_LSR)
+    while ((status & LSR_THRE) == 0) {
+        status = inb(SERIAL_PORT + UART_LSR)
+    }
+}
+
+// 初始化串口 (115200 波特率, 8N1)
+fn serial_init() {
+    outb(SERIAL_PORT + 1, 0x00)
+    outb(SERIAL_PORT + UART_LCR, LCR_DLAB)
+    outb(SERIAL_PORT + UART_DLL, 0x01)
+    outb(SERIAL_PORT + UART_DLM, 0x00)
+    outb(SERIAL_PORT + UART_LCR, 0x03)
+    outb(SERIAL_PORT + 2, 0xC7)
+    outb(SERIAL_PORT + 4, 0x03)
+}
+
+// 覆写 freestanding 弱符号 fs_output_putchar，把输出重定向到串口
+fn fs_output_putchar(c: char) {
+    serial_wait_ready()
+    outb(SERIAL_PORT + UART_THR, as<u8>(c))
+}
+
+// Kaula 裸机主逻辑 (由模板的 _kaula_entry 调用)
+fn kaula_main() i32 {
+    serial_init()
+
+    // 测试 freestanding.io
+    println("--- freestanding baremetal test ---")
+
+    // 测试 freestanding.string
+    char* s = fs_strdup("hello freestanding")
+    print("str: %s (len=%d)\n", s, strlen(s))
+
+    char* numbuf = as<char*>(fs_alloc(33))
+    fs_itoa(-9876, numbuf)
+    print("itoa: %s\n", numbuf)
+
+    fs_itoa_hex(0xCAFE, numbuf, true)
+    print("itoa_hex: %s\n", numbuf)
+
+    print("atoi: %d\n", fs_atoi("12345") + fs_atoi("6789"))
+
+    // 测试 freestanding.memory
+    char* buf = as<char*>(fs_alloc(64))
+    memset(buf, 65, 8)
+    print("memset A: %c %c %c\n", buf[0], buf[3], buf[7])
+
+    memcpy(buf, s, 8)
+    print("memcpy: %c %c\n", buf[0], buf[7])
+
+    print("alloc_usage: %d bytes\n", fs_alloc_usage())
+
+    // 测试 freestanding.math
+    print("abs(-42)=%d gcd(48,36)=%d\n", math_abs_i32(-42), math_gcd(48, 36))
+    print("is_pow2(256)=%d is_pow2(300)=%d\n", math_is_pow2(256), math_is_pow2(300))
+    print("popcount(0xF0F0F0F0)=%d clz(1)=%d ctz(0x8000)=%d\n",
+        math_popcount(0xF0F0F0F0), math_clz(1), math_ctz(0x8000))
+    print("min(3,7)=%d max(3,7)=%d round_up(10,8)=%d div_round_up(10,8)=%d\n",
+        math_min_i32(3, 7), math_max_i32(3, 7), math_round_up(10, 8), math_div_round_up(10, 8))
+
+    // 单值输出
+    print_int(2026)
+    fs_putchar(32)
+    print_hex(0xDEADBEEF)
+    fs_putchar(32)
+    print_float(3.14159)
+    fs_putchar(32)
+    print_bool(true)
+    fs_putchar(10)
+
+    println("--- baremetal freestanding OK ---")
+    return 0
+}

@@ -836,6 +836,35 @@ func findBootKaulaStdPath(workDir string) string {
 	return ""
 }
 
+// findBootKaulaFreePath 查找 freestanding 库目录（freestanding/freestanding.h 所在目录），
+// 用于解析 freestanding.memory 等模块头（如 memory/memory.h）与
+// kaula_freestanding_runtime.c 的 unity include（memory/memory.c）
+func findBootKaulaFreePath(workDir string) string {
+	candidates := []string{}
+	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
+		candidates = append(candidates, filepath.Join(envHome, "freestanding"))
+	}
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(filepath.Clean(exePath))
+		candidates = append(candidates,
+			filepath.Join(exeDir, "..", "freestanding"),
+			filepath.Join(exeDir, "..", "..", "freestanding"),
+			filepath.Join(exeDir, "freestanding"),
+		)
+	}
+	candidates = append(candidates,
+		filepath.Join(workDir, "freestanding"),
+		filepath.Join(workDir, "..", "freestanding"),
+		filepath.Join(workDir, "..", "..", "freestanding"),
+	)
+	for _, p := range candidates {
+		if _, err := os.Stat(filepath.Join(p, "freestanding.h")); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 // compileBootKernel 裸机引导构建流水线：
 //  1. clang -c 生成 C 代码 -> kernel.o
 //  2. clang -c 编译 boot stub -> boot.o
@@ -881,6 +910,16 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 
 	kaulaSrcPath := findBootKaulaSrcPath(workDir)
 	kaulaStdPath := findBootKaulaStdPath(workDir)
+	kaulaFreePath := findBootKaulaFreePath(workDir)
+	// 代码生成中的 freestanding 模块头保留完整前缀（freestanding/xxx/xxx.h），
+	// 需要把 freestanding/ 的父目录也加入搜索路径，否则 #include "freestanding/base/types.h"
+	// 无法被解析（-I freestanding 只能解析 base/types.h）
+	kaulaFreeParentPath := ""
+	if kaulaFreePath != "" {
+		if parent := filepath.Dir(kaulaFreePath); parent != kaulaFreePath {
+			kaulaFreeParentPath = parent
+		}
+	}
 
 	// 1. 编译 C 代码
 	kernelArgs := append(append([]string{}, baseArgs...),
@@ -893,6 +932,12 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	}
 	if kaulaStdPath != "" {
 		kernelArgs = append(kernelArgs, "-I", kaulaStdPath)
+	}
+	if kaulaFreeParentPath != "" {
+		kernelArgs = append(kernelArgs, "-I", kaulaFreeParentPath)
+	}
+	if kaulaFreePath != "" {
+		kernelArgs = append(kernelArgs, "-I", kaulaFreePath)
 	}
 	kernelArgs = append(kernelArgs, cacheFile, "-o", kernelObj)
 	fmt.Printf("[Boot] Compiling kernel C -> %s\n", kernelObj)
@@ -909,7 +954,12 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 
 	linkObjs := []string{bootObj, kernelObj}
 
-	// 3. 编译 freestanding runtime（memset/memcpy 等，供 LLVM builtin lower 引用）
+	// 3. 编译 freestanding runtime（unity 包含 freestanding 库：memset/memcpy 等，
+	// 供 LLVM builtin lower 引用）
+	// 注意：runtime 通过 #include "memory/memory.c" 等 unity-include freestanding 库，
+	// 必须让 -I freestanding 优先于 -I std 解析，否则会错误地包含 std/memory/memory.c
+	// （后者依赖 libc <string.h>，在 -nostdlib 下找不到）。
+	// runtime 只复用 freestanding 库，不需要 std 头，故不传 -I std。
 	if kaulaSrcPath != "" {
 		runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
 		if _, err := os.Stat(runtimeSrc); err == nil {
@@ -917,6 +967,9 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 				"-ffreestanding", "-nostdlib", "-fno-pic",
 				"-DKAULA_FREESTANDING", "-I", kaulaSrcPath,
 			)
+			if kaulaFreePath != "" {
+				runtimeArgs = append(runtimeArgs, "-I", kaulaFreePath)
+			}
 			runtimeArgs = append(runtimeArgs, archCodeModel(arch)...)
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			fmt.Printf("[Boot] Compiling freestanding runtime -> %s\n", runtimeObj)
@@ -937,6 +990,9 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 				"-ffreestanding", "-nostdlib", "-fno-pic",
 				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
 			)
+			if kaulaFreePath != "" {
+				allocArgs = append(allocArgs, "-I", kaulaFreePath)
+			}
 			allocArgs = append(allocArgs, archCodeModel(arch)...)
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
 			fmt.Printf("[Boot] Compiling KMM allocator -> %s\n", allocObj)
@@ -994,6 +1050,14 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 
 	kaulaSrcPath := findBootKaulaSrcPath(workDir)
 	kaulaStdPath := findBootKaulaStdPath(workDir)
+	kaulaFreePath := findBootKaulaFreePath(workDir)
+	// 见 compileBootKernel 中同样注释：freestanding/ 父目录需加入搜索路径
+	kaulaFreeParentPath := ""
+	if kaulaFreePath != "" {
+		if parent := filepath.Dir(kaulaFreePath); parent != kaulaFreePath {
+			kaulaFreeParentPath = parent
+		}
+	}
 
 	progArgs := append(append([]string{}, baseArgs...),
 		"-ffreestanding", "-nostdlib", "-fno-pic",
@@ -1005,6 +1069,12 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 	}
 	if kaulaStdPath != "" {
 		progArgs = append(progArgs, "-I", kaulaStdPath)
+	}
+	if kaulaFreeParentPath != "" {
+		progArgs = append(progArgs, "-I", kaulaFreeParentPath)
+	}
+	if kaulaFreePath != "" {
+		progArgs = append(progArgs, "-I", kaulaFreePath)
 	}
 	progArgs = append(progArgs, cacheFile, "-o", progObj)
 	fmt.Printf("[User] Compiling program C -> %s\n", progObj)
@@ -1021,6 +1091,9 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 				"-ffreestanding", "-nostdlib", "-fno-pic",
 				"-DKAULA_FREESTANDING", "-I", kaulaSrcPath,
 			)
+			if kaulaFreePath != "" {
+				runtimeArgs = append(runtimeArgs, "-I", kaulaFreePath)
+			}
 			runtimeArgs = append(runtimeArgs, archCodeModel(arch)...)
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
@@ -1036,6 +1109,9 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 				"-ffreestanding", "-nostdlib", "-fno-pic",
 				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
 			)
+			if kaulaFreePath != "" {
+				allocArgs = append(allocArgs, "-I", kaulaFreePath)
+			}
 			allocArgs = append(allocArgs, archCodeModel(arch)...)
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
 			if out, err := exec.Command(clangPath, allocArgs...).CombinedOutput(); err != nil {
@@ -1271,9 +1347,10 @@ func printErrors(ec *errors.ErrorCollector, stage string) {
 }
 
 // resolveModuleDependencies 自动解析模块传递依赖
-// 读取 std/dependencies.json，递归展开所有依赖模块，返回去重后的完整模块列表
-func resolveModuleDependencies(usedModules []string, validStdPaths []string) []string {
-	// 查找 dependencies.json
+// 读取 std/dependencies.json 与 freestanding/dependencies.json，递归展开所有依赖模块，
+// 返回去重后的完整模块列表（freestanding 模块保留 freestanding. 前缀）
+func resolveModuleDependencies(usedModules []string, validStdPaths []string, validFreePaths []string) []string {
+	// 查找 std 依赖声明
 	var depsPath string
 	for _, stdPath := range validStdPaths {
 		candidate := filepath.Join(stdPath, "dependencies.json")
@@ -1282,19 +1359,26 @@ func resolveModuleDependencies(usedModules []string, validStdPaths []string) []s
 			break
 		}
 	}
-	if depsPath == "" {
-		return usedModules // 无依赖声明文件，原样返回
-	}
-
-	// 读取依赖声明
-	data, err := os.ReadFile(depsPath)
-	if err != nil {
-		return usedModules
-	}
-
 	var depsMap map[string][]string
-	if err := json.Unmarshal(data, &depsMap); err != nil {
-		return usedModules
+	if depsPath != "" {
+		if data, err := os.ReadFile(depsPath); err == nil {
+			_ = json.Unmarshal(data, &depsMap)
+		}
+	}
+
+	// 查找 freestanding 依赖声明
+	var freeDepsMap map[string][]string
+	for _, freePath := range validFreePaths {
+		candidate := filepath.Join(freePath, "dependencies.json")
+		if _, err := os.Stat(candidate); err == nil {
+			if data, err := os.ReadFile(candidate); err == nil {
+				_ = json.Unmarshal(data, &freeDepsMap)
+			}
+			break
+		}
+	}
+	if depsMap == nil && freeDepsMap == nil {
+		return usedModules // 无依赖声明文件，原样返回
 	}
 
 	// BFS 递归展开所有依赖
@@ -1305,6 +1389,18 @@ func resolveModuleDependencies(usedModules []string, validStdPaths []string) []s
 	for len(queue) > 0 {
 		mod := queue[0]
 		queue = queue[1:]
+
+		if result[mod] {
+			continue // 已处理
+		}
+		result[mod] = true
+
+		// freestanding 模块：剥离前缀，依赖从 freestanding 声明中查找
+		prefix := ""
+		if len(mod) > 13 && mod[:13] == "freestanding." {
+			prefix = "freestanding."
+			mod = mod[13:]
+		}
 
 		// 标准化模块名（去掉 std/ 或 std. 前缀）
 		normalizedName := mod
@@ -1321,17 +1417,22 @@ func resolveModuleDependencies(usedModules []string, validStdPaths []string) []s
 			normalizedName = parts[len(parts)-1]
 		}
 
-		if result[normalizedName] {
-			continue // 已处理
-		}
-		result[normalizedName] = true
-
 		// 查找该模块的依赖
-		if depList, ok := depsMap[normalizedName]; ok {
-			for _, dep := range depList {
-				if !result[dep] {
-					queue = append(queue, dep)
-				}
+		var depList []string
+		if prefix == "freestanding." {
+			if freeDepsMap != nil {
+				depList = freeDepsMap[normalizedName]
+			}
+		} else if depsMap != nil {
+			depList = depsMap[normalizedName]
+		}
+		for _, dep := range depList {
+			key := dep
+			if prefix == "freestanding." {
+				key = "freestanding." + dep
+			}
+			if !result[key] {
+				queue = append(queue, key)
 			}
 		}
 	}
@@ -1461,7 +1562,29 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		filepath.Join(workDir, "..", "..", "std"),
 	)
 
-	var validSrcPaths, validStdPaths []string
+	// freestanding 库目录（freestanding.memory 等模块头/实现所在目录）
+	freePaths := []string{}
+	if useInstalledLibraries {
+		freePaths = append(freePaths, filepath.Join(installedRoot, "include", "freestanding"))
+	} else if kaulaRoot != "" {
+		freePaths = append(freePaths, filepath.Join(kaulaRoot, "freestanding"))
+	}
+	freePaths = append(freePaths,
+		filepath.Join(workDir, "freestanding"),
+		filepath.Join(workDir, "..", "freestanding"),
+		filepath.Join(workDir, "..", "..", "freestanding"),
+	)
+	// 代码生成中的 freestanding 模块头保留完整前缀（freestanding/xxx/xxx.h），
+	// 需要把 freestanding/ 的父目录也加入搜索路径，否则 std 目录下的同名头
+	// 文件（如 string/string.h）会被错误解析到 std 版本
+	for _, p := range freePaths {
+		parent := filepath.Dir(p)
+		if parent != p {
+			freePaths = append(freePaths, parent)
+		}
+	}
+
+	var validSrcPaths, validStdPaths, validFreePaths []string
 	for _, p := range srcPaths {
 		if _, err := os.Stat(p); err == nil {
 			validSrcPaths = append(validSrcPaths, p)
@@ -1470,6 +1593,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	for _, p := range stdPaths {
 		if _, err := os.Stat(p); err == nil {
 			validStdPaths = append(validStdPaths, p)
+		}
+	}
+	for _, p := range freePaths {
+		if _, err := os.Stat(p); err == nil {
+			validFreePaths = append(validFreePaths, p)
 		}
 	}
 
@@ -1498,6 +1626,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		for _, p := range validStdPaths {
 			pchCmd.Args = append(pchCmd.Args, "-I", p)
 		}
+		for _, p := range validFreePaths {
+			pchCmd.Args = append(pchCmd.Args, "-I", p)
+		}
 		pchCmd.Args = append(pchCmd.Args, "-DKMM_THREAD_SAFETY_LEVEL=1")
 		if poolCapacity > 0 {
 			pchCmd.Args = append(pchCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
@@ -1521,6 +1652,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	for _, p := range validStdPaths {
 		clangArgs = append(clangArgs, "-I", p)
 	}
+	for _, p := range validFreePaths {
+		clangArgs = append(clangArgs, "-I", p)
+	}
 	// 启用 PCH：让 clang 自动查找 kaula.h.gch 并使用
 	// 暂时禁用 PCH 以调试崩溃问题
 	// if kaulaSrcPath != "" {
@@ -1528,12 +1662,12 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// }
 
 	// 自动解析模块传递依赖（读取 dependencies.json 递归展开）
-	usedModules = resolveModuleDependencies(usedModules, validStdPaths)
+	usedModules = resolveModuleDependencies(usedModules, validStdPaths, validFreePaths)
 
 	// 预编译 std 模块为 .o 对象文件（增量编译缓存）
 	// objectCacheDir 已在 PCH 阶段提前创建
 
-	// 收集所有需要编译的 std .c 文件
+	// 收集所有需要编译的 std / freestanding 模块 .c 文件
 	type moduleSource struct {
 		cPath        string
 		objPath      string
@@ -1542,16 +1676,26 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	var moduleSources []moduleSource
 
 	for _, moduleName := range usedModules {
-		for _, stdPath := range validStdPaths {
-			moduleDirName := moduleName
-			if len(moduleDirName) > 4 && moduleDirName[:4] == "std/" {
-				moduleDirName = moduleDirName[4:]
-			}
-			if len(moduleDirName) > 4 && moduleDirName[:4] == "std." {
-				moduleDirName = moduleDirName[4:]
-			}
-			moduleDirName = strings.ReplaceAll(moduleDirName, ".", "/")
+		moduleDirName := moduleName
+		isFreeModule := false
+		if len(moduleDirName) > 13 && moduleDirName[:13] == "freestanding." {
+			isFreeModule = true
+			moduleDirName = moduleDirName[13:]
+		}
+		if len(moduleDirName) > 4 && moduleDirName[:4] == "std/" {
+			moduleDirName = moduleDirName[4:]
+		}
+		if len(moduleDirName) > 4 && moduleDirName[:4] == "std." {
+			moduleDirName = moduleDirName[4:]
+		}
+		moduleDirName = strings.ReplaceAll(moduleDirName, ".", "/")
 
+		// freestanding 模块在 freestanding 库目录中查找，std 模块在 stdlib 目录中查找
+		searchPaths := validStdPaths
+		if isFreeModule {
+			searchPaths = validFreePaths
+		}
+		for _, stdPath := range searchPaths {
 			moduleDir := filepath.Join(stdPath, moduleDirName)
 			if _, err := os.Stat(moduleDir); err == nil {
 				entries, _ := os.ReadDir(moduleDir)
@@ -1559,6 +1703,10 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					if !entry.IsDir() && filepath.Ext(entry.Name()) == ".c" {
 						cFullPath := filepath.Join(moduleDir, entry.Name())
 						objName := moduleDirName + "_" + strings.TrimSuffix(entry.Name(), ".c") + ".o"
+						// freestanding 模块使用独立对象名，避免与同名 std 模块缓存冲突
+						if isFreeModule {
+							objName = "fs_" + objName
+						}
 						objFullPath := filepath.Join(objectCacheDir, objName)
 
 						needsRebuild := true
@@ -1612,6 +1760,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					compileCmd.Args = append(compileCmd.Args, "-I", p)
 				}
 				for _, p := range validStdPaths {
+					compileCmd.Args = append(compileCmd.Args, "-I", p)
+				}
+				for _, p := range validFreePaths {
 					compileCmd.Args = append(compileCmd.Args, "-I", p)
 				}
 				if kaulaSrcPath != "" {
@@ -1670,6 +1821,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				for _, p := range validStdPaths {
 					rsCmd.Args = append(rsCmd.Args, "-I", p)
 				}
+				for _, p := range validFreePaths {
+					rsCmd.Args = append(rsCmd.Args, "-I", p)
+				}
 				if poolCapacity > 0 {
 					rsCmd.Args = append(rsCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
 				}
@@ -1710,6 +1864,20 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				filepath.Join(installedRoot, "lib", runtimeLibraryName),
 			)
 			fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName)
+			// 使用 freestanding 模块时链接 libkaula_freestanding.a（安装模式下）
+			for _, mod := range usedModules {
+				if strings.HasPrefix(mod, "freestanding.") {
+					freeLibPath := filepath.Join(installedRoot, "lib", "libkaula_freestanding.a")
+					if runtime.GOOS == "windows" {
+						freeLibPath = filepath.Join(installedRoot, "lib", "kaula_freestanding.lib")
+					}
+					if _, err := os.Stat(freeLibPath); err == nil {
+						clangArgs = append(clangArgs, "-x", "none", freeLibPath)
+						fmt.Printf("[Compile] Linked installed freestanding library: %s\n", freeLibPath)
+					}
+					break
+				}
+			}
 		} else {
 			stdLibPath := filepath.Join(objectCacheDir, "std.lib")
 			// 计算当前模块集合的 hash，只有变化时才重新生成
@@ -1757,6 +1925,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 						clangArgs = append(clangArgs, "-I", p)
 					}
 					for _, p := range validStdPaths {
+						clangArgs = append(clangArgs, "-I", p)
+					}
+					for _, p := range validFreePaths {
 						clangArgs = append(clangArgs, "-I", p)
 					}
 					clangArgs = append(clangArgs, "-x", "none", stdLibPath)
@@ -1816,6 +1987,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 						clangArgs = append(clangArgs, "-I", p)
 					}
 					for _, p := range validStdPaths {
+						clangArgs = append(clangArgs, "-I", p)
+					}
+					for _, p := range validFreePaths {
 						clangArgs = append(clangArgs, "-I", p)
 					}
 					clangArgs = append(clangArgs, "-x", "none", stdLibPath)

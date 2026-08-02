@@ -8873,5 +8873,782 @@
       ],
       "return": "bool_t"
     }
+  },
+
+  "freestanding.base": {
+    "header": "freestanding/base/types.h",
+    "to_i8": {
+      "args": [
+        "ssize_t"
+      ],
+      "return": "i8"
+    },
+    "to_i16": {
+      "args": [
+        "ssize_t"
+      ],
+      "return": "i16"
+    },
+    "to_i32": {
+      "args": [
+        "ssize_t"
+      ],
+      "return": "i32"
+    },
+    "to_i64": {
+      "args": [
+        "ssize_t"
+      ],
+      "return": "i64"
+    },
+    "to_u8": {
+      "args": [
+        "size_t"
+      ],
+      "return": "u8"
+    },
+    "to_u16": {
+      "args": [
+        "size_t"
+      ],
+      "return": "u16"
+    },
+    "to_u32": {
+      "args": [
+        "size_t"
+      ],
+      "return": "u32"
+    },
+    "to_u64": {
+      "args": [
+        "size_t"
+      ],
+      "return": "u64"
+    },
+    "to_f32": {
+      "args": [
+        "double"
+      ],
+      "return": "f32"
+    },
+    "to_f64": {
+      "args": [
+        "double"
+      ],
+      "return": "f64"
+    },
+    "to_bool": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "to_char": {
+      "args": [
+        "int"
+      ],
+      "return": "char"
+    },
+    "compare_i8": {
+      "args": [
+        "i8",
+        "i8"
+      ],
+      "return": "int"
+    },
+    "compare_i16": {
+      "args": [
+        "i16",
+        "i16"
+      ],
+      "return": "int"
+    },
+    "compare_i32": {
+      "args": [
+        "i32",
+        "i32"
+      ],
+      "return": "int"
+    },
+    "compare_i64": {
+      "args": [
+        "i64",
+        "i64"
+      ],
+      "return": "int"
+    },
+    "compare_u8": {
+      "args": [
+        "u8",
+        "u8"
+      ],
+      "return": "int"
+    },
+    "compare_u16": {
+      "args": [
+        "u16",
+        "u16"
+      ],
+      "return": "int"
+    },
+    "compare_u32": {
+      "args": [
+        "u32",
+        "u32"
+      ],
+      "return": "int"
+    },
+    "compare_u64": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "int"
+    },
+    "compare_f32": {
+      "args": [
+        "f32",
+        "f32"
+      ],
+      "return": "int"
+    },
+    "compare_f64": {
+      "args": [
+        "f64",
+        "f64"
+      ],
+      "return": "int"
+    },
+    "compare_bool": {
+      "args": [
+        "bool",
+        "bool"
+      ],
+      "return": "int"
+    },
+    "compare_char": {
+      "args": [
+        "char",
+        "char"
+      ],
+      "return": "int"
+    },
+    "is_integer": {
+      "args": [
+        "ssize_t"
+      ],
+      "return": "bool"
+    },
+    "is_unsigned": {
+      "args": [
+        "size_t"
+      ],
+      "return": "bool"
+    },
+    "is_float": {
+      "args": [
+        "double"
+      ],
+      "return": "bool"
+    },
+    "is_bool": {
+      "args": [
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "is_char": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    }
+  },
+
+  "freestanding.memory": {
+    "header": "freestanding/memory/memory.h",
+    "memset": {
+      "args": [
+        "void()",
+        "int",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "memcpy": {
+      "args": [
+        "void()",
+        "const void()",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "memmove": {
+      "args": [
+        "void()",
+        "const void()",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "memcmp": {
+      "args": [
+        "const void()",
+        "const void()",
+        "size_t"
+      ],
+      "return": "int"
+    },
+    "fs_alloc": {
+      "args": [
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "fs_calloc": {
+      "args": [
+        "size_t",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "fs_free": {
+      "args": [
+        "void()"
+      ]
+    },
+    "fs_alloc_reset": {
+      "args": []
+    },
+    "fs_alloc_usage": {
+      "args": [],
+      "return": "size_t"
+    },
+    "fs_alloc_available": {
+      "args": [],
+      "return": "size_t"
+    },
+    "fs_alloc_capacity": {
+      "args": [],
+      "return": "size_t"
+    }
+  },
+
+  "freestanding.string": {
+    "header": "freestanding/string/string.h",
+    "strlen": {
+      "args": [
+        "const char*"
+      ],
+      "return": "size_t"
+    },
+    "strcmp": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "strncmp": {
+      "args": [
+        "const char*",
+        "const char*",
+        "size_t"
+      ],
+      "return": "int"
+    },
+    "strcasecmp": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "strncasecmp": {
+      "args": [
+        "const char*",
+        "const char*",
+        "size_t"
+      ],
+      "return": "int"
+    },
+    "strcpy": {
+      "args": [
+        "char*",
+        "const char*"
+      ],
+      "return": "char*"
+    },
+    "strncpy": {
+      "args": [
+        "char*",
+        "const char*",
+        "size_t"
+      ],
+      "return": "char*"
+    },
+    "strcat": {
+      "args": [
+        "char*",
+        "const char*"
+      ],
+      "return": "char*"
+    },
+    "strncat": {
+      "args": [
+        "char*",
+        "const char*",
+        "size_t"
+      ],
+      "return": "char*"
+    },
+    "strchr": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "char*"
+    },
+    "strrchr": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "char*"
+    },
+    "strstr": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "char*"
+    },
+    "strspn": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "size_t"
+    },
+    "strcspn": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "size_t"
+    },
+    "memchr": {
+      "args": [
+        "const void()",
+        "int",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "is_alpha": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "is_digit": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "is_alnum": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "is_space": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "is_upper": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "is_lower": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "is_xdigit": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "to_upper": {
+      "args": [
+        "char"
+      ],
+      "return": "char"
+    },
+    "to_lower": {
+      "args": [
+        "char"
+      ],
+      "return": "char"
+    },
+    "fs_itoa": {
+      "args": [
+        "i64",
+        "char*"
+      ],
+      "return": "char*"
+    },
+    "fs_utoa": {
+      "args": [
+        "u64",
+        "char*"
+      ],
+      "return": "char*"
+    },
+    "fs_itoa_hex": {
+      "args": [
+        "u64",
+        "char*",
+        "bool"
+      ],
+      "return": "char*"
+    },
+    "fs_atoi": {
+      "args": [
+        "const char*"
+      ],
+      "return": "i64"
+    },
+    "fs_atou": {
+      "args": [
+        "const char*"
+      ],
+      "return": "u64"
+    },
+    "fs_strdup": {
+      "args": [
+        "const char*"
+      ],
+      "return": "char*"
+    }
+  },
+
+  "freestanding.math": {
+    "header": "freestanding/math/math.h",
+    "math_abs": {
+      "args": [
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_fabs": {
+      "args": [
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_min": {
+      "args": [
+        "f64",
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_max": {
+      "args": [
+        "f64",
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_signbit": {
+      "args": [
+        "f64"
+      ],
+      "return": "int"
+    },
+    "math_isnan": {
+      "args": [
+        "f64"
+      ],
+      "return": "bool"
+    },
+    "math_isinf": {
+      "args": [
+        "f64"
+      ],
+      "return": "bool"
+    },
+    "math_isfinite": {
+      "args": [
+        "f64"
+      ],
+      "return": "bool"
+    },
+    "math_floor": {
+      "args": [
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_ceil": {
+      "args": [
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_trunc": {
+      "args": [
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_abs_i64": {
+      "args": [
+        "i64"
+      ],
+      "return": "i64"
+    },
+    "math_abs_i32": {
+      "args": [
+        "i32"
+      ],
+      "return": "i32"
+    },
+    "math_min_i64": {
+      "args": [
+        "i64",
+        "i64"
+      ],
+      "return": "i64"
+    },
+    "math_max_i64": {
+      "args": [
+        "i64",
+        "i64"
+      ],
+      "return": "i64"
+    },
+    "math_min_i32": {
+      "args": [
+        "i32",
+        "i32"
+      ],
+      "return": "i32"
+    },
+    "math_max_i32": {
+      "args": [
+        "i32",
+        "i32"
+      ],
+      "return": "i32"
+    },
+    "math_min_u64": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "u64"
+    },
+    "math_max_u64": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "u64"
+    },
+    "math_min_u32": {
+      "args": [
+        "u32",
+        "u32"
+      ],
+      "return": "u32"
+    },
+    "math_max_u32": {
+      "args": [
+        "u32",
+        "u32"
+      ],
+      "return": "u32"
+    },
+    "math_clz": {
+      "args": [
+        "u64"
+      ],
+      "return": "u32"
+    },
+    "math_ctz": {
+      "args": [
+        "u64"
+      ],
+      "return": "u32"
+    },
+    "math_popcount": {
+      "args": [
+        "u64"
+      ],
+      "return": "u32"
+    },
+    "math_is_pow2": {
+      "args": [
+        "u64"
+      ],
+      "return": "bool"
+    },
+    "math_round_up": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "u64"
+    },
+    "math_round_down": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "u64"
+    },
+    "math_div_round_up": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "u64"
+    },
+    "math_gcd": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "u64"
+    },
+    "math_srand": {
+      "args": [
+        "unsigned int"
+      ]
+    },
+    "math_rand": {
+      "args": [],
+      "return": "int"
+    },
+    "math_randf": {
+      "args": [],
+      "return": "f64"
+    },
+    "math_rand_range": {
+      "args": [
+        "f64",
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_deg_to_rad": {
+      "args": [
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "math_rad_to_deg": {
+      "args": [
+        "f64"
+      ],
+      "return": "f64"
+    }
+  },
+
+  "freestanding.io": {
+    "header": "freestanding/io/io.h",
+    "println": {
+      "args": [
+        "const char*"
+      ],
+      "varargs": true
+    },
+    "print": {
+      "args": [
+        "const char*"
+      ],
+      "varargs": true
+    },
+    "println_multi": {
+      "args": [
+        "int"
+      ],
+      "varargs": true
+    },
+    "print_char": {
+      "args": [
+        "char"
+      ]
+    },
+    "print_int": {
+      "args": [
+        "i64"
+      ]
+    },
+    "print_float": {
+      "args": [
+        "f64"
+      ]
+    },
+    "print_bool": {
+      "args": [
+        "bool"
+      ]
+    },
+    "print_hex": {
+      "args": [
+        "u64"
+      ]
+    },
+    "fs_putchar": {
+      "args": [
+        "char"
+      ]
+    },
+    "fs_puts": {
+      "args": [
+        "const char*"
+      ]
+    },
+    "fs_putint": {
+      "args": [
+        "i64"
+      ]
+    },
+    "fs_putuint": {
+      "args": [
+        "u64"
+      ]
+    },
+    "fs_puthex": {
+      "args": [
+        "u64"
+      ]
+    },
+    "fs_puthex_noprefix": {
+      "args": [
+        "u64"
+      ]
+    },
+    "fs_putbin": {
+      "args": [
+        "u64"
+      ]
+    },
+    "fs_output_putchar": {
+      "args": [
+        "char"
+      ]
+    }
   }
 }

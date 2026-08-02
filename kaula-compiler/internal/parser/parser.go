@@ -362,6 +362,15 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		stmt.Attributes = attrs
 	}
 
+	// 保存 token 状态：若最终判定不是变量声明（返回 nil），必须恢复 token 流，
+	// 让调用方以表达式语句等其它方式重新解析，避免吞掉后续语句的 token
+	// （例如 "u8 buf[64]" 后紧跟 "foo(a, b)" 时，[64]foo( 会被此函数预读后失败）
+	// 注意：必须同时恢复 lexer 状态，否则 token 窗口虽然还原，lexer 内部位置
+	// 仍停留在预读处，下一次 nextToken() 会跳过中间 token
+	savedLexState := p.lexer.SaveState()
+	savedCurTok := p.curTok
+	savedPeekTok := p.peekTok
+
 	// 首先检查是否有类型关键字
 	var typeName string
 
@@ -422,8 +431,6 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		}
 	} else if p.curTok.Type == lexer.TOKEN_LBRACKET {
 		// 数组类型 [N]type 或 []type（固定大小数组 / 动态数组）
-		savedCurTok := p.curTok
-		savedPeekTok := p.peekTok
 		p.nextToken() // consume '['
 		arraySize := ""
 		if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
@@ -446,6 +453,7 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 			isElemType = true
 		}
 		if !isElemType {
+			p.lexer.RestoreState(savedLexState)
 			p.curTok = savedCurTok
 			p.peekTok = savedPeekTok
 			return nil
@@ -453,7 +461,10 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		p.nextToken()
 		typeName = "[" + arraySize + "]" + elemType
 	} else {
-		// 不是类型，返回 nil
+		// 不是类型，恢复 token 并返回 nil
+		p.lexer.RestoreState(savedLexState)
+		p.curTok = savedCurTok
+		p.peekTok = savedPeekTok
 		return nil
 	}
 
@@ -477,7 +488,10 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 	}
 
 	if p.curTok.Type != lexer.TOKEN_IDENT {
-		// 不是变量名，返回 nil（不要报告错误，因为可能是其他语句）
+		// 不是变量名，恢复 token 流并返回 nil（不要报告错误，因为可能是其他语句）
+		p.lexer.RestoreState(savedLexState)
+		p.curTok = savedCurTok
+		p.peekTok = savedPeekTok
 		return nil
 	}
 

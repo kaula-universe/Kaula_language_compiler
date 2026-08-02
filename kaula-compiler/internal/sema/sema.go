@@ -292,9 +292,9 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 
 	if sa.stdlibConfig != nil {
 		// 检查是否是标准库模块
-		// 支持两种导入格式: `io` 和 `std.io`
+		// 支持三种导入格式: `io`、`std.io` 和 `freestanding.io`
 		stdlibKey := moduleName
-		if !strings.HasPrefix(stdlibKey, "std.") {
+		if !strings.HasPrefix(stdlibKey, "std.") && !strings.HasPrefix(stdlibKey, "freestanding.") {
 			stdlibKey = "std." + moduleName
 		}
 
@@ -1844,13 +1844,19 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 
 // checkStdlibImport 检查标准库模块是否已导入
 func (sa *SemanticAnalyzer) checkStdlibImport(memberAccess *ast.MemberAccessExpression, pos ast.Position) {
-	// 解析模块路径：std.module.function -> module
+	// 解析模块路径：std.module.function / freestanding.module.function -> module
 	var moduleName string
+	isFreeModuleCall := false
 
-	// 检查是否是 std.module.function 形式
+	// 检查是否是 std.module.function / freestanding.module.function 形式
 	if nestedMember, ok := memberAccess.Object.(*ast.MemberAccessExpression); ok {
-		if innerIdent, ok := nestedMember.Object.(*ast.Identifier); ok && innerIdent.Name == "std" {
-			moduleName = nestedMember.Member
+		if innerIdent, ok := nestedMember.Object.(*ast.Identifier); ok {
+			if innerIdent.Name == "std" {
+				moduleName = nestedMember.Member
+			} else if innerIdent.Name == "freestanding" {
+				moduleName = nestedMember.Member
+				isFreeModuleCall = true
+			}
 		}
 	}
 
@@ -1860,14 +1866,18 @@ func (sa *SemanticAnalyzer) checkStdlibImport(memberAccess *ast.MemberAccessExpr
 	}
 
 	// 检查模块是否已导入（使用 importedModules 而不是符号表）
-	stdlibKey := "std." + moduleName
+	namespace := "std."
+	if isFreeModuleCall {
+		namespace = "freestanding."
+	}
+	stdlibKey := namespace + moduleName
 	if !sa.importedModules[moduleName] && !sa.importedModules[stdlibKey] {
 		sa.errorCollector.AddSemanticError(
-			fmt.Sprintf("标准库模块 '%s' 未导入，请添加 'import std.%s;' 语句", moduleName, moduleName),
+			fmt.Sprintf("%s模块 '%s' 未导入，请添加 'import %s%s;' 语句", namespace, moduleName, namespace, moduleName),
 			pos.Line,
 			pos.Column,
 			"missing_import",
-			fmt.Sprintf("在文件顶部添加: import std.%s;", moduleName),
+			fmt.Sprintf("在文件顶部添加: import %s%s;", namespace, moduleName),
 		)
 	}
 }

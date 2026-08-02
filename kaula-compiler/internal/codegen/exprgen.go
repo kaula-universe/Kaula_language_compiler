@@ -715,28 +715,33 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	object := eg.GenerateExpression(memberAccess.Object)
 	methodName := memberAccess.Member
 
-	// 检查是否是标准库模块调用（如 std.io.println）
+	// 检查是否是标准库模块调用（如 std.io.println / freestanding.io.println）
 	// 处理多级成员访问：获取实际的模块名
 	moduleName := ""
 	isStdModuleCall := false
+	isFreeModuleCall := false
 	if ident, ok := memberAccess.Object.(*ast.Identifier); ok {
 		// 一级成员访问：io.println 或 std.println
 		moduleName = ident.Name
 	} else if nestedMember, ok := memberAccess.Object.(*ast.MemberAccessExpression); ok {
-		// 多级成员访问：std.io.println，methodName 是 "println"，nestedMember.Member 是 "io"
+		// 多级成员访问：std.io.println 或 freestanding.io.println，methodName 是 "println"
 		moduleName = nestedMember.Member
 		// 检查是否是 std.module.function 模式
 		if innerIdent, ok := nestedMember.Object.(*ast.Identifier); ok {
 			if innerIdent.Name == "std" {
 				isStdModuleCall = true
+			} else if innerIdent.Name == "freestanding" {
+				isFreeModuleCall = true
 			}
 		}
 	}
 
 	if moduleName != "" && eg.codegen.stdlibConfig != nil {
-		// 支持两种键格式: "io" 和 "std.io"
+		// 支持多种键格式: "io"、"std.io" 和 "freestanding.io"
 		stdlibKey := moduleName
-		if !strings.HasPrefix(stdlibKey, "std.") {
+		if isFreeModuleCall {
+			stdlibKey = "freestanding." + moduleName
+		} else if !strings.HasPrefix(stdlibKey, "std.") {
 			stdlibKey = "std." + moduleName
 		}
 
@@ -868,7 +873,14 @@ func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName strin
 // generatePrintlnCall 生成 println 调用代码
 // 支持类型推导自动判断格式化参数
 func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string {
+	// freestanding 模式下没有 libc 的 puts/putchar/printf，
+	// 必须使用 freestanding.io 的 println/fs_putchar 函数
+	isFreestanding := eg.codegen.config != nil && eg.codegen.config.Freestanding
+
 	if len(args) == 0 {
+		if isFreestanding {
+			return "fs_putchar('\\n')"
+		}
 		return "putchar('\\n')"
 	}
 
@@ -878,10 +890,16 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 		strEscaped := escapeCString(strings.TrimSuffix(str, "\\n"))
 
 		if len(args) == 1 && !strings.Contains(str, "%") {
+			if isFreestanding {
+				return "println(\"" + strEscaped + "\")"
+			}
 			return "puts(\"" + strEscaped + "\")"
 		}
 
 		if len(args) == 1 {
+			if isFreestanding {
+				return "println(\"" + strEscaped + "\")"
+			}
 			return "puts(\"" + strEscaped + "\")"
 		}
 
@@ -898,7 +916,15 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 		argCode := eg.GenerateExpression(args[0])
 		argType := eg.inferType(args[0])
 
+		// freestanding 模式下用 print + fs_putchar('\n')，否则用 printf
+		printFn := "printf"
+		if isFreestanding {
+			printFn = "print"
+		}
 		if argType == "d" && isIntegerLiteral(argCode) {
+			if isFreestanding {
+				return printFn + "(\"" + argCode + "\\n\")"
+			}
 			return "printf(\"" + argCode + "\\n\")"
 		}
 		// cstr 类型（char*）对应 %s
@@ -906,7 +932,7 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 		if formatSpec == "cstr" {
 			formatSpec = "s"
 		}
-		return "printf(\"%" + formatSpec + "\\n\", " + eg.maybeUnwrapString(argCode, argType) + ")"
+		return printFn + "(\"%" + formatSpec + "\\n\", " + eg.maybeUnwrapString(argCode, argType) + ")"
 	} else {
 		return eg.generatePrintlnMulti(args)
 	}
@@ -939,19 +965,26 @@ func (eg *ExpressionGenerator) generatePrintCall(args []ast.Expression) string {
 		return ""
 	}
 
+	// freestanding 模式下没有 libc 的 printf，使用 freestanding.io 的 print
+	isFreestanding := eg.codegen.config != nil && eg.codegen.config.Freestanding
+	printfName := "printf"
+	if isFreestanding {
+		printfName = "print"
+	}
+
 	// 检查第一个参数是否是字符串字面量
 	if strLit, ok := args[0].(*ast.StringLiteral); ok {
 		str := strLit.Value
 		strEscaped := escapeCString(str)
 
 		if len(args) == 1 {
-			return "printf(\"" + strEscaped + "\")"
+			return printfName + "(\"" + strEscaped + "\")"
 		}
 
 		// 有格式字符串和参数时，使用 printf 处理格式
 		if strings.Contains(str, "%") {
 			var b strings.Builder
-			b.WriteString("printf(\"")
+			b.WriteString(printfName + "(\"")
 			b.WriteString(strEscaped)
 			b.WriteString("\"")
 			for i := 1; i < len(args); i++ {
@@ -962,19 +995,19 @@ func (eg *ExpressionGenerator) generatePrintCall(args []ast.Expression) string {
 			return b.String()
 		}
 
-		return "printf(\"" + strEscaped + "\")"
+		return printfName + "(\"" + strEscaped + "\")"
 	}
 
 	// 第一个参数不是字符串字面量
 	if len(args) == 1 {
 		argCode := eg.GenerateExpression(args[0])
 		argType := eg.inferType(args[0])
-		return "printf(\"%" + argType + "\", " + eg.maybeUnwrapString(argCode, argType) + ")"
+		return printfName + "(\"%" + argType + "\", " + eg.maybeUnwrapString(argCode, argType) + ")"
 	}
 
 	// 多个参数
 	var b strings.Builder
-	b.WriteString("printf(\"")
+	b.WriteString(printfName + "(\"")
 	for i, arg := range args {
 		if i > 0 {
 			b.WriteString(" ")

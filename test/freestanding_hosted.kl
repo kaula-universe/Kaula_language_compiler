@@ -1,0 +1,55 @@
+// 托管模式测试：freestanding 库与 libc 共存（弱符号 vs 强符号）
+import freestanding.base
+import freestanding.memory
+import freestanding.string
+import freestanding.math
+import freestanding.io
+
+extern fn putchar(c: i32) -> i32
+
+// 覆写弱符号 fs_output_putchar，把 freestanding 输出重定向到控制台
+fn fs_output_putchar(c: char) {
+    putchar(as<i32>(c))
+}
+
+fn main() {
+    println("--- freestanding hosted test ---")
+
+    // string
+    char* s = fs_strdup("hello freestanding")
+    println(strlen(s), strcmp(s, "hello freestanding"), strcmp(s, "hello"))
+    println(fs_atoi("12345") + fs_atoi("6789"))
+    char* numbuf = as<char*>(fs_alloc(33))
+    fs_itoa(-9876, numbuf)
+    println(strcmp(numbuf, "-9876") == 0)
+    fs_itoa_hex(0xCAFE, numbuf, true)
+    println(strcmp(numbuf, "CAFE") == 0)
+
+    // memory
+    char* buf = as<char*>(fs_alloc(64))
+    memset(buf, 65, 8)
+    println(as<i32>(buf[0]), as<i32>(buf[3]), as<i32>(buf[7]))
+    memcpy(buf, s, 8)
+    println(as<i32>(buf[0]), as<i32>(buf[7]))
+    void* p = fs_alloc(128)
+    println(fs_alloc_usage() > 0)
+
+    // math
+    println(math_abs_i32(-42), math_gcd(48, 36), math_is_pow2(256), math_is_pow2(300))
+    println(math_min_i32(3, 7), math_max_i32(3, 7), math_round_up(10, 8), math_div_round_up(10, 8))
+    println(math_popcount(0xF0F0F0F0), math_clz(1), math_ctz(0x8000))
+
+    // io 单值输出
+    print_int(2026)
+    fs_putchar(32)
+    print_hex(0xDEADBEEF)
+    fs_putchar(32)
+    print_float(3.14159)
+    fs_putchar(32)
+    print_bool(true)
+    fs_putchar(10)
+
+    // printf 风格
+    print("printf: %d %x %s %.2f\n", 42, 0xCAFE, s, 3.14159)
+    println("done")
+}
