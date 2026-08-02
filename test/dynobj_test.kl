@@ -1,4 +1,5 @@
 // dynobj test: object keyword simulates dynamic objects + encapsulation
+import std.io
 import std.obj
 
 fn main() {

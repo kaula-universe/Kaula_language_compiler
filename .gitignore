@@ -20,6 +20,14 @@ vendor/
 *.d
 *.a
 *.out
+*.elf
+
+# Compiler binaries (no extension)
+kaula-compiler/cmd/kaulac/kaulac
+kaula-compiler/cmd/loadtest/loadtest
+
+# Runtime test artifacts
+serial_out.txt
 
 # Build directories
 build/

@@ -594,6 +594,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 					if len(header) >= 4 && header[0] == 's' && header[1] == 't' && header[2] == 'd' && header[3] == '/' {
 						header = header[4:]
 					}
+					// freestanding 模块头保留完整前缀 freestanding/xxx/xxx.h，
+					// 由 -I <kaula-root> 解析。不能去掉前缀：去掉后会与
+					// std 目录下同名头文件（string/string.h 等）冲突，
+					// 且 std 路径在前时会被错误解析到 std 版本
 					allIncludes.WriteString("#include \"")
 					allIncludes.WriteString(header)
 					allIncludes.WriteString("\"\n")

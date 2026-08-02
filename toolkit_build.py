@@ -31,6 +31,7 @@ class BuildConfig:
         self.project_root = Path(__file__).parent.resolve()
         self.std_dir = self.project_root / "std"
         self.src_dir = self.project_root / "src"
+        self.freestanding_dir = self.project_root / "freestanding"
         self.compiler_dir = self.project_root / "kaula-compiler"
         self.pkglib_dir = self.project_root / "pkglib"
         self.runtime_dir = self.compiler_dir / "runtime"
@@ -46,6 +47,15 @@ class BuildConfig:
             str(self.std_dir),
             str(self.src_dir),
             str(self.runtime_dir),
+        ]
+        # freestanding runtime 专用 include 路径（顺序敏感）：
+        # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
+        # unity-include freestanding 库，必须让 freestanding 目录优先于 std 解析，
+        # 否则会错误地包含 std/memory/memory.c（依赖 libc <string.h>）。
+        # 该文件不需要 std 头，故不包含 std_dir。
+        self.freestanding_runtime_include_dirs = [
+            str(self.freestanding_dir),
+            str(self.src_dir),
         ]
 
         self.c_standard = "c11"
@@ -214,18 +224,28 @@ class CBuilder:
                     sources.append(Path(root) / f)
         return sources
 
-    def _compile_one(self, src_file, out_obj=None):
+    def _compile_one(self, src_file, out_obj=None, include_dirs=None):
+        """编译单个 .c 文件。
+
+        include_dirs: 自定义 -I 路径列表（用于 kaula_freestanding_runtime.c 等
+        顺序敏感的特殊文件）。None 时使用 self.config.include_dirs。
+        """
         rel = src_file.relative_to(self.config.project_root)
         rel_key = str(rel).replace(os.sep, "_")
         if out_obj is None:
             out_obj = self.config.obj_dir / (rel_key + self.obj_ext)
         out_obj.parent.mkdir(parents=True, exist_ok=True)
 
-        # 增量编译:hash = sha256(src | flags),命中且 .o 存在则跳过
+        if include_dirs is None:
+            include_dirs = self.config.include_dirs
+
+        # 增量编译:hash = sha256(src | flags | include_dirs),命中且 .o 存在则跳过
+        # 注意:include_dirs 参与哈希,保证更换 -I 顺序时会触发重建
         hash_path = self.config.hash_dir / (rel_key + ".sha256")
+        hash_input = "\n".join(self.flags) + "\n-I\n" + "\n-I ".join(include_dirs)
         try:
             digest = hashlib.sha256(
-                src_file.read_bytes() + b"\0" + "\n".join(self.flags).encode()
+                src_file.read_bytes() + b"\0" + hash_input.encode()
             ).hexdigest()
         except OSError:
             digest = None
@@ -238,12 +258,12 @@ class CBuilder:
 
         if self.is_msvc:
             cmd = [self.compiler] + self.flags
-            for inc in self.config.include_dirs:
+            for inc in include_dirs:
                 cmd.extend(["/I", inc])
             cmd.extend(["/c", str(src_file), f"/Fo{out_obj}"])
         else:
             cmd = [self.compiler] + self.flags
-            for inc in self.config.include_dirs:
+            for inc in include_dirs:
                 cmd.extend(["-I", inc])
             cmd.extend(["-c", str(src_file), "-o", str(out_obj)])
 
@@ -344,10 +364,22 @@ class CBuilder:
         ok = 0
         fail = 0
         for src in sources:
-            if self._compile_one(src):
-                ok += 1
+            # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
+            # unity-include freestanding 库，必须用 freestanding 优先的 -I 顺序，
+            # 否则会错误地包含 std/memory/memory.c（依赖 libc <string.h>）。
+            if src.name == "kaula_freestanding_runtime.c":
+                if self._compile_one(
+                    src,
+                    include_dirs=self.config.freestanding_runtime_include_dirs,
+                ):
+                    ok += 1
+                else:
+                    fail += 1
             else:
-                fail += 1
+                if self._compile_one(src):
+                    ok += 1
+                else:
+                    fail += 1
 
         if fail > 0:
             print(f"[-] 运行时编译失败: {fail} 个文件")
@@ -368,6 +400,7 @@ class CBuilder:
         targets = [
             (self.config.src_dir, "kaula"),
             (self.config.std_dir, "std"),
+            (self.config.freestanding_dir, "freestanding"),
             (self.config.runtime_dir, "runtime"),
         ]
 
@@ -639,6 +672,7 @@ def main():
 
     config.build_dir.mkdir(parents=True, exist_ok=True)
     config.obj_dir.mkdir(parents=True, exist_ok=True)
+    config.hash_dir.mkdir(parents=True, exist_ok=True)
     config.bin_dir.mkdir(parents=True, exist_ok=True)
     config.lib_dir.mkdir(parents=True, exist_ok=True)
 
