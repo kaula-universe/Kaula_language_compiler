@@ -10,6 +10,7 @@ Usage:
   python toolkit_build.py                  # 默认构建所有组件 (Debug, clang)
   python toolkit_build.py --release        # Release 模式构建所有组件
   python toolkit_build.py --target std     # 只构建标准库
+  python toolkit_build.py --target freestanding  # 只构建 freestanding 无依赖标准库
   python toolkit_build.py --target compiler  # 只构建编译器
   python toolkit_build.py --cc gcc         # 指定使用 gcc 而非默认的 clang
   python toolkit_build.py --clean          # 清理所有构建产物
@@ -342,6 +343,46 @@ class CBuilder:
         self.obj_files = old_objs + self.obj_files
         return result
 
+    def build_freestanding_lib(self):
+        """构建 freestanding 无依赖标准库静态库。
+
+        纯 freestanding 实现，不依赖 std/ 或 src/，include 路径仅含 freestanding/。
+        不定义 KAULA_FREESTANDING 宏，故 memset/memcpy/memmove/memcmp 不参与编译
+        （托管安全：弱符号不会被从静态库中提取遮蔽 libc 强符号）；
+        fs_alloc/fs_strdup/... 等无冲突函数始终编译。
+        裸机用户链接本库后，可通过 -DKAULA_FREESTANDING 重编或覆写弱钩子使用。
+        """
+        print("\n=== 构建 Kaula freestanding 库 ===")
+        sources = self._find_c_files(self.config.freestanding_dir)
+        if not sources:
+            print("[-] 未找到 freestanding 库源文件")
+            return False
+
+        print(f"[*] 找到 {len(sources)} 个 freestanding 源文件")
+
+        old_objs = list(self.obj_files)
+        self.obj_files = []
+        ok = 0
+        fail = 0
+        # freestanding 库自包含：仅 -I freestanding/ 即可解析所有 "base/types.h" 等
+        freestanding_include_dirs = [str(self.config.freestanding_dir)]
+        for src in sources:
+            if self._compile_one(src, include_dirs=freestanding_include_dirs):
+                ok += 1
+            else:
+                fail += 1
+
+        if fail > 0:
+            print(f"[-] freestanding 库编译失败: {fail} 个文件")
+            self.obj_files = old_objs
+            return False
+
+        lib_name = "kaula_freestanding.lib" if self.config.is_windows else "libkaula_freestanding.a"
+        out_lib = self.config.lib_dir / lib_name
+        result = self._make_static_lib(out_lib, self.obj_files)
+        self.obj_files = old_objs + self.obj_files
+        return result
+
     def build_runtime_lib(self):
         """构建运行时库 (src/ + SOR runtime)"""
         print("\n=== 构建运行时库 ===")
@@ -552,6 +593,7 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
     c_builder = CBuilder(config, c_compiler, archiver, release)
 
     results["std_lib"] = c_builder.build_std_lib()
+    results["freestanding_lib"] = c_builder.build_freestanding_lib()
     results["runtime_lib"] = c_builder.build_runtime_lib()
     results["headers"] = c_builder.install_headers()
 
@@ -626,6 +668,7 @@ def main():
   python toolkit_build.py               # 构建所有组件 (Debug, 默认 clang)
   python toolkit_build.py --release     # Release 模式
   python toolkit_build.py --target std  # 只构建标准库
+  python toolkit_build.py --target freestanding  # 只构建 freestanding 无依赖标准库
   python toolkit_build.py --target compiler  # 只构建 Go 编译器和格式化工具
   python toolkit_build.py --cc gcc      # 使用 gcc 替代默认 clang
   python toolkit_build.py --clean       # 清理所有构建产物
@@ -636,7 +679,7 @@ def main():
     parser.add_argument("--clean", action="store_true",
                         help="清理所有构建产物")
     parser.add_argument("--target",
-                        choices=["all", "std", "runtime", "compiler", "headers"],
+                        choices=["all", "std", "freestanding", "runtime", "compiler", "headers"],
                         default="all",
                         help="指定构建目标 (默认: all)")
     parser.add_argument("--install-dir", type=str, default=None,
@@ -659,7 +702,7 @@ def main():
 
     c_compiler = ToolDetector.detect_c_compiler(args.cc)
     if not c_compiler:
-        if args.target in ("all", "std", "runtime", "headers"):
+        if args.target in ("all", "std", "freestanding", "runtime", "headers"):
             print("[-] 错误: 构建 C 组件需要 C 编译器")
             sys.exit(1)
 
@@ -686,6 +729,13 @@ def main():
             success = c_builder.build_std_lib()
         else:
             print("[-] 错误: 构建 std 需要 C 编译器")
+            success = False
+
+    elif args.target == "freestanding":
+        if c_builder:
+            success = c_builder.build_freestanding_lib()
+        else:
+            print("[-] 错误: 构建 freestanding 需要 C 编译器")
             success = False
 
     elif args.target == "runtime":
