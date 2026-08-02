@@ -1838,7 +1838,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 	// 使用预编译的 .o 文件链接，而不是重新编译 .c 文件
 	// 注意：必须在 .o 文件前用 -x none 重置语言类型，否则前面的 -x c 会让 clang 把 .o 当作 C 源码
-	if len(moduleSources) > 0 {
+	// 安装模式下 std/freestanding 模块符号已在 kaula_std.lib / kaula_freestanding.lib 中，
+	// 不再单独链接 .o，否则与静态库中的同名符号产生 LNK2005 重复定义。
+	if len(moduleSources) > 0 && !useInstalledLibraries {
 		clangArgs = append(clangArgs, "-x", "none")
 		for _, ms := range moduleSources {
 			clangArgs = append(clangArgs, ms.objPath)
