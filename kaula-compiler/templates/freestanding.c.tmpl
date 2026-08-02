@@ -18,9 +18,12 @@ extern int kaula_main(void);
 
 // 裸机入口：不返回
 // 用户可通过 #[section(".text.boot")] 属性控制放置位置
+// 约定：BSS（__bss_start..__bss_end）由 boot stub 在进入本函数前清零，
+//       栈指针已由 boot stub 设置为链接脚本的 stack_top。
+//       若使用自定义 boot stub，请自行完成这两项。
 __attribute__((noreturn))
 void _kaula_entry(void) {
-    // BSS 清零（如 boot.S 未完成，可在此补充）
+    // 参考实现（内置 boot stub 已清零，此处无需重复）：
     // extern uint8_t __bss_start[], __bss_end[];
     // for (uint8_t* p = __bss_start; p < __bss_end; ) *p++ = 0;
 

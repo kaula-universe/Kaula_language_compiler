@@ -8,7 +8,9 @@
 #include <unistd.h>      // sysconf
 #endif
 #endif
+#ifndef KAULA_FREESTANDING
 #include <string.h>
+#endif
 
 // ==================== 按需提交的虚拟内存池 ====================
 // 修复 #25：reserve 大小使用 KMM_V4_POOL_SIZE 宏，受 SOR 估算影响
@@ -126,11 +128,13 @@ static void pool_commit_up_to(size_t needed) {
 #endif
 }
 
-// 供 header inline 函数调用的提交接口
+// 供 header inline 函数调用的提交接口（静态池模式下 header 提供 no-op 内联版）
+#ifndef KMM_V4_STATIC_POOL
 __attribute__((used))
 void kmm_v4_pool_commit(size_t needed) {
     pool_commit_up_to(needed);
 }
+#endif
 
 // ==================== Per-Thread Heap 机制（修复 #1） ====================
 // 每个线程从全局池批量获取一块内存，后续分配在 TLS 内完成，无原子操作
@@ -204,7 +208,9 @@ void kmm_v4_thread_heap_invalidate(void) {
 // ==================== 核心分配 ====================
 // 修复 #6：统一不加 header，kmm_v4_free 为 no-op
 // 所有分配路径（malloc/calloc/alloc_auto/bump/strdup）行为一致
+// 静态池模式下 malloc/free/calloc/strdup 由 header 提供内联版本（#ifdef KMM_V4_STATIC_POOL）
 
+#ifndef KMM_V4_STATIC_POOL
 __attribute__((used))
 void* kmm_v4_malloc(size_t size) {
     return kmm_v4_alloc_auto(size);
@@ -215,6 +221,7 @@ __attribute__((used))
 void kmm_v4_free(void* ptr) {
     (void)ptr;
 }
+#endif
 
 // 修复 #2：realloc 简化为 always-copy + 区间检查
 // 修复 #8：检查 ptr 是否在 pool 内
@@ -255,6 +262,7 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
     #endif
 }
 
+#ifndef KMM_V4_STATIC_POOL
 __attribute__((used))
 void* kmm_v4_calloc(size_t count, size_t size) {
     // 检查溢出
@@ -278,6 +286,7 @@ void* kmm_v4_strdup(const char* s) {
     if (p) memcpy(p, s, len);
     return p;
 }
+#endif
 
 #ifndef KMM_V4_STATIC_POOL
 void kmm_v4_init_pool(size_t initial_size) {

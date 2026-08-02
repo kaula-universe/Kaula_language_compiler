@@ -549,6 +549,13 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// 不包含 <stdio.h>/<stdlib.h>/<string.h>，它们在裸机下不存在
 		// memset/memcpy 等由 kaula_freestanding_runtime.c 提供
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n")
+		// freestanding 下若代码使用 KMM 分配器（std_malloc 被重写为 kmm_v4_alloc_auto
+		// 或触发作用域回收），需包含分配器头文件（kaulac 自动添加 -I <src>）
+		if strings.Contains(functionCode.String(), "kmm_v4_alloc_auto") ||
+			strings.Contains(functionCode.String(), "KMM_V4_SCOPE_START") ||
+			strings.Contains(mainCode.String(), "kmm_v4_alloc_auto") {
+			allIncludes.WriteString("#include \"kmm_scoped_allocator_v4.h\"\n")
+		}
 	} else {
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n#include \"kaula_runtime.h\"\n")
 	}

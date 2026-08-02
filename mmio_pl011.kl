@@ -1,0 +1,41 @@
+// Kaula 裸机 PL011 UART Hello（aarch64 QEMU virt 专用）
+// PL011 @ 0x09000000：offset 0x00 = DR（数据寄存器），offset 0x18 = FR（标志），bit5 = TXFF
+
+const UART_BASE = 0x09000000
+
+fn mmio_write(u64 addr, u8 val) {
+    #[volatile_store(addr, val)]
+}
+
+fn mmio_read(u64 addr) u8 {
+    return #[volatile_load(addr)]
+}
+
+// 等待发送 FIFO 非满
+fn uart_wait_ready() {
+    while ((mmio_read(UART_BASE + 0x18) & 0x20) != 0) {
+    }
+}
+
+fn uart_putc(u8 c) {
+    uart_wait_ready()
+    mmio_write(UART_BASE + 0x00, c)
+}
+
+fn uart_puts() {
+    uart_putc(0x41)  // A
+    uart_putc(0x41)  // A
+    uart_putc(0x36)  // 6
+    uart_putc(0x34)  // 4
+    uart_putc(0x3A)  // :
+    uart_putc(0x20)  // space
+    uart_putc(0x4F)  // O
+    uart_putc(0x4B)  // K
+    uart_putc(0x21)  // !
+    uart_putc(0x0A)  // \n
+}
+
+fn kaula_main() i32 {
+    uart_puts()
+    return 0
+}
