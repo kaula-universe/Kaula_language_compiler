@@ -1,0 +1,26 @@
+{{includes}}
+
+// 用户态字符串类型（与 std/base/types.h 一致；若 stdlib 头已定义则跳过）
+#ifndef KAULA_STRING_DEFINED
+#define KAULA_STRING_DEFINED
+typedef struct {
+    size_t len;
+    char* ptr;
+} String;
+#endif
+
+// __KAULA_LOCAL_IMPORT_ANCHOR__
+
+{{forward_decls}}
+{{global_vars}}
+{{type_code}}
+{{function_code}}
+
+// 用户态入口：调用 kaula_main，结束后通过 syscall 1 (exit) 退出
+__attribute__((noreturn))
+void user_start(void) {
+    int rc = kaula_main();
+    __asm__ __volatile__("movq $1, %%rax; movq %0, %%rdi; int $0x80"
+        :: "r"((uint64_t)(int64_t)rc) : "rax", "rdi", "memory");
+    for (;;) { __asm__ __volatile__("hlt"); }
+}

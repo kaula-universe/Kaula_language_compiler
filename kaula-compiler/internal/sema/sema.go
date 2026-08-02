@@ -38,6 +38,12 @@ type SemanticAnalyzer struct {
 	thirdPartyTypeSet  map[string]bool                // 第三方库签名中的类型名缓存（lazy 构建）
 	funcReturnTypes    map[string]string              // 函数名 -> 返回类型（用于调用表达式类型推断）
 	arrayLens          map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
+	localImportFuncs   map[string]bool                // 本地 import 的 pub 函数名
+}
+
+// SetLocalImportFuncs 注册本地 import 的 pub 函数（跨文件调用）
+func (sa *SemanticAnalyzer) SetLocalImportFuncs(funcs map[string]bool) {
+	sa.localImportFuncs = funcs
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -1720,6 +1726,10 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 
 	symbol := sa.symbolTable.GetSymbol(expr.Name)
 	if symbol == nil {
+		// 本地 import 的 pub 函数（跨文件调用）不算未定义
+		if sa.localImportFuncs[expr.Name] {
+			return
+		}
 		sa.errorCollector.AddSemanticError(
 			fmt.Sprintf("未定义的变量: '%s'", expr.Name),
 			expr.Pos.Line,

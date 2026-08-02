@@ -51,7 +51,8 @@ type Parser struct {
 	loggingEnabled bool
 	file           string
 	taskStack      []ParseTask
-	skipMainCheck  bool // 跳过 main 函数检查（用于导入的库文件）
+	skipMainCheck  bool // 跳过 main 函数检查（用于导入目标文件）
+	pendingAttributes []*ast.Attribute // 已解析但尚未应用的属性（#[attr] pub 场景）
 }
 
 // NewParser 创建一个新的语法分析器
@@ -179,6 +180,10 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 	if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
 		// 预读属性后面的 token 类型来决定分发
 		switch p.peekTok.Type {
+		case lexer.TOKEN_PUB:
+			// #[attr] pub fn/struct/... — 先解析属性暂存，交给 pub 解析器（函数解析时生效）
+			p.pendingAttributes = p.parseAttributes()
+			return p.parsePubStatementIterative()
 		case lexer.TOKEN_FUNC:
 			return p.parseFunctionStatementIterative()
 		case lexer.TOKEN_STRUCT:
@@ -1083,6 +1088,12 @@ func (p *Parser) parseObjectLiteralExpressionIterative() ast.Expression {
 // 返回解析出的属性切片，如果当前 token 不是 TOKEN_ATTRIBUTE 则返回 nil
 func (p *Parser) parseAttributes() []*ast.Attribute {
 	if p.curTok.Type != lexer.TOKEN_ATTRIBUTE {
+		// 之前已解析但尚未应用的属性（#[attr] pub fn 场景）
+		if p.pendingAttributes != nil {
+			attrs := p.pendingAttributes
+			p.pendingAttributes = nil
+			return attrs
+		}
 		return nil
 	}
 
