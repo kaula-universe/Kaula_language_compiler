@@ -6,8 +6,19 @@ Kaula 编译器提供完整的裸机/系统级编程支持，涵盖内联汇编�
 
 ### 最小裸机程序
 
+使用 `--boot pvh` 时无需自写 `_start`（引导 stub 已内建），只需提供 `kaula_main` 入口：
+
 ```kaula
-// boot.kl - 最小裸机入口
+// hello_serial.kl - 最小裸机程序（boot 模式）
+fn kaula_main() -> i32 {
+    return 0
+}
+```
+
+不使用内建引导时，可自写入口：
+
+```kaula
+// boot.kl - 手写入口
 #[naked, section(".text.boot")]
 fn _start() -> void {
     #[asm("mov %cr3, %rax")]
@@ -20,34 +31,156 @@ fn kaula_main() -> void {
 }
 ```
 
-### 编译命令
+### 编译命令（自动引导）
 
 ```bash
-kaulac.exe --freestanding \
-    --target-triple x86_64-unknown-elf \
-    --link-script linker.ld \
-    --entry _start \
-    --output-format bin \
-    boot.kl
+kaulac.exe --freestanding --boot pvh \
+    --template kaula-compiler\templates \
+    hello_serial.kl
 ```
+
+一条命令完成全部构建：生成 C → 编译内核 → 编译内建 boot 引导 → 链接输出可引导 ELF。
 
 或通过 `kaula.json` 配置：
 
 ```json
 {
     "freestanding": true,
-    "target_triple": "x86_64-unknown-elf",
-    "link_script": "linker.ld",
-    "entry": "_start",
-    "output_format": "bin"
+    "boot": "pvh"
 }
 ```
+
+### QEMU 验证
+
+```bash
+qemu-system-x86_64 -display none -kernel hello_serial.elf \
+    -no-reboot -no-shutdown -serial file:serial_out.txt
+cat serial_out.txt   # 串口输出 "Hello, Kaula from bare metal!"
+```
+
+## 内建引导（boot）
+
+从 `--freestanding` 输出不可引导的 COFF/EXE 到可引导 ELF 的全过程（boot stub 汇编、链接脚本、链接器调用）已内建到编译器，无需手动编写。
+
+> boot 模式与不带 `--boot` 的 freestanding 是两条独立流水线（见[编译选项](#编译选项)）：boot 模式由 `compileBootKernel` 用 `ld.lld` 手工链接，当前不启用 KMM 静态池宏；不带 `--boot` 的 freestanding 走 clang 直接链接，保留 `-DKMM_V4_STATIC_POOL`。
+
+### --boot
+
+| 模式 | 说明 |
+|------|------|
+| `pvh` | Xen PVH 引导（QEMU `-kernel` 直接支持 x86_64 ELF） |
+| `custom` | 使用 `--boot-file` 指定的自定义引导汇编 |
+| `none` | 不自动引导（默认，仅输出编译产物） |
+
+boot 模式需要同时启用 `--freestanding`。
+
+### 内置模板文件
+
+| 文件 | 作用 |
+|------|------|
+| `templates/boot/x86_64-pvh.S` | x86_64 PVH 引导 stub（32 位入口 → 长模式 → 调 `_kaula_entry`） |
+| `templates/linker/x86_64.ld` | x86_64 链接脚本（入口 `_start`，加载地址 1M） |
+
+### 自动构建流水线
+
+```
+.kl 源码
+  ├─ kaulac 生成 C 代码（freestanding 模板，含 _kaula_entry）
+  ├─ clang -c 编译 C        → kernel.o
+  ├─ clang -c 编译 boot stub → boot.o
+  ├─ clang -c 编译 freestanding runtime → runtime.o (memset/memcpy 等)
+  └─ ld.lld -T linker.ld 链接 → 可引导 ELF（或 raw bin）
+```
+
+### 已验证示例（x86_64 + QEMU）
+
+串口输出例程（`hello_serial.kl`，通过 QEMU `-serial file:serial_out.txt` 验证 "Hello, Kaula from bare metal!"）：
+
+```kaula
+// 串口寄存器（COM1）
+const SERIAL_PORT = 0x3F8
+const UART_THR = 0
+const UART_LSR = 5
+const LSR_THRE = 0x20
+
+#[inline, asm]
+fn outb(u16 port, u8 val) {
+    __asm__ __volatile__("outb %0, %1" : : "a"(val), "d"(port));
+}
+
+#[inline]
+fn inb(u16 port) u8 {
+    u8 ret
+    #[asm("inb %1, %0", "=a"(ret), "d"(port))]
+    return ret
+}
+
+fn serial_wait_ready() {
+    u8 status = inb(SERIAL_PORT + UART_LSR)
+    while ((status & LSR_THRE) == 0) {
+        status = inb(SERIAL_PORT + UART_LSR)
+    }
+}
+
+fn serial_putc(u8 c) {
+    serial_wait_ready()
+    outb(SERIAL_PORT + UART_THR, c)
+}
+
+fn serial_init() {
+    outb(SERIAL_PORT + 1, 0x00)  // 关中断
+    outb(SERIAL_PORT + 3, 0x80)  // DLAB 置位
+    outb(SERIAL_PORT + 0, 0x01)  // 分频低字节 (115200)
+    outb(SERIAL_PORT + 1, 0x00)  // 分频高字节
+    outb(SERIAL_PORT + 3, 0x03)  // 8N1
+    outb(SERIAL_PORT + 2, 0xC7)  // FIFO 使能
+    outb(SERIAL_PORT + 4, 0x03)  // DTR/RTS 使能
+}
+
+fn kaula_main() i32 {
+    serial_init()
+    serial_putc(0x4F)  // 'O'
+    serial_putc(0x4B)  // 'K'
+    serial_putc(0x0A)  // '\n'
+    return 0
+}
+```
+
+该示例同时验证了：固定大小数组声明 `[N]type`、`if ((a) && (b))` 括号约束、extern 符号链接、boot stub 的 SSE/长模式初始化。
+
+### 定制引导
+
+```bash
+# 使用自定义 boot stub（例如非标准初始化序列）
+kaulac.exe --freestanding --boot custom --boot-file myboot.S kernel.kl
+
+# 使用自定义链接脚本
+kaulac.exe --freestanding --boot pvh --link-script mylayout.ld kernel.kl
+
+# 指定目标架构（默认从 --target-triple 推断）
+kaulac.exe --freestanding --boot pvh --target-triple x86_64-none-elf kernel.kl
+```
+
+### 相关配置项
+
+| 配置项 | 命令行 flag | 说明 |
+|--------|-------------|------|
+| `boot` | `--boot` | 引导方式：pvh/custom/none |
+| `boot_file` | `--boot-file` | 自定义引导汇编路径 |
+| `boot_arch` | `--boot-arch` | 引导架构（x86_64/i386/riscv64/aarch64） |
+| `link_script` | `--link-script` | 自定义链接脚本（覆盖内置） |
+| `target_triple` | `--target-triple` | 目标三元组（决定 boot 架构与 clang 目标） |
+| `output_format` | `--output-format` | `elf`（默认）/ `bin`（raw binary） |
+
+`boot` 模式下入口固定为 `_start`（引导 stub 定义，链接脚本 ENTRY），用户代码入口为 `kaula_main`（由模板 `_kaula_entry` 调用），无需再传 `--entry`。
 
 ## 编译选项
 
 ### --freestanding
 
-启用裸机模式，自动添加以下 clang 参数：
+启用裸机模式。按是否指定 `--boot` 分为两条流水线：
+
+**1. 不带 `--boot`（clang 直接链接）**，自动添加以下 clang 参数：
 
 | 参数 | 作用 |
 |------|------|
@@ -57,7 +190,16 @@ kaulac.exe --freestanding \
 | `-DKMM_V4_STATIC_POOL` | KMM 内存分配器使用静态池（BSS 段） |
 | `-DKAULA_FREESTANDING` | 全局宏定义，用于条件编译 |
 
-自动链接 freestanding runtime（`kaula_freestanding_runtime.c`），提供 `memset`/`memcpy`/`memmove`/`memcmp`/`strlen` 实现。
+**2. 带 `--boot`（内建引导流水线，见上文）**，clang 编译参数：
+
+| 参数 | 作用 |
+|------|------|
+| `-ffreestanding` | 不依赖标准库和操作系统 |
+| `-nostdlib` | 不链接标准库 |
+| `-fno-pic` / `-mcmodel=large` | 内核代码模型（高位地址可寻址） |
+| `-DKAULA_FREESTANDING` | 全局宏定义，用于条件编译 |
+
+两条路径都自动链接 freestanding runtime（`kaula_freestanding_runtime.c`），提供 `memset`/`memcpy`/`memmove`/`memcmp`/`strlen` 实现。
 
 头文件裁剪：freestanding 模式下不包含 `<stdio.h>`/`<stdlib.h>`，仅保留 `<stdint.h>`/`<stddef.h>` 等 freestanding 头文件。
 
@@ -365,7 +507,9 @@ freestanding 模式使用 `freestanding.c.tmpl` 模板，提供：
 
 ## KMM V4 静态池模式
 
-freestanding 模式下定义 `KMM_V4_STATIC_POOL`，Kaula 内存分配器使用 BSS 段中的静态池，无需 `malloc`/`free`。
+不带 `--boot` 的 freestanding 路径定义 `KMM_V4_STATIC_POOL`，Kaula 内存分配器使用 BSS 段中的静态池，无需 `malloc`/`free`。
+
+> 注意：`--boot` 内建引导流水线当前不定义 `KMM_V4_STATIC_POOL` 宏，boot 模式下 `std.memory.std_malloc` 等分配函数不可用，需要堆分配时需自行提供实现（如手工编译链接 KMM 或自写 bump allocator）。
 
 ### 设计原理
 
@@ -472,6 +616,8 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
 
 ### 裸机使用示例
 
+适用于不带 `--boot` 的 freestanding 路径（boot 模式下 KMM 不可用，见上文注意）：
+
 ```kaula
 // 裸机程序使用 KMM V4 静态池
 #[naked, section(".text.boot")]
@@ -491,7 +637,7 @@ fn kaula_main() -> void {
 
 | 宏 | 默认值 | 说明 |
 |----|--------|------|
-| `KMM_V4_STATIC_POOL` | freestanding 自动定义 | 启用静态池模式 |
+| `KMM_V4_STATIC_POOL` | 不含 `--boot` 的 freestanding 自动定义 | 启用静态池模式 |
 | `KMM_V4_POOL_SIZE` | 16MB (static) / 256MB (dynamic) | 池大小（字节） |
 | `KMM_V4_ALIGNMENT` | 8/16/32/64（按 SIMD 自动） | 对齐字节数 |
 | `KMM_THREAD_SAFETY_LEVEL` | 1（优化模式） | 线程安全级别 |
@@ -600,6 +746,7 @@ fn kaula_main() -> void {
 | freestanding 模式 | `--freestanding` | 已实现 |
 | 入口函数 | `--entry` | 已实现 |
 | 输出格式 | `--output-format elf/bin/obj` | 已实现 |
-| KMM 静态池 | 自动（freestanding 下） | 已实现 |
+| KMM 静态池 | 自动（freestanding，不含 `--boot` 路径） | 已实现 |
 | freestanding runtime | 自动（5 个函数） | 已实现 |
 | 裸机入口模板 | `freestanding.c.tmpl` | 已实现 |
+| 内建引导 | `--boot pvh/custom` + 内置 boot stub/linker 脚本 | 已实现 |

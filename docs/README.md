@@ -54,7 +54,7 @@ KMM V4 是 Kaula 的默认内存分配器，基于 per-thread heap + bump alloca
 
 相关文档：
 - [代码生成器](code-generation.md) - KMM inline 机制、作用域插入策略
-- [裸机开发指南](bare-metal.md) - KMM V4 静态池模式（freestanding）
+- [裸机开发指南](bare-metal.md) - 内建引导（--boot pvh/custom）、KMM V4 静态池模式（freestanding）
 - [SOR 子所有权释放](sor-system.md) - SOR 与 KMM 集成、内存分配决策
 
 ### 想了解如何扩展编译器？
