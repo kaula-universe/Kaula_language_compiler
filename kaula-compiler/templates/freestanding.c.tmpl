@@ -1,4 +1,14 @@
 {{includes}}
+
+// 裸机字符串类型（与 std/base/types.h 一致；若 stdlib 头已定义则跳过）
+#ifndef KAULA_STRING_DEFINED
+#define KAULA_STRING_DEFINED
+typedef struct {
+    size_t len;
+    char* ptr;
+} String;
+#endif
+
 {{forward_decls}}
 {{global_vars}}
 {{type_code}}

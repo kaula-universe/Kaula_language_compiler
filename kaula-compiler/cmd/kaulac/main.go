@@ -48,7 +48,11 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 
 		absPath := localPath
 		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(inputDir, absPath)
+			// 解析器按 (CWD, 输入文件目录) 两种相对基准解析 LocalPath，
+			// 这里先按输入目录尝试，失败则按 CWD 原样使用
+			if candidate := filepath.Join(inputDir, absPath); fileExists(candidate) {
+				absPath = candidate
+			}
 		}
 
 		data, err := os.ReadFile(absPath)
@@ -64,10 +68,16 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 		localParser.SetErrorCollector(errorCollector)
 		localParser.EnableLogging(false)
 		localParser.SetSkipMainCheck(true)
+		errCountBefore := len(errorCollector.Errors())
 		localProgram := localParser.Parse()
 
-		if localParser.HasErrors() {
+		if len(errorCollector.Errors()) > errCountBefore {
 			fmt.Printf("[Multi-file] Parse errors in %s\n", localPath)
+			for _, e := range errorCollector.Errors()[errCountBefore:] {
+				if e != nil {
+					fmt.Printf("[Multi-file]   %d:%d %s\n", e.Line, e.Column, e.Message)
+				}
+			}
 			continue
 		}
 
@@ -86,8 +96,10 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 		localAnalyzer.SetSOREnabled(cfg.SOR)
 		localAnalyzer.Analyze(localProgram)
 
-		// 代码生成
-		localCG := codegen.NewCodeGenerator(cfg)
+		// 代码生成（本地文件使用 freestanding 模板，避免注入用户态/宿主入口）
+		localCfg := *cfg
+		localCfg.Boot = "none"
+		localCG := codegen.NewCodeGenerator(&localCfg)
 		if stdlibConfig != nil {
 			localCG.SetStdlibConfig(stdlibConfig)
 		}
@@ -218,7 +230,18 @@ func injectLocalCode(mainCode, localCode string) string {
 	// 找到 "int main" 的位置
 	mainIdx := strings.Index(mainCode, "int main(")
 	if mainIdx == -1 {
-		// 没有 main 函数，直接追加
+		// 没有 main 函数：优先插入到注入锚点（用户态模板定义在 includes 之后），
+		// 确保本地导入的函数原型/定义在类型定义之后、函数使用之前可见
+		if anchorIdx := strings.Index(mainCode, "__KAULA_LOCAL_IMPORT_ANCHOR__"); anchorIdx >= 0 {
+			endOfLine := strings.Index(mainCode[anchorIdx:], "\n")
+			if endOfLine >= 0 {
+				insertAt := anchorIdx + endOfLine + 1
+				return mainCode[:insertAt] + "\n" + localCode + mainCode[insertAt:]
+			}
+		}
+		if parts := strings.SplitN(mainCode, "\n\n", 2); len(parts) == 2 {
+			return parts[0] + "\n\n" + localCode + "\n" + parts[1]
+		}
 		return mainCode + "\n" + localCode
 	}
 
@@ -425,7 +448,10 @@ func main() {
 
 	p := parser.NewParser(lex)
 	p.SetErrorCollector(errorCollector)
-	p.EnableLogging(false)
+	p.EnableLogging(true)
+	if inputFile != "" {
+		p.SetFile(inputFile)
+	}
 	if cfg.Freestanding {
 		p.SetSkipMainCheck(true)
 	}
@@ -446,7 +472,8 @@ func main() {
 	fmt.Println("[Stage 2] Semantic Analysis...")
 	stage2Start := time.Now()
 
-	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR)
+	localPubFuncs := collectLocalPubFuncs(program, inputDir)
+	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs)
 	stage2Time := time.Since(stage2Start)
 	fmt.Printf("[Stage 2] Semantic Analysis completed in %v\n", stage2Time)
 
@@ -935,6 +962,104 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	return nil
 }
 
+// compileUserProgram 用户态程序构建流水线：
+//  1. clang -c 生成 C 代码 -> prog.o（与 boot 内核同参，含 KMM 静态池）
+//  2. ld.lld -T user.ld 链接（入口 user_start，加载地址 0x40000000）
+//  输出可在内核 ELF 加载器下运行的用户程序 ELF
+func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, cfg *config.Config) error {
+	clangPath, err := exec.LookPath("clang")
+	if err != nil {
+		return fmt.Errorf("clang not found in PATH")
+	}
+	ldPath, err := exec.LookPath("ld.lld")
+	if err != nil {
+		return fmt.Errorf("ld.lld not found in PATH (required for user program linking)")
+	}
+
+	arch := resolveBootArch(cfg)
+	triple := cfg.TargetTriple
+	if triple == "" {
+		triple = arch + "-none-elf"
+	}
+	fmt.Printf("[User] arch=%s triple=%s\n", arch, triple)
+
+	workCache := filepath.Dir(cacheFile)
+	os.MkdirAll(workCache, 0755)
+	base := strings.TrimSuffix(filepath.Base(cacheFile), filepath.Ext(cacheFile))
+	progObj := filepath.Join(workCache, base+".o")
+	runtimeObj := filepath.Join(workCache, "kaula_freestanding_runtime.o")
+	allocObj := filepath.Join(workCache, "kmm_scoped_allocator_v4.o")
+
+	baseArgs := []string{"-target", triple, "-c", optLevel}
+
+	kaulaSrcPath := findBootKaulaSrcPath(workDir)
+	kaulaStdPath := findBootKaulaStdPath(workDir)
+
+	progArgs := append(append([]string{}, baseArgs...),
+		"-ffreestanding", "-nostdlib", "-fno-pic",
+		"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL",
+	)
+	progArgs = append(progArgs, archCodeModel(arch)...)
+	if kaulaSrcPath != "" {
+		progArgs = append(progArgs, "-I", kaulaSrcPath)
+	}
+	if kaulaStdPath != "" {
+		progArgs = append(progArgs, "-I", kaulaStdPath)
+	}
+	progArgs = append(progArgs, cacheFile, "-o", progObj)
+	fmt.Printf("[User] Compiling program C -> %s\n", progObj)
+	if out, err := exec.Command(clangPath, progArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("program C compilation failed: %v\n%s", err, string(out))
+	}
+
+	linkObjs := []string{progObj}
+
+	if kaulaSrcPath != "" {
+		runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
+		if _, err := os.Stat(runtimeSrc); err == nil {
+			runtimeArgs := append(append([]string{}, baseArgs...),
+				"-ffreestanding", "-nostdlib", "-fno-pic",
+				"-DKAULA_FREESTANDING", "-I", kaulaSrcPath,
+			)
+			runtimeArgs = append(runtimeArgs, archCodeModel(arch)...)
+			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
+			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
+				fmt.Printf("[User] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
+			} else if _, err := os.Stat(runtimeObj); err == nil {
+				linkObjs = append(linkObjs, runtimeObj)
+			}
+		}
+
+		allocSrc := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c")
+		if _, err := os.Stat(allocSrc); err == nil {
+			allocArgs := append(append([]string{}, baseArgs...),
+				"-ffreestanding", "-nostdlib", "-fno-pic",
+				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
+			)
+			allocArgs = append(allocArgs, archCodeModel(arch)...)
+			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
+			if out, err := exec.Command(clangPath, allocArgs...).CombinedOutput(); err != nil {
+				fmt.Printf("[User] Warning: allocator compilation failed: %v\n%s\n", err, string(out))
+			} else if _, err := os.Stat(allocObj); err == nil {
+				linkObjs = append(linkObjs, allocObj)
+			}
+		}
+	}
+
+	userLinkScript := filepath.Join(cfg.TemplatePath, "linker", "user.ld")
+	if _, err := os.Stat(userLinkScript); err != nil {
+		userLinkScript = filepath.Join(workDir, "user.ld")
+	}
+	ldArgs := []string{"-m", linkerEmulation(arch), "-T", userLinkScript}
+	ldArgs = append(ldArgs, linkObjs...)
+	ldArgs = append(ldArgs, "-o", outputFile)
+	fmt.Printf("[User] Linking -> %s\n", outputFile)
+	if out, err := exec.Command(ldPath, ldArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("user program linking failed: %v\n%s", err, string(out))
+	}
+	return nil
+}
+
 // concurrentCompile 并发保存缓存并编译 C 代码
 func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) *compileResult_t {
 	result := &compileResult_t{}
@@ -975,7 +1100,10 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 		}
 
 		var err error
-		if isBootMode(cfg) {
+		if cfg.Boot == "user" {
+			// 用户态程序：clang -c + ld.lld 链接到用户区 0x40000000，无 boot stub
+			err = compileUserProgram(cacheFile, outputExe, workDir, optLevel, cfg)
+		} else if isBootMode(cfg) {
 			err = compileBootKernel(cacheFile, outputExe, workDir, optLevel, cfg)
 		} else {
 			err = compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity, cfg)
@@ -1020,7 +1148,7 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 }
 
 // concurrentSemanticAnalysisWithConfig 并发执行语义分析（使用已加载的配置）
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
 	var wg sync.WaitGroup
@@ -1032,12 +1160,62 @@ func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *st
 		if stdlibConfig != nil {
 			sa.SetStdlibConfig(stdlibConfig)
 		}
+		sa.SetLocalImportFuncs(localPubFuncs)
 		sa.SetSOREnabled(sorEnabled)
 		sa.Analyze(program)
 	}()
 
 	wg.Wait()
 	return result
+}
+
+// collectLocalPubFuncs 扫描本地 import 的 .kl 文件，收集 pub 函数名
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// collectLocalPubFuncs 扫描本地 import 的 .kl 文件，收集 pub 函数名
+// （在语义分析之前解析，使跨文件调用不被判为未定义）
+func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool {
+	pubFuncs := make(map[string]bool)
+
+	var visit func(p *ast.Program, dir string)
+	visit = func(p *ast.Program, dir string) {
+		for _, stmt := range p.Statements {
+			imp, ok := stmt.(*ast.ImportStatement)
+			if !ok || !imp.IsLocal {
+				continue
+			}
+			absPath := imp.LocalPath
+			if !filepath.IsAbs(absPath) {
+				if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+					absPath = candidate
+				}
+			}
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				continue
+			}
+			localLex := lexer.NewLexer(string(data))
+			localParser := parser.NewParser(localLex)
+			localParser.SetSkipMainCheck(true)
+			localParser.EnableLogging(false)
+			localProgram := localParser.Parse()
+			if localParser.HasErrors() {
+				continue
+			}
+			for _, s := range localProgram.Statements {
+				if fn, ok := s.(*ast.FunctionStatement); ok && fn.IsPublic {
+					pubFuncs[fn.Name] = true
+				}
+			}
+			visit(localProgram, filepath.Dir(absPath))
+		}
+	}
+
+	visit(program, inputDir)
+	return pubFuncs
 }
 
 type semaResult_t struct {

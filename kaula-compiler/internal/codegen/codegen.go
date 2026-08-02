@@ -139,6 +139,18 @@ func (cg *CodeGenerator) GetSourceMap() *SourceMap {
 	return cg.sourceMap
 }
 
+// generateGlobalVarDeclString 生成 C 变量声明（"类型 名字"），
+// 固定大小数组类型 [N]elem → "elem name[N]"
+func (cg *CodeGenerator) generateGlobalVarDeclString(cType, varName string) string {
+	openBracket := strings.Index(cType, "[")
+	if openBracket > 0 && strings.HasSuffix(cType, "]") {
+		baseType := cType[:openBracket]
+		arrayPart := cType[openBracket:]
+		return baseType + " " + varName + arrayPart
+	}
+	return cType + " " + varName
+}
+
 // SetSourceFile 设置源文件名
 func (cg *CodeGenerator) SetSourceFile(filename string) {
 	cg.sourceFile = filename
@@ -216,6 +228,11 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	// 加载 freestanding 裸机入口模板（用于 --freestanding 模式）
 	freestandingPath := filepath.Join(cfg.TemplatePath, "freestanding.c.tmpl")
 	tm.LoadTemplate("freestanding", freestandingPath)
+	// 加载用户态入口模板（用于 --boot user 模式）
+	if cfg.Boot == "user" {
+		userPath := filepath.Join(cfg.TemplatePath, "user.c.tmpl")
+		tm.LoadTemplate("user", userPath)
+	}
 
 	pm := NewPluginManager()
 
@@ -431,13 +448,20 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 				varPrefix.WriteString("const ")
 			}
 			prefix := varPrefix.String()
+			// 固定大小数组类型 [N]elem → C 声明 "elem name[N]"
+			decl := cg.generateGlobalVarDeclString(cType, varDecl.Name)
+			isArray := strings.Contains(cType, "[") && strings.HasSuffix(cType, "]")
+			// 数组全局变量：标量初始化值转换为 {0}（字符串字面量初始化除外）
+			if isArray && !strings.HasPrefix(initValue, "\"") {
+				initValue = "{0}"
+			}
 			if prefix != "" {
-				code := fmt.Sprintf("%s%s %s = %s;\n", prefix, cType, varDecl.Name, initValue)
+				code := fmt.Sprintf("%s%s = %s;\n", prefix, decl, initValue)
 				lines := strings.Count(code, "\n")
 				addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
 				globalVars.WriteString(code)
 			} else {
-				code := fmt.Sprintf("%s %s = %s;\n", cType, varDecl.Name, initValue)
+				code := fmt.Sprintf("%s = %s;\n", decl, initValue)
 				lines := strings.Count(code, "\n")
 				addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
 				globalVars.WriteString(code)
@@ -471,7 +495,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 				code = fmt.Sprintf("extern %s %s(%s);\n", returnType, externStmt.Name, params.String())
 			} else {
 				cType := cg.typeGenerator.convertType(externStmt.Type, externStmt.Nullable)
-				code = fmt.Sprintf("extern %s %s;\n", cType, externStmt.Name)
+				code = fmt.Sprintf("extern %s;\n", cg.generateGlobalVarDeclString(cType, externStmt.Name))
 			}
 			lines := strings.Count(code, "\n")
 			addEntry("global", externStmt.Pos.Line, externStmt.Pos.Column, "extern", externStmt.Name, lines)
@@ -635,10 +659,7 @@ static inline String string_concat(String str1, String str2) {
 	forwardDecls.Grow(1024)
 	for _, stmt := range program.Statements {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsPublic && fnStmt.Name != "main" {
-			returnType := cg.typeGenerator.convertType(fnStmt.ReturnType, false)
-			if returnType == "" {
-				returnType = "void"
-			}
+			returnType := tgReturnTypeToC(cg.typeGenerator, fnStmt.ReturnType)
 			forwardDecls.WriteString(returnType)
 			forwardDecls.WriteByte(' ')
 			forwardDecls.WriteString(fnStmt.Name)
@@ -670,11 +691,17 @@ static inline String string_concat(String str1, String str2) {
 	// freestanding 模式：始终使用裸机入口模板，无论是否存在 main 函数
 	useFreestanding := cg.config != nil && cg.config.Freestanding
 
+	// --boot user：用户态程序入口模板（user_start → kaula_main → sys_exit）
+	isUserMode := cg.config != nil && cg.config.Boot == "user"
+
 	if useFreestanding || !hasMain {
 		fmt.Printf("[DEBUG] Template path: useFreestanding=%v, hasMain=%v\n", useFreestanding, hasMain)
 		templateName := "main"
 		if useFreestanding {
 			templateName = "freestanding"
+		}
+		if isUserMode {
+			templateName = "user"
 		}
 		template, ok := cg.templateManager.GetTemplate(templateName)
 		if !ok {

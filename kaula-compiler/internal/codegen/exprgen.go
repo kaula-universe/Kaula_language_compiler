@@ -27,6 +27,70 @@ var cOperatorPrecedence = map[string]int{
 	"*": 11, "/": 11, "%": 11,
 }
 
+// kaulaOpToCOp 将 Kaula AST 运算符名映射为 C 运算符（用于优先级判断）
+func kaulaOpToCOp(op string) string {
+	switch op {
+	case "PLUS", "+":
+		return "+"
+	case "MINUS", "-":
+		return "-"
+	case "MULTIPLY", "*":
+		return "*"
+	case "DIVIDE", "/":
+		return "/"
+	case "MOD", "%":
+		return "%"
+	case "EQ", "==":
+		return "=="
+	case "NE", "!=":
+		return "!="
+	case "LT", "<":
+		return "<"
+	case "GT", ">":
+		return ">"
+	case "LE", "<=":
+		return "<="
+	case "GE", ">=":
+		return ">="
+	case "LSHIFT", "SHIFT_LEFT", "<<":
+		return "<<"
+	case "RSHIFT", "SHIFT_RIGHT", ">>":
+		return ">>"
+	case "AND", "&&":
+		return "&&"
+	case "OR", "||":
+		return "||"
+	case "BITWISE_AND", "AMPERSAND", "&":
+		return "&"
+	case "BITWISE_OR", "PIPE", "|":
+		return "|"
+	case "BITWISE_XOR", "CARET", "^", "XOR":
+		return "^"
+	default:
+		return ""
+	}
+}
+
+// astBinaryNeedsParens 基于 AST 判断二元表达式的子表达式是否需要括号，
+// 避免字符串匹配方式漏检（如 "a >> b & c" 中 '&' 优先级低于 '<<'）。
+func astBinaryNeedsParens(child ast.Expression, outerOp string, side string) bool {
+	bin, ok := child.(*ast.BinaryExpression)
+	if !ok {
+		return false
+	}
+	innerC := kaulaOpToCOp(bin.Operator)
+	outerC := kaulaOpToCOp(outerOp)
+	if innerC == "" || outerC == "" {
+		return false
+	}
+	innerPrec := cOperatorPrecedence[innerC]
+	outerPrec := cOperatorPrecedence[outerC]
+	if side == "left" {
+		return innerPrec < outerPrec
+	}
+	return innerPrec <= outerPrec
+}
+
 // 预排序的运算符列表（从长到短，避免短运算符误匹配长运算符的子串）
 var sortedOps = []string{
 	"==", "!=", "<=", ">=", "<<", ">>", "&&", "||",
@@ -310,6 +374,14 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	// 预先计算左右表达式
 	left := eg.GenerateExpression(e.Left)
 	right := eg.GenerateExpression(e.Right)
+
+	// AST 级括号修正：防止 "a >> b & c" 这类字符串匹配漏检导致的优先级错误
+	if astBinaryNeedsParens(e.Left, e.Operator, "left") {
+		left = "(" + left + ")"
+	}
+	if astBinaryNeedsParens(e.Right, e.Operator, "right") {
+		right = "(" + right + ")"
+	}
 
 	// 常量折叠：如果左右都是整数常量，直接在编译期计算
 	if isIntegerLiteral(left) && isIntegerLiteral(right) {

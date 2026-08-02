@@ -656,45 +656,7 @@ func (fg *FunctionGenerator) mapReturnType(returnType string) string {
 	if returnType == "" {
 		return "void "
 	}
-
-	switch returnType {
-	case "int":
-		return "int "
-	case "i64":
-		return "int64_t "
-	case "u64":
-		return "uint64_t "
-	case "i32":
-		return "int32_t "
-	case "u32":
-		return "uint32_t "
-	case "i16":
-		return "int16_t "
-	case "u16":
-		return "uint16_t "
-	case "i8":
-		return "int8_t "
-	case "u8":
-		return "uint8_t "
-	case "float":
-		return "float "
-	case "f32":
-		return "float "
-	case "double":
-		return "double "
-	case "f64":
-		return "double "
-	case "bool":
-		return "bool "
-	case "char":
-		return "char "
-	case "void":
-		return "void "
-	case "string":
-		return "String "
-	default:
-		return fg.codegen.typeGenerator.convertType(returnType, false) + " "
-	}
+	return tgReturnTypeToC(fg.codegen.typeGenerator, returnType) + " "
 }
 
 // ============================================================================

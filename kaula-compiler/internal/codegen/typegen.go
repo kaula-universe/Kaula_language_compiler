@@ -847,6 +847,50 @@ func methodHasReturn(stmts []ast.Statement) bool {
 	return false
 }
 
+// tgReturnTypeToC 函数返回类型 → C 类型（与函数定义生成保持一致）
+func tgReturnTypeToC(tg *TypeGenerator, kaulaType string) string {
+	switch kaulaType {
+	case "":
+		return "void"
+	case "int":
+		return "int"
+	case "i64":
+		return "int64_t"
+	case "u64":
+		return "uint64_t"
+	case "i32":
+		return "int32_t"
+	case "u32":
+		return "uint32_t"
+	case "i16":
+		return "int16_t"
+	case "u16":
+		return "uint16_t"
+	case "i8":
+		return "int8_t"
+	case "u8":
+		return "uint8_t"
+	case "float":
+		return "float"
+	case "f32":
+		return "float"
+	case "double":
+		return "double"
+	case "f64":
+		return "double"
+	case "bool":
+		return "bool"
+	case "char":
+		return "char"
+	case "void":
+		return "void"
+	case "string":
+		return "String"
+	default:
+		return tg.convertType(kaulaType, false)
+	}
+}
+
 func (tg *TypeGenerator) convertType(kaulaType string, nullable bool) string {
 	if cType, ok := tg.clibTypeMap[kaulaType]; ok {
 		if nullable && !strings.HasSuffix(cType, "*") {
