@@ -655,6 +655,217 @@ type compileResult_t struct {
 	Error      error
 }
 
+// isBootMode 判断是否启用编译器内建的裸机引导构建
+// 需要: freestanding + boot != none
+func isBootMode(cfg *config.Config) bool {
+	return cfg != nil && cfg.Freestanding && cfg.Boot != "" && cfg.Boot != "none"
+}
+
+// resolveBootArch 推断引导架构（优先级: BootArch > TargetTriple > x86_64）
+func resolveBootArch(cfg *config.Config) string {
+	if cfg.BootArch != "" {
+		return cfg.BootArch
+	}
+	t := strings.ToLower(cfg.TargetTriple)
+	switch {
+	case strings.HasPrefix(t, "x86_64"), strings.Contains(t, "amd64"):
+		return "x86_64"
+	case strings.HasPrefix(t, "i386"), strings.HasPrefix(t, "i686"):
+		return "i386"
+	case strings.HasPrefix(t, "aarch64"), strings.Contains(t, "arm64"):
+		return "aarch64"
+	case strings.HasPrefix(t, "riscv64"):
+		return "riscv64"
+	default:
+		return "x86_64"
+	}
+}
+
+// linkerEmulation 返回对应架构的 lld 仿真模式
+func linkerEmulation(arch string) string {
+	switch arch {
+	case "i386":
+		return "elf_i386"
+	case "aarch64":
+		return "aarch64elf"
+	case "riscv64":
+		return "elf64lriscv"
+	default:
+		return "elf_x86_64"
+	}
+}
+
+// resolveBootSource 定位引导汇编源文件
+// 优先级: --boot-file > 内置模板 <templates>/boot/<arch>-<boot>.S
+func resolveBootSource(cfg *config.Config) (string, error) {
+	if cfg.BootFile != "" {
+		if _, err := os.Stat(cfg.BootFile); err == nil {
+			return cfg.BootFile, nil
+		}
+		return "", fmt.Errorf("boot file not found: %s", cfg.BootFile)
+	}
+	if cfg.Boot == "custom" {
+		return "", fmt.Errorf("boot=custom requires --boot-file")
+	}
+	arch := resolveBootArch(cfg)
+	candidates := []string{
+		filepath.Join(cfg.TemplatePath, "boot", fmt.Sprintf("%s-%s.S", arch, cfg.Boot)),
+		filepath.Join(cfg.TemplatePath, "boot", arch+".S"),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("no built-in boot stub for boot=%s arch=%s (looked in %s). Use --boot-file to provide a custom stub",
+		cfg.Boot, arch, filepath.Join(cfg.TemplatePath, "boot"))
+}
+
+// resolveBootLinkScript 定位链接脚本
+// 优先级: --link-script > 内置模板 <templates>/linker/<arch>.ld
+func resolveBootLinkScript(cfg *config.Config) (string, error) {
+	if cfg.LinkScript != "" {
+		if _, err := os.Stat(cfg.LinkScript); err == nil {
+			return cfg.LinkScript, nil
+		}
+		return "", fmt.Errorf("link script not found: %s", cfg.LinkScript)
+	}
+	arch := resolveBootArch(cfg)
+	p := filepath.Join(cfg.TemplatePath, "linker", arch+".ld")
+	if _, err := os.Stat(p); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("no built-in linker script for arch %s (looked in %s). Use --link-script to provide one",
+		arch, filepath.Join(cfg.TemplatePath, "linker"))
+}
+
+// findBootKaulaSrcPath 查找 kaula 源目录（src/kaula.h 所在目录），
+// 用于定位 freestanding runtime（kaula_freestanding_runtime.c）
+func findBootKaulaSrcPath(workDir string) string {
+	candidates := []string{}
+	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
+		candidates = append(candidates, filepath.Join(envHome, "src"))
+	}
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(filepath.Clean(exePath))
+		candidates = append(candidates,
+			filepath.Join(exeDir, "..", "src"),
+			filepath.Join(exeDir, "..", "..", "src"),
+			filepath.Join(exeDir, "src"),
+		)
+	}
+	candidates = append(candidates,
+		filepath.Join(workDir, "src"),
+		filepath.Join(workDir, "..", "src"),
+	)
+	for _, p := range candidates {
+		if _, err := os.Stat(filepath.Join(p, "kaula.h")); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// compileBootKernel 裸机引导构建流水线：
+//  1. clang -c 生成 C 代码 -> kernel.o
+//  2. clang -c 编译 boot stub -> boot.o
+//  3. clang -c 编译 freestanding runtime（如存在）-> runtime.o
+//  4. ld.lld -T <linker script> boot.o kernel.o runtime.o -> 可引导 ELF/bin
+func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, cfg *config.Config) error {
+	clangPath, err := exec.LookPath("clang")
+	if err != nil {
+		return fmt.Errorf("clang not found in PATH")
+	}
+	ldPath, err := exec.LookPath("ld.lld")
+	if err != nil {
+		return fmt.Errorf("ld.lld not found in PATH (required for bare-metal boot linking)")
+	}
+
+	bootSrc, err := resolveBootSource(cfg)
+	if err != nil {
+		return err
+	}
+	linkScript, err := resolveBootLinkScript(cfg)
+	if err != nil {
+		return err
+	}
+
+	arch := resolveBootArch(cfg)
+	triple := cfg.TargetTriple
+	if triple == "" {
+		triple = arch + "-none-elf"
+	}
+	fmt.Printf("[Boot] arch=%s triple=%s boot=%s\n", arch, triple, cfg.Boot)
+	fmt.Printf("[Boot] boot stub: %s\n", bootSrc)
+	fmt.Printf("[Boot] linker script: %s\n", linkScript)
+
+	workCache := filepath.Dir(cacheFile)
+	os.MkdirAll(workCache, 0755)
+	base := strings.TrimSuffix(filepath.Base(cacheFile), filepath.Ext(cacheFile))
+	kernelObj := filepath.Join(workCache, base+".o")
+	bootObj := filepath.Join(workCache, "boot.o")
+	runtimeObj := filepath.Join(workCache, "kaula_freestanding_runtime.o")
+
+	// 公共编译参数
+	baseArgs := []string{"-target", triple, "-c", optLevel}
+
+	kaulaSrcPath := findBootKaulaSrcPath(workDir)
+
+	// 1. 编译 C 代码
+	kernelArgs := append(append([]string{}, baseArgs...),
+		"-ffreestanding", "-nostdlib", "-fno-pic", "-mcmodel=large",
+		"-DKAULA_FREESTANDING",
+	)
+	if kaulaSrcPath != "" {
+		kernelArgs = append(kernelArgs, "-I", kaulaSrcPath)
+	}
+	kernelArgs = append(kernelArgs, cacheFile, "-o", kernelObj)
+	fmt.Printf("[Boot] Compiling kernel C -> %s\n", kernelObj)
+	if out, err := exec.Command(clangPath, kernelArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("kernel C compilation failed: %v\n%s", err, string(out))
+	}
+
+	// 2. 编译 boot stub
+	bootArgs := append(append([]string{}, baseArgs...), bootSrc, "-o", bootObj)
+	fmt.Printf("[Boot] Compiling boot stub -> %s\n", bootObj)
+	if out, err := exec.Command(clangPath, bootArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("boot stub compilation failed: %v\n%s", err, string(out))
+	}
+
+	linkObjs := []string{bootObj, kernelObj}
+
+	// 3. 编译 freestanding runtime（memset/memcpy 等，供 LLVM builtin lower 引用）
+	if kaulaSrcPath != "" {
+		runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
+		if _, err := os.Stat(runtimeSrc); err == nil {
+			runtimeArgs := append(append([]string{}, baseArgs...),
+				"-ffreestanding", "-nostdlib", "-fno-pic", "-mcmodel=large",
+				"-DKAULA_FREESTANDING", "-I", kaulaSrcPath,
+			)
+			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
+			fmt.Printf("[Boot] Compiling freestanding runtime -> %s\n", runtimeObj)
+			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
+				fmt.Printf("[Boot] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
+			} else if _, err := os.Stat(runtimeObj); err == nil {
+				linkObjs = append(linkObjs, runtimeObj)
+			}
+		}
+	}
+
+	// 4. 链接
+	ldArgs := []string{"-m", linkerEmulation(arch), "-T", linkScript}
+	ldArgs = append(ldArgs, linkObjs...)
+	ldArgs = append(ldArgs, "-o", outputFile)
+	if cfg.OutputFormat == "bin" {
+		ldArgs = append(ldArgs, "--oformat=binary")
+	}
+	fmt.Printf("[Boot] Linking -> %s\n", outputFile)
+	if out, err := exec.Command(ldPath, ldArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("linking failed: %v\n%s", err, string(out))
+	}
+	return nil
+}
+
 // concurrentCompile 并发保存缓存并编译 C 代码
 func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) *compileResult_t {
 	result := &compileResult_t{}
@@ -685,8 +896,22 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 		if runtime.GOOS != "windows" {
 			outputExe = filepath.Join(inputDir, inputName)
 		}
+		if isBootMode(cfg) {
+			// 裸机引导模式：输出可引导 ELF（或 raw bin）
+			ext := ".elf"
+			if cfg.OutputFormat == "bin" {
+				ext = ".bin"
+			}
+			outputExe = filepath.Join(inputDir, inputName+ext)
+		}
 
-		if err := compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity, cfg); err != nil {
+		var err error
+		if isBootMode(cfg) {
+			err = compileBootKernel(cacheFile, outputExe, workDir, optLevel, cfg)
+		} else {
+			err = compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity, cfg)
+		}
+		if err != nil {
 			result.Error = err
 			return
 		}
@@ -1575,6 +1800,9 @@ func printUsage(exe string) {
 	fmt.Printf("  --libs <libs>           额外的链接库 (逗号分隔)\n")
 	fmt.Printf("  --analyze-pkg <name>    分析指定包并生成配置文件\n")
 	fmt.Printf("  --analyze-pkg-all       分析所有 pkglib 中的包\n")
+	fmt.Printf("  --boot <mode>           裸机引导方式：pvh/multiboot/custom/none (默认 none，需配合 --freestanding)\n")
+	fmt.Printf("  --boot-file <path>      自定义引导汇编文件 (boot=custom 时使用)\n")
+	fmt.Printf("  --boot-arch <arch>      引导架构：x86_64/i386/riscv64/aarch64 (默认从 --target-triple 推断)\n")
 	fmt.Printf("\nConfiguration File (kaula.json):\n")
 	fmt.Printf("  在项目根目录创建 kaula.json 文件配置编译参数。\n")
 	fmt.Printf("  命令行参数优先级高于配置文件。\n")

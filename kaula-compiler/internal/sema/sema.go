@@ -1200,6 +1200,15 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 		return sa.isTypeValid(innerType)
 	}
 
+	// 检查是否是固定大小数组类型（如 [16]u8）
+	if len(typeName) > 0 && typeName[0] == '[' {
+		closeBracket := strings.Index(typeName, "]")
+		if closeBracket > 0 {
+			innerType := typeName[closeBracket+1:]
+			return sa.isTypeValid(innerType)
+		}
+	}
+
 	// 检查是否是const类型（如 const char*）
 	if strings.HasPrefix(typeName, "const ") {
 		innerType := typeName[6:]

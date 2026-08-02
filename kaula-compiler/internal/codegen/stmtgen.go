@@ -174,9 +174,7 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		}
 	}
 
-	builder.WriteString(cType)
-	builder.WriteByte(' ')
-	builder.WriteString(stmt.Name)
+	builder.WriteString(sg.generateVarDeclString(cType, stmt.Name))
 
 	if stmt.Value != nil {
 		builder.WriteString(" = ")
@@ -186,6 +184,18 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	}
 	builder.WriteString(";\n")
 	return builder.String()
+}
+
+// generateVarDeclString 生成 C 变量声明字符串，处理固定大小数组类型
+// 例如 [128]u8 → C 类型 "uint8_t[128]" → 声明 "uint8_t dst[128]"
+func (sg *StatementGenerator) generateVarDeclString(cType, varName string) string {
+	openBracket := strings.Index(cType, "[")
+	if openBracket > 0 && strings.HasSuffix(cType, "]") {
+		baseType := cType[:openBracket]
+		arrayPart := cType[openBracket:]
+		return baseType + " " + varName + arrayPart
+	}
+	return cType + " " + varName
 }
 
 // generateAutoDeclaration 生成 auto 声明代码（类型推导）
@@ -207,9 +217,7 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 	var builder strings.Builder
 	builder.Grow(64)
 
-	builder.WriteString(cType)
-	builder.WriteByte(' ')
-	builder.WriteString(stmt.Name)
+	builder.WriteString(sg.generateVarDeclString(cType, stmt.Name))
 
 	if stmt.Value != nil {
 		builder.WriteString(" = ")

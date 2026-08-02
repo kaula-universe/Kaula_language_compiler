@@ -309,6 +309,13 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 		}
 		// 否则作为表达式语句处理
 		return p.parseExpressionStatementIterative()
+	case lexer.TOKEN_LBRACKET:
+		// [ 开头可能是固定大小数组声明: [N]type name 或 []type name
+		if stmt := p.parseVariableDeclarationIterative(); stmt != nil {
+			return stmt
+		}
+		// 否则作为数组字面量表达式处理
+		return p.parseExpressionStatementIterative()
 	case lexer.TOKEN_IDENT:
 		// 检查是否是变量声明：标识符后面跟另一个标识符（类型名）
 		// 例如：i64 x, int y, MyType obj
@@ -408,6 +415,38 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 				typeName += ">"
 			}
 		}
+	} else if p.curTok.Type == lexer.TOKEN_LBRACKET {
+		// 数组类型 [N]type 或 []type（固定大小数组 / 动态数组）
+		savedCurTok := p.curTok
+		savedPeekTok := p.peekTok
+		p.nextToken() // consume '['
+		arraySize := ""
+		if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+			arraySize = p.curTok.Value
+			p.nextToken()
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACKET {
+			p.nextToken()
+		}
+		elemType := ""
+		isElemType := false
+		switch p.curTok.Type {
+		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+			lexer.TOKEN_TYPE_VOID:
+			elemType = p.curTok.Value
+			isElemType = true
+		case lexer.TOKEN_IDENT:
+			elemType = p.curTok.Value
+			isElemType = true
+		}
+		if !isElemType {
+			p.curTok = savedCurTok
+			p.peekTok = savedPeekTok
+			return nil
+		}
+		p.nextToken()
+		typeName = "[" + arraySize + "]" + elemType
 	} else {
 		// 不是类型，返回 nil
 		return nil

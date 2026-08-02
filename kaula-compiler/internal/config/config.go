@@ -31,6 +31,11 @@ type Config struct {
 	Entry        string `json:"entry,omitempty"`         // 入口函数名（默认 main，裸机可为 _start）
 	OutputFormat string `json:"output_format,omitempty"` // 输出格式：elf/bin/obj（默认按平台自动选择）
 
+	// ====== 裸机引导（boot） ======
+	Boot        string `json:"boot,omitempty"`        // 引导方式：pvh/multiboot/custom/none（默认 none）
+	BootFile    string `json:"boot_file,omitempty"`   // 自定义引导汇编文件路径（boot=custom 时使用）
+	BootArch    string `json:"boot_arch,omitempty"`   // 引导架构：x86_64/i386/riscv64/aarch64（默认按 TargetTriple 推断）
+
 	// ====== 优化选项 ======
 	OptLevel string `json:"opt_level,omitempty"` // O0/O1/O2/O3, 覆盖所有默认值
 
@@ -171,6 +176,11 @@ func loadFlags(config *Config) {
 	flag.StringVar(&config.LinkScript, "link-script", config.LinkScript, "链接脚本路径（.lds）")
 	flag.StringVar(&config.Entry, "entry", config.Entry, "入口函数名（默认 main，裸机可为 _start）")
 	flag.StringVar(&config.OutputFormat, "output-format", config.OutputFormat, "输出格式：elf/bin/obj")
+
+	// 裸机引导
+	flag.StringVar(&config.Boot, "boot", config.Boot, "引导方式：pvh/multiboot/custom/none（none=不自动引导）")
+	flag.StringVar(&config.BootFile, "boot-file", config.BootFile, "自定义引导汇编文件路径（boot=custom 时使用）")
+	flag.StringVar(&config.BootArch, "boot-arch", config.BootArch, "引导架构：x86_64/i386/riscv64/aarch64")
 
 	// 编译模式
 	flag.BoolVar(&config.SOR, "sor", config.SOR, "启用 SOR 编译时所有权分析")
