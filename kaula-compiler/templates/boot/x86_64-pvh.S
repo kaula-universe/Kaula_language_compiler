@@ -22,6 +22,15 @@
 .global _start
 _start:
     cli
+    cld
+
+    # 清零 BSS（__bss_start..__bss_end，含页表与栈；页表随后显式初始化）
+    movl $__bss_start, %edi
+    movl $__bss_end, %ecx
+    subl %edi, %ecx
+    shrl $2, %ecx
+    xorl %eax, %eax
+    rep stosl
 
     # Load GDT
     lgdt gdt_ptr
@@ -105,7 +114,4 @@ pdpt:
     .skip 4096
 pd:
     .skip 4096
-
-.align 16
-.skip 65536
-stack_top:
+# 内核栈由链接脚本统一提供（stack_top 符号，位于 .bss 末尾，已清零）

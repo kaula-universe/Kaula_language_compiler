@@ -4,8 +4,20 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+
+#ifndef KAULA_FREESTANDING
 #include <string.h>
 #include <stdlib.h>
+#else
+// freestanding/bare-metal：libc 头不存在，声明 kaula_freestanding_runtime.c 提供的函数
+void* memset(void* s, int c, size_t n);
+void* memcpy(void* dst, const void* src, size_t n);
+void* memmove(void* dst, const void* src, size_t n);
+int   memcmp(const void* a, const void* b, size_t n);
+size_t strlen(const char* s);
+// freestanding 无 stderr；debug 输出降级为空操作
+#define fprintf(...) (0)
+#endif
 
 #ifndef KAULA_FREESTANDING
 // hosted 模式下包含 stdio.h（用于 debug 输出）
@@ -150,7 +162,12 @@
 // 修复：Clang 在 Windows 下将 __declspec(thread) 展开为 __attribute__((thread))，
 // 但 Clang 不支持 thread 属性，需要使用 __thread
 #ifndef KMM_TLS
-    #if defined(__GNUC__) || defined(__clang__)
+    #if defined(KMM_V4_STATIC_POOL) && defined(KAULA_FREESTANDING)
+        // freestanding/bare-metal：无 TLS 运行时支持（FS/TPIDR 未初始化），
+        // 单线程模型下线程局部变量退化为普通全局变量。
+        // 多核内核可自行设置 TLS 并用 -DKMM_TLS=__thread 覆盖。
+        #define KMM_TLS
+    #elif defined(__GNUC__) || defined(__clang__)
         #define KMM_TLS __thread
     #elif KMM_V4_OS_WINDOWS
         #define KMM_TLS __declspec(thread)
@@ -402,7 +419,9 @@
 
 // 自动选择回退策略
 #ifndef KMM_V4_ENABLE_FALLBACK
-    #if KMM_V4_DEBUG_MODE
+    #if defined(KAULA_FREESTANDING)
+        #define KMM_V4_ENABLE_FALLBACK 0  // freestanding：无 malloc 可回退，池耗尽即失败
+    #elif KMM_V4_DEBUG_MODE
         #define KMM_V4_ENABLE_FALLBACK 1  // 调试模式：允许回退到 malloc
     #else
         #define KMM_V4_ENABLE_FALLBACK 0  // 发布模式：严格模式
@@ -757,6 +776,18 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
             uint8_t* p = (uint8_t*)ptr;
             while (size >= 16) {
                 _mm_storeu_si128((__m128i*)p, zero);
+                p += 16;
+                size -= 16;
+            }
+            if (size > 0) memset(p, 0, size);
+        }
+    #elif defined(__ARM_NEON)
+        #include <arm_neon.h>
+        static inline void kmm_v4_zero_auto(void* ptr, size_t size) {
+            uint8x16_t zero = vdupq_n_u8(0);
+            uint8_t* p = (uint8_t*)ptr;
+            while (size >= 16) {
+                vst1q_u8(p, zero);
                 p += 16;
                 size -= 16;
             }

@@ -695,6 +695,21 @@ func linkerEmulation(arch string) string {
 	}
 }
 
+// archCodeModel 返回各架构的 clang 代码模型参数
+// x86_64/aarch64: large（内核可置于任意地址）
+// riscv64: medany（0x80000000 起始，±2GB PC 相对寻址即可达）
+// i386: 无代码模型（32 位固定寻址）
+func archCodeModel(arch string) []string {
+	switch arch {
+	case "i386":
+		return nil
+	case "riscv64":
+		return []string{"-mcmodel=medany"}
+	default:
+		return []string{"-mcmodel=large"}
+	}
+}
+
 // resolveBootSource 定位引导汇编源文件
 // 优先级: --boot-file > 内置模板 <templates>/boot/<arch>-<boot>.S
 func resolveBootSource(cfg *config.Config) (string, error) {
@@ -766,6 +781,34 @@ func findBootKaulaSrcPath(workDir string) string {
 	return ""
 }
 
+// findBootKaulaStdPath 查找 stdlib 头目录（std/io/io.h 所在目录），
+// 用于 boot 模式下解析 std.memory 等模块头（如 memory/memory.h）
+func findBootKaulaStdPath(workDir string) string {
+	candidates := []string{}
+	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
+		candidates = append(candidates, filepath.Join(envHome, "std"))
+	}
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(filepath.Clean(exePath))
+		candidates = append(candidates,
+			filepath.Join(exeDir, "..", "std"),
+			filepath.Join(exeDir, "..", "..", "std"),
+			filepath.Join(exeDir, "std"),
+		)
+	}
+	candidates = append(candidates,
+		filepath.Join(workDir, "std"),
+		filepath.Join(workDir, "..", "std"),
+		filepath.Join(workDir, "..", "..", "std"),
+	)
+	for _, p := range candidates {
+		if _, err := os.Stat(filepath.Join(p, "io", "io.h")); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 // compileBootKernel 裸机引导构建流水线：
 //  1. clang -c 生成 C 代码 -> kernel.o
 //  2. clang -c 编译 boot stub -> boot.o
@@ -810,14 +853,19 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	baseArgs := []string{"-target", triple, "-c", optLevel}
 
 	kaulaSrcPath := findBootKaulaSrcPath(workDir)
+	kaulaStdPath := findBootKaulaStdPath(workDir)
 
 	// 1. 编译 C 代码
 	kernelArgs := append(append([]string{}, baseArgs...),
-		"-ffreestanding", "-nostdlib", "-fno-pic", "-mcmodel=large",
-		"-DKAULA_FREESTANDING",
+		"-ffreestanding", "-nostdlib", "-fno-pic",
+		"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL",
 	)
+	kernelArgs = append(kernelArgs, archCodeModel(arch)...)
 	if kaulaSrcPath != "" {
 		kernelArgs = append(kernelArgs, "-I", kaulaSrcPath)
+	}
+	if kaulaStdPath != "" {
+		kernelArgs = append(kernelArgs, "-I", kaulaStdPath)
 	}
 	kernelArgs = append(kernelArgs, cacheFile, "-o", kernelObj)
 	fmt.Printf("[Boot] Compiling kernel C -> %s\n", kernelObj)
@@ -839,15 +887,36 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 		runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
 		if _, err := os.Stat(runtimeSrc); err == nil {
 			runtimeArgs := append(append([]string{}, baseArgs...),
-				"-ffreestanding", "-nostdlib", "-fno-pic", "-mcmodel=large",
+				"-ffreestanding", "-nostdlib", "-fno-pic",
 				"-DKAULA_FREESTANDING", "-I", kaulaSrcPath,
 			)
+			runtimeArgs = append(runtimeArgs, archCodeModel(arch)...)
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			fmt.Printf("[Boot] Compiling freestanding runtime -> %s\n", runtimeObj)
 			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
 				fmt.Printf("[Boot] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(runtimeObj); err == nil {
 				linkObjs = append(linkObjs, runtimeObj)
+			}
+		}
+	}
+
+	// 3.5 编译 KMM V4 分配器（静态池模式，提供堆分配/作用域回收）
+	allocObj := filepath.Join(workCache, "kmm_scoped_allocator_v4.o")
+	if kaulaSrcPath != "" {
+		allocSrc := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c")
+		if _, err := os.Stat(allocSrc); err == nil {
+			allocArgs := append(append([]string{}, baseArgs...),
+				"-ffreestanding", "-nostdlib", "-fno-pic",
+				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
+			)
+			allocArgs = append(allocArgs, archCodeModel(arch)...)
+			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
+			fmt.Printf("[Boot] Compiling KMM allocator -> %s\n", allocObj)
+			if out, err := exec.Command(clangPath, allocArgs...).CombinedOutput(); err != nil {
+				fmt.Printf("[Boot] Warning: allocator compilation failed: %v\n%s\n", err, string(out))
+			} else if _, err := os.Stat(allocObj); err == nil {
+				linkObjs = append(linkObjs, allocObj)
 			}
 		}
 	}

@@ -1,0 +1,48 @@
+// Kaula 裸机 MMIO UART Hello（架构无关测试程序）
+// riscv64: QEMU virt 16550 @ 0x10000000
+// aarch64: QEMU virt PL011 @ 0x09000000（或 16550 兼容视图 @ 0x09000000）
+// 通用 16550 寄存器布局（offset 5 = LSR，bit5 = THRE；offset 0 = THR）
+
+const UART_BASE = 0x10000000
+
+// 向 MMIO 地址写一个字节（volatile，编译器不会优化掉）
+fn mmio_write(u64 addr, u8 val) {
+    #[volatile_store(addr, val)]
+}
+
+// 读一个字节
+fn mmio_read(u64 addr) u8 {
+    return #[volatile_load(addr)]
+}
+
+// 等待发送缓冲空
+fn uart_wait_ready() {
+    while ((mmio_read(UART_BASE + 5) & 0x20) == 0) {
+    }
+}
+
+// 发送一个字符
+fn uart_putc(u8 c) {
+    uart_wait_ready()
+    mmio_write(UART_BASE + 0, c)
+}
+
+// 发送字符串（逐字符，避免字符串字面量运行时依赖）
+fn uart_puts() {
+    uart_putc(0x4D)  // M
+    uart_putc(0x4D)  // M
+    uart_putc(0x49)  // I
+    uart_putc(0x4F)  // O
+    uart_putc(0x3A)  // :
+    uart_putc(0x20)  // space
+    uart_putc(0x4F)  // O
+    uart_putc(0x4B)  // K
+    uart_putc(0x21)  // !
+    uart_putc(0x0A)  // \n
+}
+
+// Kaula 裸机主逻辑（由模板的 _kaula_entry 调用）
+fn kaula_main() i32 {
+    uart_puts()
+    return 0
+}
