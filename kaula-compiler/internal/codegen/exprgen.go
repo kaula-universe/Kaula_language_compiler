@@ -850,20 +850,31 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		}
 	}
 
-	// 处理基本类型的方法调用
+	// 处理基本类型的方法调用：仅当对象是对应基本类型时才走这个分支；
+	// 若对象是 class 类型，将其交给 generateObjectMethodCall 按类方法名解析。
 	if len(args) == 1 {
 		argCode := eg.GenerateExpression(args[0])
 		switch methodName {
 		case "add":
-			return "int_object_add(" + object + ", " + argCode + ")"
+			if eg.symbolTypeIsIntLike(memberAccess.Object) {
+				return "int_object_add(" + object + ", " + argCode + ")"
+			}
 		case "subtract":
-			return "int_object_subtract(" + object + ", " + argCode + ")"
+			if eg.symbolTypeIsIntLike(memberAccess.Object) {
+				return "int_object_subtract(" + object + ", " + argCode + ")"
+			}
 		case "multiply":
-			return "int_object_multiply(" + object + ", " + argCode + ")"
+			if eg.symbolTypeIsIntLike(memberAccess.Object) {
+				return "int_object_multiply(" + object + ", " + argCode + ")"
+			}
 		case "divide":
-			return "int_object_divide(" + object + ", " + argCode + ")"
+			if eg.symbolTypeIsIntLike(memberAccess.Object) {
+				return "int_object_divide(" + object + ", " + argCode + ")"
+			}
 		case "concat":
-			return "string_object_concat(" + object + ", " + argCode + ")"
+			if eg.symbolTypeIsStringLike(memberAccess.Object) {
+				return "string_object_concat(" + object + ", " + argCode + ")"
+			}
 		case "equals":
 			return "object_equals((Object*)" + object + ", (Object*)" + argCode + ")"
 		}
@@ -871,7 +882,11 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 
 	switch methodName {
 	case "length":
-		return "string_object_length(" + object + ")"
+		// 仅字符串类型使用 string_object_length；其它类型（如 Vec2.length()）作为类方法解析
+		if eg.symbolTypeIsStringLike(memberAccess.Object) {
+			return "string_object_length(" + object + ")"
+		}
+		return eg.generateObjectMethodCall(memberAccess.Object, object, methodName, args)
 	case "toString":
 		return "object_to_string((Object*)" + object + ")"
 	default:
@@ -939,6 +954,40 @@ func (eg *ExpressionGenerator) inferClassType(expr ast.Expression) string {
 		}
 	}
 	return ""
+}
+
+// symbolTypeIsIntLike 判断表达式符号表中的类型是否为整数类型（用于分派 int_object_xxx）
+func (eg *ExpressionGenerator) symbolTypeIsIntLike(expr ast.Expression) bool {
+	if ident, ok := expr.(*ast.Identifier); ok {
+		sym := eg.codegen.GetSymbol(ident.Name)
+		if sym == nil {
+			return false
+		}
+		switch sym.Type {
+		case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "int":
+			return true
+		}
+		return false
+	}
+	// 非标识符：基本类型字面量走 inferType
+	switch eg.inferType(expr) {
+	case "i", "u":
+		return true
+	}
+	return false
+}
+
+// symbolTypeIsStringLike 判断表达式符号表中的类型是否为字符串类型（用于分派 string_object_xxx / length）
+func (eg *ExpressionGenerator) symbolTypeIsStringLike(expr ast.Expression) bool {
+	if ident, ok := expr.(*ast.Identifier); ok {
+		sym := eg.codegen.GetSymbol(ident.Name)
+		if sym == nil {
+			return false
+		}
+		return sym.Type == "string"
+	}
+	// 字符串字面量 inferType 返回 "s"
+	return eg.inferType(expr) == "s"
 }
 
 // isClassField 检查 name 是否是 className 对应类的字段名
@@ -1612,6 +1661,56 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 			if strings.HasSuffix(typeStr, "*") || strings.HasPrefix(typeStr, "*") {
 				isPtr = true
 			}
+			// 类类型变量始终按指针传递和存储（K_ClassName*），
+			// 即使符号表中类型名未显式带 *，也视为指针访问。
+			if !isPtr && eg.codegen.IsClassType(typeStr) {
+				isPtr = true
+			}
+			// class_field:Class:fieldName 形式（类方法/构造中的裸字段名），
+			// 实际代码生成会被上层处理为 self->field，此处兜底。
+			if strings.HasPrefix(typeStr, "class_field:") {
+				isPtr = true
+			}
+		}
+	}
+	// 兜底：如果对象表达式本身是另一个成员访问，且中间成员类型为类类型，也使用 ->。
+	if !isPtr {
+		if _, ok := e.Object.(*ast.MemberAccessExpression); ok {
+			// 无法静态推导嵌套成员类型时，先按对象指针处理：
+			// 若符号名对应对象是 class，成员声明也是 class，递归访问中都是指针。
+			// 此处不强制，避免误伤，但对于对象表达式是 MemberAccess 的情况，
+			// 先保守判断对象根符号。
+			objRoot := e.Object
+			for {
+				if ma, ok := objRoot.(*ast.MemberAccessExpression); ok {
+					objRoot = ma.Object
+				} else {
+					break
+				}
+			}
+			if rootIdent, ok := objRoot.(*ast.Identifier); ok {
+				if rootIdent.Name != "self" {
+					if sym := eg.codegen.GetSymbol(rootIdent.Name); sym != nil {
+						typeStr := sym.Type
+						if eg.codegen.IsClassType(typeStr) {
+							// 根对象是类指针，则所有成员访问中访问的是非指针字段使用 .，
+							// 但字段若是 class 类型则是指针；这里无法确定，
+							// 仅根据根是类指针的判断不充分，故不盲目设置。
+							_ = typeStr
+						}
+					}
+				}
+			}
+		}
+	}
+	// 进一步检查：对象表达式的推断类型若是 class 指针 → 用 ->
+	if !isPtr {
+		objType := eg.inferClassType(e.Object)
+		if objType != "" && eg.codegen.IsClassType(objType) {
+			// 对于类类型变量的字段读取，如果字段不是 class 类型，仍是结构体点访问。
+			// 但如果 objType 是类，则 Object 本身是 class，在 C 中是 K_Class*（指针），
+			// 所以第一层必定是指针。
+			isPtr = true
 		}
 	}
 

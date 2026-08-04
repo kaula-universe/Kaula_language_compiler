@@ -1833,18 +1833,143 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				p.log("跳过 token: %s", lexer.TokenTypeToString(p.curTok.Type))
 				p.nextToken()
 			} else if p.curTok.Type == lexer.TOKEN_FUNC {
-				// fn 关键字开头的方法
+				// fn 关键字开头的方法: fn Name(params) [ReturnType] { ... }
 				savedCurTok := p.curTok
 				savedPeekTok := p.peekTok
 				p.nextToken() // 跳过 fn
 
-				if method := p.parseMethodStatementIterative(); method != nil {
-					p.log("解析完成方法声明：%s", method.String())
-					stmt.Methods = append(stmt.Methods, method)
-				} else {
+				// 下一个 token 必须是方法名 IDENT
+				if p.curTok.Type != lexer.TOKEN_IDENT {
 					p.curTok = savedCurTok
 					p.peekTok = savedPeekTok
-					p.log("跳过 token: %s", lexer.TokenTypeToString(p.curTok.Type))
+					p.log("跳过 token: %s (fn 后不是方法名)", lexer.TokenTypeToString(p.curTok.Type))
+					p.nextToken()
+					continue
+				}
+
+				method := &ast.MethodStatement{
+					Params: []*ast.Param{},
+					Body:   []ast.Statement{},
+					Pos: ast.Position{
+						Line:   p.curTok.Line,
+						Column: p.curTok.Column,
+						File:   p.file,
+					},
+				}
+				method.Name = p.curTok.Value
+				p.log("解析 fn 方法名：%s", method.Name)
+				p.nextToken()
+
+				// 期望左括号
+				if p.curTok.Type != lexer.TOKEN_LPAREN {
+					p.curTok = savedCurTok
+					p.peekTok = savedPeekTok
+					p.log("跳过 token: %s (方法名后不是 ()", lexer.TokenTypeToString(p.curTok.Type))
+					p.nextToken()
+					continue
+				}
+				p.nextToken() // 跳过 (
+
+				// 解析参数
+				for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+					isParamTypeKeyword := false
+					switch p.curTok.Type {
+					case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+						lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+						lexer.TOKEN_TYPE_VOID:
+						isParamTypeKeyword = true
+					}
+					if p.curTok.Type != lexer.TOKEN_IDENT && !isParamTypeKeyword {
+						break
+					}
+					param := &ast.Param{}
+					param.Type = p.curTok.Value
+					p.nextToken()
+					if p.curTok.Type == lexer.TOKEN_QUESTION {
+						param.Nullable = true
+						p.nextToken()
+					}
+					if p.curTok.Type != lexer.TOKEN_IDENT {
+						p.error(fmt.Sprintf("expected parameter name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
+						break
+					}
+					param.Name = p.curTok.Value
+					p.nextToken()
+					method.Params = append(method.Params, param)
+					if p.curTok.Type == lexer.TOKEN_COMMA {
+						p.nextToken()
+					}
+				}
+				if p.curTok.Type == lexer.TOKEN_RPAREN {
+					p.nextToken() // 跳过 )
+				}
+
+				// 解析可选返回类型：可以是 IDENT 或类型关键字（int, void, f64 等）
+				isRetTypeKeyword := false
+				switch p.curTok.Type {
+				case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+					lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+					lexer.TOKEN_TYPE_VOID:
+					isRetTypeKeyword = true
+				}
+				returnPointer := false
+				if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+					// 不常见，但兼容处理
+					returnPointer = true
+					p.nextToken()
+					isRetTypeKeyword = true
+				}
+				if p.curTok.Type == lexer.TOKEN_IDENT || isRetTypeKeyword {
+					retType := p.curTok.Value
+					p.nextToken()
+					if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+						retPointerSuffix := true
+						_ = retPointerSuffix
+						retType = retType + "*"
+						p.nextToken()
+					}
+					if returnPointer {
+						retType = "*" + retType
+					}
+					method.ReturnType = retType
+					p.log("解析 fn 方法返回类型：%s", method.ReturnType)
+				}
+
+				// 解析方法体 { ... }
+				if p.curTok.Type == lexer.TOKEN_LBRACE {
+					p.nextToken() // 跳过 {
+					for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+						bodyStmt := p.parseStatementIterative()
+						if bodyStmt != nil {
+							method.Body = append(method.Body, bodyStmt)
+						}
+						// 如果 parseStatementIterative 没有推进到下一个有效位置，手动前进
+						// 避免 RBRACE 前死循环
+						if p.curTok.Type != lexer.TOKEN_RBRACE &&
+							p.curTok.Type != lexer.TOKEN_EOF {
+							// 检查是否还在同一个 token 上没动（防止死循环）
+							// 简单策略：若下一个解析仍是该 token，则跳过它（这里仅通过查看 peek 是否 == curTok 判断不了）
+							// 我们只在 parseStatementIterative 返回 nil 时手动推进
+							if bodyStmt == nil {
+								p.nextToken()
+							}
+						}
+					}
+					if p.curTok.Type == lexer.TOKEN_RBRACE {
+						p.nextToken() // 跳过 }
+					}
+					stmt.Methods = append(stmt.Methods, method)
+					p.log("解析完成 fn 方法声明：%s", method.String())
+				} else if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+					// 接口方法（仅有声明，无体）
+					p.nextToken()
+					stmt.Methods = append(stmt.Methods, method)
+					p.log("解析完成 fn 接口方法声明（无体）：%s", method.String())
+				} else {
+					// 不是 fn 方法声明：恢复
+					p.curTok = savedCurTok
+					p.peekTok = savedPeekTok
+					p.log("跳过 token: %s (fn 声明后无 { 或 ;)", lexer.TokenTypeToString(p.curTok.Type))
 					p.nextToken()
 				}
 			} else if p.curTok.Type == lexer.TOKEN_CONSTRUCTOR {
@@ -1905,7 +2030,7 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
-			// 检查是否是类型关键字开头（接口方法语法：returnType methodName();）
+			// 检查是否是类型关键字开头（接口方法语法：returnType methodName(); 或 fn methodName() returnType;）
 			isTypeKeyword := false
 			switch p.curTok.Type {
 			case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
@@ -1914,21 +2039,114 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 				isTypeKeyword = true
 			}
 
-			if p.curTok.Type == lexer.TOKEN_FUNC || p.curTok.Type == lexer.TOKEN_IDENT || isTypeKeyword {
+			if p.curTok.Type == lexer.TOKEN_FUNC {
+				// 接口方法使用 fn methodName(params) [retType]; 语法
 				savedCurTok := p.curTok
 				savedPeekTok := p.peekTok
+				p.nextToken() // 跳过 fn
 
-				// 跳过 fn 关键字（如果存在）
-				if p.curTok.Type == lexer.TOKEN_FUNC {
+				if p.curTok.Type != lexer.TOKEN_IDENT {
+					// 不是方法名：恢复并跳过
+					p.curTok = savedCurTok
+					p.peekTok = savedPeekTok
+					p.nextToken()
+					continue
+				}
+
+				method := &ast.MethodStatement{
+					Params: []*ast.Param{},
+					Body:   []ast.Statement{},
+					Pos: ast.Position{
+						Line:   p.curTok.Line,
+						Column: p.curTok.Column,
+						File:   p.file,
+					},
+				}
+				method.Name = p.curTok.Value
+				p.log("接口 fn 方法名：%s", method.Name)
+				p.nextToken()
+
+				if p.curTok.Type != lexer.TOKEN_LPAREN {
+					p.curTok = savedCurTok
+					p.peekTok = savedPeekTok
+					p.nextToken()
+					continue
+				}
+				p.nextToken() // 跳过 (
+
+				for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+					isParamTypeKeyword := false
+					switch p.curTok.Type {
+					case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+						lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+						lexer.TOKEN_TYPE_VOID:
+						isParamTypeKeyword = true
+					}
+					if p.curTok.Type != lexer.TOKEN_IDENT && !isParamTypeKeyword {
+						break
+					}
+					param := &ast.Param{}
+					param.Type = p.curTok.Value
+					p.nextToken()
+					if p.curTok.Type == lexer.TOKEN_QUESTION {
+						param.Nullable = true
+						p.nextToken()
+					}
+					if p.curTok.Type != lexer.TOKEN_IDENT {
+						break
+					}
+					param.Name = p.curTok.Value
+					p.nextToken()
+					method.Params = append(method.Params, param)
+					if p.curTok.Type == lexer.TOKEN_COMMA {
+						p.nextToken()
+					}
+				}
+				if p.curTok.Type == lexer.TOKEN_RPAREN {
+					p.nextToken() // 跳过 )
+				}
+
+				// 解析可选返回类型
+				isRetTypeKeyword := false
+				switch p.curTok.Type {
+				case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+					lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+					lexer.TOKEN_TYPE_VOID:
+					isRetTypeKeyword = true
+				}
+				if p.curTok.Type == lexer.TOKEN_IDENT || isRetTypeKeyword {
+					method.ReturnType = p.curTok.Value
+					p.nextToken()
+					if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+						method.ReturnType = method.ReturnType + "*"
+						p.nextToken()
+					}
+				}
+				// 接口方法：需要分号结尾
+				if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+					p.nextToken()
+					stmt.Methods = append(stmt.Methods, method)
+					p.log("解析完成接口 fn 方法声明：%s", method.String())
+				} else if p.curTok.Type == lexer.TOKEN_RBRACE {
+					// 无分号，但到了接口结尾：也算合法（分号可选）
+					stmt.Methods = append(stmt.Methods, method)
+					p.log("解析完成接口 fn 方法声明（无分号）：%s", method.String())
+				} else {
+					// 失败：恢复
+					p.curTok = savedCurTok
+					p.peekTok = savedPeekTok
 					p.nextToken()
 				}
+			} else if p.curTok.Type == lexer.TOKEN_IDENT || isTypeKeyword {
+				savedCurTok := p.curTok
+				savedPeekTok := p.peekTok
 
 				if method := p.parseMethodStatementIterative(); method != nil {
 					stmt.Methods = append(stmt.Methods, method)
 					continue
 				}
 
-				// 如果解析失败，恢复 token 位置
+				// 如果解析失败，恢复 token 位置并跳过一个 token 避免死循环
 				p.curTok = savedCurTok
 				p.peekTok = savedPeekTok
 				p.nextToken()
@@ -2503,7 +2721,7 @@ parseMethodBody:
 			if bodyStmt != nil {
 				method.Body = append(method.Body, bodyStmt)
 			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
+			if p.curTok.Type != lexer.TOKEN_RBRACE && bodyStmt == nil {
 				p.nextToken()
 				p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 			}
@@ -2611,7 +2829,7 @@ func (p *Parser) parseConstructorStatementIterative() *ast.ConstructorStatement 
 			if bodyStmt != nil {
 				constructor.Body = append(constructor.Body, bodyStmt)
 			}
-			if p.curTok.Type != lexer.TOKEN_RBRACE {
+			if p.curTok.Type != lexer.TOKEN_RBRACE && bodyStmt == nil {
 				p.nextToken()
 				p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 			}
@@ -2838,22 +3056,19 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			Name: p.curTok.Value,
 		}
 		p.nextToken()
-		if p.curTok.Type == lexer.TOKEN_LPAREN {
-			return p.parseCallExpressionIterative(ident)
-		}
-		return ident
+		return p.parsePostfixChain(ident)
 	case lexer.TOKEN_SELF:
 		ident := &ast.Identifier{
 			Name: p.curTok.Value,
 		}
 		p.nextToken()
-		return ident
+		return p.parsePostfixChain(ident)
 	case lexer.TOKEN_NULL:
 		ident := &ast.Identifier{
 			Name: p.curTok.Value,
 		}
 		p.nextToken()
-		return ident
+		return p.parsePostfixChain(ident)
 	case lexer.TOKEN_TRUE:
 		pos := ast.Position{
 			Line:   p.curTok.Line,
@@ -2983,22 +3198,9 @@ func (p *Parser) parseStructLiteralExpression() ast.Expression {
 	return stmt
 }
 
-// parseIdentifierIterative 迭代解析标识符（支持多级成员访问和索引访问）
-func (p *Parser) parseIdentifierIterative() ast.Expression {
-	pos := ast.Position{
-		Line:   p.curTok.Line,
-		Column: p.curTok.Column,
-		File:   p.file,
-	}
-
-	// 使用 Expression 接口类型，支持 Identifier 和 MemberAccessExpression
-	var expr ast.Expression
-	expr = &ast.Identifier{
-		Name: p.curTok.Value,
-		Pos:  pos,
-	}
-	p.nextToken()
-
+// parsePostfixChain 解析后缀表达式链：成员访问(.field)、索引访问([i])、函数调用(())
+// 从给定的初始表达式开始，循环处理后续的运算符直到不再匹配
+func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
 	// 循环处理多级成员访问和索引访问（如 std.io.println 或 arr[i].field）
 	for {
 		if p.curTok.Type == lexer.TOKEN_DOT {
@@ -3073,6 +3275,23 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 	}
 
 	return expr
+}
+
+// parseIdentifierIterative 迭代解析标识符（支持多级成员访问和索引访问）
+func (p *Parser) parseIdentifierIterative() ast.Expression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+
+	expr := &ast.Identifier{
+		Name: p.curTok.Value,
+		Pos:  pos,
+	}
+	p.nextToken()
+
+	return p.parsePostfixChain(expr)
 }
 
 // looksLikeGenericArgs 检查当前 < 是否是泛型类型参数列表
