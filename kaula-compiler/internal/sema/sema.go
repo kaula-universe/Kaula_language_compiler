@@ -120,7 +120,7 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 
 	sa.comptime = comptime.NewEvaluator()
 
-	// 第一遍：将所有函数和变量添加到符号表（不分析函数体）
+	// 第一遍：将所有函数和变量添加到符号表（不分析函数体/方法体/构造函数体）
 	sa.funcReturnTypes = make(map[string]string)
 	for _, stmt := range program.Statements {
 		if funcStmt, ok := stmt.(*ast.FunctionStatement); ok {
@@ -134,6 +134,75 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 		if funcStmt, ok := stmt.(*ast.FunctionStatement); ok {
 			sa.analyzeFunctionBody(funcStmt)
 		}
+		// 第二遍：分析类的方法体和构造函数体
+		if classStmt, ok := stmt.(*ast.ClassStatement); ok {
+			sa.analyzeClassMembersBody(classStmt)
+		}
+	}
+}
+
+// analyzeClassMembersBody 分析类方法体和构造函数体（第二遍调用，类符号已注册）
+func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatement) {
+	fmt.Fprintf(os.Stderr, "[SEMA DEBUG] analyzeClassMembersBody: class=%s, %d ctors, %d methods\n",
+		classStmt.Name, len(classStmt.Constructors), len(classStmt.Methods))
+	// 分析构造函数
+	for _, ctor := range classStmt.Constructors {
+		oldSymbolTable := sa.symbolTable
+		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "constructor_"+classStmt.Name)
+		sa.scope++
+
+		// 注册 self：类型为类的指针类型
+		sa.symbolTable.AddSymbol("self", classStmt.Name+"*", false, "local", classStmt.Pos.Line, classStmt.Pos.Column)
+
+		// 注册类字段作为 self 的成员（同时作为作用域内可解析的字段名）
+		// 实际字段访问是通过 self.field 实现的，但为了允许裸字段名（如 x = 5 而不是 self.x = 5），
+		// 我们将字段名也注册到作用域，标记为 "class_field:Class:field" 类型
+		for _, f := range classStmt.Fields {
+			sa.symbolTable.AddSymbol(f.Name, f.Type, f.Nullable, "class_field:"+classStmt.Name, f.Pos.Line, f.Pos.Column)
+		}
+
+		// 注册构造函数参数
+		for _, param := range ctor.Params {
+			sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", classStmt.Pos.Line, classStmt.Pos.Column)
+		}
+
+		// 分析构造函数体
+		for _, bodyStmt := range ctor.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
+
+		sa.symbolTable = oldSymbolTable
+		sa.scope--
+	}
+
+	// 分析方法体
+	for _, method := range classStmt.Methods {
+		oldSymbolTable := sa.symbolTable
+		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "method_"+classStmt.Name+"_"+method.Name)
+		sa.scope++
+
+		sa.funcReturnTypes[classStmt.Name+"_"+method.Name] = method.ReturnType
+
+		// 注册 self
+		sa.symbolTable.AddSymbol("self", classStmt.Name+"*", false, "local", method.Pos.Line, method.Pos.Column)
+
+		// 注册类字段（允许裸字段名）
+		for _, f := range classStmt.Fields {
+			sa.symbolTable.AddSymbol(f.Name, f.Type, f.Nullable, "class_field:"+classStmt.Name, f.Pos.Line, f.Pos.Column)
+		}
+
+		// 注册方法参数
+		for _, param := range method.Params {
+			sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", method.Pos.Line, method.Pos.Column)
+		}
+
+		// 分析方法体
+		for _, bodyStmt := range method.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
+
+		sa.symbolTable = oldSymbolTable
+		sa.scope--
 	}
 }
 

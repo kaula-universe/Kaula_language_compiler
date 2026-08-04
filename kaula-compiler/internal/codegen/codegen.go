@@ -1269,6 +1269,22 @@ func (cg *CodeGenerator) IsEnumType(name string) bool {
 	return false
 }
 
+// IsClassType 检查指定名称是否是已定义的类类型（含已实例化的泛型类：如 Box_int）
+func (cg *CodeGenerator) IsClassType(name string) bool {
+	if cg.program == nil {
+		return false
+	}
+	// 首先尝试直接查找（非泛型或已实例化的泛型类型在 typeGenerator.structTypes 中注册）
+	if cg.typeGenerator.structTypes[name] && cg.program.FindClass(name) != nil {
+		return true
+	}
+	// 查 AST 中的类定义
+	if cg.program.FindClass(name) != nil {
+		return true
+	}
+	return false
+}
+
 // GetGenericCachedCode 获取缓存的泛型代码
 func (cg *CodeGenerator) GetGenericCachedCode(funcName string, typeArgs []string) (string, bool) {
 	cacheKey := funcName + "<"

@@ -306,7 +306,18 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 		return "const " + tg.MapKaulaTypeToC(innerType)
 	}
 	if tg.structTypes[kaulaType] {
+		// 区分 struct 类型和 class 类型：
+		// struct 实例按值传递/存储（使用 K_StructName）
+		// class 实例按引用/指针传递/存储（使用 K_ClassName*，始终是堆分配指针）
+		if tg.codegen != nil && tg.codegen.IsClassType(kaulaType) {
+			return kaulaStructTag(kaulaType) + "*"
+		}
 		return kaulaStructTag(kaulaType)
+	}
+	// 最后 fallback：若名称未注册为 struct 类型，但 AST 中存在同名类定义，
+	// 仍按 class 指针处理，避免类顺序依赖导致的生成错误。
+	if tg.codegen != nil && tg.codegen.IsClassType(kaulaType) {
+		return kaulaStructTag(kaulaType) + "*"
 	}
 	return kaulaType
 }
@@ -335,7 +346,8 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 
 	for _, ifaceName := range stmt.Implements {
-		code.WriteString(fmt.Sprintf("    %s_MethodGroup %s;\n", ifaceName, ifaceName))
+		methodGroupType := kaulaStructTag(ifaceName + "_MethodGroup")
+		code.WriteString(fmt.Sprintf("    %s %s;\n", methodGroupType, ifaceName))
 	}
 
 	for _, field := range stmt.Fields {
@@ -346,7 +358,12 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 
 	for _, method := range stmt.Methods {
 		returnType := tg.convertType(method.ReturnType, false)
-		code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, tg.convertType(stmt.Name, false)))
+		// 无显式返回类型的方法视为 void 返回
+		if returnType == "" {
+			returnType = "void"
+		}
+		selfStructType := kaulaStructTag(stmt.Name)
+		code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, selfStructType))
 		for _, param := range method.Params {
 			paramType := tg.convertType(param.Type, false)
 			code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
@@ -445,110 +462,6 @@ func (tg *TypeGenerator) getInterfaceMethods(ifaceName string) []*ast.MethodStat
 		return nil
 	}
 	return iface.Methods
-}
-
-func (tg *TypeGenerator) generateStatementWithSelfPrefix(className string, stmt ast.Statement) string {
-	generated := tg.codegen.generateStatement(stmt)
-	if generated == "" {
-		return generated
-	}
-
-	// 预计算类字段集合，避免每行重复查询
-	fieldSet := make(map[string]bool)
-	for _, field := range tg.getClassFields(className) {
-		fieldSet[field.Name] = true
-	}
-
-	lines := strings.Split(generated, "\n")
-	var b strings.Builder
-	b.Grow(len(generated) + 64)
-
-	for _, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t")
-
-		if trimmed == "" || trimmed == ";" || trimmed == "}" || trimmed == "{" {
-			b.WriteString(line)
-			b.WriteByte('\n')
-			continue
-		}
-
-		// 查找赋值位置（跳过 ==）
-		assignPos := -1
-		for i := 0; i < len(trimmed); i++ {
-			if i+1 < len(trimmed) && trimmed[i] == '=' && trimmed[i+1] == '=' {
-				i++
-				continue
-			}
-			if trimmed[i] == '=' {
-				assignPos = i
-				break
-			}
-		}
-
-		if assignPos > 0 {
-			lhsTrimmed := strings.TrimRight(trimmed[:assignPos], " ")
-			if fieldSet[lhsTrimmed] {
-				// 需要添加 self-> 前缀
-				prefix := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-				b.WriteString(prefix)
-				b.WriteString("self->")
-				b.WriteString(lhsTrimmed)
-				b.WriteString(trimmed[assignPos:])
-				b.WriteByte('\n')
-				continue
-			}
-		}
-
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-
-	return b.String()
-}
-
-func (tg *TypeGenerator) getMethodBodyWithSelfPrefix(className string, method *ast.MethodStatement) string {
-	// 预计算类字段集合
-	fieldSet := make(map[string]bool)
-	for _, field := range tg.getClassFields(className) {
-		fieldSet[field.Name] = true
-	}
-
-	var b strings.Builder
-	for _, bodyStmt := range method.Body {
-		generated := tg.codegen.generateStatement(bodyStmt)
-		if generated == "" {
-			continue
-		}
-
-		lines := strings.Split(generated, "\n")
-		for _, line := range lines {
-			trimmed := strings.TrimLeft(line, " \t")
-
-			if trimmed == "" || trimmed == ";" || trimmed == "}" || trimmed == "{" {
-				b.WriteString(line)
-				b.WriteByte('\n')
-				continue
-			}
-
-			if strings.HasPrefix(trimmed, "return") {
-				returnExpr := strings.TrimRight(trimmed[6:], "; ")
-				returnExpr = strings.TrimSpace(returnExpr)
-
-				prefix := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-				b.WriteString(prefix)
-				b.WriteString("return ")
-				if fieldSet[returnExpr] {
-					b.WriteString("self->")
-				}
-				b.WriteString(returnExpr)
-				b.WriteString(";\n")
-			} else {
-				b.WriteString(line)
-				b.WriteByte('\n')
-			}
-		}
-	}
-	return b.String()
 }
 
 func (tg *TypeGenerator) getClassFields(className string) []*ast.FieldDeclaration {
@@ -796,37 +709,14 @@ func (tg *TypeGenerator) GenerateGenericStructStatement(stmt *ast.StructStatemen
 	return code.String()
 }
 
-func (tg *TypeGenerator) GenerateConstructorStatement(className string, constructor *ast.ConstructorStatement) string {
-	var code strings.Builder
-	cName := kaulaStructTag(className)
-	code.WriteString(fmt.Sprintf("%s* %s_new(", cName, className))
-	for i, param := range constructor.Params {
-		paramType := tg.convertType(param.Type, param.Nullable)
-		if i > 0 {
-			code.WriteString(", ")
-		}
-		code.WriteString(fmt.Sprintf("%s %s", paramType, param.Name))
-	}
-	code.WriteString(") {\n")
-
-	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
-	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
-
-	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("// Initialize interface method groups\n"))
-
-	for _, bodyStmt := range constructor.Body {
-		code.WriteString(tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt))
-	}
-
-	code.WriteString(tg.codegen.indentString() + "return self;\n")
-	code.WriteString("}\n\n")
-
-	return code.String()
-}
-
 func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.MethodStatement) string {
 	returnType := tg.convertType(method.ReturnType, false)
-	selfType := tg.convertType(className, false)
+	// 无显式返回类型的方法视为 void 返回
+	if returnType == "" {
+		returnType = "void"
+	}
+	// self 参数始终是指向类结构体的指针；这里使用 struct tag 本身（非指针）配合后面的显式 * 形成单级指针 K_Class*
+	selfStructType := kaulaStructTag(className)
 
 	// 进入方法作用域：作用域名编码 className 和 methodName，供 exprgen 识别
 	tg.codegen.EnterScope("method_" + className + "_" + method.Name)
@@ -839,7 +729,7 @@ func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.M
 	tg.codegen.indent++
 
 	var code strings.Builder
-	code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, selfType))
+	code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, selfStructType))
 	for _, param := range method.Params {
 		paramType := tg.convertType(param.Type, false)
 		code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
@@ -867,6 +757,9 @@ func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.M
 // 生成形如: self->Iface.method = (R(*)(void*, T1, T2))Class_method;
 func (tg *TypeGenerator) buildInterfaceMethodCast(className string, ifaceName string, method *ast.MethodStatement) string {
 	returnType := tg.convertType(method.ReturnType, false)
+	if returnType == "" {
+		returnType = "void"
+	}
 	var paramSig strings.Builder
 	paramSig.WriteString("void*")
 	for _, param := range method.Params {
