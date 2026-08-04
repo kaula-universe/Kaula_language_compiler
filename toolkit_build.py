@@ -23,6 +23,8 @@ import subprocess
 import argparse
 import hashlib
 import shutil
+import time
+import threading
 from pathlib import Path
 
 
@@ -83,6 +85,89 @@ class BuildConfig:
         self.is_windows = sys.platform.startswith("win")
         self.is_macos = sys.platform == "darwin"
         self.is_linux = sys.platform.startswith("linux")
+
+
+class ProgressBar:
+    """跨平台进度条，支持终端宽度自适应，无外部依赖"""
+
+    def __init__(self, total, prefix="", width=40, stream=None):
+        self.total = max(1, total)
+        self.prefix = prefix
+        self.width = width
+        self.stream = stream or sys.stdout
+        self.current = 0
+        self.start_time = time.time()
+        self.last_update = 0
+        self._lock = threading.Lock()
+        self._visible = False
+        self._last_line = ""
+        self._term_width = self._get_term_width()
+
+    def _get_term_width(self):
+        try:
+            return shutil.get_terminal_size().columns
+        except Exception:
+            return 80
+
+    def _format_time(self, seconds):
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        m, s = divmod(seconds, 60)
+        return f"{m:.0f}m{s:.0f}s"
+
+    def _eta(self):
+        if self.current == 0:
+            return "?s"
+        elapsed = time.time() - self.start_time
+        rate = self.current / elapsed
+        remaining = (self.total - self.current) / rate
+        return self._format_time(remaining)
+
+    def _render(self):
+        if self.total <= 0:
+            return ""
+        pct = self.current / self.total
+        filled = int(self.width * pct)
+        # Use ASCII characters for cross-platform compatibility (Windows GBK, etc.)
+        bar = "#" * filled + "-" * (self.width - filled)
+        elapsed = time.time() - self.start_time
+        eta_str = self._eta()
+        return f"\r{self.prefix} [{bar}] {self.current}/{self.total} ({pct*100:.0f}%) | {self._format_time(elapsed)} elapsed | ETA: {eta_str}"
+
+    def update(self, n=1):
+        with self._lock:
+            self.current = min(self.current + n, self.total)
+            now = time.time()
+            if now - self.last_update >= 0.1 or self.current == self.total:
+                self._draw()
+
+    def _draw(self):
+        line = self._render()
+        if self._visible:
+            self.stream.write("\r" + " " * len(self._last_line) + "\r")
+        self.stream.write(line)
+        self.stream.flush()
+        self._last_line = line.strip()
+        self._visible = True
+        self.last_update = time.time()
+
+    def finish(self, message=None):
+        with self._lock:
+            self.current = self.total
+            if self._visible:
+                self.stream.write("\r" + " " * len(self._last_line) + "\r")
+            if message:
+                self.stream.write(message + "\n")
+            else:
+                self.stream.write(self._render() + "\n")
+            self.stream.flush()
+            self._visible = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.finish()
 
 
 class ToolDetector:
@@ -277,7 +362,7 @@ class CBuilder:
                     print(f"      {line}")
                 return False
             self.obj_files.append(out_obj)
-            print(f"  [✓] {src_file.name}")
+            print(f"  [OK] {src_file.name}")
             if digest:
                 hash_path.write_text(digest, encoding="ascii")
             return True
@@ -306,7 +391,7 @@ class CBuilder:
                 print(f"[-] 创建静态库失败: {err}")
                 return False
             sz = output_lib.stat().st_size
-            print(f"[\u2713] 静态库: {output_lib} ({sz / 1024:.1f} KB)")
+            print(f"[OK] 静态库: {output_lib} ({sz / 1024:.1f} KB)")
             return True
         except subprocess.TimeoutExpired:
             print("[-] 创建静态库超时")
@@ -326,11 +411,13 @@ class CBuilder:
         self.obj_files = []
         ok = 0
         fail = 0
-        for src in sources:
-            if self._compile_one(src):
-                ok += 1
-            else:
-                fail += 1
+        with ProgressBar(len(sources), "编译标准库", width=40) as pbar:
+            for src in sources:
+                if self._compile_one(src):
+                    ok += 1
+                else:
+                    fail += 1
+                pbar.update()
 
         if fail > 0:
             print(f"[-] 标准库编译失败: {fail} 个文件")
@@ -366,11 +453,13 @@ class CBuilder:
         fail = 0
         # freestanding 库自包含：仅 -I freestanding/ 即可解析所有 "base/types.h" 等
         freestanding_include_dirs = [str(self.config.freestanding_dir)]
-        for src in sources:
-            if self._compile_one(src, include_dirs=freestanding_include_dirs):
-                ok += 1
-            else:
-                fail += 1
+        with ProgressBar(len(sources), "编译 freestanding", width=40) as pbar:
+            for src in sources:
+                if self._compile_one(src, include_dirs=freestanding_include_dirs):
+                    ok += 1
+                else:
+                    fail += 1
+                pbar.update()
 
         if fail > 0:
             print(f"[-] freestanding 库编译失败: {fail} 个文件")
@@ -404,23 +493,25 @@ class CBuilder:
         self.obj_files = []
         ok = 0
         fail = 0
-        for src in sources:
-            # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
-            # unity-include freestanding 库，必须用 freestanding 优先的 -I 顺序，
-            # 否则会错误地包含 std/memory/memory.c（依赖 libc <string.h>）。
-            if src.name == "kaula_freestanding_runtime.c":
-                if self._compile_one(
-                    src,
-                    include_dirs=self.config.freestanding_runtime_include_dirs,
-                ):
-                    ok += 1
+        with ProgressBar(len(sources), "编译运行时", width=40) as pbar:
+            for src in sources:
+                # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
+                # unity-include freestanding 库，必须用 freestanding 优先的 -I 顺序，
+                # 否则会错误地包含 std/memory/memory.c（依赖 libc <string.h>）。
+                if src.name == "kaula_freestanding_runtime.c":
+                    if self._compile_one(
+                        src,
+                        include_dirs=self.config.freestanding_runtime_include_dirs,
+                    ):
+                        ok += 1
+                    else:
+                        fail += 1
                 else:
-                    fail += 1
-            else:
-                if self._compile_one(src):
-                    ok += 1
-                else:
-                    fail += 1
+                    if self._compile_one(src):
+                        ok += 1
+                    else:
+                        fail += 1
+                pbar.update()
 
         if fail > 0:
             print(f"[-] 运行时编译失败: {fail} 个文件")
@@ -445,14 +536,16 @@ class CBuilder:
             (self.config.runtime_dir, "runtime"),
         ]
 
-        for src, dest_name in targets:
-            if not src.exists():
-                continue
-            dest = self.config.include_dir / dest_name
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*.c", "build"))
-            print(f"[\u2713] 头文件: {dest_name}/")
+        with ProgressBar(len(targets), "安装头文件", width=40) as pbar:
+            for src, dest_name in targets:
+                if not src.exists():
+                    pbar.update()
+                    continue
+                dest = self.config.include_dir / dest_name
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*.c", "build"))
+                pbar.update()
 
         return True
 
@@ -533,25 +626,28 @@ class GoBuilder:
             cmd.extend(["-ldflags", ldflags])
         cmd.extend(["-o", str(out_file), "."])
 
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300,
-                cwd=str(cmd_path), env=env
-            )
-            if result.returncode != 0:
-                err = result.stderr if result.stderr else result.stdout
-                print(f"[-] 构建 {output_name} 失败:")
-                print(err)
+        # 简单的进度指示器 (Go 编译是单步完成的)
+        with ProgressBar(1, f"Go 编译 {output_name}", width=30) as pbar:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300,
+                    cwd=str(cmd_path), env=env
+                )
+                pbar.update()
+                if result.returncode != 0:
+                    err = result.stderr if result.stderr else result.stdout
+                    print(f"[-] 构建 {output_name} 失败:")
+                    print(err)
+                    return False
+                sz = out_file.stat().st_size
+                print(f"[OK] {output_name}: {out_file} ({sz / 1024:.1f} KB)")
+                if digest:
+                    self.config.hash_dir.mkdir(parents=True, exist_ok=True)
+                    hash_path.write_text(digest, encoding="ascii")
+                return True
+            except subprocess.TimeoutExpired:
+                print(f"[-] 构建 {output_name} 超时")
                 return False
-            sz = out_file.stat().st_size
-            print(f"[\u2713] {output_name}: {out_file} ({sz / 1024:.1f} KB)")
-            if digest:
-                self.config.hash_dir.mkdir(parents=True, exist_ok=True)
-                hash_path.write_text(digest, encoding="ascii")
-            return True
-        except subprocess.TimeoutExpired:
-            print(f"[-] 构建 {output_name} 超时")
-            return False
 
     def build_kaulac(self):
         return self._build_go_binary("kaulac", "kaulac")
@@ -568,7 +664,7 @@ class GoBuilder:
         self.config.bin_dir.mkdir(parents=True, exist_ok=True)
         dest = self.config.bin_dir / "stdlib.json"
         shutil.copy2(src, dest)
-        print(f"[\u2713] stdlib.json -> {dest}")
+        print(f"[OK] stdlib.json -> {dest}")
         return True
 
 
@@ -623,12 +719,12 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
     failed_components = [name for name, ok in results.items() if ok is False]
     all_ok = not failed_components
     if all_ok:
-        print("\n\u2705 构建完成!")
+        print("\n[OK] 构建完成!")
         print(f"   可执行文件: {config.bin_dir}")
         print(f"   静态库:     {config.lib_dir}")
         print(f"   头文件:     {config.include_dir}")
     else:
-        print("\n\u274c 部分组件构建失败")
+        print("\n[FAIL] 部分组件构建失败")
         print(f"   失败组件: {', '.join(failed_components)}")
 
     return all_ok
@@ -642,21 +738,21 @@ def clean_all(config):
 
     if config.build_dir.exists():
         shutil.rmtree(config.build_dir)
-        print(f"[\u2713] 已删除: {config.build_dir}")
+        print(f"[OK] 已删除: {config.build_dir}")
 
     std_lib_a = config.std_dir / "libkaula_std.a"
     std_lib_lib = config.std_dir / "kaula_std.lib"
     for p in [std_lib_a, std_lib_lib]:
         if p.exists():
             p.unlink()
-            print(f"[\u2713] 已删除: {p}")
+            print(f"[OK] 已删除: {p}")
 
     obj_dir_old = config.project_root / "build"
     if obj_dir_old.exists() and obj_dir_old != config.build_dir:
         shutil.rmtree(obj_dir_old)
-        print(f"[\u2713] 已删除: {obj_dir_old}")
+        print(f"[OK] 已删除: {obj_dir_old}")
 
-    print("\n\u2705 清理完成!")
+    print("\n[OK] 清理完成!")
 
 
 def main():

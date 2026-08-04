@@ -379,6 +379,17 @@ func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className
 	}
 	code.WriteString(") {\n")
 
+	// 进入构造函数作用域：注册作用域名、参数、self 符号
+	tg.codegen.EnterScope("constructor_" + className)
+	tg.codegen.currentClassName = className
+	tg.codegen.currentFunctionReturnType = className + "*"
+	// self 在 C 函数体中才声明，这里预注册为局部符号，避免 GenerateIdentifier 误判
+	tg.codegen.AddSymbol("self", className+"*", false, "local", constructor.Pos.Line, constructor.Pos.Column)
+	for _, param := range constructor.Params {
+		tg.codegen.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", constructor.Pos.Line, constructor.Pos.Column)
+	}
+	tg.codegen.indent++
+
 	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
 	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
 
@@ -400,7 +411,7 @@ func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className
 			for _, ifaceName := range interfaces {
 				if ifaceMethodsMap[ifaceName] != nil {
 					if ifaceMethodsMap[ifaceName][classMethod.Name] {
-						code.WriteString(tg.codegen.indentString() + fmt.Sprintf("self->%s.%s = (%s(*)(void*))%s_%s;\n", ifaceName, classMethod.Name, tg.convertType(classMethod.ReturnType, false), className, classMethod.Name))
+						code.WriteString(tg.codegen.indentString() + tg.buildInterfaceMethodCast(className, ifaceName, classMethod))
 					}
 				}
 			}
@@ -409,10 +420,17 @@ func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className
 	}
 
 	for _, bodyStmt := range constructor.Body {
-		code.WriteString(tg.codegen.indentString() + tg.generateStatementWithSelfPrefix(className, bodyStmt))
+		code.WriteString(tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt))
 	}
 
 	code.WriteString(tg.codegen.indentString() + "return self;\n")
+
+	// 作用域清理
+	tg.codegen.indent--
+	tg.codegen.ExitScope()
+	tg.codegen.currentClassName = ""
+	tg.codegen.currentFunctionReturnType = ""
+
 	code.WriteString("}\n\n")
 
 	return code.String()
@@ -808,16 +826,27 @@ func (tg *TypeGenerator) GenerateConstructorStatement(className string, construc
 
 func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.MethodStatement) string {
 	returnType := tg.convertType(method.ReturnType, false)
+	selfType := tg.convertType(className, false)
+
+	// 进入方法作用域：作用域名编码 className 和 methodName，供 exprgen 识别
+	tg.codegen.EnterScope("method_" + className + "_" + method.Name)
+	tg.codegen.currentClassName = className
+	tg.codegen.currentFunctionReturnType = method.ReturnType
+	tg.codegen.AddSymbol("self", className+"*", false, "local", method.Pos.Line, method.Pos.Column)
+	for _, param := range method.Params {
+		tg.codegen.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", method.Pos.Line, method.Pos.Column)
+	}
+	tg.codegen.indent++
 
 	var code strings.Builder
-	code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, className))
+	code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, selfType))
 	for _, param := range method.Params {
 		paramType := tg.convertType(param.Type, false)
 		code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
 	}
 	code.WriteString(") {\n")
 
-	bodyCode := tg.getMethodBodyWithSelfPrefix(className, method)
+	bodyCode := tg.codegen.generateStatementFromStmts(method.Body)
 	code.WriteString(bodyCode)
 
 	if returnType != "void" && !methodHasReturn(method.Body) {
@@ -825,7 +854,29 @@ func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.M
 	}
 	code.WriteString("}\n\n")
 
+	// 清理作用域
+	tg.codegen.indent--
+	tg.codegen.ExitScope()
+	tg.codegen.currentClassName = ""
+	tg.codegen.currentFunctionReturnType = ""
+
 	return code.String()
+}
+
+// buildInterfaceMethodCast 构建接口方法赋值的完整函数指针强转（修复接口多参数调用签名不匹配问题）
+// 生成形如: self->Iface.method = (R(*)(void*, T1, T2))Class_method;
+func (tg *TypeGenerator) buildInterfaceMethodCast(className string, ifaceName string, method *ast.MethodStatement) string {
+	returnType := tg.convertType(method.ReturnType, false)
+	var paramSig strings.Builder
+	paramSig.WriteString("void*")
+	for _, param := range method.Params {
+		paramSig.WriteString(", ")
+		paramSig.WriteString(tg.convertType(param.Type, false))
+	}
+	return fmt.Sprintf("self->%s.%s = (%s(*)(%s))%s_%s;\n",
+		ifaceName, method.Name,
+		returnType, paramSig.String(),
+		className, method.Name)
 }
 
 func methodHasReturn(stmts []ast.Statement) bool {

@@ -59,6 +59,9 @@ type CodeGenerator struct {
 	currentFunctionReturnType string
 	callStack                 map[string]bool
 
+	// 当前类上下文：在生成构造函数/方法体期间设置，供 exprgen 识别成员字段
+	currentClassName string
+
 	sorAdapter *SORCodeGenAdapter
 
 	kmmScopeDepth    int
@@ -813,6 +816,18 @@ static inline String string_concat(String str1, String str2) {
 
 func (cg *CodeGenerator) generateStatement(stmt ast.Statement) string {
 	return cg.statementGenerator.GenerateStatement(stmt)
+}
+
+// generateStatementFromStmts 从多个语句生成代码（类构造函数/方法体使用）
+func (cg *CodeGenerator) generateStatementFromStmts(stmts []ast.Statement) string {
+	var b strings.Builder
+	for _, s := range stmts {
+		code := cg.generateStatement(s)
+		if code != "" {
+			b.WriteString(code)
+		}
+	}
+	return b.String()
 }
 
 func (cg *CodeGenerator) generateExpression(expr ast.Expression) string {

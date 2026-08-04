@@ -71,6 +71,7 @@ cat serial_out.txt   # 串口输出 "Hello, Kaula from bare metal!"
 | `pvh` | Xen PVH 引导（QEMU `-kernel` 直接支持 x86_64/riscv64/aarch64 ELF） |
 | `multiboot` | Multiboot 引导（QEMU `-kernel` 支持 x86_64/i386，需 AOUT_KLUDGE） |
 | `custom` | 使用 `--boot-file` 指定的自定义引导汇编 |
+| `user` | 用户态程序流水线（加载地址 `0x40000000`，入口 `user_start` → `kaula_main` → `sys_exit`） |
 | `none` | 不自动引导（默认，仅输出编译产物） |
 
 boot 模式需要同时启用 `--freestanding`。架构由 `--boot-arch`（或 `--target-triple`）决定：`x86_64`（默认）/`i386`/`riscv64`/`aarch64`。
@@ -224,7 +225,14 @@ kaulac.exe --freestanding --boot pvh --target-triple x86_64-none-elf kernel.kl
 
 两条路径都自动链接 freestanding runtime（`kaula_freestanding_runtime.c`），提供 `memset`/`memcpy`/`memmove`/`memcmp`/`strlen` 实现。
 
-头文件裁剪：freestanding 模式下不包含 `<stdio.h>`/`<stdlib.h>`，仅保留 `<stdint.h>`/`<stddef.h>` 等 freestanding 头文件。
+**freestanding 库链接**：
+- 两条路径都自动链接 `kaula_freestanding.lib`/`libkaula_freestanding.a`
+- freestanding 库包含：base/types、memory、string、math、io 五大模块
+- 所有符号均为弱符号（`FS_WEAK`），托管模式下与 libc/kaula_runtime 共存不冲突
+- 内存管理采用 BSS 静态池 bump 分配器（`fs_alloc`/`fs_free`/`fs_alloc_usage`），无 free list、无碎片、无系统调用
+- 托管模式下可通过覆写弱钩子 `fs_output_putchar` 将 freestanding I/O 重定向到控制台
+
+头文件裁剪：freestanding 模式下不包含 `<stdio.h>`/`<stdlib.h>`，仅保留 `<stdint.h>`/`<stddef.h>`/`<stdbool.h>` 等 freestanding 头文件。
 
 ### --target-triple
 
@@ -496,6 +504,189 @@ void disable_interrupts(void) {
 | `#[section("...")]` | `#[section(".data")] buf: u8` | `__attribute__((section(".data")))` | 指定数据段 |
 | `#[aligned(N)]` | `#[aligned(4096)] page: u8` | `__attribute__((aligned(4096)))` | 指定对齐 |
 | `#[weak]` | `#[weak] flag: i32` | `__attribute__((weak))` | 弱符号 |
+
+## Freestanding 无依赖标准库
+
+Kaula 提供 **freestanding** 库，作为 std 的无依赖对等体。它与 std 同级别，提供相同的模块结构和调用方式，但完全不依赖 libc/OS。
+
+### 模块概览
+
+| 模块 | 导入方式 | 主要功能 |
+|------|----------|----------|
+| `freestanding.base` | `import freestanding.base` | 类型定义、通用宏（`FS_WEAK`、`FS_ALLOC` 等） |
+| `freestanding.memory` | `import freestanding.memory` | BSS 静态池分配器（`fs_alloc`/`fs_free`/`fs_realloc`/`fs_alloc_usage`）、内存操作（`memset`/`memcpy`/`memmove`/`memcmp`） |
+| `freestanding.string` | `import freestanding.string` | 字符串处理（`strlen`/`strcmp`/`strcpy`/`strcat`/`fs_strdup`/`fs_itoa`/`fs_itoa_hex`/`fs_atoi`/`fs_atol`） |
+| `freestanding.math` | `import freestanding.math` | 数学工具（`math_abs`/`math_min`/`math_max`/`math_gcd`/`math_is_pow2`/`math_round_up`/`math_div_round_up`/`math_popcount`/`math_clz`/`math_ctz`） |
+| `freestanding.io` | `import freestanding.io` | 格式化输出（`print`/`println`/`print_int`/`print_hex`/`print_float`/`print_bool`/`fs_putchar`）、弱钩子 `fs_output_putchar` |
+
+### 核心特性
+
+1. **无任何依赖**：仅依赖编译器自带 freestanding 头（`<stdint.h>`/`<stddef.h>`/`<stdbool.h>`），不包含 `<stdio.h>`/`<stdlib.h>`/`<string.h>` 等
+
+2. **弱符号设计（`FS_WEAK`）**：所有导出符号均标记为弱符号
+   - 裸机模式（`-ffreestanding -nostdlib`）：弱符号生效，提供实际实现
+   - 托管模式：弱符号被 libc/kaula_runtime 强符号覆盖，不产生冲突
+   - 实现：GCC/Clang 用 `__attribute__((weak))`，MSVC 用 `/alternatename`/选择性导出
+
+3. **BSS 静态池内存管理**：
+   - 编译期在 BSS 段预留固定大小池（默认 16MB，可通过 `-DKMM_V4_POOL_SIZE` 调整）
+   - bump pointer 分配：`fs_alloc` 推进 offset，`fs_free` 为 no-op
+   - 作用域批量回收：`fs_scope_push`/`fs_scope_pop` 保存/恢复 offset
+   - 无 free list、无碎片、无系统调用、O(1) 分配
+
+4. **托管/裸机双环境可跑**：同一套代码在 `-ffreestanding` 和普通托管编译下均可工作
+
+5. **`kaula_freestanding_runtime.c` 复用本库**：unity include 方式包含 freestanding 全部实现，避免符号重复
+
+### 使用示例
+
+```kaula
+// 裸机程序（--freestanding）
+import freestanding.base
+import freestanding.memory
+import freestanding.string
+import freestanding.math
+import freestanding.io
+
+fn kaula_main() -> void {
+    // 内存分配
+    char* buf = as<char*>(fs_alloc(256))
+    memset(buf, 0, 256)
+    memcpy(buf, "Hello", 5)
+    
+    // 字符串
+    char* s = fs_strdup("freestanding")
+    char numbuf[32]
+    fs_itoa(-12345, numbuf)
+    fs_itoa_hex(0xDEADBEEF, numbuf, true)
+    
+    // 数学
+    math_gcd(1024, 768)
+    math_is_pow2(1024)
+    
+    // 输出（串口/控制台）
+    println("Hello from freestanding!")
+    print("Value: %d, Hex: %x\n", 42, 0xCAFE)
+}
+```
+
+```kaula
+// 托管模式测试（覆写弱钩子重定向输出）
+import freestanding.base
+import freestanding.memory
+import freestanding.string
+import freestanding.math
+import freestanding.io
+
+extern fn putchar(c: i32) -> i32
+
+// 覆写弱符号 fs_output_putchar，把 freestanding 输出重定向到控制台
+fn fs_output_putchar(c: char) {
+    putchar(as<i32>(c))
+}
+
+fn main() {
+    println("--- freestanding hosted test ---")
+    print_int(2026)
+    print_hex(0xDEADBEEF)
+    println("done")
+}
+```
+
+### 编译与链接
+
+**toolkit_build.py**：
+```bash
+# 构建 freestanding 库
+python toolkit_build.py --target freestanding
+
+# 构建所有（包含 freestanding）
+python toolkit_build.py
+python toolkit_build.py --release
+```
+
+**kaulac**：
+```bash
+# 裸机模式（自动链接 kaula_freestanding.lib）
+kaulac --freestanding program.kl
+
+# 带内建引导
+kaulac --freestanding --boot pvh kernel.kl
+```
+
+**生成产物**：
+- Windows: `build/lib/kaula_freestanding.lib`（COFF）
+- Linux/macOS: `build/lib/libkaula_freestanding.a`（ELF/Mach-O）
+- 头文件: `build/include/freestanding/`（含 base/memory/string/math/io 目录）
+
+### 内存管理 API 详解
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `fs_alloc` | `void* fs_alloc(size_t size)` | 从 BSS 静态池分配（8 字节对齐），失败返回 NULL |
+| `fs_free` | `void fs_free(void* ptr)` | no-op，作用域退出批量回收 |
+| `fs_realloc` | `void* fs_realloc(void* ptr, size_t new_size)` | 重新分配（当前实现：alloc+memcpy+scope_pop 近似） |
+| `fs_alloc_usage` | `size_t fs_alloc_usage(void)` | 返回已分配字节数（全局 offset） |
+| `fs_scope_push` | `size_t fs_scope_push(void)` | 保存当前 offset，返回旧值 |
+| `fs_scope_pop` | `void fs_scope_pop(size_t old_offset)` | 恢复 offset，批量回收 |
+
+### 弱钩子：托管模式下的 I/O 重定向
+
+freestanding.io 的输出函数（`print`/`println`/`print_int` 等）最终都调用弱钩子 `fs_output_putchar`：
+
+```c
+// freestanding/io/io.c
+FS_WEAK void fs_output_putchar(char c) {
+    // 默认空实现（裸机需用户通过串口/显存实现）
+}
+```
+
+托管模式下，用户可在自定义代码中提供强定义覆写：
+
+```kaula
+fn fs_output_putchar(c: char) {
+    // 重定向到 putchar/printf/自定义日志
+    extern fn putchar(c: i32) -> i32
+    putchar(as<i32>(c))
+}
+```
+
+### 与 std 的对比
+
+| 特性 | std.memory | freestanding.memory |
+|------|------------|---------------------|
+| 依赖 | libc (malloc/free) | 无（仅编译器内置头） |
+| 分配器 | KMM V4 per-thread heap (malloc 后端) | BSS 静态池 bump allocator |
+| `free` | no-op (作用域回收) | no-op (作用域回收) |
+| 适用场景 | 用户态应用、托管环境 | 裸机、内核、嵌入式、无 libc 环境 |
+| 符号强度 | 强符号 | 弱符号 (FS_WEAK) |
+| 池大小 | 256MB (动态) / 16MB (静态) | 16MB (静态，可配置) |
+
+### 配置宏
+
+| 宏 | 默认值 | 说明 |
+|----|--------|------|
+| `KMM_V4_STATIC_POOL` | freestanding 自动定义 | 启用静态池模式 |
+| `KMM_V4_POOL_SIZE` | 16MB (16777216) | BSS 池大小（字节） |
+| `KAULA_FREESTANDING` | 编译器自动定义 | 条件编译标识 |
+
+自定义池大小：
+```bash
+# 通过 toolkit_build.py
+python toolkit_build.py --target freestanding
+# 编译时手动覆盖
+clang -DKMM_V4_STATIC_POOL -DKMM_V4_POOL_SIZE=$((32*1024*1024)) ...
+```
+
+```json
+// kaula.json
+{
+    "freestanding": true,
+    "extra_clang_flags": ["-DKMM_V4_POOL_SIZE=33554432"]
+}
+```
+
+---
 
 ## Freestanding 运行时
 
@@ -775,3 +966,7 @@ fn kaula_main() -> void {
 | freestanding runtime | 自动（5 个函数） | 已实现 |
 | 裸机入口模板 | `freestanding.c.tmpl` | 已实现 |
 | 内建引导 | `--boot pvh/multiboot/custom` + 内置 boot stub/linker 脚本 | 已实现 |
+| freestanding 无依赖标准库 | `import freestanding.*` + `kaula_freestanding.lib` | 已实现 |
+| 弱符号设计 | `FS_WEAK` 托管/裸机双环境共存 | 已实现 |
+| BSS 静态池分配器 | `fs_alloc`/`fs_free`/`fs_scope_push`/`fs_scope_pop` | 已实现 |
+| 托管模式 I/O 重定向 | 覆写 `fs_output_putchar` 弱钩子 | 已实现 |
