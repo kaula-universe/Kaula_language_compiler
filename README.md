@@ -295,6 +295,49 @@ fn _start() {
 # 提供 memset/memcpy/memmove 等最小运行时
 ```
 
+### Freestanding 无依赖标准库
+
+Kaula 提供 **freestanding** 库，作为 std 的无依赖对等体：
+
+```kaula
+// 导入 freestanding 模块（与 std 同级别）
+import freestanding.base
+import freestanding.memory
+import freestanding.string
+import freestanding.math
+import freestanding.io
+
+fn main() {
+    // 内存管理（BSS 静态池 bump 分配，无 free list、无系统调用）
+    char* buf = as<char*>(fs_alloc(64))
+    memset(buf, 65, 8)
+    fs_free(buf)
+
+    // 字符串处理
+    char* s = fs_strdup("hello")
+    fs_itoa(-9876, buf)
+    fs_itoa_hex(0xCAFE, buf, true)
+
+    // 数学运算
+    math_abs_i32(-42)
+    math_gcd(48, 36)
+    math_is_pow2(256)
+
+    // I/O（弱符号钩子，托管模式可覆写 fs_output_putchar 重定向到控制台）
+    println("Hello freestanding!")
+    print_int(2026)
+    print_hex(0xDEADBEEF)
+    print("printf: %d %s\n", 42, "test")
+}
+```
+
+**特性**：
+- 与 std 相同的调用方式：`import freestanding.memory` 等
+- 所有符号均为弱符号（`FS_WEAK`），托管/裸机双环境可跑，不冲突 libc
+- 内存管理采用 BSS 静态池 bump 分配器，无 free list、无碎片、无系统调用
+- 仅依赖编译器自带 freestanding 头（`<stdint.h>`/`<stddef.h>`/`<stdbool.h>`）
+- 裸机模式下自动链接 `kaula_freestanding.lib`/`libkaula_freestanding.a`
+
 ---
 
 ## KMM V4 内存管理
@@ -365,6 +408,7 @@ fn process_data() {
 | **类型** | option、traits、base、error |
 | **运行时** | vo、prefix、task、format、logging、testing、i18n |
 | **GUI** | gui（Nuklear 绑定） |
+| **Freestanding** | freestanding.base、freestanding.memory、freestanding.string、freestanding.math、freestanding.io（无依赖，弱符号，裸机/托管双环境） |
 
 ---
 
@@ -373,14 +417,18 @@ fn process_data() {
 ### 安装
 
 ```bash
-python toolkit_build.py            # Debug 构建 (默认)
-python toolkit_build.py --release # Release 构建
-python toolkit_build.py --target compiler # 只构建编译器
+python toolkit_build.py                     # Debug 构建 (默认)
+python toolkit_build.py --release           # Release 构建
+python toolkit_build.py --target compiler   # 只构建编译器
+python toolkit_build.py --target freestanding # 只构建 freestanding 无依赖标准库
+python toolkit_build.py --cc gcc            # 指定使用 gcc 而非默认的 clang
+python toolkit_build.py --clean             # 清理所有构建产物
+python toolkit_build.py --install-dir D:/kaula  # 自定义输出目录
 ```
 
 依赖：Python 3.8+、Go 1.21+、Clang
 
-该脚本一次性构建：标准库 (kaula_std)、运行时 (kaula_runtime)、编译器 (kaulac)、格式化工具 (kaulafmt)。基于 SHA256 增量缓存，未变更的源文件秒级跳过。
+该脚本一次性构建：标准库 (kaula_std)、freestanding 库 (kaula_freestanding)、运行时 (kaula_runtime)、编译器 (kaulac)、格式化工具 (kaulafmt)。基于 SHA256 增量缓存，未变更的源文件秒级跳过。
 
 ### 编译流程
 
@@ -409,7 +457,7 @@ kaulac --no-cache program.kl   # 禁用缓存
 |------|------|
 | `--sor` | 启用 SOR 编译时所有权分析 |
 | `--release` | Release 模式（-O3） |
-| `--freestanding` | 裸机模式（无 OS 依赖） |
+| `--freestanding` | 裸机模式（无 OS 依赖，链接 freestanding 库） |
 | `--opt <level>` | 优化级别 O0/O1/O2/O3 |
 | `--sourcemap` | 生成源码映射 |
 | `--no-cache` | 禁用增量编译 |

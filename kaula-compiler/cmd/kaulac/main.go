@@ -939,6 +939,13 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	if kaulaFreePath != "" {
 		kernelArgs = append(kernelArgs, "-I", kaulaFreePath)
 	}
+	// 添加用户自定义的 C 编译器参数
+	for _, flag := range cfg.CFlags {
+		kernelArgs = append(kernelArgs, flag)
+	}
+	for _, define := range cfg.CDefines {
+		kernelArgs = append(kernelArgs, "-D"+define)
+	}
 	kernelArgs = append(kernelArgs, cacheFile, "-o", kernelObj)
 	fmt.Printf("[Boot] Compiling kernel C -> %s\n", kernelObj)
 	if out, err := exec.Command(clangPath, kernelArgs...).CombinedOutput(); err != nil {
@@ -971,6 +978,13 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 				runtimeArgs = append(runtimeArgs, "-I", kaulaFreePath)
 			}
 			runtimeArgs = append(runtimeArgs, archCodeModel(arch)...)
+			// 添加用户自定义的 C 编译器参数
+			for _, flag := range cfg.CFlags {
+				runtimeArgs = append(runtimeArgs, flag)
+			}
+			for _, define := range cfg.CDefines {
+				runtimeArgs = append(runtimeArgs, "-D"+define)
+			}
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			fmt.Printf("[Boot] Compiling freestanding runtime -> %s\n", runtimeObj)
 			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
@@ -994,6 +1008,13 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 				allocArgs = append(allocArgs, "-I", kaulaFreePath)
 			}
 			allocArgs = append(allocArgs, archCodeModel(arch)...)
+			// 添加用户自定义的 C 编译器参数
+			for _, flag := range cfg.CFlags {
+				allocArgs = append(allocArgs, flag)
+			}
+			for _, define := range cfg.CDefines {
+				allocArgs = append(allocArgs, "-D"+define)
+			}
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
 			fmt.Printf("[Boot] Compiling KMM allocator -> %s\n", allocObj)
 			if out, err := exec.Command(clangPath, allocArgs...).CombinedOutput(); err != nil {
@@ -1076,6 +1097,13 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 	if kaulaFreePath != "" {
 		progArgs = append(progArgs, "-I", kaulaFreePath)
 	}
+	// 添加用户自定义的 C 编译器参数
+	for _, flag := range cfg.CFlags {
+		progArgs = append(progArgs, flag)
+	}
+	for _, define := range cfg.CDefines {
+		progArgs = append(progArgs, "-D"+define)
+	}
 	progArgs = append(progArgs, cacheFile, "-o", progObj)
 	fmt.Printf("[User] Compiling program C -> %s\n", progObj)
 	if out, err := exec.Command(clangPath, progArgs...).CombinedOutput(); err != nil {
@@ -1095,6 +1123,13 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 				runtimeArgs = append(runtimeArgs, "-I", kaulaFreePath)
 			}
 			runtimeArgs = append(runtimeArgs, archCodeModel(arch)...)
+			// 添加用户自定义的 C 编译器参数
+			for _, flag := range cfg.CFlags {
+				runtimeArgs = append(runtimeArgs, flag)
+			}
+			for _, define := range cfg.CDefines {
+				runtimeArgs = append(runtimeArgs, "-D"+define)
+			}
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
 				fmt.Printf("[User] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
@@ -1113,6 +1148,13 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 				allocArgs = append(allocArgs, "-I", kaulaFreePath)
 			}
 			allocArgs = append(allocArgs, archCodeModel(arch)...)
+			// 添加用户自定义的 C 编译器参数
+			for _, flag := range cfg.CFlags {
+				allocArgs = append(allocArgs, flag)
+			}
+			for _, define := range cfg.CDefines {
+				allocArgs = append(allocArgs, "-D"+define)
+			}
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
 			if out, err := exec.Command(clangPath, allocArgs...).CombinedOutput(); err != nil {
 				fmt.Printf("[User] Warning: allocator compilation failed: %v\n%s\n", err, string(out))

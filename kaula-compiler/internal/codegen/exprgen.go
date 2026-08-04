@@ -318,19 +318,43 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		return varName
 	}
 
-	// 检查当前作用域是否是构造函数或方法
-	if strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "constructor") ||
-		strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "method_") {
+	// 检查当前是否在类方法/构造函数作用域内（两种检测方式，互为兜底）
+	inClassScope := eg.codegen.currentClassName != "" ||
+		strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "constructor") ||
+		strings.HasPrefix(eg.codegen.currentScope.GetScopeName(), "method_")
+
+	if inClassScope {
 		// 检查是否是 self 关键字
 		if e.Name == "self" {
 			return e.Name
 		}
-		// 检查是否是参数名
+		// 检查是否是参数名或局部变量名
 		if eg.codegen.currentScope.HasLocalSymbol(e.Name) {
 			return e.Name
 		}
-		// 否则，假设是成员变量
-		return "self->" + e.Name
+		// 检查是否属于当前类字段（如果能确定当前类）
+		className := eg.codegen.currentClassName
+		if className == "" {
+			// 从 scopeName 中解析类名：method_Class_methodName 或 constructor_Class
+			scopeName := eg.codegen.currentScope.GetScopeName()
+			if strings.HasPrefix(scopeName, "method_") {
+				rest := scopeName[len("method_"):] // Class_methodName
+				// 取下划线之前的部分作为类名（注意类名本身不含下划线时安全）
+				if idx := strings.LastIndex(rest, "_"); idx > 0 {
+					className = rest[:idx]
+				}
+			} else if strings.HasPrefix(scopeName, "constructor_") {
+				className = scopeName[len("constructor_"):]
+			}
+		}
+		if className != "" && eg.isClassField(className, e.Name) {
+			return "self->" + e.Name
+		}
+		// 即使无法确定当前类，也保守地假定为 self 字段（类作用域内的标识符通常是字段）
+		// 这是之前行为的兜底，防止遗漏
+		if className == "" {
+			return "self->" + e.Name
+		}
 	}
 
 	// 检查是否是枚举变体
@@ -600,6 +624,22 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		}
 	}
 
+	// 检查是否是类构造函数调用：ClassName(args) → ClassName_new(args)
+	// 同时处理无参的 ClassName() 情况（如果类有默认构造函数或无参构造）
+	if ident, ok := e.Function.(*ast.Identifier); ok && len(e.TypeArgs) == 0 {
+		if eg.codegen.IsClassType(ident.Name) {
+			ctorFuncName := ident.Name + "_new"
+			if len(e.Args) == 0 {
+				return ctorFuncName + "()"
+			}
+			var sig *stdlib.Function
+			if eg.codegen.stdlibConfig != nil {
+				sig = eg.codegen.stdlibConfig.GetAnyFunctionSignature(ctorFuncName)
+			}
+			return ctorFuncName + "(" + eg.generateStdlibArgs(e.Args, sig) + ")"
+		}
+	}
+
 	// 通用泛型适配：如果存在类型参数，则触发实例化
 	if len(e.TypeArgs) > 0 {
 		// 触发泛型实例化（实例化代码写入 genericFuncCode 缓冲区，最终前置注入）
@@ -847,18 +887,18 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 			code += ")"
 			return code
 		}
-		return eg.generateObjectMethodCall(object, methodName, args)
+		return eg.generateObjectMethodCall(memberAccess.Object, object, methodName, args)
 	}
 }
 
 // generateObjectMethodCall 生成对象方法调用代码
-func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName string, args []ast.Expression) string {
-	className := ""
-
-	// 尝试从符号表中获取类型
-	// 这里 object 已经是字符串形式的表达式，无法直接推断类型
-	// 暂时使用默认类名
-	className = "Object"
+// objectAST 是原始的对象表达式 AST，用于从符号表推断真实类名
+func (eg *ExpressionGenerator) generateObjectMethodCall(objectAST ast.Expression, object string, methodName string, args []ast.Expression) string {
+	className := eg.inferClassType(objectAST)
+	if className == "" {
+		// 无法推断类型时，降级为 Object
+		className = "Object"
+	}
 
 	code := className + "_" + methodName + "("
 	code += object
@@ -868,6 +908,54 @@ func (eg *ExpressionGenerator) generateObjectMethodCall(object, methodName strin
 	}
 	code += ")"
 	return code
+}
+
+// inferClassType 从 AST 表达式推断其所属的类名（若为 class 类型则返回类名，否则返回空串）
+func (eg *ExpressionGenerator) inferClassType(expr ast.Expression) string {
+	if eg.codegen.program == nil {
+		return ""
+	}
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		// 直接的变量引用：查符号表获取其 Kaula 类型名
+		sym := eg.codegen.currentScope.GetSymbol(e.Name)
+		if sym != nil {
+			typeName := strings.TrimSuffix(sym.Type, "*")
+			if typeName != "" && eg.codegen.program.FindClass(typeName) != nil {
+				return typeName
+			}
+		}
+	case *ast.MemberAccessExpression:
+		// obj.field：如果 field 的类型是 class，则返回该类名
+		// 暂不深入推断嵌套类型
+		return ""
+	case *ast.CallExpression:
+		// ClassName(args...) 或 ClassName_new(...)：返回调用的类名
+		if ident, ok := e.Function.(*ast.Identifier); ok {
+			name := strings.TrimSuffix(ident.Name, "_new")
+			if eg.codegen.program.FindClass(name) != nil {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// isClassField 检查 name 是否是 className 对应类的字段名
+func (eg *ExpressionGenerator) isClassField(className, name string) bool {
+	if eg.codegen.program == nil {
+		return false
+	}
+	classStmt := eg.codegen.program.FindClass(className)
+	if classStmt == nil {
+		return false
+	}
+	for _, f := range classStmt.Fields {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // generatePrintlnCall 生成 println 调用代码

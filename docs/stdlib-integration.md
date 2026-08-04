@@ -2,7 +2,12 @@
 
 编译器通过 `stdlib.json` 管理标准库函数签名，支持自动发现第三方库。实现位于 `internal/stdlib/` 目录。
 
-当前标准库包含 **58 个模块**，超过 **800+** 个函数。
+当前标准库包含 **62 个模块**，超过 **800+** 个函数，分为标准库和 freestanding 无依赖标准库两大体系：
+
+| 体系 | 模块数 | 特点 |
+|------|--------|------|
+| **std (标准库)** | 57 | 完整功能，依赖 libc，用户态应用首选 |
+| **freestanding (无依赖库)** | 5 | 零依赖，弱符号，裸机/内核/嵌入式首选 |
 
 ## 设计
 
@@ -64,13 +69,47 @@ type Function struct {
 
 ## 模块结构
 
+标准库分为两个独立体系，编译器根据编译模式自动选择：
+
+### std 标准库（托管模式默认）
+
 ```go
 type Module struct {
-    Name      string              // 模块名
+    Name      string              // 模块名，如 "std.io"
     Header    string              // 头文件路径
     Functions map[string]*Function // 函数映射
 }
 ```
+
+模块示例：`std.io`、`std.math`、`std.memory`、`std.string` 等 57 个模块。
+
+### freestanding 无依赖标准库（`--freestanding` 模式）
+
+```json
+// freestanding/dependencies.json
+{
+  "freestanding.base": [],
+  "freestanding.memory": ["freestanding.base"],
+  "freestanding.string": ["freestanding.base"],
+  "freestanding.math": ["freestanding.base"],
+  "freestanding.io": ["freestanding.base", "freestanding.string"]
+}
+```
+
+模块列表：
+| 模块 | 头文件 | 依赖 | 说明 |
+|------|--------|------|------|
+| `freestanding.base` | `freestanding/base/types.h` | - | 类型定义、`FS_WEAK` 宏 |
+| `freestanding.memory` | `freestanding/memory/memory.h` | base | BSS 静态池分配器、内存操作 |
+| `freestanding.string` | `freestanding/string/string.h` | base | 字符串处理、格式化转换 |
+| `freestanding.math` | `freestanding/math/math.h` | base | 整数数学工具 |
+| `freestanding.io` | `freestanding/io/io.h` | base, string | 格式化输出、弱钩子 `fs_output_putchar` |
+
+**关键差异**：
+- 所有 freestanding 函数在 C 层标记为弱符号（`FS_WEAK`）
+- 不依赖 `<stdio.h>`/`<stdlib.h>`/`<string.h>`，仅用 `<stdint.h>`/`<stddef.h>`/`<stdbool.h>`
+- `stdlib.json` 中 freestanding 模块的函数签名与 std 同名函数保持一致（如 `memset`/`strlen`/`print`/`println`）
+- 编译器在 `--freestanding` 模式下自动链接 `kaula_freestanding.lib`/`libkaula_freestanding.a`
 
 ## 配置加载
 
@@ -250,6 +289,38 @@ fn main() {
 }
 ```
 
+### 导入 freestanding 无依赖库（`--freestanding` 模式）
+
+```kaula
+import freestanding.base
+import freestanding.memory
+import freestanding.string
+import freestanding.math
+import freestanding.io
+
+fn main() {
+    // 内存
+    char* buf = as<char*>(fs_alloc(64))
+    memset(buf, 65, 8)
+    fs_free(buf)
+    
+    // 字符串
+    char* s = fs_strdup("hello")
+    char numbuf[32]
+    fs_itoa(-9876, numbuf)
+    fs_itoa_hex(0xCAFE, numbuf, true)
+    
+    // 数学
+    math_gcd(48, 36)
+    math_is_pow2(256)
+    
+    // I/O（托管模式需覆写 fs_output_putchar）
+    println("Hello freestanding!")
+    print_int(2026)
+    print("printf: %d %s\n", 42, "test")
+}
+```
+
 ### 使用第三方库
 
 ```kaula
@@ -274,7 +345,17 @@ for _, imp := range program.Imports {
     includes = append(includes, module.Header)
 }
 
-// 3. 生成 C 代码
+// 3. freestanding 模式：额外链接 freestanding 库
+if compilerOptions.Freestanding {
+    // 自动添加 freestanding 库链接
+    linkerArgs = append(linkerArgs, "kaula_freestanding.lib") // Windows
+    // 或 libkaula_freestanding.a (Linux/macOS)
+    
+    // freestanding 模块的头文件路径已在 stdlib.json 中配置
+    // 编译器会自动解析 import freestanding.* 并包含对应头文件
+}
+
+// 4. 生成 C 代码
 for _, include := range includes {
     fmt.Fprintf(&buf, "#include %s\n", include)
 }
