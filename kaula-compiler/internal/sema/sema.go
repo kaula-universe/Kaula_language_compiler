@@ -39,11 +39,18 @@ type SemanticAnalyzer struct {
 	funcReturnTypes    map[string]string              // 函数名 -> 返回类型（用于调用表达式类型推断）
 	arrayLens          map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
 	localImportFuncs   map[string]bool                // 本地 import 的 pub 函数名
+	localModuleFuncs   map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
 }
 
 // SetLocalImportFuncs 注册本地 import 的 pub 函数（跨文件调用）
 func (sa *SemanticAnalyzer) SetLocalImportFuncs(funcs map[string]bool) {
 	sa.localImportFuncs = funcs
+}
+
+// SetLocalModuleFuncs 注册本地 import 模块的全部函数名（导出检查用）
+// 调用存在于被 import 模块但非 pub 的函数时, 报"未导出"错误
+func (sa *SemanticAnalyzer) SetLocalModuleFuncs(funcs map[string]bool) {
+	sa.localModuleFuncs = funcs
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -171,6 +178,9 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 			sa.analyzeStatement(bodyStmt)
 		}
 
+		// 未使用检查已注释
+		// sa.checkUnusedSymbols()
+
 		sa.symbolTable = oldSymbolTable
 		sa.scope--
 	}
@@ -200,6 +210,9 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 		for _, bodyStmt := range method.Body {
 			sa.analyzeStatement(bodyStmt)
 		}
+
+		// 未使用检查已注释
+		// sa.checkUnusedSymbols()
 
 		sa.symbolTable = oldSymbolTable
 		sa.scope--
@@ -262,6 +275,11 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 	if stmt.IsGeneric() {
 		sa.genericStack = sa.genericStack[:len(sa.genericStack)-1]
 	}
+
+	// 未使用检查(warning)已注释：函数带 #[unused] 注解则整体豁免
+	// if !ast.HasAttribute(stmt.Attributes, "unused") {
+	// 	sa.checkUnusedSymbols()
+	// }
 
 	sa.currentFunction = oldFunction
 	sa.symbolTable = oldSymbolTable
@@ -1014,6 +1032,104 @@ func (sa *SemanticAnalyzer) analyzeObjectStatement(stmt *ast.ObjectStatement) {
 // analyzeClassStatement 分析 class 语句
 func (sa *SemanticAnalyzer) analyzeClassStatement(stmt *ast.ClassStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, "class", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	// 注册成员字段（scope=field_<类名>，供方法体 self.xxx / 裸字段名引用）
+	for _, field := range stmt.Fields {
+		if field == nil {
+			continue
+		}
+		sa.symbolTable.AddSymbol(field.Name, field.Type, field.Nullable, "field_"+stmt.Name, field.Pos.Line, field.Pos.Column)
+	}
+	// 注册方法返回类型: "类名.方法名" -> 返回类型 (供 v.method() 调用类型推断)
+	if sa.funcReturnTypes == nil {
+		sa.funcReturnTypes = make(map[string]string)
+	}
+	for _, m := range stmt.Methods {
+		if m != nil {
+			sa.funcReturnTypes[stmt.Name+"."+m.Name] = m.ReturnType
+		}
+	}
+}
+
+// analyzeClassMethods 分析 class 的方法与构造函数体（第二遍）
+// 方法/构造函数作用域内注册 self（类型=类名），方法体里 self 与裸成员名可用
+func (sa *SemanticAnalyzer) analyzeClassMethods(stmt *ast.ClassStatement) {
+	// 分析普通方法
+	for _, m := range stmt.Methods {
+		if m == nil {
+			continue
+		}
+		oldSymbolTable := sa.symbolTable
+		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "method_"+m.Name)
+		sa.scope++
+
+		// self 符号：类型=类名，永远视为已使用
+		sa.symbolTable.AddSymbol("self", stmt.Name, false, "parameter", m.Pos.Line, m.Pos.Column)
+		if sym := sa.symbolTable.GetSymbol("self"); sym != nil {
+		}
+		// 成员字段符号（方法体裸名引用 self->field 的字段）
+		for _, field := range stmt.Fields {
+			if field != nil {
+				sa.symbolTable.AddSymbol(field.Name, field.Type, field.Nullable, "field", field.Pos.Line, field.Pos.Column)
+			}
+		}
+		// 参数
+		paramMap := make(map[string]bool)
+		for _, param := range m.Params {
+			if param == nil {
+				continue
+			}
+			if paramMap[param.Name] {
+				sa.error(fmt.Sprintf("重复的参数 %s 在方法 %s 中", param.Name, m.Name), m.Pos.Line, m.Pos.Column)
+			} else {
+				paramMap[param.Name] = true
+				sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", param.Pos.Line, param.Pos.Column)
+			}
+		}
+		// 分析方法体
+		for _, bodyStmt := range m.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
+
+		sa.symbolTable = oldSymbolTable
+		sa.scope--
+	}
+
+	// 分析构造函数
+	for _, c := range stmt.Constructors {
+		if c == nil {
+			continue
+		}
+		oldSymbolTable := sa.symbolTable
+		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "constructor_"+stmt.Name)
+		sa.scope++
+
+		sa.symbolTable.AddSymbol("self", stmt.Name, false, "parameter", c.Pos.Line, c.Pos.Column)
+		if sym := sa.symbolTable.GetSymbol("self"); sym != nil {
+		}
+		for _, field := range stmt.Fields {
+			if field != nil {
+				sa.symbolTable.AddSymbol(field.Name, field.Type, field.Nullable, "field", field.Pos.Line, field.Pos.Column)
+			}
+		}
+		paramMap := make(map[string]bool)
+		for _, param := range c.Params {
+			if param == nil {
+				continue
+			}
+			if paramMap[param.Name] {
+				sa.error(fmt.Sprintf("重复的参数 %s 在构造函数中", param.Name), c.Pos.Line, c.Pos.Column)
+			} else {
+				paramMap[param.Name] = true
+				sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", param.Pos.Line, param.Pos.Column)
+			}
+		}
+		for _, bodyStmt := range c.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
+
+		sa.symbolTable = oldSymbolTable
+		sa.scope--
+	}
 }
 
 // analyzeInterfaceStatement 分析 interface 语句
@@ -1057,6 +1173,13 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 
 	// 2. 添加变量到符号表
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
+
+	// [unused 检查已注释] 声明带 #[unused] 注解 → 豁免 unused 检查
+	// if ast.HasAttribute(stmt.Attributes, "unused") {
+	// 	if s := sa.symbolTable.GetSymbol(stmt.Name); s != nil {
+	// 		s.Unused = true
+	// 	}
+	// }
 
 	// 记录数组字面量长度，供 spend 全集证明使用
 	if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok {
@@ -1197,6 +1320,13 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 
 	// 添加到符号表
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+
+	// [unused 检查已注释] 声明带 #[unused] 注解 → 豁免 unused 检查
+	// if ast.HasAttribute(stmt.Attributes, "unused") {
+	// 	if s := sa.symbolTable.GetSymbol(stmt.Name); s != nil {
+	// 		s.Unused = true
+	// 	}
+	// }
 }
 
 // isTypeValid 检查类型是否有效
@@ -1687,6 +1817,11 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 		sa.analyzeIndexExpression(e)
 	case *ast.MemberExpression:
 		sa.analyzeMemberExpression(e)
+	case *ast.MemberAccessExpression:
+		// 成员访问 (obj.field / obj.method()): 分析 Object, 标记符号为已使用
+		if e.Object != nil {
+			sa.analyzeExpression(e.Object)
+		}
 	case *ast.LiteralExpression:
 		// 字面量不需要额外分析
 	case *ast.ParenExpression:
@@ -1799,6 +1934,17 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 		if sa.localImportFuncs[expr.Name] {
 			return
 		}
+		// 函数存在于被 import 模块但未导出(pub): 报"未导出"错误
+		if sa.localModuleFuncs[expr.Name] {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("函数 '%s' 存在于被导入的模块, 但未通过 pub 导出", expr.Name),
+				expr.Pos.Line,
+				expr.Pos.Column,
+				"not_exported",
+				fmt.Sprintf("在 '%s' 的定义前添加 pub 修饰符: pub fn %s(...)", expr.Name, expr.Name),
+			)
+			return
+		}
 		sa.errorCollector.AddSemanticError(
 			fmt.Sprintf("未定义的变量: '%s'", expr.Name),
 			expr.Pos.Line,
@@ -1806,8 +1952,48 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 			"undefined_variable",
 			"请确保变量已声明后再使用",
 		)
+		return
+	}
+	// 标记符号为已使用（unused 检查已注释）
+	// symbol.Referenced = true
+}
+
+// checkUnusedSymbols 检查当前函数/方法/构造函数作用域中未被引用的局部变量和参数。
+// 产生 warning 级诊断；声明带 #[unused] 注解的符号豁免。
+// [已注释] unused 检查暂未启用
+/*
+func (sa *SemanticAnalyzer) checkUnusedSymbols() {
+	if sa.symbolTable == nil {
+		return
+	}
+	for _, sym := range sa.symbolTable.Symbols() {
+		// self 是隐式指针，不检查
+		if sym.Name == "self" {
+			continue
+		}
+		// 泛型类型参数/类型符号不检查
+		if sym.Type == "type" {
+			continue
+		}
+		// 类字段通过 self.field 访问，不在此检查（裸字段名引用会正常标记）
+		if strings.HasPrefix(sym.Scope, "class_field:") {
+			continue
+		}
+		// 全局/外部符号不在函数作用域检查范围内
+		if sym.Scope == "global" || sym.Scope == "extern" || sym.Scope == "extern_func" {
+			continue
+		}
+		if sym.Referenced || sym.Unused {
+			continue
+		}
+		sa.errorCollector.AddSemanticWarning(
+			fmt.Sprintf("未使用的变量: '%s'", sym.Name),
+			sym.Line, sym.Column, "unused_variable",
+			"如果该声明有意保留未使用，请添加 #[unused] 注解",
+		)
 	}
 }
+*/
 
 // analyzeBinaryExpression 分析二元表达式
 func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) {
@@ -2108,6 +2294,14 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 				for _, mod := range sa.stdlibConfig.Modules {
 					if sig, ok := mod.Functions[funcName]; ok && sig.Return != "" {
 						return sig.Return
+					}
+				}
+			}
+			// class 方法调用 (v.method()): Object 类型是类名, 查 "类名.方法名"
+			if objIdent, ok := member.Object.(*ast.Identifier); ok {
+				if sym := sa.symbolTable.GetSymbol(objIdent.Name); sym != nil && sym.Type != "" {
+					if retType, ok := sa.funcReturnTypes[sym.Type+"."+member.Member]; ok && retType != "" {
+						return retType
 					}
 				}
 			}

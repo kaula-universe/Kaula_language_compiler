@@ -139,6 +139,10 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
+	// class 类型变量: 引用语义, C 类型为指针 (K_A*)
+	if sg.codegen.typeGenerator != nil && sg.codegen.typeGenerator.classTypes[stmt.Type] && !strings.HasSuffix(cType, "*") {
+		cType += "*"
+	}
 
 	var builder strings.Builder
 	builder.Grow(128)
