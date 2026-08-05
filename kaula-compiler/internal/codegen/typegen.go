@@ -11,6 +11,7 @@ type TypeGenerator struct {
 	codegen     *CodeGenerator
 	clibTypeMap map[string]string
 	structTypes map[string]bool
+	classTypes  map[string]bool // class 类型名 (指针语义, 与 struct 区分)
 
 	// activeTypeMap 当前活跃的类型参数映射（泛型单态化期间设置）。
 	// T -> 具体类型（Kaula 类型名，如 "int"）
@@ -25,6 +26,7 @@ func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 			"File": "FILE*",
 		},
 		structTypes:   make(map[string]bool),
+		classTypes:    make(map[string]bool),
 		activeTypeMap: nil,
 	}
 }
@@ -343,6 +345,7 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 	}
 
 	tg.structTypes[stmt.Name] = true
+	tg.classTypes[stmt.Name] = true
 	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 
 	for _, ifaceName := range stmt.Implements {
@@ -436,9 +439,18 @@ func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className
 		code.WriteString("\n")
 	}
 
+	tg.codegen.EnterScope("constructor" + className)
+	// 注册 self 和参数(供 exprgen 区分成员变量与局部名)
+	tg.codegen.AddSymbol("self", className, false, "parameter", 0, 0)
+	for _, param := range constructor.Params {
+		if param != nil {
+			tg.codegen.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", 0, 0)
+		}
+	}
 	for _, bodyStmt := range constructor.Body {
 		code.WriteString(tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt))
 	}
+	tg.codegen.ExitScope()
 
 	code.WriteString(tg.codegen.indentString() + "return self;\n")
 
