@@ -354,7 +354,13 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 // 语法：类型 变量名 [= 表达式]
 // 例如：int x = 10  或者  int x
 func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
-	stmt := &ast.VariableDeclaration{}
+	stmt := &ast.VariableDeclaration{
+		Pos: ast.Position{
+			Line:   p.curTok.Line,
+			Column: p.curTok.Column,
+			File:   p.file,
+		},
+	}
 
 	// 解析属性注解（如 #[volatile], #[section("...")], #[aligned(N)] 等）
 	attrs := p.parseAttributes()
@@ -614,6 +620,16 @@ func (p *Parser) parseExternFunctionIterative(stmt *ast.ExternStatement) *ast.Ex
 	p.nextToken() // 跳过 )
 
 	// 解析返回类型: -> type
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		p.nextToken() // 跳过 ->
+		returnType := p.parseTypeStringForDecl()
+		if returnType == "" {
+			p.error("extern fn 返回类型无效")
+			return nil
+		}
+		stmt.ReturnType = returnType
+		return stmt
+	}
 	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
 		p.nextToken() // 跳过 -
 		p.nextToken() // 跳过 >
@@ -663,7 +679,14 @@ func (p *Parser) parseConstDeclarationIterative() *ast.VariableDeclaration {
 
 	// const name = value 风格（无类型，从值推导）
 	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
-		stmt := &ast.VariableDeclaration{IsConst: true}
+		stmt := &ast.VariableDeclaration{
+			IsConst: true,
+			Pos: ast.Position{
+				Line:   p.curTok.Line,
+				Column: p.curTok.Column,
+				File:   p.file,
+			},
+		}
 		stmt.Name = p.curTok.Value
 		p.nextToken() // 跳过 name
 		if p.curTok.Type == lexer.TOKEN_ASSIGN {
@@ -690,6 +713,11 @@ func (p *Parser) parseConstDeclarationIterative() *ast.VariableDeclaration {
 func (p *Parser) parseAutoDeclarationIterative() *ast.VariableDeclaration {
 	stmt := &ast.VariableDeclaration{
 		IsAuto: true,
+		Pos: ast.Position{
+			Line:   p.curTok.Line,
+			Column: p.curTok.Column,
+			File:   p.file,
+		},
 	}
 
 	// 解析属性注解（如 #[volatile], #[section("...")] 等）
@@ -1284,7 +1312,10 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 			p.nextToken()
 		}
 	}
-	// 解析返回类型（如果存在）
+	// 解析返回类型（如果存在）(支持 -> type 形式)
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		p.nextToken()
+	}
 	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT || p.curTok.Type == lexer.TOKEN_MULTIPLY {
 		isPointer := false
 		// 处理指针前缀 (*Type)
@@ -1870,7 +1901,7 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				}
 				p.nextToken() // 跳过 (
 
-				// 解析参数
+				// 解析参数（支持指针类型: Type* name / *Type name）
 				for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
 					isParamTypeKeyword := false
 					switch p.curTok.Type {
@@ -1879,12 +1910,38 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 						lexer.TOKEN_TYPE_VOID:
 						isParamTypeKeyword = true
 					}
+
+					param := &ast.Param{}
+					// *Type name 形式
+					if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+						param.Type = "*" + p.peekTok.Value
+						p.log("跳过指针参数类型：%s", param.Type)
+						p.nextToken()
+						p.nextToken()
+						if p.curTok.Type != lexer.TOKEN_IDENT {
+							p.error(fmt.Sprintf("expected parameter name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
+							break
+						}
+						param.Name = p.curTok.Value
+						p.nextToken()
+						method.Params = append(method.Params, param)
+						if p.curTok.Type == lexer.TOKEN_COMMA {
+							p.nextToken()
+						}
+						continue
+					}
+
 					if p.curTok.Type != lexer.TOKEN_IDENT && !isParamTypeKeyword {
 						break
 					}
-					param := &ast.Param{}
 					param.Type = p.curTok.Value
 					p.nextToken()
+					// Type* name 形式（指针后缀）
+					if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+						param.Type += "*"
+						p.log("指针后缀：%s", param.Type)
+						p.nextToken()
+					}
 					if p.curTok.Type == lexer.TOKEN_QUESTION {
 						param.Nullable = true
 						p.nextToken()
@@ -1978,8 +2035,9 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				savedPeekTok := p.peekTok
 				p.nextToken() // 跳过 constructor
 
-				// 期望构造函数名（类名）
-				if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == stmt.Name {
+				// 期望构造函数名（类名），也支持直接 constructor(...)（文档风格）
+				if (p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == stmt.Name) ||
+					p.curTok.Type == lexer.TOKEN_LPAREN {
 					p.log("开始解析构造函数")
 					constructor := p.parseConstructorStatementIterative()
 					if constructor != nil {
@@ -2452,8 +2510,13 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 	p.nextToken()
 
 	// 检查下一个 token 是否是冒号（name: type 语法）
+	// 冒号必须存在: 无冒号时不是字段声明(可能是方法/构造/其他), 回退
 	if p.curTok.Type == lexer.TOKEN_COLON {
 		p.nextToken()
+	} else {
+		p.curTok = savedCurTok
+		p.peekTok = savedPeekTok
+		return nil
 	}
 
 	// 解析类型（支持 [N]byte 数组语法和普通类型）
@@ -2591,8 +2654,19 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 		p.peekTok = savedPeekTok
 		return nil
 	}
-	// 处理指针前缀 (*Type)
+
+	// 文档风格: fn name(params) ReturnType (方法名前置, 返回类型后置)
 	isPointer := false
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_LPAREN {
+		method.Name = p.curTok.Value
+		p.log("解析方法名（前置风格）：%s", method.Name)
+		p.nextToken() // 到 (
+		p.nextToken() // 跳过 (
+		p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+		goto parseMethodParams
+	}
+
+	// 处理指针前缀 (*Type)
 	if p.curTok.Type == lexer.TOKEN_MULTIPLY {
 		isPointer = true
 		p.nextToken()
@@ -2647,6 +2721,7 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 	p.log("跳过 LPAREN token")
 	p.nextToken()
 	p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+parseMethodParams:
 	if p.curTok.Type != lexer.TOKEN_RPAREN {
 		for p.curTok.Type != lexer.TOKEN_RPAREN {
 			p.log("解析参数，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
@@ -2660,17 +2735,46 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 				isParamTypeKeyword = true
 			}
 
+			// 支持指针类型参数: Type* name / *Type name / char* name
+			param := &ast.Param{}
+			if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+				// *Type name 形式
+				param.Type = "*" + p.peekTok.Value
+				p.log("跳过指针参数类型：%s", param.Type)
+				p.nextToken()
+				p.nextToken()
+				if p.curTok.Type != lexer.TOKEN_IDENT {
+					p.error(fmt.Sprintf("expected parameter name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
+					p.curTok = savedCurTok
+					p.peekTok = savedPeekTok
+					return nil
+				}
+				param.Name = p.curTok.Value
+				p.nextToken()
+				method.Params = append(method.Params, param)
+				if p.curTok.Type == lexer.TOKEN_COMMA {
+					p.nextToken()
+				}
+				continue
+			}
+
 			if p.curTok.Type != lexer.TOKEN_IDENT && !isParamTypeKeyword {
 				p.log("不是方法声明，返回 nil")
 				p.curTok = savedCurTok
 				p.peekTok = savedPeekTok
 				return nil
 			}
-			param := &ast.Param{}
 			param.Type = p.curTok.Value
 			p.log("跳过参数类型：%s", p.curTok.Value)
 			p.nextToken()
 			p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+			// Type* name 形式 (指针后缀)
+			if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+				param.Type += "*"
+				p.log("指针后缀：%s", param.Type)
+				p.nextToken()
+				p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+			}
 			if p.curTok.Type == lexer.TOKEN_QUESTION {
 				param.Nullable = true
 				p.log("跳过 QUESTION token")
@@ -2707,6 +2811,30 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 		return nil
 	}
 
+	// 文档风格: 返回类型在参数后 (fn name(params) ReturnType / fn name(params) -> ReturnType)
+	if method.ReturnType == "" {
+		if p.curTok.Type == lexer.TOKEN_ARROW {
+			p.log("跳过返回类型箭头 ->")
+			p.nextToken()
+		}
+		retIsTypeKeyword := false
+		switch p.curTok.Type {
+		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+			lexer.TOKEN_TYPE_VOID:
+			retIsTypeKeyword = true
+		}
+		if p.curTok.Type == lexer.TOKEN_IDENT || retIsTypeKeyword || p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			method.ReturnType = p.curTok.Value
+			p.log("解析返回类型（后置）：%s", method.ReturnType)
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+				method.ReturnType += "*"
+				p.nextToken()
+			}
+		}
+	}
+
 parseMethodBody:
 	p.log("解析方法体或分号，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 	if p.curTok.Type == lexer.TOKEN_SEMICOLON {
@@ -2716,14 +2844,13 @@ parseMethodBody:
 		p.log("跳过 LBRACE token")
 		p.nextToken()
 		p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				method.Body = append(method.Body, bodyStmt)
 			}
 			if p.curTok.Type != lexer.TOKEN_RBRACE && bodyStmt == nil {
 				p.nextToken()
-				p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 			}
 		}
 		if p.curTok.Type == lexer.TOKEN_RBRACE {
@@ -2756,18 +2883,26 @@ func (p *Parser) parseConstructorStatementIterative() *ast.ConstructorStatement 
 		Body:   []ast.Statement{},
 		Pos:    pos,
 	}
-	if p.curTok.Type != lexer.TOKEN_IDENT {
+	// 两种形式: constructor ClassName(params) / constructor(params)
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		constructorName := p.curTok.Value
+		p.log("解析构造函数名：%s", constructorName)
+		p.nextToken()
+		if p.curTok.Type == lexer.TOKEN_LPAREN {
+			p.log("跳过 LPAREN token")
+			p.nextToken()
+			p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+		}
+	} else if p.curTok.Type == lexer.TOKEN_LPAREN {
+		// 文档风格 constructor(...): 无显式构造名, 直接解析参数
+		p.log("解析构造函数参数（无构造名形式）")
+		p.nextToken()
+		p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+	} else {
 		p.log("不是构造函数声明，返回 nil")
 		return nil
 	}
-	constructorName := p.curTok.Value
-	p.log("解析构造函数名：%s", constructorName)
-	p.nextToken()
-	p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		p.log("跳过 LPAREN token")
-		p.nextToken()
-		p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+	{
 		for p.curTok.Type != lexer.TOKEN_RPAREN {
 			p.log("解析参数，当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 
@@ -2816,22 +2951,18 @@ func (p *Parser) parseConstructorStatementIterative() *ast.ConstructorStatement 
 		} else {
 			p.error(fmt.Sprintf("expected ), got %s", lexer.TokenTypeToString(p.curTok.Type)))
 		}
-	} else {
-		p.error(fmt.Sprintf("expected (, got %s", lexer.TokenTypeToString(p.curTok.Type)))
-		return nil
 	}
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.log("跳过 LBRACE token")
 		p.nextToken()
 		p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
-		for p.curTok.Type != lexer.TOKEN_RBRACE {
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				constructor.Body = append(constructor.Body, bodyStmt)
 			}
 			if p.curTok.Type != lexer.TOKEN_RBRACE && bodyStmt == nil {
 				p.nextToken()
-				p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 			}
 		}
 		if p.curTok.Type == lexer.TOKEN_RBRACE {
@@ -3058,8 +3189,14 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		p.nextToken()
 		return p.parsePostfixChain(ident)
 	case lexer.TOKEN_SELF:
+		pos := ast.Position{
+			Line:   p.curTok.Line,
+			Column: p.curTok.Column,
+			File:   p.file,
+		}
 		ident := &ast.Identifier{
 			Name: p.curTok.Value,
+			Pos:  pos,
 		}
 		p.nextToken()
 		return p.parsePostfixChain(ident)
@@ -3757,7 +3894,9 @@ func (p *Parser) parseYieldStatementIterative() ast.Statement {
 	}
 
 	// 期望 -> 箭头
-	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		p.nextToken()
+	} else if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
 		p.nextToken() // 跳过 -
 		p.nextToken() // 跳过 >
 	}
@@ -3794,7 +3933,9 @@ func (p *Parser) parseReleaseStatementIterative() ast.Statement {
 	}
 
 	// 期望 ->
-	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		p.nextToken()
+	} else if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
 		p.nextToken()
 		p.nextToken()
 	}
@@ -3850,7 +3991,9 @@ func (p *Parser) parseExtractStatementIterative() ast.Statement {
 	}
 
 	// 期望 ->
-	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		p.nextToken()
+	} else if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
 		p.nextToken()
 		p.nextToken()
 	}
@@ -4459,7 +4602,14 @@ func (p *Parser) parseLambdaExpression() *ast.LambdaExpression {
 	}
 
 	// 可选的返回类型: fn(...) -> type 或 fn(...) type
-	if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
+	if p.curTok.Type == lexer.TOKEN_ARROW {
+		// -> type 形式
+		p.nextToken()
+		if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+			expr.ReturnType = p.curTok.Value
+			p.nextToken()
+		}
+	} else if p.curTok.Type == lexer.TOKEN_MINUS && p.peekTok.Type == lexer.TOKEN_GT {
 		// -> type 形式
 		p.nextToken() // -
 		p.nextToken() // >
