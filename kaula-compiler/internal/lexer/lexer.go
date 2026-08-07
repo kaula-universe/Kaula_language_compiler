@@ -252,6 +252,11 @@ func (l *Lexer) Next() Token {
 			l.next()
 			return Token{Type: TOKEN_PLUS, Value: "+", Line: l.line, Column: l.column}
 		case char == '-':
+			if l.peek() == '>' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_ARROW, Value: "->", Line: l.line, Column: l.column}
+			}
 			l.next()
 			return Token{Type: TOKEN_MINUS, Value: "-", Line: l.line, Column: l.column}
 		case char == '*':

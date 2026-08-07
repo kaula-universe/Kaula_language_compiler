@@ -473,7 +473,8 @@ func main() {
 	stage2Start := time.Now()
 
 	localPubFuncs := collectLocalPubFuncs(program, inputDir)
-	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs)
+	localAllFuncs := collectLocalAllFuncs(program, inputDir)
+	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs)
 	stage2Time := time.Since(stage2Start)
 	fmt.Printf("[Stage 2] Semantic Analysis completed in %v\n", stage2Time)
 
@@ -1266,7 +1267,7 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 }
 
 // concurrentSemanticAnalysisWithConfig 并发执行语义分析（使用已加载的配置）
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
 	var wg sync.WaitGroup
@@ -1279,6 +1280,7 @@ func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *st
 			sa.SetStdlibConfig(stdlibConfig)
 		}
 		sa.SetLocalImportFuncs(localPubFuncs)
+		sa.SetLocalModuleFuncs(localAllFuncs)
 		sa.SetSOREnabled(sorEnabled)
 		sa.Analyze(program)
 	}()
@@ -1334,6 +1336,49 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 
 	visit(program, inputDir)
 	return pubFuncs
+}
+
+// collectLocalAllFuncs 扫描本地 import 的 .kl 文件，收集全部函数名(含非 pub)
+// 用于导出检查: 调用存在于被 import 模块但非 pub 的函数时, 报"未导出"错误
+func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool {
+	allFuncs := make(map[string]bool)
+
+	var visit func(p *ast.Program, dir string)
+	visit = func(p *ast.Program, dir string) {
+		for _, stmt := range p.Statements {
+			imp, ok := stmt.(*ast.ImportStatement)
+			if !ok || !imp.IsLocal {
+				continue
+			}
+			absPath := imp.LocalPath
+			if !filepath.IsAbs(absPath) {
+				if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+					absPath = candidate
+				}
+			}
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				continue
+			}
+			localLex := lexer.NewLexer(string(data))
+			localParser := parser.NewParser(localLex)
+			localParser.SetSkipMainCheck(true)
+			localParser.EnableLogging(false)
+			localProgram := localParser.Parse()
+			if localParser.HasErrors() {
+				continue
+			}
+			for _, s := range localProgram.Statements {
+				if fn, ok := s.(*ast.FunctionStatement); ok {
+					allFuncs[fn.Name] = true
+				}
+			}
+			visit(localProgram, filepath.Dir(absPath))
+		}
+	}
+
+	visit(program, inputDir)
+	return allFuncs
 }
 
 type semaResult_t struct {

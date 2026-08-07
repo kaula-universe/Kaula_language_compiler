@@ -355,6 +355,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 
 	var typeCode strings.Builder
 	var globalVars strings.Builder
+	var classGlobalVars strings.Builder // class 类型全局变量: 需在 typedef 之后生成
+	var classInitCode strings.Builder   // class 全局变量的初始化: 注入 main 开头
 	var functionCode strings.Builder
 	var mainCode strings.Builder
 	typeCode.Grow(4096)
@@ -435,10 +437,18 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 				}
 			}
 			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
+			// class 类型变量: 引用语义, C 类型为指针 (K_A*)
+			if cg.typeGenerator != nil && cg.typeGenerator.classTypes[varDecl.Type] && !strings.HasSuffix(cType, "*") {
+				cType += "*"
+			}
+			// 注册全局变量到 codegen 符号表 (成员访问/方法调用需要)
+			cg.AddSymbol(varDecl.Name, varDecl.Type, varDecl.Nullable, "global", varDecl.Pos.Line, varDecl.Pos.Column)
 			initValue := cg.generateExpression(varDecl.Value)
 			if varDecl.IsAuto {
 				cType = "auto"
 			}
+			// class 类型全局变量: 延迟到 typedef 之后生成 (K_Student 等)
+			isClassGlobal := cg.typeGenerator != nil && cg.typeGenerator.classTypes[varDecl.Type]
 			// 全局变量：支持属性、static
 			var varPrefix strings.Builder
 			if len(varDecl.Attributes) > 0 {
@@ -462,12 +472,24 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 				code := fmt.Sprintf("%s%s = %s;\n", prefix, decl, initValue)
 				lines := strings.Count(code, "\n")
 				addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
-				globalVars.WriteString(code)
+				if isClassGlobal {
+					// class 全局变量: 声明为 NULL, main 开头用赋值初始化 (避免局部遮蔽)
+					classGlobalVars.WriteString(fmt.Sprintf("%s%s = NULL;\n", prefix, decl))
+					classInitCode.WriteString(varDecl.Name + " = " + initValue + ";\n")
+				} else {
+					globalVars.WriteString(code)
+				}
 			} else {
 				code := fmt.Sprintf("%s = %s;\n", decl, initValue)
 				lines := strings.Count(code, "\n")
 				addEntry("global", varDecl.Pos.Line, varDecl.Pos.Column, "variable", varDecl.Name, lines)
-				globalVars.WriteString(code)
+				if isClassGlobal {
+					// class 全局变量: 声明为 NULL, main 开头用赋值初始化 (避免局部遮蔽)
+					classGlobalVars.WriteString(decl + " = NULL;\n")
+					classInitCode.WriteString(varDecl.Name + " = " + initValue + ";\n")
+				} else {
+					globalVars.WriteString(code)
+				}
 			}
 		} else if externStmt, ok := stmt.(*ast.ExternStatement); ok {
 			if externStmt == nil {
@@ -534,6 +556,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	for moduleName := range importedModules {
 		cg.usedModules = append(cg.usedModules, moduleName)
 	}
+	// 将 class 全局变量的初始化注入 main 开头 (运行时构造)
+	if classInitCode.Len() > 0 {
+		originalMain := mainCode.String()
+		mainCode.Reset()
+		mainCode.WriteString(classInitCode.String())
+		mainCode.WriteString(originalMain)
+	}
+
 	// 动态对象运行时依赖 std/obj 模块（dynobj.c），需要预编译链接
 	if cg.needsObjRuntime {
 		cg.usedModules = append(cg.usedModules, "std.obj")
@@ -665,7 +695,21 @@ static inline String string_concat(String str1, String str2) {
 	var forwardDecls strings.Builder
 	forwardDecls.Grow(1024)
 	for _, stmt := range program.Statements {
-		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsPublic && fnStmt.Name != "main" {
+		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.Name != "main" {
+			// 参数含 struct/class 类型的函数跳过前置声明
+			// (前置声明在 typedef 之前, 值参数需要完整类型)
+			hasStructParam := false
+			for _, pType := range fnStmt.ParamTypes {
+				base := strings.TrimSuffix(strings.TrimPrefix(pType, "*"), "*")
+				if cg.typeGenerator != nil &&
+					(cg.typeGenerator.structTypes[base] || cg.typeGenerator.classTypes[base]) {
+					hasStructParam = true
+					break
+				}
+			}
+			if hasStructParam {
+				continue
+			}
 			returnType := tgReturnTypeToC(cg.typeGenerator, fnStmt.ReturnType)
 			forwardDecls.WriteString(returnType)
 			forwardDecls.WriteByte(' ')
@@ -702,7 +746,6 @@ static inline String string_concat(String str1, String str2) {
 	isUserMode := cg.config != nil && cg.config.Boot == "user"
 
 	if useFreestanding || !hasMain {
-		fmt.Printf("[DEBUG] Template path: useFreestanding=%v, hasMain=%v\n", useFreestanding, hasMain)
 		templateName := "main"
 		if useFreestanding {
 			templateName = "freestanding"
@@ -728,6 +771,8 @@ static inline String string_concat(String str1, String str2) {
 
 			resultBuilder.WriteString(globalVars.String())
 			resultBuilder.WriteByte('\n')
+			resultBuilder.WriteString(classGlobalVars.String())
+			resultBuilder.WriteByte('\n')
 
 			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
 			resultBuilder.WriteString(functionCode.String())
@@ -748,7 +793,11 @@ static inline String string_concat(String str1, String str2) {
 			result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
 			result = strings.ReplaceAll(result, "{{forward_decls}}", forwardDecls.String())
 			result = strings.ReplaceAll(result, "{{global_vars}}", globalVars.String())
-			result = strings.ReplaceAll(result, "{{type_code}}", typeCode.String())
+			typeCodeWithClassGlobals := typeCode.String()
+			if classGlobalVars.Len() > 0 {
+				typeCodeWithClassGlobals += "\n" + classGlobalVars.String()
+			}
+			result = strings.ReplaceAll(result, "{{type_code}}", typeCodeWithClassGlobals)
 			result = strings.ReplaceAll(result, "{{function_code}}", functionCode.String())
 			result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
 			result = strings.ReplaceAll(result, "{{code}}", "")
@@ -788,7 +837,30 @@ static inline String string_concat(String str1, String str2) {
 		typeOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
 		resultBuilder.WriteString(typeCode.String())
 
+		// class 类型全局变量: 需在 typedef 之后生成
+		if classGlobalVars.Len() > 0 {
+			resultBuilder.WriteString("\n")
+			resultBuilder.WriteString(classGlobalVars.String())
+		}
+
 		funcOffset = typeOffset + strings.Count(typeCode.String(), "\n")
+		// class 全局变量初始化注入 main 函数体开头 (运行时构造)
+		if classInitCode.Len() > 0 {
+			mainFunc := functionCode.String()
+			idx := strings.Index(mainFunc, "int main() {")
+			if idx < 0 {
+				idx = strings.Index(mainFunc, "void main() {")
+			}
+			if idx >= 0 {
+				braceIdx := strings.Index(mainFunc[idx:], "{")
+				if braceIdx >= 0 {
+					insertAt := idx + braceIdx + 1
+					mainFunc = mainFunc[:insertAt] + "\n" + classInitCode.String() + mainFunc[insertAt:]
+				}
+			}
+			functionCode.Reset()
+			functionCode.WriteString(mainFunc)
+		}
 		resultBuilder.WriteString(functionCode.String())
 		result = resultBuilder.String()
 	}

@@ -332,6 +332,17 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		if eg.codegen.currentScope.HasLocalSymbol(e.Name) {
 			return e.Name
 		}
+		// 内置函数名/全局符号不是成员变量
+		switch e.Name {
+		case "println", "print", "read_int", "read_line", "read_string", "read_bool",
+			"read_float", "read_char", "string_create", "string_to_int",
+			"string_concat", "string_equals", "string_free", "kmm_v4_alloc_auto":
+			return e.Name
+		}
+		if eg.codegen.GetSymbol(e.Name) != nil {
+			// 全局符号(函数/变量/类型)不是成员变量
+			return e.Name
+		}
 		// 检查是否属于当前类字段（如果能确定当前类）
 		className := eg.codegen.currentClassName
 		if className == "" {
@@ -811,6 +822,21 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 				}
 
 				code := cFuncName + "(" + eg.generateStdlibArgs(args, &funcSig) + ")"
+				return code
+			}
+		}
+	}
+
+	// class 方法调用 (v.method()): object 的符号类型是已定义 class
+	// class 实例是指针语义, 直接传对象指针: Class_Method(v, args...)
+	if ident, ok := memberAccess.Object.(*ast.Identifier); ok {
+		if sym := eg.codegen.GetSymbol(ident.Name); sym != nil {
+			if eg.codegen.typeGenerator != nil && eg.codegen.typeGenerator.classTypes[sym.Type] {
+				code := sym.Type + "_" + methodName + "(" + eg.GenerateExpression(memberAccess.Object)
+				for _, arg := range args {
+					code += ", " + eg.GenerateExpression(arg)
+				}
+				code += ")"
 				return code
 			}
 		}

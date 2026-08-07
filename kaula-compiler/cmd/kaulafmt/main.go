@@ -328,7 +328,7 @@ func (f *Formatter) formatFunctionStatement(stmt *ast.FunctionStatement) {
 	f.buf.WriteString(")")
 
 	if stmt.ReturnType != "" {
-		f.buf.WriteString(" -> " + stmt.ReturnType)
+		f.buf.WriteString(" " + stmt.ReturnType)
 	}
 
 	if len(stmt.Body) > 0 {
@@ -757,14 +757,15 @@ func (f *Formatter) formatMethodStatement(stmt *ast.MethodStatement) {
 		if i > 0 {
 			f.buf.WriteString(", ")
 		}
-		f.buf.WriteString(param.Name)
 		if param.Type != "" {
-			f.buf.WriteString(": " + param.Type)
+			f.buf.WriteString(param.Type)
+			f.buf.WriteString(" ")
 		}
+		f.buf.WriteString(param.Name)
 	}
 	f.buf.WriteString(")")
 	if stmt.ReturnType != "" {
-		f.buf.WriteString(" -> " + stmt.ReturnType)
+		f.buf.WriteString(" " + stmt.ReturnType)
 	}
 	if len(stmt.Body) > 0 {
 		f.buf.WriteString(" {\n")
@@ -786,10 +787,11 @@ func (f *Formatter) formatConstructorStatement(stmt *ast.ConstructorStatement) {
 		if i > 0 {
 			f.buf.WriteString(", ")
 		}
-		f.buf.WriteString(param.Name)
 		if param.Type != "" {
-			f.buf.WriteString(": " + param.Type)
+			f.buf.WriteString(param.Type)
+			f.buf.WriteString(" ")
 		}
+		f.buf.WriteString(param.Name)
 	}
 	f.buf.WriteString(")")
 	if len(stmt.Body) > 0 {

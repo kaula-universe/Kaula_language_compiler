@@ -9,6 +9,8 @@ type Symbol struct {
 	Scope       string
 	Line        int
 	Column      int
+	// Referenced  bool // 是否被引用过（unused 检查用，已注释）
+	// Unused      bool // 声明带 #[unused] 注解，豁免 unused 检查（已注释）
 	IsGeneric   bool
 	GenericInst *GenericInstanceInfo
 }
@@ -186,7 +188,7 @@ func (st *SymbolTable) GetAllSymbols() map[string]*Symbol {
 	return st.symbols
 }
 
-// GetSymbolsInScope 获取指定作用域的符号
+// GetSymbolsInScope 返回指定作用域的所有符号
 func (st *SymbolTable) GetSymbolsInScope(scope string) map[string]*Symbol {
 	result := make(map[string]*Symbol)
 	for name, symbol := range st.symbols {
@@ -196,3 +198,12 @@ func (st *SymbolTable) GetSymbolsInScope(scope string) map[string]*Symbol {
 	}
 	return result
 }
+
+// Symbols 返回当前作用域中的所有符号（unused 检查遍历用，已注释）
+// func (st *SymbolTable) Symbols() []*Symbol {
+// 	out := make([]*Symbol, 0, len(st.symbols))
+// 	for _, s := range st.symbols {
+// 		out = append(out, s)
+// 	}
+// 	return out
+// }
