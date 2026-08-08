@@ -1,6 +1,18 @@
 #ifndef STD_BASE_TYPES_H
 #define STD_BASE_TYPES_H
 
+#if defined(_WIN32) || defined(WIN32) || defined(_WIN64)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef _WINSOCKAPI_
+        #define _WINSOCKAPI_
+    #endif
+    #ifndef _WINSOCK_H
+        #define _WINSOCK_H
+    #endif
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>      // wchar_t, size_t (C 标准)

@@ -1,6 +1,18 @@
 #ifndef STD_WEB_WEB_H
 #define STD_WEB_WEB_H
 
+#if defined(_WIN32) || defined(WIN32) || defined(_WIN64)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef _WINSOCKAPI_
+        #define _WINSOCKAPI_
+    #endif
+    #ifndef _WINSOCK_H
+        #define _WINSOCK_H
+    #endif
+#endif
+
 #include "../base/types.h"
 
 // 跨平台socket支持
