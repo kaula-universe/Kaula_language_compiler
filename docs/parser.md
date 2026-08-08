@@ -69,12 +69,12 @@ class Point {
     float y
     
     Point(float x, float y) {
-        this.x = x
-        this.y = y
+        self.x = x
+        self.y = y
     }
     
     float distance() {
-        return math_sqrt(this.x * this.x + this.y * this.y)
+        return math_sqrt(self.x * self.x + self.y * self.y)
     }
 }
 ```

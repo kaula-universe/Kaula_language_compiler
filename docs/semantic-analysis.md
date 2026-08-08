@@ -72,7 +72,7 @@ fn max<T>(T a, T b) T {
 // 泛型类
 class Box<T> {
     T value
-    constructor(T v) { this.value = v }
+    constructor(T v) { self.value = v }
 }
 ```
 
