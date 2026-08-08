@@ -2398,13 +2398,19 @@ func printUsage(exe string) {
 func ensureLibrary(libDir string, force bool) (*stdlib.BuildResult, error) {
 	name := filepath.Base(libDir)
 	if !force && !stdlib.LibNeedsBuild(libDir) {
+		sources, err := stdlib.ScanPackageSources(libDir)
+		if err != nil {
+			return nil, err
+		}
+		if len(sources) == 0 {
+			// 纯头文件库（无源码，实现宏内联进用户代码）：无可链接归档
+			return &stdlib.BuildResult{Name: name}, nil
+		}
 		hasCpp := false
-		if sources, err := stdlib.ScanPackageSources(libDir); err == nil {
-			for _, s := range sources {
-				if s.IsCpp() {
-					hasCpp = true
-					break
-				}
+		for _, s := range sources {
+			if s.IsCpp() {
+				hasCpp = true
+				break
 			}
 		}
 		libraries := []string{name}
