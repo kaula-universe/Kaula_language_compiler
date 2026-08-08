@@ -359,7 +359,11 @@ fn main() {
 - **自动桥接**：C++ 头自动生成 `<lib>_kbridge.h/.cpp` 并编译自检；`T&`→`T*`、其他类型指针→`void*` 还原，重载保留最优签名
 - **自动构建**：归档缺失/源码更新时编译 `lib<name>.a`，C++ 库自动链接 `c++/c++abi`
 - **自愈合并**：重新分析保留人工链接项（如 imgui 的 `d3d11/dwmapi/d3dcompiler`），`--skip-auto-pkg` 可关闭
-- 常用命令：`kaulac --build-pkglib <库名>`（幂等：分析/重分析/构建）、`--build-pkglib all`、`--pkglib <目录>`
+- 常用命令：
+  - `kaulac --build-pkglib <库名>`（幂等：分析/重分析/构建）、`--build-pkglib all`
+  - `kaulac --analyze-pkg <库名>`（强制手动重新解析并重写配置）、`--analyze-pkg-all`
+  - 注意：`--analyze-pkg` 直接重写配置、不合并人工链接项；`--build-pkglib` 走 `MergeLibrariesInto` 保留人工项（如 imgui 的系统库），手写配置且想重分析建议用它
+  - `--force-pkg` 强制重建归档；`--pkglib <目录>` 指定第三方库目录
 - 已知边界：类成员方法、模板值返回不自动暴露；个别库需人工补一次系统链接库（重分析不丢）
 
 ---
