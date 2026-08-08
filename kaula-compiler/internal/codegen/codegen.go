@@ -830,12 +830,15 @@ static inline String string_concat(String str1, String str2) {
 		resultBuilder.WriteString(forwardDecls.String())
 		resultBuilder.WriteString("\n")
 
-		globalOffset = strings.Count(allIncludes.String(), "\n") + 2 + strings.Count(forwardDecls.String(), "\n") + 1
-		resultBuilder.WriteString(globalVars.String())
+		// type_code (typedef/struct/enum/type alias) 必须在 global_vars (extern/全局变量) 之前,
+		// 否则 extern 函数原型引用 type 别名/自定义类型时 C 编译失败 (undefined type)
+		typeOffset = strings.Count(allIncludes.String(), "\n") + 2 + strings.Count(forwardDecls.String(), "\n") + 1
+		resultBuilder.WriteString(typeCode.String())
 		resultBuilder.WriteString("\n")
 
-		typeOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
-		resultBuilder.WriteString(typeCode.String())
+		globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1
+		resultBuilder.WriteString(globalVars.String())
+		resultBuilder.WriteString("\n")
 
 		// class 类型全局变量: 需在 typedef 之后生成
 		if classGlobalVars.Len() > 0 {
@@ -843,7 +846,7 @@ static inline String string_concat(String str1, String str2) {
 			resultBuilder.WriteString(classGlobalVars.String())
 		}
 
-		funcOffset = typeOffset + strings.Count(typeCode.String(), "\n")
+		funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
 		// class 全局变量初始化注入 main 函数体开头 (运行时构造)
 		if classInitCode.Len() > 0 {
 			mainFunc := functionCode.String()
