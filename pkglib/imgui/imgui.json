@@ -13,8 +13,8 @@
     "dwmapi",
     "d3dcompiler"
   ],
-  "include_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib",
-  "library_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib\\imgui",
+  "include_path": "pkglib",
+  "library_path": "pkglib\\imgui",
   "functions": {
     "kbridge_AcceptDragDropPayload": {
       "args": [
@@ -5215,5 +5215,5 @@
     }
   },
   "auto_generated": true,
-  "generated_at": "2026-08-08T13:51:27+08:00"
+  "generated_at": "2026-08-08T14:23:19+08:00"
 }
