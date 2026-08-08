@@ -143,55 +143,73 @@ fn := config.GetFunction("std.io", "println")
 
 ## 第三方库集成
 
-### pkglib 目录结构
+### 放库即用（drop-in）
+
+第三方库**无需任何配置**：把源码目录放进 `pkglib/` 即可直接 `import` 使用。
+编译器在加载配置时自动完成全部工作：
 
 ```
 pkglib/
-├── stb_image/
+├── stb_image/        # 纯 C：头 + 可选源码
 │   ├── stb_image.h
-│   ├── stb_image.json
-│   └── stb_image.lib
+│   └── stb_image.c
 ├── nuklear/
-│   ├── nuklear.h
-│   ├── nuklear.json
-│   └── nuklear.lib
-└── zlib/
-    ├── zlib.h
-    ├── zlib.json
-    └── zlib.lib
+│   └── nuklear.h
+└── imgui/            # C++：自动生成 extern "C" 桥接
+    ├── imgui.h
+    ├── imgui.cpp
+    └── imgui_kbridge.h/.cpp   # 自动生成，勿手改
 ```
 
-### 库配置文件
+首次 `import imgui` 时编译器依次自动完成：
+
+1. **自动分析**：无 `<库名>.json` → 用 Clang 提取函数签名并写配置；配置已存在但过期（自动生成配置 + 头/源码比配置新，或配置里登记的头文件已消失）→ 自动重新分析
+2. **自动桥接**（C++ 头文件）：生成 `<lib>_kbridge.h/.cpp`（`extern "C"`），并经 `clang -fsyntax-only` 编译自检，失败则回退并跳过该头
+3. **自动构建**：归档缺失或源码更新时，编译所有 `.c/.cpp` 为 `<lib> 的 `lib<name>.a`，C++ 库自动追加 `c++/c++abi` 运行时链接
+4. **自愈**：重新分析后自动合并旧配置里的人工项（`libraries/include_path/library_path`），手写/补的链接库不会丢
+
+### C++ 自动桥接规则
+
+C++ 头文件无法被 Kaula 生成的 C 代码直接引用，编译器自动生成 `extern "C"` 桥接。导出的函数一律使用 `kbridge_<函数名>` 前缀（避免与平台头冲突，如 windows.h 的 `GetVersion`）：
+
+| C++ 类型 | 导出类型 | stub 内还原 |
+|---|---|---|
+| `T&` / `T&&` | `T*`（基础类型）/ `void*` | `*p` / `(*((T*)p))` |
+| 基础类型指针（`char*`、`float*`） | 原样导出 | — |
+| 其他指针（`ImVec2*` 等） | `void*` | `(T*)p` |
+| 含 `::`/`<>` 的指针 | `void*` | `(T*)p` |
+| 非基础值类型、函数指针、数组 | 不导出 | — |
+
+- 同名重载只保留"最友好"的一个签名（转换次数最少、参数最少）
+- `operator` 重载等非法 C 标识符自动过滤
+- 已知限制：类成员方法、模板值返回类型暂不自动暴露
+
+### 库配置文件（自动生成）
+
+自动分析生成的 `<name>.json` 记录了 `auto_generated: true`。可人工补充
+`libraries`（系统库）、`include_path`、`library_path` 等字段，重分析时
+`MergeLibrariesInto` 会把人工项合并保留：
 
 ```json
 {
-  "name": "stb_image",
-  "headers": ["\"stb_image.h\""],
-  "libraries": ["stb_image.lib"],
+  "name": "imgui",
+  "auto_generated": true,
   "functions": {
-    "stbi_load": {
-      "args": ["const char*", "int*", "int*", "int*", "int"],
-      "return": "void*"
-    },
-    "stbi_image_free": {
-      "args": ["void*"],
-      "return": "void"
-    }
-  }
+    "kbridge_GetVersion": { "args": [], "return": "const char*" }
+  },
+  "libraries": ["imgui", "c++", "c++abi", "d3d11", "dwmapi", "d3dcompiler"]
 }
 ```
 
-### 自动发现
+### 自动发现（实现）
 
 ```go
-// 加载第三方库
+// 编译器加载阶段（配置缺失即分析、过期即重分析）
 libraries, err := stdlib.LoadPkgLibraries("pkglib/")
-
-// 自动分析未配置的库
 for _, lib := range libraries {
-    if lib.Config == nil {
-        // 使用 Clang 分析头文件
-        stdlib.AnalyzePackage(lib.Dir)
+    if stdlib.ConfigStale(libDir, lib.Name) { // 缺失/过期/登记头文件消失
+        result, _ := stdlib.AnalyzePackage(libDir)
+        stdlib.MergeLibrariesInto(libDir, result) // 合并人工链接项并写回
     }
 }
 ```
@@ -325,12 +343,23 @@ fn main() {
 
 ```kaula
 import stb_image
+import imgui   // C++ 库：自动生成 kbridge_* 桥接
 
 fn main() {
     void* img = stbi_load("texture.png", &width, &height, &channels, 4)
     stbi_image_free(img)
+
+    println(kbridge_GetVersion())         // 1.92.9
 }
 ```
+
+### 常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `kaulac --build-pkglib <库名>` | 幂等指令：无配置先自动分析 → 过期自动重分析 → 构建归档（平时无需手动跑，import 时自动完成） |
+| `kaulac --build-pkglib all` | 构建 pkglib 下全部库 |
+| `kaulac --pkglib <目录> [文件]` | 编译时优先使用指定目录作为 pkglib（`--skip-auto-pkg` 可关闭自动分析自愈） |
 
 ### 编译器处理
 

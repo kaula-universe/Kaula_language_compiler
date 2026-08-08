@@ -296,6 +296,31 @@ fn _start() {
 ```
 
 ---
+ 
+## Third-Party Libraries (pkglib)
+
+**Drop-in, zero-config**: put any C/C++ library source directory into `pkglib/` and call it via `import`.
+The compiler automatically handles analysis -> bridging -> building -> linking:
+
+```kaula
+import stb_image   // C library
+import imgui       // C++ library: auto-generated extern "C" bridge (kbridge_* prefix)
+
+fn main() {
+    void* img = stbi_load("texture.png", &width, &height, &channels, 4)
+    stbi_image_free(img)
+    println(kbridge_GetVersion())  // 1.92.9
+}
+```
+
+- **Auto analysis**: missing config, or stale auto-generated config (newer sources / vanished registered headers) -> re-extracts signatures with Clang
+- **Auto bridging**: C++ headers generate `<lib>_kbridge.h/.cpp` with compile self-check; `T&`->`T*`, other pointers -> `void*` restored in stubs, best overload signature kept
+- **Auto build**: compiles `lib<name>.a` when archive is missing or sources changed; C++ libraries link `c++/c++abi` automatically
+- **Self-healing**: re-analysis preserves manual link entries (e.g. imgui's `d3d11/dwmapi/d3dcompiler`); disable with `--skip-auto-pkg`
+- Commands: `kaulac --build-pkglib <name>` (idempotent), `--build-pkglib all`, `--pkglib <dir>`
+- Known limits: class member methods and template value returns are not exposed; some libs need a one-time manual system-library entry (never lost on re-analysis)
+
+---
 
 ## KMM V4 Memory Management
 
