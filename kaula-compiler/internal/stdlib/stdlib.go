@@ -110,21 +110,9 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 			libConfig.Name = libName
 		}
 
-		// 配置自愈：auto_generated 配置落后于头/源码时，任何加载方（编译/构建）都会
-		// 自动重新分析并合并旧配置的人工链接项——放库即用，无需手动分析
-		if autoHealEnabled && len(libConfig.Functions) > 0 && ConfigStale(libDir, libName) {
-			fmt.Printf("[auto-heal] %s config is stale, re-analyzing...\n", libName)
-			if aRes, aErr := AnalyzePackage(libDir); aErr == nil {
-				if merged, mErr := MergeLibrariesInto(libDir, aRes); mErr == nil {
-					libConfig = *merged
-				} else {
-					fmt.Printf("[auto-heal] merge config for %s failed: %v\n", libName, mErr)
-				}
-			} else {
-				fmt.Printf("[auto-heal] re-analyze %s failed: %v\n", libName, aErr)
-			}
-		}
-
+		// 注意：不在此处执行 auto-heal（ConfigStale 触发 AnalyzePackage），
+		// 因为加载阶段不知道哪些库会被使用。auto-heal 应只在 compileCCode 中
+		// 针对 usedModules 中的库执行，避免对未使用的 C++ 库生成桥接代码并触发编译。
 		libraries = append(libraries, libConfig)
 		fmt.Printf("Loaded third-party library: %s from %s\n", libConfig.Name, configFile)
 	}
