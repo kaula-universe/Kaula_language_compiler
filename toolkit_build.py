@@ -119,6 +119,9 @@ class ProgressBar:
         if self.current == 0:
             return "?s"
         elapsed = time.time() - self.start_time
+        # 全缓存秒完时 elapsed 可能为 0 (除零崩溃, 见 freestanding 5 文件全 cached)
+        if elapsed <= 0:
+            return "0s"
         rate = self.current / elapsed
         remaining = (self.total - self.current) / rate
         return self._format_time(remaining)
