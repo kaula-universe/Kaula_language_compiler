@@ -65,6 +65,12 @@ type Config struct {
 	// ====== 静态分析 ======
 	AnalyzePkg    string `json:"analyze_pkg,omitempty"`
 	AnalyzePkgAll bool   `json:"analyze_pkg_all,omitempty"`
+
+	// ====== 第三方库构建 ======
+	BuildPkglib  string `json:"build_pkglib,omitempty"` // 构建指定 pkglib 库（或 "all"）后退出
+	ForcePKG     bool   `json:"force_pkg,omitempty"`    // 强制重新构建/重新分析 pkglib 库
+	SkipAutoPkg  bool   `json:"skip_auto_pkg,omitempty"` // 禁用使用库时的自动构建
+	AutoAnalyzePkg bool `json:"auto_analyze_pkg,omitempty"` // 自动分析缺失/过期的库配置
 }
 
 // DefaultConfig 返回默认配置
@@ -208,6 +214,12 @@ func loadFlags(config *Config) {
 	// pkglib 分析
 	flag.StringVar(&config.AnalyzePkg, "analyze-pkg", config.AnalyzePkg, "分析指定包并生成配置文件")
 	flag.BoolVar(&config.AnalyzePkgAll, "analyze-pkg-all", config.AnalyzePkgAll, "分析所有 pkglib 中的包")
+
+	// 第三方库构建
+	flag.StringVar(&config.BuildPkglib, "build-pkglib", config.BuildPkglib, "构建指定 pkglib 库（或 all）后退出")
+	flag.BoolVar(&config.ForcePKG, "force-pkg", config.ForcePKG, "强制重新构建/重新分析 pkglib 库")
+	flag.BoolVar(&config.SkipAutoPkg, "skip-auto-pkg", config.SkipAutoPkg, "禁用使用库时的自动构建")
+	flag.BoolVar(&config.AutoAnalyzePkg, "auto-analyze-pkg", config.AutoAnalyzePkg, "(已废弃) 过期配置默认自动重新分析，无需此开关")
 
 	flag.Parse()
 

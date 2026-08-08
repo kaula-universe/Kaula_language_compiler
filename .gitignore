@@ -22,6 +22,13 @@ vendor/
 *.out
 *.elf
 
+# Third-party library build artifacts (auto-built static libs & intermediate objects)
+pkglib/**/kbuild/
+
+# Auto-generated C++ bridge files (regenerated on demand by the analyzer)
+pkglib/**/*_kbridge.h
+pkglib/**/*_kbridge.cpp
+
 # Compiler binaries (no extension)
 kaula-compiler/cmd/kaulac/kaulac
 kaula-compiler/cmd/loadtest/loadtest
