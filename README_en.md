@@ -317,7 +317,10 @@ fn main() {
 - **Auto bridging**: C++ headers generate `<lib>_kbridge.h/.cpp` with compile self-check; `T&`->`T*`, other pointers -> `void*` restored in stubs, best overload signature kept
 - **Auto build**: compiles `lib<name>.a` when archive is missing or sources changed; C++ libraries link `c++/c++abi` automatically
 - **Self-healing**: re-analysis preserves manual link entries (e.g. imgui's `d3d11/dwmapi/d3dcompiler`); disable with `--skip-auto-pkg`
-- Commands: `kaulac --build-pkglib <name>` (idempotent), `--build-pkglib all`, `--pkglib <dir>`
+- Commands:
+  - Manual analysis: `kaulac --analyze-pkg <name>` (force re-analysis and rewrite config), `--analyze-pkg-all`
+  - Note: `--analyze-pkg` rewrites the config directly without merging manual link entries; `--build-pkglib` merges old entries (e.g. imgui's `d3d11/...`), so prefer it when the config has manual entries
+  - `kaulac --build-pkglib <name>` (idempotent: analyze/re-analyze/build), `--build-pkglib all`, `--force-pkg` forces rebuild, `--pkglib <dir>`
 - Known limits: class member methods and template value returns are not exposed; some libs need a one-time manual system-library entry (never lost on re-analysis)
 
 ---

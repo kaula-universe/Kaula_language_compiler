@@ -359,7 +359,27 @@ fn main() {
 |---|---|
 | `kaulac --build-pkglib <库名>` | 幂等指令：无配置先自动分析 → 过期自动重分析 → 构建归档（平时无需手动跑，import 时自动完成） |
 | `kaulac --build-pkglib all` | 构建 pkglib 下全部库 |
+| `kaulac --analyze-pkg <库名>` | 强制手动重新解析（Clang 重新提取签名并重写 `<库名>.json`，常用于头文件改动后手动刷新） |
+| `kaulac --analyze-pkg-all` | 重新解析 pkglib 下全部库 |
+| `kaulac --force-pkg` | 参与构建时强制重建归档（配合 `--build-pkglib` 使用） |
 | `kaulac --pkglib <目录> [文件]` | 编译时优先使用指定目录作为 pkglib（`--skip-auto-pkg` 可关闭自动分析自愈） |
+
+> **注意 `--analyze-pkg` 与 `--build-pkglib` 的区别**：
+> `--analyze-pkg` 直接重写配置，不走 `MergeLibrariesInto`，会把旧配置里人工补充的链接库（如 imgui 的 `d3d11/dwmapi/d3dcompiler`）丢掉；
+> `--build-pkglib` 在过期重分析时走 `MergeLibrariesInto` 保留人工项。
+> 配置含人工链接项时，建议用 `--build-pkglib <库名>` 代替 `--analyze-pkg <库名>`。
+
+### 自动分析入口（何时触发）
+
+除手动命令外，编译器在以下时机自动完成分析/重分析，无需人工干预：
+
+| 时机 | 触发条件 | 入口 |
+|---|---|---|
+| 加载配置 | 扫描 `pkglib/` 时发现库目录没有同名 `<库名>.json` | `LoadPkgLibraries` → `AnalyzePackage` + `WriteConfig` |
+| import 解析 | `import 某库` 时配置中不存在该库，且 `pkglib/` 下有对应目录 | `tryAnalyzeMissingPackage`（按需分析并写配置） |
+| 编译自愈 | 正在使用的库配置过期（`auto_generated=true` 且头/源码比配置新、或登记头文件消失） | `compileCCode` → `ConfigStale` 触发重分析 + `MergeLibrariesInto` |
+
+其中"编译自愈"只针对**已 import（usedModules）**的库执行，未使用的库不会被强制重分析；`--skip-auto-pkg` 可关闭全部自动分析。
 
 ### 编译器处理
 

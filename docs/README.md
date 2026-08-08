@@ -4,6 +4,15 @@
 
 ## 文档索引
 
+### 工具
+
+- [工具索引](tools/README.md) - 全部命令行工具的总览与分类
+- [编译器 kaulac](tools/kaulac.md) - 全参数编译、缓存管理、pkglib 管理、裸机模式
+- [构建脚本 toolkit_build.py](tools/toolkit-build.md) - 一键全量/分目标构建
+- [代码格式化工具 (kaulafmt)](tools/kaulafmt.md) - 格式化规则、使用方法
+- [AST 转储 (dumpast)](tools/dumpast.md) - 调试解析器的 AST 树输出
+- [语义负载测试 (loadtest)](tools/loadtest.md) - 语义分析验证
+
 ### 架构概览
 
 - [编译器架构](compiler-architecture.md) - 整体架构、编译流程、目录结构
@@ -11,7 +20,6 @@
 
 ### 编译器组件
 
-- [代码格式化工具 (kaulafmt)](kaulafmt.md) - 代码格式化、格式化规则、使用方法
 - [词法分析器 (Lexer)](lexer.md) - Token 类型、扫描策略、API
 - [语法分析器 (Parser)](parser.md) - 语法规则、递归下降解析、错误恢复
 - [抽象语法树 (AST)](ast.md) - 节点类型、层次结构、遍历机制
