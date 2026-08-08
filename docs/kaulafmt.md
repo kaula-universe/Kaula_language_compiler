@@ -121,7 +121,7 @@ class Person {
     age: int
 
     fn getName() -> string {
-        return name
+        return self.name
     }
 
     constructor(name: string, age: int) {
@@ -134,7 +134,7 @@ export class Container[T] {
     value: T
 
     fn get() -> T {
-        return value
+        return self.value
     }
 }
 

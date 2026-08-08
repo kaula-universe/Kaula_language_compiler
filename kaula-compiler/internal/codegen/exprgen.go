@@ -142,6 +142,7 @@ func wrapIfNeeded(expr string, op string, side string) string {
 
 	return expr
 }
+
 // escapeCString 转义字符串为 C 字符串字面量
 // 词法器保留 Kaula 转义序列的原始形式（\" \n \\ 等），这些序列透传到 C
 // 源码中与 Kaula 语义完全一致（\" 仍是转义引号、\n 仍是换行），
@@ -343,29 +344,9 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 			// 全局符号(函数/变量/类型)不是成员变量
 			return e.Name
 		}
-		// 检查是否属于当前类字段（如果能确定当前类）
-		className := eg.codegen.currentClassName
-		if className == "" {
-			// 从 scopeName 中解析类名：method_Class_methodName 或 constructor_Class
-			scopeName := eg.codegen.currentScope.GetScopeName()
-			if strings.HasPrefix(scopeName, "method_") {
-				rest := scopeName[len("method_"):] // Class_methodName
-				// 取下划线之前的部分作为类名（注意类名本身不含下划线时安全）
-				if idx := strings.LastIndex(rest, "_"); idx > 0 {
-					className = rest[:idx]
-				}
-			} else if strings.HasPrefix(scopeName, "constructor_") {
-				className = scopeName[len("constructor_"):]
-			}
-		}
-		if className != "" && eg.isClassField(className, e.Name) {
-			return "self->" + e.Name
-		}
-		// 即使无法确定当前类，也保守地假定为 self 字段（类作用域内的标识符通常是字段）
-		// 这是之前行为的兜底，防止遗漏
-		if className == "" {
-			return "self->" + e.Name
-		}
+		// 强制 self 策略：类成员必须通过 self.field 显式访问。
+		// 裸名不再自动解析为 self 字段；未解析的裸名落到末尾原样输出
+		// （sema 阶段已对类作用域内的裸字段引用报错并提示改用 self.field）。
 	}
 
 	// 检查是否是枚举变体
@@ -1014,23 +995,6 @@ func (eg *ExpressionGenerator) symbolTypeIsStringLike(expr ast.Expression) bool 
 	}
 	// 字符串字面量 inferType 返回 "s"
 	return eg.inferType(expr) == "s"
-}
-
-// isClassField 检查 name 是否是 className 对应类的字段名
-func (eg *ExpressionGenerator) isClassField(className, name string) bool {
-	if eg.codegen.program == nil {
-		return false
-	}
-	classStmt := eg.codegen.program.FindClass(className)
-	if classStmt == nil {
-		return false
-	}
-	for _, f := range classStmt.Fields {
-		if f.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 // generatePrintlnCall 生成 println 调用代码
@@ -1690,11 +1654,6 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 			// 类类型变量始终按指针传递和存储（K_ClassName*），
 			// 即使符号表中类型名未显式带 *，也视为指针访问。
 			if !isPtr && eg.codegen.IsClassType(typeStr) {
-				isPtr = true
-			}
-			// class_field:Class:fieldName 形式（类方法/构造中的裸字段名），
-			// 实际代码生成会被上层处理为 self->field，此处兜底。
-			if strings.HasPrefix(typeStr, "class_field:") {
 				isPtr = true
 			}
 		}

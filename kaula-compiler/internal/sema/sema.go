@@ -161,12 +161,8 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 		// 注册 self：类型为类的指针类型
 		sa.symbolTable.AddSymbol("self", classStmt.Name+"*", false, "local", classStmt.Pos.Line, classStmt.Pos.Column)
 
-		// 注册类字段作为 self 的成员（同时作为作用域内可解析的字段名）
-		// 实际字段访问是通过 self.field 实现的，但为了允许裸字段名（如 x = 5 而不是 self.x = 5），
-		// 我们将字段名也注册到作用域，标记为 "class_field:Class:field" 类型
-		for _, f := range classStmt.Fields {
-			sa.symbolTable.AddSymbol(f.Name, f.Type, f.Nullable, "class_field:"+classStmt.Name, f.Pos.Line, f.Pos.Column)
-		}
+		// 类字段不再注册为作用域符号：成员必须通过 self.field 显式访问，
+		// 以消除参数/局部变量与字段同名的歧义。
 
 		// 注册构造函数参数
 		for _, param := range ctor.Params {
@@ -196,10 +192,7 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 		// 注册 self
 		sa.symbolTable.AddSymbol("self", classStmt.Name+"*", false, "local", method.Pos.Line, method.Pos.Column)
 
-		// 注册类字段（允许裸字段名）
-		for _, f := range classStmt.Fields {
-			sa.symbolTable.AddSymbol(f.Name, f.Type, f.Nullable, "class_field:"+classStmt.Name, f.Pos.Line, f.Pos.Column)
-		}
+		// 类字段不再注册为作用域符号：成员必须通过 self.field 显式访问。
 
 		// 注册方法参数
 		for _, param := range method.Params {
@@ -521,8 +514,8 @@ func (sa *SemanticAnalyzer) analyzeSpendStatement(stmt *ast.SpendStatement) {
 	}
 
 	// 2. 逐个子句：索引合法性 + 唯一性
-	used := make(map[int]bool)   // 已使用的元素序号（1-based）
-	hasDefault := false          // 是否存在兜底子句
+	used := make(map[int]bool) // 已使用的元素序号（1-based）
+	hasDefault := false        // 是否存在兜底子句
 	maxIndex := 0
 	enumVariantOrder := map[string]int{} // 变体名 -> 序号（1-based）
 	if enumName != "" {
@@ -1047,88 +1040,6 @@ func (sa *SemanticAnalyzer) analyzeClassStatement(stmt *ast.ClassStatement) {
 		if m != nil {
 			sa.funcReturnTypes[stmt.Name+"."+m.Name] = m.ReturnType
 		}
-	}
-}
-
-// analyzeClassMethods 分析 class 的方法与构造函数体（第二遍）
-// 方法/构造函数作用域内注册 self（类型=类名），方法体里 self 与裸成员名可用
-func (sa *SemanticAnalyzer) analyzeClassMethods(stmt *ast.ClassStatement) {
-	// 分析普通方法
-	for _, m := range stmt.Methods {
-		if m == nil {
-			continue
-		}
-		oldSymbolTable := sa.symbolTable
-		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "method_"+m.Name)
-		sa.scope++
-
-		// self 符号：类型=类名，永远视为已使用
-		sa.symbolTable.AddSymbol("self", stmt.Name, false, "parameter", m.Pos.Line, m.Pos.Column)
-		if sym := sa.symbolTable.GetSymbol("self"); sym != nil {
-		}
-		// 成员字段符号（方法体裸名引用 self->field 的字段）
-		for _, field := range stmt.Fields {
-			if field != nil {
-				sa.symbolTable.AddSymbol(field.Name, field.Type, field.Nullable, "field", field.Pos.Line, field.Pos.Column)
-			}
-		}
-		// 参数
-		paramMap := make(map[string]bool)
-		for _, param := range m.Params {
-			if param == nil {
-				continue
-			}
-			if paramMap[param.Name] {
-				sa.error(fmt.Sprintf("重复的参数 %s 在方法 %s 中", param.Name, m.Name), m.Pos.Line, m.Pos.Column)
-			} else {
-				paramMap[param.Name] = true
-				sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", param.Pos.Line, param.Pos.Column)
-			}
-		}
-		// 分析方法体
-		for _, bodyStmt := range m.Body {
-			sa.analyzeStatement(bodyStmt)
-		}
-
-		sa.symbolTable = oldSymbolTable
-		sa.scope--
-	}
-
-	// 分析构造函数
-	for _, c := range stmt.Constructors {
-		if c == nil {
-			continue
-		}
-		oldSymbolTable := sa.symbolTable
-		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "constructor_"+stmt.Name)
-		sa.scope++
-
-		sa.symbolTable.AddSymbol("self", stmt.Name, false, "parameter", c.Pos.Line, c.Pos.Column)
-		if sym := sa.symbolTable.GetSymbol("self"); sym != nil {
-		}
-		for _, field := range stmt.Fields {
-			if field != nil {
-				sa.symbolTable.AddSymbol(field.Name, field.Type, field.Nullable, "field", field.Pos.Line, field.Pos.Column)
-			}
-		}
-		paramMap := make(map[string]bool)
-		for _, param := range c.Params {
-			if param == nil {
-				continue
-			}
-			if paramMap[param.Name] {
-				sa.error(fmt.Sprintf("重复的参数 %s 在构造函数中", param.Name), c.Pos.Line, c.Pos.Column)
-			} else {
-				paramMap[param.Name] = true
-				sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", param.Pos.Line, param.Pos.Column)
-			}
-		}
-		for _, bodyStmt := range c.Body {
-			sa.analyzeStatement(bodyStmt)
-		}
-
-		sa.symbolTable = oldSymbolTable
-		sa.scope--
 	}
 }
 
@@ -1929,6 +1840,20 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 	}
 
 	symbol := sa.symbolTable.GetSymbol(expr.Name)
+	// 类字段符号只能通过 self.field 显式访问（强制 self 策略）。
+	// 字段在 analyzeClassStatement 中以 scope="field_<类名>" 注册到全局符号表，
+	// 裸名引用会解析到它，此处拦截并提示改用 self.field。
+	if symbol != nil && strings.HasPrefix(symbol.Scope, "field_") {
+		className := strings.TrimPrefix(symbol.Scope, "field_")
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("未定义的变量: '%s'", expr.Name),
+			expr.Pos.Line,
+			expr.Pos.Column,
+			"undefined_variable",
+			fmt.Sprintf("类 '%s' 的字段必须通过 self.%s 显式访问", className, expr.Name),
+		)
+		return
+	}
 	if symbol == nil {
 		// 本地 import 的 pub 函数（跨文件调用）不算未定义
 		if sa.localImportFuncs[expr.Name] {
@@ -1945,6 +1870,18 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 			)
 			return
 		}
+		// 类方法/构造函数作用域内：若该名字恰好是当前类的字段，
+		// 提示必须通过 self.field 显式访问（强制 self 策略）。
+		if hint := sa.classFieldAccessHint(expr.Name); hint != "" {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("未定义的变量: '%s'", expr.Name),
+				expr.Pos.Line,
+				expr.Pos.Column,
+				"undefined_variable",
+				hint,
+			)
+			return
+		}
 		sa.errorCollector.AddSemanticError(
 			fmt.Sprintf("未定义的变量: '%s'", expr.Name),
 			expr.Pos.Line,
@@ -1956,6 +1893,37 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 	}
 	// 标记符号为已使用（unused 检查已注释）
 	// symbol.Referenced = true
+}
+
+// classFieldAccessHint 在类方法/构造函数作用域内，若 name 是当前类的字段，
+// 返回提示用户改用 self.name 的字符串；否则返回空串。
+func (sa *SemanticAnalyzer) classFieldAccessHint(name string) string {
+	if sa.program == nil {
+		return ""
+	}
+	scopeName := sa.symbolTable.GetScopeName()
+	className := ""
+	if strings.HasPrefix(scopeName, "method_") {
+		rest := scopeName[len("method_"):]
+		if idx := strings.LastIndex(rest, "_"); idx > 0 {
+			className = rest[:idx]
+		}
+	} else if strings.HasPrefix(scopeName, "constructor_") {
+		className = scopeName[len("constructor_"):]
+	}
+	if className == "" {
+		return ""
+	}
+	classStmt := sa.program.FindClass(className)
+	if classStmt == nil {
+		return ""
+	}
+	for _, f := range classStmt.Fields {
+		if f != nil && f.Name == name {
+			return fmt.Sprintf("类 '%s' 的字段必须通过 self.%s 显式访问", className, name)
+		}
+	}
+	return ""
 }
 
 // checkUnusedSymbols 检查当前函数/方法/构造函数作用域中未被引用的局部变量和参数。
