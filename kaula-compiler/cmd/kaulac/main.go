@@ -322,15 +322,28 @@ func main() {
 		fmt.Printf("Warning: Failed to load config: %v, using default\n", err)
 	}
 
+	// 让 stdlib 加载默认优先使用 --pkglib 指定的目录
+	if cfg.PkglibPath != "" {
+		stdlib.SetDefaultPkglibPrefer(cfg.PkglibPath)
+	}
+	// 配置自愈默认开启；--skip-auto-pkg 显式关闭
+	stdlib.SetAutoHealEnabled(!cfg.SkipAutoPkg)
+
 	// 处理 --analyze-pkg 命令
 	if cfg.AnalyzePkg != "" {
-		handleAnalyzePkg(cfg.AnalyzePkg)
+		handleAnalyzePkg(cfg.AnalyzePkg, cfg.PkglibPath)
 		return
 	}
 
 	// 处理 --analyze-pkg-all 命令
 	if cfg.AnalyzePkgAll {
-		handleAnalyzePkgAll()
+		handleAnalyzePkgAll(cfg.PkglibPath)
+		return
+	}
+
+	// 处理 --build-pkglib 命令（构建指定库或全部库后退出）
+	if cfg.BuildPkglib != "" {
+		handleBuildPkg(cfg.BuildPkglib, cfg.ForcePKG, cfg.PkglibPath)
 		return
 	}
 
@@ -436,7 +449,7 @@ func main() {
 	go func() {
 		defer parallelWg.Done()
 		stdlibPath = findStdlib()
-		stdlibConfig, _ = stdlib.LoadStdlibConfig(stdlibPath)
+		stdlibConfig, _ = stdlib.LoadStdlibConfigWithPkglib(stdlibPath, cfg.PkglibPath)
 	}()
 
 	// Stage 1: Lex + Parse（与 stdlib 加载并行）
@@ -2106,6 +2119,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 	// 消费 pkglib 第三方库的 libraries/include_path/library_path 字段
 	if stdlibConfig != nil {
+		var extraLibs []string // 自动构建/桥接产生的额外链接库（如 stdc++）
 		for _, lib := range stdlibConfig.ThirdParty {
 			// 检查是否使用了此库（通过 usedModules）
 			used := false
@@ -2117,6 +2131,53 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			}
 			if !used {
 				continue
+			}
+			// 解析库目录（含回退），并支持按需自动构建（增强：从源码构建缺失/过期的静态库）
+			libForce := cfg != nil && cfg.ForcePKG
+			resolvedLibDir := lib.LibraryPath
+			if resolvedLibDir == "" || !dirExists(resolvedLibDir) {
+				fallbackDir := filepath.Join(workDir, "pkglib", lib.Name)
+				if dirExists(fallbackDir) {
+					resolvedLibDir = fallbackDir
+				}
+			}
+			if resolvedLibDir != "" && (cfg == nil || !cfg.SkipAutoPkg) {
+				// 配置自愈（默认开启，--skip-auto-pkg 关闭）：
+				// 对 auto_generated 的配置在落后于头/源码时重新分析（生成桥接/新签名），
+				// 并合并旧配置里的人工库列表（如 imgui 的 d3d11/dwmapi/d3dcompiler），
+				// 避免重新分析丢掉人工链接项；缺失配置的库由导入阶段的按需分析自动处理。
+				if stdlib.ConfigStale(resolvedLibDir, lib.Name) {
+					fmt.Printf("[Info] Config for %s is stale, re-analyzing...\n", lib.Name)
+					if aRes, aErr := stdlib.AnalyzePackage(resolvedLibDir); aErr == nil {
+						// 合并旧配置的人工链接库/额外目录，防止自动分析丢项
+						if merged, mErr := stdlib.MergeLibrariesInto(resolvedLibDir, aRes); mErr == nil {
+							lib = *merged
+						} else {
+							fmt.Printf("[Warn] Merge config for %s failed: %v\n", lib.Name, mErr)
+						}
+					} else {
+						fmt.Printf("[Warn] Re-analyze %s failed: %v\n", lib.Name, aErr)
+					}
+				}
+				result, bErr := ensureLibrary(resolvedLibDir, libForce)
+				if bErr != nil {
+					fmt.Printf("[Warn] Auto-build failed for %s: %v (continuing)\n", lib.Name, bErr)
+				} else if result != nil && result.HasLibraries {
+					// 构建产生的额外链接库（如 C++ 运行时 stdc++）稍后与 -L 一起追加，
+					// 保证 -L 出现在 -l 之前（ld 按顺序解析搜索路径）
+					for _, extra := range result.Libraries {
+						already := false
+						for _, l := range lib.Libraries {
+							if l == extra {
+								already = true
+								break
+							}
+						}
+						if !already {
+							extraLibs = append(extraLibs, extra)
+						}
+					}
+				}
 			}
 			// 添加 include 路径
 			if lib.IncludePath != "" {
@@ -2132,8 +2193,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				clangArgs = append(clangArgs, "-I", incPath)
 			}
 			// 添加库搜索路径
-			if lib.LibraryPath != "" {
-				libPath := lib.LibraryPath
+			if resolvedLibDir != "" {
+				libPath := resolvedLibDir
 				if _, err := os.Stat(libPath); err != nil {
 					fallbackLib := filepath.Join(workDir, "pkglib", lib.Name)
 					if _, fbErr := os.Stat(fallbackLib); fbErr == nil {
@@ -2142,7 +2203,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 				clangArgs = append(clangArgs, "-L", libPath)
 			}
-			// 添加链接库
+			// 添加链接库（先追加构建产物产生的额外库，再追加配置声明的库）
+			for _, extra := range extraLibs {
+				clangArgs = append(clangArgs, "-l"+extra)
+			}
+			extraLibs = extraLibs[:0]
 			for _, libName := range lib.Libraries {
 				clangArgs = append(clangArgs, "-l"+libName)
 			}
@@ -2242,8 +2307,14 @@ func installedLibraryNames() (string, string) {
 	return "libkaula_std.a", "libkaula_runtime.a"
 }
 
-// findPkglibPath 查找 pkglib 目录路径
-func findPkglibPath() string {
+// findPkglibPath 查找 pkglib 目录路径（prefer 优先：--pkglib 命令行指定的目录）
+func findPkglibPath(prefer string) string {
+	if prefer != "" {
+		if info, err := os.Stat(prefer); err == nil && info.IsDir() {
+			absPath, _ := filepath.Abs(prefer)
+			return absPath
+		}
+	}
 	// 1. KAULA_HOME 环境变量
 	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
 		p := filepath.Join(envHome, "pkglib")
@@ -2310,6 +2381,9 @@ func printUsage(exe string) {
 	fmt.Printf("  --libs <libs>           额外的链接库 (逗号分隔)\n")
 	fmt.Printf("  --analyze-pkg <name>    分析指定包并生成配置文件\n")
 	fmt.Printf("  --analyze-pkg-all       分析所有 pkglib 中的包\n")
+	fmt.Printf("  --build-pkglib <name>   构建指定 pkglib 库（all=全部），含缺失配置自动分析\n")
+	fmt.Printf("  --force-pkg             强制重新构建/重新分析 pkglib 库\n")
+	fmt.Printf("  --skip-auto-pkg         禁止编译按需的自动构建\n")
 	fmt.Printf("  --boot <mode>           裸机引导方式：pvh/multiboot/custom/none (默认 none，需配合 --freestanding)\n")
 	fmt.Printf("  --boot-file <path>      自定义引导汇编文件 (boot=custom 时使用)\n")
 	fmt.Printf("  --boot-arch <arch>      引导架构：x86_64/i386/riscv64/aarch64 (默认从 --target-triple 推断)\n")
@@ -2319,9 +2393,42 @@ func printUsage(exe string) {
 	fmt.Printf("  使用 --init 生成默认配置文件。\n")
 }
 
+// ensureLibrary 按需确保库：force 为 true 或归档缺失/源码更新时重建，
+// 否则直接返回现有状态（含 C++ 运行时库项，链接时依然需要）
+func ensureLibrary(libDir string, force bool) (*stdlib.BuildResult, error) {
+	name := filepath.Base(libDir)
+	if !force && !stdlib.LibNeedsBuild(libDir) {
+		hasCpp := false
+		if sources, err := stdlib.ScanPackageSources(libDir); err == nil {
+			for _, s := range sources {
+				if s.IsCpp() {
+					hasCpp = true
+					break
+				}
+			}
+		}
+		libraries := []string{name}
+		libraries = append(libraries, stdlib.CppRuntimeLibraries(hasCpp)...)
+		return &stdlib.BuildResult{
+			Name:         name,
+			ArchivePath:  stdlib.LibArchivePath(libDir),
+			HasCpp:       hasCpp,
+			Libraries:    libraries,
+			HasLibraries: true,
+		}, nil
+	}
+	return stdlib.BuildLibrary(libDir)
+}
+
+// dirExists 判断路径是否存在且为目录
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 // handleAnalyzePkg 处理 --analyze-pkg 命令，手动分析指定包
-func handleAnalyzePkg(pkgName string) {
-	pkglibPath := findPkglibPath()
+func handleAnalyzePkg(pkgName, pkglibPrefer string) {
+	pkglibPath := findPkglibPath(pkglibPrefer)
 	if pkglibPath == "" {
 		fmt.Printf("Error: pkglib directory not found\n")
 		os.Exit(1)
@@ -2358,9 +2465,98 @@ func handleAnalyzePkg(pkgName string) {
 	}
 }
 
+// handleBuildPkg 处理 --build-pkglib 命令，构建指定库或全部库
+func handleBuildPkg(target string, force bool, pkglibPrefer string) {
+	pkglibPath := findPkglibPath(pkglibPrefer)
+	if pkglibPath == "" {
+		fmt.Printf("Error: pkglib directory not found\n")
+		os.Exit(1)
+	}
+
+	// 若库无配置或配置过期（auto_generated 且落后于头/源码），先重新分析：
+	// 统一的自愈入口：放库 -> 本条命令自动 分析/桥接 -> 编译归档
+	ensureFresh := func(libDir, libName string) {
+		cfgPath := filepath.Join(libDir, libName+".json")
+		if _, err := os.Stat(cfgPath); err != nil {
+			fmt.Printf("  [auto-analyze] %s has no config, analyzing...\n", libName)
+			if result, aErr := stdlib.AnalyzePackage(libDir); aErr == nil {
+				_ = result.WriteConfig(libDir)
+			} else {
+				fmt.Printf("  [warn] auto-analyze %s failed: %v\n", libName, aErr)
+			}
+			return
+		}
+		if stdlib.ConfigStale(libDir, libName) {
+			fmt.Printf("  [re-analyze] %s config is stale, re-analyzing...\n", libName)
+			if aRes, aErr := stdlib.AnalyzePackage(libDir); aErr == nil {
+				// 合并旧配置的人工链接库/额外目录，防止自动分析丢项
+				if _, mErr := stdlib.MergeLibrariesInto(libDir, aRes); mErr != nil {
+					fmt.Printf("  [warn] merge config for %s failed: %v\n", libName, mErr)
+				}
+			} else {
+				fmt.Printf("  [warn] re-analyze %s failed: %v\n", libName, aErr)
+			}
+		}
+	}
+
+	if target == "all" {
+		entries, rErr := os.ReadDir(pkglibPath)
+		if rErr != nil {
+			fmt.Printf("Error: failed to read pkglib directory: %v\n", rErr)
+			os.Exit(1)
+		}
+		ok, failed := 0, 0
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			libName := e.Name()
+			libDir := filepath.Join(pkglibPath, libName)
+			ensureFresh(libDir, libName)
+			if !force && !stdlib.LibNeedsBuild(libDir) {
+				continue
+			}
+			fmt.Printf("\nBuilding: %s\n", libName)
+			if _, err := buildOnePackage(libDir, libName, force); err != nil {
+				fmt.Printf("  FAILED: %v\n", err)
+				failed++
+				continue
+			}
+			ok++
+		}
+		fmt.Printf("\nBuild complete: %d rebuilt, %d failed\n", ok, failed)
+		return
+	}
+
+	libDir := filepath.Join(pkglibPath, target)
+	if info, err := os.Stat(libDir); err != nil || !info.IsDir() {
+		fmt.Printf("Error: package '%s' not found in %s\n", target, pkglibPath)
+		os.Exit(1)
+	}
+	ensureFresh(libDir, target)
+	fmt.Printf("Build package: %s\n", target)
+	if res, err := buildOnePackage(libDir, target, force); err != nil {
+		fmt.Printf("Error: failed to build %s: %v\n", target, err)
+		os.Exit(1)
+	} else {
+		fmt.Printf("  Archive: %s\n", res.ArchivePath)
+		fmt.Printf("  Sources compiled: %d\n", res.Built)
+		fmt.Printf("  Link libraries: %v\n", res.Libraries)
+	}
+}
+
+// buildOnePackage 构建单个包；up-to-date 时提示并返回空结果
+func buildOnePackage(libDir, libName string, force bool) (*stdlib.BuildResult, error) {
+	if !force && !stdlib.LibNeedsBuild(libDir) {
+		fmt.Printf("  Up to date (no rebuild needed)\n")
+		return &stdlib.BuildResult{Name: libName, ArchivePath: stdlib.LibArchivePath(libDir)}, nil
+	}
+	return stdlib.BuildLibrary(libDir)
+}
+
 // handleAnalyzePkgAll 处理 --analyze-pkg-all 命令，手动分析所有包
-func handleAnalyzePkgAll() {
-	pkglibPath := findPkglibPath()
+func handleAnalyzePkgAll(pkglibPrefer string) {
+	pkglibPath := findPkglibPath(pkglibPrefer)
 	if pkglibPath == "" {
 		fmt.Printf("Error: pkglib directory not found\n")
 		os.Exit(1)

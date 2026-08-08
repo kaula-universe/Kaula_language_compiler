@@ -1,15 +1,14 @@
-﻿{
+{
   "name": "imgui",
   "type": "multi_header",
   "header": "imgui/imstb_rectpack.h",
   "headers": [
     "\"imgui/imstb_rectpack.h\"",
     "\"imgui/imstb_truetype.h\"",
-    "\"imgui/kimgui.h\""
+    "\"imgui/imgui_kbridge.h\""
   ],
   "libraries": [
     "imgui",
-    "stdc++",
     "d3d11",
     "dwmapi",
     "d3dcompiler"
@@ -17,223 +16,4547 @@
   "include_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib",
   "library_path": "E:\\Users\\tf\\Desktop\\新建文件夹\\kaula\\pkglib\\imgui",
   "functions": {
-    "kimgui_apply_dark_theme": {
+    "kbridge_AcceptDragDropPayload": {
       "args": [
-        "void()"
-      ],
-      "return": "void"
-    },
-    "kimgui_apply_light_theme": {
-      "args": [
-        "void()"
-      ],
-      "return": "void"
-    },
-    "kimgui_begin_window": {
-      "args": [
-        "void()",
         "const char*",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_AddDrawListToDrawDataEx": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_AddSettingsHandler": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_AlignTextToFramePadding": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_Begin": {
+      "args": [
+        "const char*",
+        "bool*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginChild": {
+      "args": [
+        "unsigned int",
+        "void*",
+        "int",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginColumns": {
+      "args": [
+        "const char*",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_BeginCombo": {
+      "args": [
+        "const char*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginComboPreview": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BeginDisabled": {
+      "args": [
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_BeginDisabledOverrideReenable": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_BeginDragDropSource": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginDragDropTarget": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BeginDragDropTargetViewport": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginErrorTooltip": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BeginGroup": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_BeginItemTooltip": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BeginListBox": {
+      "args": [
+        "const char*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginMainMenuBar": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BeginMenu": {
+      "args": [
+        "const char*",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginMenuBar": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BeginMenuEx": {
+      "args": [
+        "const char*",
+        "const char*",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginMultiSelect": {
+      "args": [
+        "int",
+        "int",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_BeginPopup": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginPopupContextItem": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginPopupContextVoid": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginPopupContextWindow": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginPopupModal": {
+      "args": [
+        "const char*",
+        "bool*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginTabBar": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginTabBarEx": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginTabItem": {
+      "args": [
+        "const char*",
+        "bool*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginTable": {
+      "args": [
+        "const char*",
+        "int",
+        "int",
+        "void*",
+        "float"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginTooltip": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BeginTooltipEx": {
+      "args": [
+        "int",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_BeginTooltipHidden": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_BringWindowToDisplayBack": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_BringWindowToDisplayBehind": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_BringWindowToDisplayFront": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_BringWindowToFocusFront": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_Bullet": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_Button": {
+      "args": [
+        "const char*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ButtonEx": {
+      "args": [
+        "const char*",
+        "void*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_CalcClipRectVisibleItemsY": {
+      "args": [
+        "void*",
+        "void*",
+        "float",
+        "int*",
         "int*"
       ],
       "return": "void"
     },
-    "kimgui_button": {
+    "kbridge_CalcItemWidth": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_CalcRoundingFlagsForRectInRect": {
       "args": [
-        "void()",
-        "const char*"
+        "void*",
+        "void*",
+        "float"
       ],
       "return": "int"
     },
-    "kimgui_checkbox": {
+    "kbridge_CalcTypematicRepeatAmount": {
       "args": [
-        "void()",
-        "const char*",
-        "int*"
+        "float",
+        "float",
+        "float",
+        "float"
       ],
       "return": "int"
     },
-    "kimgui_color_edit4": {
+    "kbridge_CalcWrapWidthForPos": {
       "args": [
-        "void()",
-        "const char*",
-        "float*"
-      ],
-      "return": "int"
-    },
-    "kimgui_end_frame": {
-      "args": [
-        "void()"
-      ],
-      "return": "void"
-    },
-    "kimgui_end_window": {
-      "args": [
-        "void()"
-      ],
-      "return": "void"
-    },
-    "kimgui_framerate": {
-      "args": [
-        "void()"
+        "void*",
+        "float"
       ],
       "return": "float"
     },
-    "kimgui_init": {
+    "kbridge_Checkbox": {
+      "args": [
+        "const char*",
+        "bool*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_CheckboxFlags": {
+      "args": [
+        "const char*",
+        "unsigned long long*",
+        "unsigned long long"
+      ],
+      "return": "bool"
+    },
+    "kbridge_CleanupIniSettings": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ClearActiveID": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ClearDragDrop": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ClearIniSettings": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ClearWindowSettings": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_CloseCurrentPopup": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ClosePopupToLevel": {
+      "args": [
+        "int",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_ClosePopupsExceptModals": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ClosePopupsOverWindow": {
+      "args": [
+        "void*",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_CollapsingHeader": {
+      "args": [
+        "const char*",
+        "bool*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ColorButton": {
+      "args": [
+        "const char*",
+        "void*",
+        "int",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ColorConvertFloat4ToU32": {
+      "args": [
+        "void*"
+      ],
+      "return": "unsigned int"
+    },
+    "kbridge_ColorConvertHSVtoRGB": {
+      "args": [
+        "float",
+        "float",
+        "float",
+        "float *",
+        "float *",
+        "float *"
+      ],
+      "return": "void"
+    },
+    "kbridge_ColorConvertRGBtoHSV": {
+      "args": [
+        "float",
+        "float",
+        "float",
+        "float *",
+        "float *",
+        "float *"
+      ],
+      "return": "void"
+    },
+    "kbridge_ColorEdit3": {
+      "args": [
+        "const char*",
+        "float*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ColorEdit4": {
+      "args": [
+        "const char*",
+        "float*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ColorEditOptionsPopup": {
+      "args": [
+        "const float*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ColorPicker3": {
+      "args": [
+        "const char*",
+        "float*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ColorPicker4": {
+      "args": [
+        "const char*",
+        "float*",
+        "int",
+        "const float*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ColorPickerOptionsPopup": {
+      "args": [
+        "const float*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ColorTooltip": {
+      "args": [
+        "const char*",
+        "const float*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_Columns": {
+      "args": [
+        "int",
+        "const char*",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_CreateContext": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_CreateNewWindowSettings": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_DataTypeApplyFromText": {
       "args": [
         "const char*",
         "int",
-        "int"
+        "void*",
+        "const char*",
+        "void*"
       ],
-      "return": "void()"
+      "return": "bool"
     },
-    "kimgui_input_text": {
+    "kbridge_DataTypeApplyOp": {
       "args": [
-        "void()",
+        "int",
+        "int",
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DataTypeClamp": {
+      "args": [
+        "int",
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DataTypeCompare": {
+      "args": [
+        "int",
+        "void*",
+        "void*"
+      ],
+      "return": "int"
+    },
+    "kbridge_DataTypeFormatString": {
+      "args": [
+        "char*",
+        "int",
+        "int",
+        "void*",
         "const char*"
       ],
       "return": "int"
     },
-    "kimgui_input_text_value": {
+    "kbridge_DataTypeGetInfo": {
       "args": [
-        "void()"
+        "int"
       ],
-      "return": "const char*"
+      "return": "void*"
     },
-    "kimgui_new_frame": {
+    "kbridge_DataTypeIsZero": {
       "args": [
-        "void()"
+        "int",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DebugAllocHook": {
+      "args": [
+        "void*",
+        "int",
+        "void*",
+        "size_t"
       ],
       "return": "void"
     },
-    "kimgui_new_line": {
+    "kbridge_DebugBreakButton": {
       "args": [
-        "void()"
-      ],
-      "return": "void"
-    },
-    "kimgui_plot_sine": {
-      "args": [
-        "void()",
         "const char*",
-        "float"
+        "const char*"
       ],
-      "return": "int"
+      "return": "bool"
     },
-    "kimgui_poll_events": {
+    "kbridge_DebugBreakButtonTooltip": {
       "args": [
-        "void()"
+        "bool",
+        "const char*"
       ],
-      "return": "int"
+      "return": "void"
     },
-    "kimgui_pop_style_color": {
+    "kbridge_DebugBreakClearData": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_DebugCheckVersionAndDataLayout": {
       "args": [
-        "void()",
+        "const char*",
+        "size_t",
+        "size_t",
+        "size_t",
+        "size_t",
+        "size_t",
+        "size_t"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DebugDrawCursorPos": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugDrawItemRect": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugDrawLineExtents": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugFlashStyleColor": {
+      "args": [
         "int"
       ],
       "return": "void"
     },
-    "kimgui_push_style_color": {
+    "kbridge_DebugLocateItemResolveWithLastItem": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_DebugNodeColumns": {
       "args": [
-        "void()",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeDrawCmdShowMeshAndBoundingBox": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "bool",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeDrawList": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeFont": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeFontGlyph": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeFontGlyphsForSrcMask": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeInputTextState": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeMultiSelectState": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeStorage": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeTabBar": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeTable": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeTableSettings": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeTexture": {
+      "args": [
+        "void*",
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeTypingSelectState": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeViewport": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeWindow": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeWindowSettings": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeWindowsList": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugNodeWindowsListByBeginStackParent": {
+      "args": [
+        "void*",
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugRenderKeyboardPreview": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugRenderViewportThumbnail": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugStartItemPicker": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_DebugTextEncoding": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugTextUnformattedWithLocateItem": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DebugTextureIDToU64": {
+      "args": [
+        "unsigned long long"
+      ],
+      "return": "unsigned long long"
+    },
+    "kbridge_DemoMarker": {
+      "args": [
+        "const char*",
+        "int",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DestroyContext": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_DragFloat": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragFloat2": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragFloat3": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragFloat4": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragFloatRange2": {
+      "args": [
+        "const char*",
+        "float*",
+        "float*",
+        "float",
+        "float",
+        "float",
+        "const char*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragInt": {
+      "args": [
+        "const char*",
+        "int*",
+        "float",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragInt2": {
+      "args": [
+        "const char*",
+        "int*",
+        "float",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragInt3": {
+      "args": [
+        "const char*",
+        "int*",
+        "float",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragInt4": {
+      "args": [
+        "const char*",
+        "int*",
+        "float",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragIntRange2": {
+      "args": [
+        "const char*",
+        "int*",
+        "int*",
+        "float",
+        "int",
+        "int",
+        "const char*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragScalar": {
+      "args": [
+        "const char*",
+        "int",
+        "void*",
+        "float",
+        "void*",
+        "void*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_DragScalarN": {
+      "args": [
+        "const char*",
+        "int",
+        "void*",
         "int",
         "float",
+        "void*",
+        "void*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_Dummy": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_End": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndBoxSelect": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_EndChild": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndColumns": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndCombo": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndComboPreview": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndDisabled": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndDisabledOverrideReenable": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndDragDropSource": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndDragDropTarget": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndErrorTooltip": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndFrame": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndGroup": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndListBox": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndMainMenuBar": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndMenu": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndMenuBar": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndMultiSelect": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_EndPopup": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndTabBar": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndTabItem": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndTable": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_EndTooltip": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ErrorCheckEndFrameFinalizeErrorTooltip": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ErrorCheckUsingSetCursorPosToExtendParentBoundaries": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ErrorLog": {
+      "args": [
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ErrorRecoveryStoreState": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ErrorRecoveryTryToRecoverState": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ErrorRecoveryTryToRecoverWindowState": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_FindBlockingModal": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_FindBottomMostVisibleWindowWithinBeginStack": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_FindFrontMostVisibleChildWindow": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_FindHoveredWindowEx": {
+      "args": [
+        "void*",
+        "bool",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_FindRenderedTextEnd": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_FindSettingsHandler": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_FindWindowByName": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_FindWindowDisplayIndex": {
+      "args": [
+        "void*"
+      ],
+      "return": "int"
+    },
+    "kbridge_FindWindowSettingsByWindow": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_FixupKeyChord": {
+      "args": [
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_FocusItem": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_FocusTopMostWindowUnderOne": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_FocusWindow": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_GcAwakeTransientWindowBuffers": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_GcCompactTransientMiscBuffers": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_GcCompactTransientWindowBuffers": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_GetBackgroundDrawList": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetClipboardText": {
+      "args": [],
+      "return": "const char*"
+    },
+    "kbridge_GetColorU32": {
+      "args": [
+        "unsigned int",
+        "float"
+      ],
+      "return": "unsigned int"
+    },
+    "kbridge_GetColumnIndex": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_GetColumnNormFromOffset": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_GetColumnOffset": {
+      "args": [
+        "int"
+      ],
+      "return": "float"
+    },
+    "kbridge_GetColumnOffsetFromNorm": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_GetColumnWidth": {
+      "args": [
+        "int"
+      ],
+      "return": "float"
+    },
+    "kbridge_GetColumnsCount": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_GetCurrentContext": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetCurrentTabBar": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetCurrentTable": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetCurrentWindow": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetCurrentWindowRead": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetCursorPosX": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetCursorPosY": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetDefaultFont": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetDragDropPayload": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetDrawData": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetDrawListSharedData": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetFont": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetFontBaked": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetFontRasterizerDensity": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetFontSize": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetForegroundDrawList": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetFrameCount": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_GetFrameHeight": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetFrameHeightWithSpacing": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetID": {
+      "args": [
+        "int"
+      ],
+      "return": "unsigned int"
+    },
+    "kbridge_GetIO": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetItemClickedCountWithSingleClickDelay": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "int"
+    },
+    "kbridge_GetItemFlags": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_GetItemID": {
+      "args": [],
+      "return": "unsigned int"
+    },
+    "kbridge_GetItemStatusFlags": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_GetKeyChordName": {
+      "args": [
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_GetMainViewport": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetMouseButtonFromPopupFlags": {
+      "args": [
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_GetMouseClickedCount": {
+      "args": [
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_GetMouseCursor": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_GetPlatformIO": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetRoundedFontSize": {
+      "args": [
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_GetScale": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetScrollMaxX": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetScrollMaxY": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetScrollX": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetScrollY": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetShortcutRoutingData": {
+      "args": [
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetStateStorage": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetStyle": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetStyleColorName": {
+      "args": [
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_GetStyleColorVec4": {
+      "args": [
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetStyleVarInfo": {
+      "args": [
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetTextLineHeight": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetTextLineHeightWithSpacing": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetTime": {
+      "args": [],
+      "return": "double"
+    },
+    "kbridge_GetTopMostAndVisiblePopupModal": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetTopMostPopupModal": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetTreeNodeToLabelSpacing": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetTypematicRepeatRate": {
+      "args": [
+        "int",
+        "float*",
+        "float*"
+      ],
+      "return": "void"
+    },
+    "kbridge_GetTypingSelectRequest": {
+      "args": [
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_GetVersion": {
+      "args": [],
+      "return": "const char*"
+    },
+    "kbridge_GetWindowDrawList": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetWindowHeight": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_GetWindowViewport": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_GetWindowWidth": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_ImAbs": {
+      "args": [
+        "double"
+      ],
+      "return": "double"
+    },
+    "kbridge_ImAlphaBlendColors": {
+      "args": [
+        "unsigned int",
+        "unsigned int"
+      ],
+      "return": "unsigned int"
+    },
+    "kbridge_ImBitArrayClearAllBits": {
+      "args": [
+        "unsigned int*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImBitArrayClearBit": {
+      "args": [
+        "unsigned int*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImBitArrayGetStorageSizeInBytes": {
+      "args": [
+        "int"
+      ],
+      "return": "size_t"
+    },
+    "kbridge_ImBitArraySetBit": {
+      "args": [
+        "unsigned int*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImBitArraySetBitRange": {
+      "args": [
+        "unsigned int*",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImBitArrayTestBit": {
+      "args": [
+        "const unsigned int*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImCeilFast": {
+      "args": [
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImCharIsBlankA": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImCharIsBlankW": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImCharIsXdigitA": {
+      "args": [
+        "char"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImCountSetBits": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "unsigned int"
+    },
+    "kbridge_ImDot": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImExponentialMovingAverage": {
+      "args": [
         "float",
         "float",
+        "int"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImFileClose": {
+      "args": [
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImFileGetSize": {
+      "args": [
+        "void*"
+      ],
+      "return": "unsigned long long"
+    },
+    "kbridge_ImFileLoadToMemory": {
+      "args": [
+        "const char*",
+        "const char*",
+        "size_t*",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_ImFileOpen": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_ImFileRead": {
+      "args": [
+        "void*",
+        "unsigned long long",
+        "unsigned long long",
+        "void*"
+      ],
+      "return": "unsigned long long"
+    },
+    "kbridge_ImFileWrite": {
+      "args": [
+        "void*",
+        "unsigned long long",
+        "unsigned long long",
+        "void*"
+      ],
+      "return": "unsigned long long"
+    },
+    "kbridge_ImFontAtlasAddDrawListSharedData": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBakedAddFontGlyph": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_ImFontAtlasBakedAddFontGlyphAdvancedX": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "unsigned short",
         "float"
       ],
       "return": "void"
     },
-    "kimgui_same_line": {
+    "kbridge_ImFontAtlasBakedDiscard": {
       "args": [
-        "void()"
+        "void*",
+        "void*",
+        "void*"
       ],
       "return": "void"
     },
-    "kimgui_separator": {
+    "kbridge_ImFontAtlasBakedDiscardFontGlyph": {
       "args": [
-        "void()"
+        "void*",
+        "void*",
+        "void*",
+        "void*"
       ],
       "return": "void"
     },
-    "kimgui_set_next_window_pos": {
+    "kbridge_ImFontAtlasBakedGetClosestMatch": {
       "args": [
-        "void()",
+        "void*",
+        "void*",
         "float",
         "float"
       ],
-      "return": "void"
+      "return": "void*"
     },
-    "kimgui_set_next_window_size": {
+    "kbridge_ImFontAtlasBakedGetOrAdd": {
       "args": [
-        "void()",
+        "void*",
+        "void*",
         "float",
         "float"
       ],
+      "return": "void*"
+    },
+    "kbridge_ImFontAtlasBuildClear": {
+      "args": [
+        "void*"
+      ],
       "return": "void"
     },
-    "kimgui_show_demo_window": {
+    "kbridge_ImFontAtlasBuildDestroy": {
       "args": [
-        "void()",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildDiscardBakes": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildGetOversampleFactors": {
+      "args": [
+        "void*",
+        "void*",
+        "int*",
         "int*"
       ],
       "return": "void"
     },
-    "kimgui_shutdown": {
+    "kbridge_ImFontAtlasBuildInit": {
       "args": [
-        "void()"
+        "void*"
       ],
       "return": "void"
     },
-    "kimgui_slider_float": {
+    "kbridge_ImFontAtlasBuildLegacyPreloadAllGlyphRanges": {
       "args": [
-        "void()",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildMain": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildNotifySetFont": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildRenderBitmapFromString": {
+      "args": [
+        "void*",
+        "int",
+        "int",
+        "int",
+        "int",
         "const char*",
-        "float*",
-        "float",
-        "float"
+        "char"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildSetupFontLoader": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildSetupFontSpecialGlyphs": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasBuildUpdatePointers": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasDebugLogTextureRequests": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasFontDestroyOutput": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasFontDestroySourceData": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasFontDiscardBakes": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasFontInitOutput": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImFontAtlasFontRebuildOutput": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasFontSourceAddToFont": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasFontSourceInit": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImFontAtlasGetFontLoaderForStbTruetype": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_ImFontAtlasGetMouseCursorTexData": {
+      "args": [
+        "void*",
+        "int",
+        "void*",
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImFontAtlasPackAddRect": {
+      "args": [
+        "void*",
+        "int",
+        "int",
+        "void*"
       ],
       "return": "int"
     },
-    "kimgui_slider_int": {
+    "kbridge_ImFontAtlasPackDiscardRect": {
       "args": [
-        "void()",
-        "const char*",
-        "int*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasPackGetRect": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_ImFontAtlasPackGetRectSafe": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_ImFontAtlasPackInit": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasRectId_GetGeneration": {
+      "args": [
+        "int"
+      ],
+      "return": "unsigned int"
+    },
+    "kbridge_ImFontAtlasRectId_GetIndex": {
+      "args": [
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImFontAtlasRectId_Make": {
+      "args": [
         "int",
         "int"
       ],
       "return": "int"
     },
-    "kimgui_spacing": {
+    "kbridge_ImFontAtlasRemoveDrawListSharedData": {
       "args": [
-        "void()"
+        "void*",
+        "void*"
       ],
       "return": "void"
     },
-    "kimgui_text": {
+    "kbridge_ImFontAtlasTextureAdd": {
       "args": [
-        "void()",
+        "void*",
+        "int",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_ImFontAtlasTextureBlockCopy": {
+      "args": [
+        "void*",
+        "int",
+        "int",
+        "void*",
+        "int",
+        "int",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureBlockFill": {
+      "args": [
+        "void*",
+        "int",
+        "int",
+        "int",
+        "int",
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureBlockPostProcess": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureBlockPostProcessMultiply": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureBlockQueueUpload": {
+      "args": [
+        "void*",
+        "void*",
+        "int",
+        "int",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureCompact": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureGrow": {
+      "args": [
+        "void*",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureMakeSpace": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasTextureRepack": {
+      "args": [
+        "void*",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasUpdateDrawListsSharedData": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontAtlasUpdateNewFrame": {
+      "args": [
+        "void*",
+        "int",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImFontCalcWordWrapPositionEx": {
+      "args": [
+        "void*",
+        "float",
+        "const char*",
+        "const char*",
+        "float",
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImHashSkipUncontributingPrefix": {
+      "args": [
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImInvLength": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImIsFloatAboveGuaranteedIntegerPrecision": {
+      "args": [
+        "float"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImIsPowerOfTwo": {
+      "args": [
+        "unsigned long long"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImLengthSqr": {
+      "args": [
+        "void*"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImLinearRemapClamp": {
+      "args": [
+        "float",
+        "float",
+        "float",
+        "float",
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImLinearSweep": {
+      "args": [
+        "float",
+        "float",
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImLog": {
+      "args": [
+        "double"
+      ],
+      "return": "double"
+    },
+    "kbridge_ImMemdup": {
+      "args": [
+        "void*",
+        "size_t"
+      ],
+      "return": "void*"
+    },
+    "kbridge_ImModPositive": {
+      "args": [
+        "int",
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImParseFormatFindEnd": {
+      "args": [
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImParseFormatFindStart": {
+      "args": [
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImParseFormatPrecision": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImParseFormatSanitizeForPrinting": {
+      "args": [
+        "const char*",
+        "char*",
+        "size_t"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImParseFormatSanitizeForScanning": {
+      "args": [
+        "const char*",
+        "char*",
+        "size_t"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImParseFormatTrimDecorations": {
+      "args": [
+        "const char*",
+        "char*",
+        "size_t"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImPow": {
+      "args": [
+        "double",
+        "double"
+      ],
+      "return": "double"
+    },
+    "kbridge_ImRound64": {
+      "args": [
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImRsqrt": {
+      "args": [
+        "double"
+      ],
+      "return": "double"
+    },
+    "kbridge_ImSaturate": {
+      "args": [
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImSign": {
+      "args": [
+        "double"
+      ],
+      "return": "double"
+    },
+    "kbridge_ImStrSkipBlank": {
+      "args": [
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImStrTrimBlanks": {
+      "args": [
+        "char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImStrbol": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImStrchrRange": {
+      "args": [
+        "const char*",
+        "const char*",
+        "char"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImStrdup": {
+      "args": [
+        "const char*"
+      ],
+      "return": "char*"
+    },
+    "kbridge_ImStrdupcpy": {
+      "args": [
+        "char*",
+        "size_t*",
+        "const char*"
+      ],
+      "return": "char*"
+    },
+    "kbridge_ImStreolRange": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImStricmp": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImStristr": {
+      "args": [
+        "const char*",
+        "const char*",
+        "const char*",
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImStrlenW": {
+      "args": [
+        "const unsigned short*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImStrncpy": {
+      "args": [
+        "char*",
+        "const char*",
+        "size_t"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImStrnicmp": {
+      "args": [
+        "const char*",
+        "const char*",
+        "size_t"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextCalcWordWrapNextLineStart": {
+      "args": [
+        "const char*",
+        "const char*",
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImTextCharFromUtf8": {
+      "args": [
+        "unsigned int*",
+        "const char*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextCharToUtf8": {
+      "args": [
+        "char*",
+        "unsigned int"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextCountCharsFromUtf8": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextCountLines": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextCountUtf8BytesFromChar": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextCountUtf8BytesFromStr": {
+      "args": [
+        "const unsigned short*",
+        "const unsigned short*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextFindPreviousUtf8Codepoint": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImTextFindValidUtf8CodepointEnd": {
+      "args": [
+        "const char*",
+        "const char*",
+        "const char*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ImTextInitClassifiers": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ImTextStrFromUtf8": {
+      "args": [
+        "unsigned short*",
+        "int",
+        "const char*",
+        "const char*",
+        "void*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextStrToUtf8": {
+      "args": [
+        "char*",
+        "int",
+        "const unsigned short*",
+        "const unsigned short*"
+      ],
+      "return": "int"
+    },
+    "kbridge_ImTextureDataQueueUpload": {
+      "args": [
+        "void*",
+        "int",
+        "int",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImTextureDataUpdateNewFrame": {
+      "args": [
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImToUpper": {
+      "args": [
+        "char"
+      ],
+      "return": "char"
+    },
+    "kbridge_ImTriangleArea": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImTriangleBarycentricCoords": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "void*",
+        "float *",
+        "float *",
+        "float *"
+      ],
+      "return": "void"
+    },
+    "kbridge_ImTriangleContainsPoint": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImTriangleIsClockwise": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ImTrunc64": {
+      "args": [
+        "float"
+      ],
+      "return": "float"
+    },
+    "kbridge_ImUpperPowerOfTwo": {
+      "args": [
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_Indent": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_Initialize": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_InputDouble": {
+      "args": [
+        "const char*",
+        "double*",
+        "double",
+        "double",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputFloat": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputFloat2": {
+      "args": [
+        "const char*",
+        "float*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputFloat3": {
+      "args": [
+        "const char*",
+        "float*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputFloat4": {
+      "args": [
+        "const char*",
+        "float*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputInt": {
+      "args": [
+        "const char*",
+        "int*",
+        "int",
+        "int",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputInt2": {
+      "args": [
+        "const char*",
+        "int*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputInt3": {
+      "args": [
+        "const char*",
+        "int*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputInt4": {
+      "args": [
+        "const char*",
+        "int*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputScalar": {
+      "args": [
+        "const char*",
+        "int",
+        "void*",
+        "void*",
+        "void*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InputScalarN": {
+      "args": [
+        "const char*",
+        "int",
+        "void*",
+        "int",
+        "void*",
+        "void*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_InvisibleButton": {
+      "args": [
+        "const char*",
+        "void*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsAnyItemActive": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsAnyItemFocused": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsAnyItemHovered": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsAnyMouseDown": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsDragDropActive": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsDragDropPayloadBeingAccepted": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemActivated": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemActive": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemActiveAsInputText": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemClicked": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsItemDeactivated": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemDeactivatedAfterEdit": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemEdited": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemFocused": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemHovered": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsItemToggledOpen": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemToggledSelection": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsItemVisible": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsMouseDragPastThreshold": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsMouseDragging": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsMouseHoveringRect": {
+      "args": [
+        "void*",
+        "void*",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsMousePosValid": {
+      "args": [
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsMouseReleasedWithDelay": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsPopupOpenRequestForWindow": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsRectVisible": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowAbove": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowAppearing": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsWindowChildOf": {
+      "args": [
+        "void*",
+        "void*",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowCollapsed": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_IsWindowContentHoverable": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowFocused": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowHovered": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowInBeginStack": {
+      "args": [
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowNavFocusable": {
+      "args": [
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_IsWindowWithinBeginStackOf": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ItemSize": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_LoadIniSettingsFromDisk": {
+      "args": [
         "const char*"
       ],
       "return": "void"
     },
-    "kimgui_text_colored": {
+    "kbridge_LoadIniSettingsFromMemory": {
       "args": [
-        "void()",
-        "float",
-        "float",
-        "float",
-        "float",
+        "const char*",
+        "size_t"
+      ],
+      "return": "void"
+    },
+    "kbridge_LocalizeRegisterEntries": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_LogBegin": {
+      "args": [
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_LogButtons": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_LogFinish": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_LogRenderedText": {
+      "args": [
+        "void*",
+        "const char*",
         "const char*"
       ],
       "return": "void"
     },
-    "kimgui_text_fmt": {
+    "kbridge_LogSetNextTextDecoration": {
       "args": [
-        "void()",
+        "const char*",
         "const char*"
       ],
-      "varargs": true,
+      "return": "void"
+    },
+    "kbridge_LogToBuffer": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_LogToClipboard": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_LogToFile": {
+      "args": [
+        "int",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_LogToTTY": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_MarkIniSettingsDirty": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_MemAlloc": {
+      "args": [
+        "size_t"
+      ],
+      "return": "void*"
+    },
+    "kbridge_MemFree": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_MenuItem": {
+      "args": [
+        "const char*",
+        "const char*",
+        "bool*",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "kbridge_MenuItemEx": {
+      "args": [
+        "const char*",
+        "const char*",
+        "const char*",
+        "bool",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "kbridge_MultiSelectAddSetAll": {
+      "args": [
+        "void*",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_MultiSelectAddSetRange": {
+      "args": [
+        "void*",
+        "bool",
+        "int",
+        "long long",
+        "long long"
+      ],
+      "return": "void"
+    },
+    "kbridge_NavInitRequestApplyResult": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_NavInitWindow": {
+      "args": [
+        "void*",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_NavMoveRequestApplyResult": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_NavMoveRequestButNoResultYet": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_NavMoveRequestCancel": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_NavMoveRequestResolveWithLastItem": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_NavMoveRequestResolveWithPastTreeNode": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_NavMoveRequestTryWrapping": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_NavUpdateCurrentWindowIsScrollPushableX": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_NewFrame": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_NewLine": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_NextColumn": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_OpenPopup": {
+      "args": [
+        "unsigned int",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_OpenPopupOnItemClick": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_PopButtonRepeat": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopClipRect": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopColumnsBackground": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopFocusScope": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopFont": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopID": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopItemFlag": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopItemWidth": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopPasswordFont": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopStyleColor": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_PopStyleVar": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_PopTabStop": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PopTextWrapPos": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ProgressBar": {
+      "args": [
+        "float",
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushButtonRepeat": {
+      "args": [
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushClipRect": {
+      "args": [
+        "void*",
+        "void*",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushColumnClipRect": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushColumnsBackground": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PushFont": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushID": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushItemFlag": {
+      "args": [
+        "int",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushItemWidth": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushMultiItemsWidths": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushPasswordFont": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_PushStyleColor": {
+      "args": [
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushStyleVar": {
+      "args": [
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushStyleVarX": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushStyleVarY": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushTabStop": {
+      "args": [
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_PushTextWrapPos": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_RadioButton": {
+      "args": [
+        "const char*",
+        "int*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_RegisterFontAtlas": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_RegisterUserTexture": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_RemoveSettingsHandler": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_Render": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_RenderColorComponentMarker": {
+      "args": [
+        "void*",
+        "unsigned int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_RenderDragDropTargetRectEx": {
+      "args": [
+        "void*",
+        "void*",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_RenderDragDropTargetRectForItem": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_RenderRectFilledInRangeH": {
+      "args": [
+        "void*",
+        "void*",
+        "unsigned int",
+        "float",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_RenderRectFilledWithHole": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "unsigned int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_RenderTextClipped": {
+      "args": [
+        "void*",
+        "void*",
+        "const char*",
+        "const char*",
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_RenderTextClippedEx": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "const char*",
+        "const char*",
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_RenderTextEllipsis": {
+      "args": [
+        "void*",
+        "void*",
+        "void*",
+        "float",
+        "const char*",
+        "const char*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ResetMouseDragDelta": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SameLine": {
+      "args": [
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SaveIniSettingsToDisk": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SaveIniSettingsToMemory": {
+      "args": [
+        "size_t*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_ScaleWindowsInViewport": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_ScrollToBringRectIntoView": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ScrollToItem": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_ScrollToRect": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_Selectable": {
+      "args": [
+        "const char*",
+        "bool*",
+        "int",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_Separator": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_SeparatorEx": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SeparatorText": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetActiveIdUsingAllKeyboardKeys": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_SetClipboardText": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetColorEditOptions": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetColumnOffset": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetColumnWidth": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetContextName": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetCurrentContext": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetCurrentFont": {
+      "args": [
+        "void*",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetCursorPos": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetCursorPosX": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetCursorPosY": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetCursorScreenPos": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetDragDropPayload": {
+      "args": [
+        "const char*",
+        "void*",
+        "size_t",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SetFontRasterizerDensity": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetItemDefaultFocus": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_SetKeyboardFocusHere": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetMouseCursor": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNavCursorVisible": {
+      "args": [
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNavCursorVisibleAfterMove": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_SetNavWindow": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextFrameWantCaptureKeyboard": {
+      "args": [
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextFrameWantCaptureMouse": {
+      "args": [
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextItemAllowOverlap": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_SetNextItemColorMarker": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextItemOpen": {
+      "args": [
+        "bool",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextItemRefVal": {
+      "args": [
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextItemSelectionUserData": {
+      "args": [
+        "long long"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextItemShortcut": {
+      "args": [
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextItemStorageID": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextItemWidth": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowBgAlpha": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowCollapsed": {
+      "args": [
+        "bool",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowContentSize": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowFocus": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowPos": {
+      "args": [
+        "void*",
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowRefreshPolicy": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowScroll": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetNextWindowSize": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetScrollFromPosX": {
+      "args": [
+        "void*",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetScrollFromPosY": {
+      "args": [
+        "void*",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetScrollHereX": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetScrollHereY": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetScrollX": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetScrollY": {
+      "args": [
+        "void*",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetStateStorage": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetTabItemClosed": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowClipRectBeforeSetChannel": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowCollapsed": {
+      "args": [
+        "void*",
+        "bool",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowFocus": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowFontScale": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowHiddenAndSkipItemsForCurrentFrame": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowHitTestHole": {
+      "args": [
+        "void*",
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowParentWindowForFocusRoute": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowPos": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowSize": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_SetWindowViewport": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShadeVertsLinearUV": {
+      "args": [
+        "void*",
+        "int",
+        "int",
+        "void*",
+        "void*",
+        "void*",
+        "void*",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShadeVertsTransformPos": {
+      "args": [
+        "void*",
+        "int",
+        "int",
+        "void*",
+        "float",
+        "float",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowAboutWindow": {
+      "args": [
+        "bool*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowDebugLogWindow": {
+      "args": [
+        "bool*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowDemoWindow": {
+      "args": [
+        "bool*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowFontAtlas": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowFontSelector": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowIDStackToolWindow": {
+      "args": [
+        "bool*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowMetricsWindow": {
+      "args": [
+        "bool*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowStyleEditor": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_ShowStyleSelector": {
+      "args": [
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_ShowUserGuide": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_ShrinkWidths": {
+      "args": [
+        "void*",
+        "int",
+        "float",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_Shutdown": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_SliderAngle": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderFloat": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderFloat2": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderFloat3": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderFloat4": {
+      "args": [
+        "const char*",
+        "float*",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderInt": {
+      "args": [
+        "const char*",
+        "int*",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderInt2": {
+      "args": [
+        "const char*",
+        "int*",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderInt3": {
+      "args": [
+        "const char*",
+        "int*",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderInt4": {
+      "args": [
+        "const char*",
+        "int*",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderScalar": {
+      "args": [
+        "const char*",
+        "int",
+        "void*",
+        "void*",
+        "void*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SliderScalarN": {
+      "args": [
+        "const char*",
+        "int",
+        "void*",
+        "int",
+        "void*",
+        "void*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_SmallButton": {
+      "args": [
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_Spacing": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_StartMouseMovingWindow": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_StopMouseMovingWindow": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_StyleColorsClassic": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_StyleColorsDark": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_StyleColorsLight": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TabBarCloseTab": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TabBarFindTabByOrder": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_TabBarGetCurrentTab": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_TabBarGetTabName": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_TabBarGetTabOrder": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "int"
+    },
+    "kbridge_TabBarProcessReorder": {
+      "args": [
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TabBarQueueFocus": {
+      "args": [
+        "void*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TabBarQueueReorder": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TabBarRemove": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TabItemBackground": {
+      "args": [
+        "void*",
+        "void*",
+        "int",
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TabItemButton": {
+      "args": [
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TabItemEx": {
+      "args": [
+        "void*",
+        "const char*",
+        "bool*",
+        "int",
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TabItemSpacing": {
+      "args": [
+        "const char*",
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableAngledHeadersRow": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TableApplyExternalUnclipRect": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableApplyQueuedRequests": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableBeginCell": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableBeginContextMenuPopup": {
+      "args": [
+        "void*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TableBeginInitMemory": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableBeginRow": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableCalcMaxColumnWidth": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "float"
+    },
+    "kbridge_TableDrawBorders": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableDrawDefaultContextMenu": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableEndCell": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableEndRow": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableFixColumnSortDirection": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableFixDisplayOrder": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableGcCompactSettings": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TableGcCompactTransientBuffers": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableGetBoundSettings": {
+      "args": [
+        "void*"
+      ],
+      "return": "void*"
+    },
+    "kbridge_TableGetColumnCount": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_TableGetColumnFlags": {
+      "args": [
+        "int"
+      ],
+      "return": "int"
+    },
+    "kbridge_TableGetColumnIndex": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_TableGetColumnName": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "kbridge_TableGetColumnWidthAuto": {
+      "args": [
+        "void*",
+        "void*"
+      ],
+      "return": "float"
+    },
+    "kbridge_TableGetHeaderAngledMaxLabelWidth": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_TableGetHeaderRowHeight": {
+      "args": [],
+      "return": "float"
+    },
+    "kbridge_TableGetHoveredColumn": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_TableGetHoveredRow": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_TableGetInstanceData": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void*"
+    },
+    "kbridge_TableGetRowIndex": {
+      "args": [],
+      "return": "int"
+    },
+    "kbridge_TableGetSortSpecs": {
+      "args": [],
+      "return": "void*"
+    },
+    "kbridge_TableHeader": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableHeadersRow": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TableInitColumnDefaults": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableLoadSettings": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableLoadSettingsForColumn": {
+      "args": [
+        "void*",
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableLoadSettingsForColumns": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableMergeDrawChannels": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableNextColumn": {
+      "args": [],
+      "return": "bool"
+    },
+    "kbridge_TableNextRow": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableOpenContextMenu": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TablePopBackgroundChannel": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TablePopColumnChannel": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TablePushBackgroundChannel": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TablePushColumnChannel": {
+      "args": [
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableQueueSetColumnDisplayOrder": {
+      "args": [
+        "void*",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableReconcileColumns": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableRemove": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableResetSettings": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSaveSettings": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetBgColor": {
+      "args": [
+        "int",
+        "unsigned int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetColumnDisplayOrder": {
+      "args": [
+        "void*",
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetColumnEnabled": {
+      "args": [
+        "int",
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetColumnIndex": {
+      "args": [
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TableSetColumnWidth": {
+      "args": [
+        "int",
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetColumnWidthAutoAll": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetColumnWidthAutoSingle": {
+      "args": [
+        "void*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSettingsAddSettingsHandler": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TableSetupColumn": {
+      "args": [
+        "const char*",
+        "int",
+        "float",
+        "unsigned int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetupDrawChannels": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSetupScrollFreeze": {
+      "args": [
+        "int",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSortSpecsBuild": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableSortSpecsSanitize": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableUpdateBorders": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableUpdateColumnsWeightFromWidth": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TableUpdateLayout": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TeleportMousePos": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TextEx": {
+      "args": [
+        "const char*",
+        "const char*",
+        "int"
+      ],
+      "return": "void"
+    },
+    "kbridge_TextLink": {
+      "args": [
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TextLinkOpenURL": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TextUnformatted": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TreeNodeDrawLineToChildNode": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TreeNodeDrawLineToTreePop": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_TreeNodeGetOpen": {
+      "args": [
+        "unsigned int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_TreePop": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_TreePush": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_Unindent": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_UnregisterFontAtlas": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_UnregisterUserTexture": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_UpdateCurrentFontSize": {
+      "args": [
+        "float"
+      ],
+      "return": "void"
+    },
+    "kbridge_UpdateHoveredWindowAndCaptureFlags": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_UpdateInputEvents": {
+      "args": [
+        "bool"
+      ],
+      "return": "void"
+    },
+    "kbridge_UpdateMouseMovingWindowEndFrame": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_UpdateMouseMovingWindowNewFrame": {
+      "args": [],
+      "return": "void"
+    },
+    "kbridge_UpdateWindowParentAndRootLinks": {
+      "args": [
+        "void*",
+        "int",
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_UpdateWindowSkipRefresh": {
+      "args": [
+        "void*"
+      ],
+      "return": "void"
+    },
+    "kbridge_VSliderFloat": {
+      "args": [
+        "const char*",
+        "void*",
+        "float*",
+        "float",
+        "float",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_VSliderInt": {
+      "args": [
+        "const char*",
+        "void*",
+        "int*",
+        "int",
+        "int",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_VSliderScalar": {
+      "args": [
+        "const char*",
+        "void*",
+        "int",
+        "void*",
+        "void*",
+        "void*",
+        "const char*",
+        "int"
+      ],
+      "return": "bool"
+    },
+    "kbridge_Value": {
+      "args": [
+        "const char*",
+        "float",
+        "const char*"
+      ],
       "return": "void"
     },
     "stbrp_init_target": {
@@ -316,14 +4639,14 @@
     "stbtt_FreeBitmap": {
       "args": [
         "unsigned char*",
-        "void()"
+        "void*"
       ],
       "return": "void"
     },
     "stbtt_FreeSDF": {
       "args": [
         "unsigned char*",
-        "void()"
+        "void*"
       ],
       "return": "void"
     },
@@ -784,7 +5107,7 @@
         "int",
         "int",
         "int",
-        "void()"
+        "void*"
       ],
       "return": "int"
     },
@@ -872,7 +5195,7 @@
         "int",
         "int",
         "int",
-        "void()"
+        "void*"
       ],
       "return": "void"
     },
@@ -892,5 +5215,5 @@
     }
   },
   "auto_generated": true,
-  "generated_at": "2026-07-31T20:55:25+08:00"
+  "generated_at": "2026-08-08T13:51:27+08:00"
 }

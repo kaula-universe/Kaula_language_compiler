@@ -11,9 +11,12 @@ import (
 )
 
 type Function struct {
-	Args    []string `json:"args"`
-	VarArgs bool     `json:"varargs"`
-	Return  string   `json:"return"`
+	Args         []string `json:"args"`
+	VarArgs      bool     `json:"varargs"`
+	Return       string   `json:"return"`
+	MangledName  string   `json:"-"`
+	Name         string   `json:"name,omitempty"`
+	IsFromBridge bool     `json:"-"`
 }
 
 type Module struct {
@@ -107,6 +110,21 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 			libConfig.Name = libName
 		}
 
+		// 配置自愈：auto_generated 配置落后于头/源码时，任何加载方（编译/构建）都会
+		// 自动重新分析并合并旧配置的人工链接项——放库即用，无需手动分析
+		if autoHealEnabled && len(libConfig.Functions) > 0 && ConfigStale(libDir, libName) {
+			fmt.Printf("[auto-heal] %s config is stale, re-analyzing...\n", libName)
+			if aRes, aErr := AnalyzePackage(libDir); aErr == nil {
+				if merged, mErr := MergeLibrariesInto(libDir, aRes); mErr == nil {
+					libConfig = *merged
+				} else {
+					fmt.Printf("[auto-heal] merge config for %s failed: %v\n", libName, mErr)
+				}
+			} else {
+				fmt.Printf("[auto-heal] re-analyze %s failed: %v\n", libName, aErr)
+			}
+		}
+
 		libraries = append(libraries, libConfig)
 		fmt.Printf("Loaded third-party library: %s from %s\n", libConfig.Name, configFile)
 	}
@@ -114,14 +132,40 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 	return libraries, nil
 }
 
+var autoHealEnabled = true
+
+// SetAutoHealEnabled 开关配置自愈（--skip-auto-pkg 关闭）
+func SetAutoHealEnabled(on bool) {
+	autoHealEnabled = on
+}
+
 func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
+	return LoadStdlibConfigWithPkglib(configPath, defaultPkglibPrefer)
+}
+
+var defaultPkglibPrefer string
+
+// SetDefaultPkglibPrefer 设置所有 LoadStdlibConfig 调用默认优先使用的 pkglib 目录
+func SetDefaultPkglibPrefer(path string) {
+	defaultPkglibPrefer = path
+}
+
+// LoadStdlibConfigWithPkglib 加载 stdlib 配置；pkglibPrefer 非空时优先从该目录加载第三方库
+func LoadStdlibConfigWithPkglib(configPath, pkglibPrefer string) (*StdlibConfig, error) {
 	absPath, err := filepath.Abs(configPath)
 	if err != nil {
 		absPath = configPath
 	}
 
+	cacheKey := absPath
+	if pkglibPrefer != "" {
+		if p, err := filepath.Abs(pkglibPrefer); err == nil {
+			cacheKey += "|" + p
+		}
+	}
+
 	configCacheMu.RLock()
-	if cached, ok := configCache[absPath]; ok {
+	if cached, ok := configCache[cacheKey]; ok {
 		configCacheMu.RUnlock()
 		return cached, nil
 	}
@@ -223,12 +267,18 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 		exePath = configPath
 	}
 	exeDir := filepath.Dir(exePath)
-	pkglibPaths := []string{
+	pkglibPaths := []string{}
+	if pkglibPrefer != "" {
+		if _, err := os.Stat(pkglibPrefer); err == nil {
+			pkglibPaths = append(pkglibPaths, pkglibPrefer)
+		}
+	}
+	pkglibPaths = append(pkglibPaths,
 		filepath.Join(exeDir, "pkglib"),
 		filepath.Join(filepath.Dir(filepath.Dir(configPath)), "pkglib"),
 		filepath.Join(exeDir, "..", "pkglib"),
 		"pkglib",
-	}
+	)
 
 	for _, pkglibPath := range pkglibPaths {
 		if _, err := os.Stat(pkglibPath); err == nil {
@@ -244,7 +294,7 @@ func LoadStdlibConfig(configPath string) (*StdlibConfig, error) {
 	}
 
 	configCacheMu.Lock()
-	configCache[absPath] = config
+	configCache[cacheKey] = config
 	configCacheMu.Unlock()
 
 	return config, nil

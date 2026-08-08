@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,10 @@ type ClangASTNode struct {
 	Range        *ClangRange    `json:"range,omitempty"`
 	MangledName  string         `json:"mangledName,omitempty"`
 }
+
+// analyzeMu 串行化整个库的分析：编译期并发加载（编译主流程 + 解析器校验）
+// 会同时触发自动分析，clang AST dump 与桥接文件写入必须互斥
+var analyzeMu sync.Mutex
 
 // ClangQualType 表示 clang AST 中的 qualType 字段
 type ClangQualType struct {
@@ -53,6 +58,21 @@ type ClangRangeLoc struct {
 	IncludedFrom *struct {
 		File string `json:"file"`
 	} `json:"includedFrom,omitempty"`
+}
+
+// declaredFromInclude 判断节点是否经 #include 链从外部文件进入当前头：
+// 被包含文件（如 <immintrin.h>）里的声明在 clang dump 中 loc/range 无 file
+// 字段、仅带 includedFrom（指向包含它的根文件）；而根文件自身的声明
+// （clang 对同文件后续节点省略 file 字段）不带 includedFrom，靠该特征区分。
+func declaredFromInclude(node *ClangASTNode) bool {
+	if node.Loc != nil && node.Loc.IncludedFrom != nil && node.Loc.IncludedFrom.File != "" {
+		return true
+	}
+	if node.Range != nil && node.Range.Begin != nil &&
+		node.Range.Begin.IncludedFrom != nil && node.Range.Begin.IncludedFrom.File != "" {
+		return true
+	}
+	return false
 }
 
 // resolveLocFile 解析节点声明的真实文件：
@@ -455,9 +475,10 @@ func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functi
 		if isCpp && node.MangledName == "" {
 			return
 		}
-		// C++ 类方法/重载具有 mangled 名称（如 _ZN5ImGui4TextEPKcz），
-		// 无法从 Kaula 生成的 C 代码按原名调用，跳过
-		if node.MangledName != "" && node.MangledName != node.Name {
+		// C++ 类方法/重载具有 mangled 名称（如 _ZN5ImGui4TextEPKcz）。
+		// 在 C 模式下无法从 Kaula 生成的 C 代码按原名调用，跳过；
+		// 在 C++（桥接分析）模式下保留并记录 mangledName 供桥接使用
+		if node.MangledName != "" && node.MangledName != node.Name && !isCpp {
 			return
 		}
 		// 位置过滤：只保留声明在目标头文件（或其所在目录）中的函数。
@@ -465,6 +486,12 @@ func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functi
 		// 此时用 range 内的 spellingLoc/expansionLoc 定位真实文件；
 		// 全部省略说明声明就在根文件本身，直接保留
 		locFile := resolveLocFile(node)
+		// 先从"包含而来"的声明入手剔除：系统头（<immintrin.h> 的 _writefsbase_u32
+		// 等内建、math.h 的 atan）里的声明在 dump 中带 includedFrom 且无真实文件。
+		// 根文件自身的声明不带 includedFrom，即使 loc.file 被 clang 省略也必须保留。
+		if isCpp && declaredFromInclude(node) {
+			return
+		}
 		if locFile != "" {
 			if strings.HasPrefix(locFile, "<") {
 				return
@@ -472,7 +499,13 @@ func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functi
 			if sourceFile != "" {
 				locFileNorm := strings.ReplaceAll(locFile, "\\", "/")
 				sourceNorm := strings.ReplaceAll(sourceFile, "\\", "/")
-				if !strings.HasPrefix(locFileNorm, sourceNorm) &&
+				if isCpp {
+					if !strings.HasPrefix(locFileNorm, sourceNorm) &&
+						!strings.HasSuffix(locFileNorm, "/"+filepath.Base(sourceNorm)) &&
+						!strings.HasSuffix(locFileNorm, "\\"+filepath.Base(sourceNorm)) {
+						return
+					}
+				} else if !strings.HasPrefix(locFileNorm, sourceNorm) &&
 					!strings.Contains(locFileNorm, filepath.Dir(sourceNorm)) &&
 					!strings.HasSuffix(locFileNorm, "/"+filepath.Base(sourceNorm)) &&
 					!strings.HasSuffix(locFileNorm, "\\"+filepath.Base(sourceNorm)) {
@@ -486,8 +519,10 @@ func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functi
 		}
 
 		fn := Function{
-			Args:   extractParamTypes(node, typedefs),
-			Return: extractReturnType(node, typedefs),
+			Args:        extractParamTypes(node, typedefs),
+			Return:      extractReturnType(node, typedefs),
+			MangledName: node.MangledName,
+			Name:        node.Name,
 		}
 
 		// 检测变参
@@ -583,6 +618,8 @@ func normalizeType(typeStr string) string {
 
 // AnalyzePackage 分析指定包目录，生成配置
 func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
+	analyzeMu.Lock()
+	defer analyzeMu.Unlock()
 	libName := filepath.Base(pkgDir)
 
 	// 1. 分类单/多头文件
@@ -622,6 +659,12 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 	var effectiveHeaders []string
 	var lastExtractErr error
 
+	// C++ 头文件不能直接被生成的 C 代码 #include，先按头逐个提取，
+	// 统一收齐后再一次性生成 extern "C" 桥接（多 C++ 头必须合并，
+	// 否则后一个头会把前一个生成的 <lib>_kbridge.h 覆盖掉）
+	var cppHeaders []string
+	var cppFuncs map[string]Function
+
 	for _, h := range headerFiles {
 		headerPath := filepath.Join(pkgDir, h)
 		headerContent, rerr := os.ReadFile(headerPath)
@@ -636,9 +679,14 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 			continue
 		}
 		if usedCpp {
-			// C++ 模式才能解析的头文件无法被生成的 C 代码 #include，
-			// 其中的 C 链接函数（如 extern "C" 包装）也无法获得声明，整体跳过
-			fmt.Printf("[Analyze] Skipping C++ header %s (not C-compatible)\n", h)
+			// 收集 C++ 头，等循环结束统一桥接
+			cppHeaders = append(cppHeaders, fmt.Sprintf("%s/%s", libName, h))
+			if cppFuncs == nil {
+				cppFuncs = make(map[string]Function)
+			}
+			for name, fn := range fns {
+				cppFuncs[name] = fn
+			}
 			continue
 		}
 		if len(fns) > 0 {
@@ -649,6 +697,24 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 			if mcr != "" {
 				implementMacro = mcr
 			}
+		}
+	}
+
+	// 统一生成桥接（所有 C++ 头合并入同一个桥接头/桥接源）
+	if len(cppHeaders) > 0 {
+		bridge, bErr := GenCppBridge(pkgDir, libName, cppHeaders, cppFuncs)
+		if bErr != nil {
+			fmt.Printf("[Analyze] C++ bridge failed for %s (skipping all C++ headers: %v)\n", libName, bErr)
+		} else {
+			effectiveHeaders = append(effectiveHeaders, strings.TrimPrefix(bridge.Header, libName+"/"))
+			for name, fn := range bridge.BridgeFuncs {
+				if _, exists := functions[name]; !exists {
+					functions[name] = fn
+				} else {
+					fmt.Printf("[Analyze] Bridge function %s conflicts with existing, keeping C version\n", name)
+				}
+			}
+			fmt.Printf("[Analyze] Generated extern \"C\" bridge for C++ headers %v -> %s\n", cppHeaders, strings.TrimPrefix(bridge.Header, libName+"/"))
 		}
 	}
 
@@ -716,9 +782,11 @@ func extractFunctionsWithClang(pkgDir, mainHeaderPath, headerContent, libType st
 	includeMacros := detectIncludeMacros(headerContent)
 	extraDefines = append(extraDefines, includeMacros...)
 
-	// 构建 clang 命令
+	// 构建 clang 命令。强制 -x c：.hpp/.h 等文件 clang 会按扩展名推断语言，
+	// 而我们需要明确区分「C 可解析」与「必须 C++ 解析」（后者触发桥接）
 	args := []string{
 		"-Xclang", "-ast-dump=json",
+		"-x", "c",
 		"-fsyntax-only",
 		// 添加 pkglib 父目录到 include 路径
 		"-I", filepath.Dir(pkgDir),
@@ -738,6 +806,7 @@ func extractFunctionsWithClang(pkgDir, mainHeaderPath, headerContent, libType st
 		// 如果带导出宏失败，尝试不带导出宏
 		args2 := []string{
 			"-Xclang", "-ast-dump=json",
+			"-x", "c",
 			"-fsyntax-only",
 			"-I", filepath.Dir(pkgDir),
 			mainHeaderPath,
