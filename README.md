@@ -340,6 +340,30 @@ fn main() {
 
 ---
 
+## 第三方库（pkglib）
+
+**放库即用、零配置**：把任意 C/C++ 库源码目录放进 `pkglib/`，`import` 即可直接调用。编译器自动完成分析 → 桥接 → 构建 → 链接：
+
+```kaula
+import stb_image   // C 库
+import imgui       // C++ 库：自动生成 extern "C" 桥接（kbridge_* 前缀）
+
+fn main() {
+    void* img = stbi_load("texture.png", &width, &height, &channels, 4)
+    stbi_image_free(img)
+    println(kbridge_GetVersion())  // 1.92.9
+}
+```
+
+- **自动分析**：无配置/配置过期（自动生成配置 + 源码更新或登记头文件消失）→ 自动用 Clang 重新提取函数签名
+- **自动桥接**：C++ 头自动生成 `<lib>_kbridge.h/.cpp` 并编译自检；`T&`→`T*`、其他类型指针→`void*` 还原，重载保留最优签名
+- **自动构建**：归档缺失/源码更新时编译 `lib<name>.a`，C++ 库自动链接 `c++/c++abi`
+- **自愈合并**：重新分析保留人工链接项（如 imgui 的 `d3d11/dwmapi/d3dcompiler`），`--skip-auto-pkg` 可关闭
+- 常用命令：`kaulac --build-pkglib <库名>`（幂等：分析/重分析/构建）、`--build-pkglib all`、`--pkglib <目录>`
+- 已知边界：类成员方法、模板值返回不自动暴露；个别库需人工补一次系统链接库（重分析不丢）
+
+---
+
 ## KMM V4 内存管理
 
 Kaula 默认使用 KMM V4（Kaula Memory Manager V4）作为内存分配器，基于 per-thread heap + bump allocation + scope-based reclamation 设计，相比传统 malloc/free 有显著性能优势。
