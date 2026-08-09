@@ -1,7 +1,10 @@
-import std.io
-import "lib_b.kl"
+import "libsub.kl"
 
-pub fn lib_a_hello() {
-    println("hello from lib a")
-    println("lib_b value = ", lib_b_value())
+export var app_version = 3
+
+export fn hello_from_a() {
+    println("hello from exported fn")
+    println("sub_value = ", sub_value())
 }
+
+export const C_MAX = 100

@@ -302,7 +302,7 @@ func (f *Formatter) formatFunctionStatement(stmt *ast.FunctionStatement) {
 		}
 	}
 
-	if stmt.Generic {
+	if stmt.Generic || stmt.IsExported {
 		f.buf.WriteString("export ")
 	}
 
@@ -457,7 +457,9 @@ func (f *Formatter) formatForStatement(stmt *ast.ForStatement) {
 }
 
 func (f *Formatter) formatVariableDeclaration(stmt *ast.VariableDeclaration) {
-	if stmt.IsPublic {
+	if stmt.IsExported {
+		f.buf.WriteString("export ")
+	} else if stmt.IsPublic {
 		f.buf.WriteString("pub ")
 	}
 	if stmt.IsStatic {

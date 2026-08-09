@@ -308,6 +308,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteByte(' ')
 	}
 
+	// export 修饰符：C 级导出声明
+	if stmt.IsExported {
+		builder.WriteString("KAULA_EXPORT ")
+	}
+
 	safeName := stmt.Name
 	if safeName == "max" || safeName == "min" || safeName == "abs" {
 		safeName = "kaula_" + safeName

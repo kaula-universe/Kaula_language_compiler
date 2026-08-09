@@ -94,6 +94,7 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	}
 
 	localSource := string(data)
+	s.errorCollector.SetSource(localSource)
 	localLex := lexer.NewLexer(localSource)
 	localLex.SetErrorCollector(s.errorCollector)
 	localParser := parser.NewParser(localLex)
@@ -135,6 +136,11 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	if s.stdlibConfig != nil {
 		localAnalyzer.SetStdlibConfig(s.stdlibConfig)
 	}
+	// 本文件依赖的跨文件 pub/export 符号也注册给本地分析器
+	depDir := filepath.Dir(absPath)
+	localAnalyzer.SetLocalImportFuncs(collectLocalPubFuncs(localProgram, depDir))
+	localAnalyzer.SetLocalModuleFuncs(collectLocalAllFuncs(localProgram, depDir))
+	localAnalyzer.SetLocalPubVars(collectLocalPubVars(localProgram, depDir))
 	localAnalyzer.SetSOREnabled(s.cfg.SOR)
 	localAnalyzer.Analyze(localProgram)
 
@@ -467,6 +473,7 @@ func main() {
 	fmt.Printf("Starting at %v\n\n", totalStart.Format("15:04:05.000"))
 
 	errorCollector := errors.NewErrorCollector()
+	errorCollector.SetSource(input)
 
 	// 并行启动：stdlib 配置加载 + 路径搜索（不依赖 Go 前端）
 	parallelStart := time.Now()
@@ -515,12 +522,10 @@ func main() {
 
 	localPubFuncs := collectLocalPubFuncs(program, inputDir)
 	localAllFuncs := collectLocalAllFuncs(program, inputDir)
-	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs)
+	localPubVars := collectLocalPubVars(program, inputDir)
+	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars)
 	stage2Time := time.Since(stage2Start)
 	fmt.Printf("[Stage 2] Semantic Analysis completed in %v\n", stage2Time)
-
-	// 计算语义分析阶段新增的错误数量
-	stage2ErrorCount := len(errorCollector.Errors()) - stage1ErrorCount
 
 	// Stage 2.5: SOR Ownership Analysis (--sor)
 	var sorErrors []sor.SORError
@@ -591,26 +596,28 @@ func main() {
 	codegenTime := time.Since(codegenStart)
 	fmt.Printf("[Stage 3a] Code generation completed in %v\n", codegenTime)
 
-	// 检查所有阶段的错误并统一输出
-	totalErrors := stage1ErrorCount + stage2ErrorCount + len(cg.Errors()) + len(sorErrors)
-	if totalErrors > 0 {
-		fmt.Println("\n=== Compilation Errors ===")
+	// 检查并输出所有阶段的诊断信息（错误与警告分开统计）
+	stage1Errs, stage1Warns := splitErrorsWarnings(errorCollector.Errors()[:stage1ErrorCount])
+	stage2Errs, stage2Warns := splitErrorsWarnings(errorCollector.Errors()[stage1ErrorCount:])
+	frontendWarnings := append(stage1Warns, stage2Warns...)
+	errorCount := len(stage1Errs) + len(stage2Errs) + len(cg.Errors()) + len(sorErrors)
+	warningCount := len(frontendWarnings)
+
+	if errorCount > 0 || warningCount > 0 {
+		fmt.Println("\n=== Compilation Errors / Warnings ===")
 
 		// 输出词法分析和语法分析错误（阶段 1 的错误）
-		if stage1ErrorCount > 0 {
-			fmt.Printf("\n[Lexing & Parsing Errors] (%d errors)\n", stage1ErrorCount)
-			for i := 0; i < stage1ErrorCount; i++ {
-				err := errorCollector.Errors()[i]
+		if len(stage1Errs) > 0 {
+			fmt.Printf("\n[Lexing & Parsing Errors] (%d errors)\n", len(stage1Errs))
+			for _, err := range stage1Errs {
 				fmt.Println(errors.FormatErrorWithContext(err))
 			}
 		}
 
 		// 输出语义分析错误（阶段 2 新增的错误）
-		if stage2ErrorCount > 0 {
-			fmt.Printf("\n[Semantic Analysis Errors] (%d errors)\n", stage2ErrorCount)
-			for i := 0; i < stage2ErrorCount; i++ {
-				idx := stage1ErrorCount + i
-				err := errorCollector.Errors()[idx]
+		if len(stage2Errs) > 0 {
+			fmt.Printf("\n[Semantic Analysis Errors] (%d errors)\n", len(stage2Errs))
+			for _, err := range stage2Errs {
 				fmt.Println(errors.FormatErrorWithContext(err))
 			}
 		}
@@ -634,8 +641,18 @@ func main() {
 			}
 		}
 
-		fmt.Printf("\nTotal: %d error(s)\n", totalErrors)
-		os.Exit(1)
+		// 输出警告（黄色高亮）
+		if warningCount > 0 {
+			fmt.Printf("\n[Warnings] (%d warnings)\n", warningCount)
+			for _, err := range frontendWarnings {
+				fmt.Println(errors.FormatErrorWithContext(err))
+			}
+		}
+
+		fmt.Printf("\nSummary: %d error(s), %d warning(s)\n", errorCount, warningCount)
+		if errorCount > 0 {
+			os.Exit(1)
+		}
 	}
 
 	// 增量编译：检查缓存
@@ -698,6 +715,7 @@ func main() {
 	fmt.Println(output)
 
 	fmt.Printf("\n=== Compilation Results ===\n")
+	fmt.Printf("Diagnostics: %d error(s), %d warning(s)\n", errorCount, warningCount)
 	if compileResult.Error != nil {
 		fmt.Printf("Status: FAILED - %v\n", compileResult.Error)
 		fmt.Printf("Cache:  %s (available for manual compilation)\n", cacheFile)
@@ -1308,7 +1326,7 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 }
 
 // concurrentSemanticAnalysisWithConfig 并发执行语义分析（使用已加载的配置）
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
 	var wg sync.WaitGroup
@@ -1322,6 +1340,7 @@ func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *st
 		}
 		sa.SetLocalImportFuncs(localPubFuncs)
 		sa.SetLocalModuleFuncs(localAllFuncs)
+		sa.SetLocalPubVars(localPubVars)
 		sa.SetSOREnabled(sorEnabled)
 		sa.Analyze(program)
 	}()
@@ -1336,7 +1355,7 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// collectLocalPubFuncs 扫描本地 import 的 .kl 文件，收集 pub 函数名
+// collectLocalPubFuncs 扫描本地 import 的 .kl 文件，收集 pub/export 函数名
 // （在语义分析之前解析，使跨文件调用不被判为未定义）
 func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool {
 	pubFuncs := make(map[string]bool)
@@ -1369,8 +1388,12 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 					continue
 				}
 				for _, s := range localProgram.Statements {
-					if fn, ok := s.(*ast.FunctionStatement); ok && fn.IsPublic {
+					if fn, ok := s.(*ast.FunctionStatement); ok && (fn.IsPublic || fn.IsExported) {
 						pubFuncs[fn.Name] = true
+					}
+					// export <name> 裸名导出：转发导出本文件 import 的符号（重导出）
+					if exp, ok := s.(*ast.ExportStatement); ok && exp.Name != "" {
+						pubFuncs[exp.Name] = true
 					}
 				}
 				visit(localProgram, filepath.Dir(absPath))
@@ -1383,7 +1406,7 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 }
 
 // collectLocalAllFuncs 扫描本地 import 的 .kl 文件，收集全部函数名(含非 pub)
-// 用于导出检查: 调用存在于被 import 模块但非 pub 的函数时, 报"未导出"错误
+// 用于导出检查: 调用存在于被 import 模块但非 pub/export 的函数时, 报"未导出"错误
 func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool {
 	allFuncs := make(map[string]bool)
 
@@ -1418,6 +1441,9 @@ func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool
 					if fn, ok := s.(*ast.FunctionStatement); ok {
 						allFuncs[fn.Name] = true
 					}
+					if exp, ok := s.(*ast.ExportStatement); ok && exp.Name != "" {
+						allFuncs[exp.Name] = true
+					}
 				}
 				visit(localProgram, filepath.Dir(absPath))
 			}
@@ -1428,8 +1454,73 @@ func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool
 	return allFuncs
 }
 
+// collectLocalPubVars 扫描本地 import 的 .kl 文件，收集 pub/export 变量名
+// （跨文件变量引用不被判为未定义）
+func collectLocalPubVars(program *ast.Program, inputDir string) map[string]bool {
+	pubVars := make(map[string]bool)
+
+	var visit func(p *ast.Program, dir string)
+	visit = func(p *ast.Program, dir string) {
+		for _, stmt := range p.Statements {
+			imp, ok := stmt.(*ast.ImportStatement)
+			if !ok || !imp.IsLocal {
+				continue
+			}
+			for _, localPath := range localImportFiles(imp) {
+				absPath := localPath
+				if !filepath.IsAbs(absPath) {
+					if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+						absPath = candidate
+					}
+				}
+				data, err := os.ReadFile(absPath)
+				if err != nil {
+					continue
+				}
+				localLex := lexer.NewLexer(string(data))
+				localParser := parser.NewParser(localLex)
+				localParser.SetFile(absPath)
+				localParser.SetSkipMainCheck(true)
+				localParser.EnableLogging(false)
+				localProgram := localParser.Parse()
+				if localParser.HasErrors() {
+					continue
+				}
+				for _, s := range localProgram.Statements {
+					if vd, ok := s.(*ast.VariableDeclaration); ok && (vd.IsPublic || vd.IsExported) {
+						pubVars[vd.Name] = true
+					}
+					// export <name> 裸名导出也可能指向变量，一并注册
+					if exp, ok := s.(*ast.ExportStatement); ok && exp.Name != "" {
+						pubVars[exp.Name] = true
+					}
+				}
+				visit(localProgram, filepath.Dir(absPath))
+			}
+		}
+	}
+
+	visit(program, inputDir)
+	return pubVars
+}
+
 type semaResult_t struct {
 	*errors.ErrorCollector
+}
+
+// splitErrorsWarnings 将诊断按严重级别拆分为错误与警告
+func splitErrorsWarnings(list []*errors.Error) (errs, warns []*errors.Error) {
+	for _, e := range list {
+		if e == nil {
+			continue
+		}
+		if e.Type == errors.ErrorWarning {
+			warns = append(warns, e)
+		} else {
+			errs = append(errs, e)
+		}
+	}
+	return errs, warns
 }
 
 func (s *semaResult_t) HasErrors() bool {

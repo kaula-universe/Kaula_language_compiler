@@ -719,6 +719,7 @@ type FunctionStatement struct {
 	SOREnabled  bool               // 函数级 SOR 启用（兼容旧 #[sor] 注解）
 	Attributes  []*Attribute       // 统一属性列表（新）
 	IsPublic    bool               // pub 修饰符：导出给其他 .kl 文件
+	IsExported  bool               // export 修饰符：显式导出（含 pub 语义，跨文件可见 + C 级导出）
 	PrefixName  string             // 如果使用prefix，记录prefix名称
 	IsAsm       bool               // 是否是 asm 函数（#[asm] 注解）
 	Pos         Position
@@ -1158,6 +1159,7 @@ type VariableDeclaration struct {
 	Nullable   bool
 	IsAuto     bool
 	IsPublic   bool         // pub 修饰符
+	IsExported bool         // export 修饰符：显式导出（含 pub 语义，跨文件可见 + C 级导出）
 	IsStatic   bool         // static 修饰符：函数内静态变量，生命周期为整个程序
 	IsConst    bool         // const 修饰符：编译期常量，不可修改
 	Attributes []*Attribute // 声明注解：#[volatile], #[section("...")], #[aligned(N)] 等

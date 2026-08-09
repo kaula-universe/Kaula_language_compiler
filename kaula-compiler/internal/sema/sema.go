@@ -40,6 +40,7 @@ type SemanticAnalyzer struct {
 	arrayLens          map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
 	localImportFuncs   map[string]bool                // 本地 import 的 pub 函数名
 	localModuleFuncs   map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
+	localPubVars       map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
 }
 
 // SetLocalImportFuncs 注册本地 import 的 pub 函数（跨文件调用）
@@ -51,6 +52,11 @@ func (sa *SemanticAnalyzer) SetLocalImportFuncs(funcs map[string]bool) {
 // 调用存在于被 import 模块但非 pub 的函数时, 报"未导出"错误
 func (sa *SemanticAnalyzer) SetLocalModuleFuncs(funcs map[string]bool) {
 	sa.localModuleFuncs = funcs
+}
+
+// SetLocalPubVars 注册本地 import / export 的变量名（跨文件变量引用）
+func (sa *SemanticAnalyzer) SetLocalPubVars(vars map[string]bool) {
+	sa.localPubVars = vars
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -1872,6 +1878,10 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 		if sa.localImportFuncs[expr.Name] {
 			return
 		}
+		// 本地 import / export 的变量（跨文件变量引用）不算未定义
+		if sa.localPubVars[expr.Name] {
+			return
+		}
 		// 函数存在于被 import 模块但未导出(pub): 报"未导出"错误
 		if sa.localModuleFuncs[expr.Name] {
 			sa.errorCollector.AddSemanticError(
@@ -2529,6 +2539,7 @@ func (sa *SemanticAnalyzer) error(msg string, line, column int) {
 		SourceContext: context,
 		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
+		Highlight:     errors.BuildHighlight(sa.source, line, column, 0, "", errors.ErrorSemantic, msg),
 	}
 	sa.errorCollector.AddErrorInstance(err)
 }

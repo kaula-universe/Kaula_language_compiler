@@ -748,6 +748,36 @@ func (p *Parser) parseAutoDeclarationIterative() *ast.VariableDeclaration {
 	return stmt
 }
 
+// inferLiteralType 根据字面量推断 Kaula 类型（顶层 var 用）
+// 与 sema.inferExpressionType 的整数字面量规则保持一致：按数值大小选 u8/u16/u32/u64
+func inferLiteralType(value ast.Expression) string {
+	switch v := value.(type) {
+	case *ast.IntegerLiteral:
+		if v == nil {
+			return ""
+		}
+		if v.Value <= 255 {
+			return "u8"
+		}
+		if v.Value <= 65535 {
+			return "u16"
+		}
+		if v.Value <= 4294967295 {
+			return "u32"
+		}
+		return "u64"
+	case *ast.FloatLiteral:
+		return "f64"
+	case *ast.StringLiteral:
+		return "string"
+	case *ast.CharLiteral:
+		return "char"
+	case *ast.BooleanLiteral:
+		return "bool"
+	}
+	return ""
+}
+
 // isTypeToken 检查是否是类型关键字
 func (p *Parser) isTypeToken(tokenType lexer.TokenType) bool {
 	return tokenType >= lexer.TOKEN_TYPE_INT && tokenType <= lexer.TOKEN_TYPE_VOID
@@ -1694,56 +1724,107 @@ func (p *Parser) parsePubStatementIterative() ast.Statement {
 }
 
 // parseExportStatementIterative 迭代解析 export 语句
-func (p *Parser) parseExportStatementIterative() *ast.ExportStatement {
+// 支持三种形式：
+//   1. export fn/var/const/class/struct/object <声明>  修饰符形式（含 pub 语义 + C 级导出）
+//   2. export <name>                                 裸名形式：标记既有符号为导出（可转发导入的符号）
+func (p *Parser) parseExportStatementIterative() ast.Statement {
 	pos := ast.Position{
 		Line:   p.curTok.Line,
 		Column: p.curTok.Column,
 		File:   p.file,
 	}
-	stmt := &ast.ExportStatement{
-		Pos: pos,
-	}
 
 	// 消耗 export 关键字
 	p.nextToken()
 
-	// 解析导出类型（可选）
-	if p.curTok.Type == lexer.TOKEN_IDENT {
-		// 检查是否是类型关键字
-		lookahead := p.peekTok
-		if lookahead.Type == lexer.TOKEN_IDENT || lookahead.Type == lexer.TOKEN_LPAREN {
-			// 可能是导出函数：export fn name()
-			switch p.curTok.Value {
-			case "fn":
-				stmt.Type = "function"
-				p.nextToken()
-			case "class":
-				stmt.Type = "class"
-				p.nextToken()
-			case "obj", "object":
-				stmt.Type = "object"
-				p.nextToken()
-			case "var", "const":
-				stmt.Type = "variable"
-				p.nextToken()
-			default:
-				// 没有类型，直接是名称
-				stmt.Type = "function" // 默认是函数
-			}
+	// 修饰符形式：export fn / export class / export struct / export object / export var|const
+	switch p.curTok.Type {
+	case lexer.TOKEN_FUNC:
+		fn := p.parseFunctionStatementIterative()
+		if fn != nil {
+			fn.IsPublic = true
+			fn.IsExported = true
+		}
+		return fn
+	case lexer.TOKEN_CLASS:
+		return p.parseClassStatementIterative()
+	case lexer.TOKEN_STRUCT:
+		return p.parseStructStatementIterative()
+	case lexer.TOKEN_OBJECT:
+		return p.parseObjectStatementIterative()
+	case lexer.TOKEN_CONST:
+		stmt := p.parseConstDeclarationIterative()
+		if stmt != nil {
+			stmt.IsPublic = true
+			stmt.IsExported = true
+		}
+		return stmt
+	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+		lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+		lexer.TOKEN_TYPE_VOID, lexer.TOKEN_AUTO:
+		stmt := p.parseVariableDeclarationIterative()
+		if stmt != nil {
+			stmt.IsPublic = true
+			stmt.IsExported = true
+		}
+		return stmt
+	}
+
+	// 词法关键字 var 不是 TOKEN_IDENT 专属语法，单独按 auto 风格解析：
+	// export var name = value（类型推导）
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == "var" &&
+		p.peekTok.Type == lexer.TOKEN_IDENT {
+		p.nextToken() // 消耗 var
+		decl := &ast.VariableDeclaration{IsAuto: true, Pos: pos}
+		decl.Name = p.curTok.Value
+		p.nextToken()
+		if p.curTok.Type != lexer.TOKEN_ASSIGN {
+			p.error("var 声明必须有初始值用于类型推导 (var name = value)")
 		} else {
-			// 直接是名称
-			stmt.Type = "function" // 默认是函数
+			p.nextToken()
+			decl.Value = p.parseExpressionIterative()
+			// 顶层 var 无法依赖 sema 的类型推导（顶层 auto 有缺陷），在这里直接推导
+			if t := inferLiteralType(decl.Value); t != "" {
+				decl.Type = t
+			} else {
+				p.error(fmt.Sprintf("var 变量 '%s' 类型推导失败，请使用显式类型：export type %s = value", decl.Name, decl.Name))
+			}
+		}
+		decl.IsPublic = true
+		decl.IsExported = true
+		return decl
+	}
+
+	// 裸名 / 类型开头声明：export name 或 export Type name
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		// 向后看一个 token 判断是变量声明（Type name）还是裸名导出
+		isDecl := p.peekTok.Type == lexer.TOKEN_IDENT ||
+			p.peekTok.Type == lexer.TOKEN_MULTIPLY ||
+			p.peekTok.Type == lexer.TOKEN_TYPE_INT || p.peekTok.Type == lexer.TOKEN_TYPE_FLOAT ||
+			p.peekTok.Type == lexer.TOKEN_TYPE_DOUBLE || p.peekTok.Type == lexer.TOKEN_TYPE_BOOL ||
+			p.peekTok.Type == lexer.TOKEN_TYPE_CHAR || p.peekTok.Type == lexer.TOKEN_TYPE_STRING ||
+			p.peekTok.Type == lexer.TOKEN_TYPE_VOID || p.peekTok.Type == lexer.TOKEN_AUTO
+		if isDecl {
+			stmt := p.parseVariableDeclarationIterative()
+			if stmt != nil {
+				stmt.IsPublic = true
+				stmt.IsExported = true
+			}
+			return stmt
 		}
 	}
 
-	// 解析导出名称
+	// 裸名导出：export <name>（符号可来自本文件声明，或 import 导入的其他模块/库）
+	stmt := &ast.ExportStatement{
+		Type: "function",
+		Pos:  pos,
+	}
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
 		p.nextToken()
 	} else {
 		p.error("export 语句后应该跟标识符")
 	}
-
 	return stmt
 }
 
@@ -4041,6 +4122,7 @@ func (p *Parser) error(message string) {
 		SourceContext: context,
 		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
+		Highlight:     errors.BuildHighlight(p.lexer.GetSource(), p.curTok.Line, p.curTok.Column, 0, p.file, errors.ErrorSyntax, message),
 	}
 	p.errorCollector.AddErrorInstance(err)
 }

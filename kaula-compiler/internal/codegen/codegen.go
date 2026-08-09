@@ -426,14 +426,23 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			}
 			// const 变量：可编译期求值的存入常量表（不生成 C 代码）；
 			// 显式类型且无法求值的（如 const char* s = fn()）按普通 C const 变量生成
+			// export 导出的 const 额外生成真实 C 常量定义（跨文件/外部链接可见）
 			if varDecl.IsConst {
 				if evaluated := cg.tryEvalConstExpr(varDecl.Value); evaluated != "" {
 					cg.constTable[varDecl.Name] = evaluated
-					continue
+					if !varDecl.IsExported {
+						continue
+					}
 				}
 				if varDecl.Type == "" {
 					cg.constTable[varDecl.Name] = cg.expressionGenerator.GenerateExpression(varDecl.Value)
-					continue
+					if !varDecl.IsExported {
+						continue
+					}
+				}
+				// 导出常量需要真实 C 定义，无类型时从字面量推导
+				if varDecl.IsExported && varDecl.Type == "" {
+					varDecl.Type = inferExportedType(varDecl.Value)
 				}
 			}
 			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
@@ -444,7 +453,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			// 注册全局变量到 codegen 符号表 (成员访问/方法调用需要)
 			cg.AddSymbol(varDecl.Name, varDecl.Type, varDecl.Nullable, "global", varDecl.Pos.Line, varDecl.Pos.Column)
 			initValue := cg.generateExpression(varDecl.Value)
-			if varDecl.IsAuto {
+			if varDecl.IsAuto && varDecl.Type == "" {
+				// 顶层 auto 无法由语义阶段推导类型时回退：若已有推导类型则直接使用
 				cType = "auto"
 			}
 			// class 类型全局变量: 延迟到 typedef 之后生成 (K_Student 等)
@@ -453,6 +463,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			var varPrefix strings.Builder
 			if len(varDecl.Attributes) > 0 {
 				varPrefix.WriteString(generateVarAttributes(varDecl.Attributes))
+			}
+			// export 修饰符：C 级导出声明（置于存储/类型限定符之前，MSVC/GCC 均合法）
+			if varDecl.IsExported {
+				varPrefix.WriteString("KAULA_EXPORT ")
 			}
 			if varDecl.IsStatic {
 				varPrefix.WriteString("static ")
@@ -691,6 +705,17 @@ static inline String string_concat(String str1, String str2) {
 // --- end inline string runtime ---
 `)
 	}
+
+	// export 导出宏（供 KAULA_EXPORT 声明使用）
+	allIncludes.WriteString(`
+#ifndef KAULA_EXPORT
+#if defined(_WIN32)
+#define KAULA_EXPORT __declspec(dllexport)
+#else
+#define KAULA_EXPORT __attribute__((visibility("default")))
+#endif
+#endif
+`)
 
 	var forwardDecls strings.Builder
 	forwardDecls.Grow(1024)
@@ -1537,6 +1562,35 @@ func (cg *CodeGenerator) evalBinaryOp(op, left, right string) string {
 			}
 			return strconv.FormatFloat(lf/rf, 'f', -1, 64)
 		}
+	}
+	return ""
+}
+
+// inferExportedType 根据字面量为无类型声明的导出常量/变量推断 Kaula 类型
+func inferExportedType(value ast.Expression) string {
+	switch v := value.(type) {
+	case *ast.IntegerLiteral:
+		if v == nil {
+			return ""
+		}
+		if v.Value <= 255 {
+			return "u8"
+		}
+		if v.Value <= 65535 {
+			return "u16"
+		}
+		if v.Value <= 4294967295 {
+			return "u32"
+		}
+		return "u64"
+	case *ast.FloatLiteral:
+		return "f64"
+	case *ast.StringLiteral:
+		return "string"
+	case *ast.CharLiteral:
+		return "char"
+	case *ast.BooleanLiteral:
+		return "bool"
 	}
 	return ""
 }

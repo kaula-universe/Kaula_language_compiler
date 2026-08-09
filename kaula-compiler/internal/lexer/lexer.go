@@ -757,6 +757,7 @@ func (l *Lexer) error(message string) {
 		SourceContext: context,
 		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
+		Highlight:     errors.BuildHighlight(l.source, l.line, l.column, 0, l.file, errors.ErrorSyntax, message),
 	}
 	l.errorCollector.AddErrorInstance(err)
 	// 跳过当前字符，继续解析

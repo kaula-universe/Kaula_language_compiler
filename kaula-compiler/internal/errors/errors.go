@@ -2,8 +2,84 @@ package errors
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
+
+// 终端 ANSI 颜色常量（用于终端高亮错误/警告）
+const (
+	ansiReset  = "\x1b[0m"
+	ansiBold   = "\x1b[1m"
+	ansiRed    = "\x1b[31m"
+	ansiYellow = "\x1b[33m"
+)
+
+// colorEnabled 是否启用终端颜色高亮
+// 设置 NO_COLOR 环境变量或 TERM=dumb 时自动关闭
+var colorEnabled = func() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	return true
+}()
+
+// HighlightSpan 表示错误在源码中的高亮区间（用于终端/IDE 专门高亮错误）
+type HighlightSpan struct {
+	File    string    // 错误所在文件名
+	Line    int       // 起始行（1 起）
+	Column  int       // 起始列（1 起）
+	Length  int       // 高亮字符数（0 表示仅单列）
+	Type    ErrorType // 错误类型（决定高亮颜色）
+	Message string    // 错误消息
+}
+
+// BuildHighlight 构建错误高亮区间
+// 传入源码以便自动把高亮扩展到错误位置的整个“词”（token）边界
+func BuildHighlight(source string, line, column, length int, file string, typ ErrorType, message string) *HighlightSpan {
+	span := &HighlightSpan{
+		Type:    typ,
+		Message: message,
+		File:    file,
+		Line:    line,
+		Column:  column,
+	}
+	if length > 0 {
+		span.Length = length
+		return span
+	}
+	// 自动扩展到当前词边界，使高亮更醒目
+	if source != "" {
+		lines := strings.Split(source, "\n")
+		if line >= 1 && line <= len(lines) {
+			text := lines[line-1]
+			start := column - 1
+			if start < 0 {
+				start = 0
+			}
+			if start < len(text) {
+				end := start
+				for end < len(text) && isWordChar(text[end]) {
+					end++
+				}
+				if end > start {
+					span.Length = end - start
+				}
+			}
+		}
+	}
+	if span.Length < 1 {
+		span.Length = 1
+	}
+	return span
+}
+
+// isWordChar 判断字符是否为词字符（用于扩展高亮区间）
+func isWordChar(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
 
 // ErrorType 表示错误类型
 type ErrorType int
@@ -32,6 +108,7 @@ type Error struct {
 	SourceContext string // 源码上下文
 	SourceLine    string // 错误所在的源码行
 	LineNumberStr string // 行号字符串（用于对齐）
+	Highlight     *HighlightSpan // 源码高亮区间（用于终端/IDE 高亮错误）
 }
 
 // String 实现error接口
@@ -46,6 +123,8 @@ func (e *Error) String() string {
 		errorType = "Type Error"
 	case ErrorRuntime:
 		errorType = "Runtime Error"
+	case ErrorWarning:
+		errorType = "Warning"
 	default:
 		errorType = "Unknown Error"
 	}
@@ -66,6 +145,7 @@ func (e *Error) String() string {
 // ErrorCollector 表示错误收集器
 type ErrorCollector struct {
 	errors []*Error
+	source string // 当前编译单元源码（用于给缺少上下文的错误补充源码与高亮）
 }
 
 // NewErrorCollector 创建一个新的错误收集器
@@ -75,9 +155,15 @@ func NewErrorCollector() *ErrorCollector {
 	}
 }
 
+// SetSource 设置当前编译单元的源码；
+// 之后通过 AddError 系列方法添加的、缺少源码上下文的错误会自动补充源码上下文与高亮区间
+func (ec *ErrorCollector) SetSource(source string) {
+	ec.source = source
+}
+
 // AddError 添加一个错误
 func (ec *ErrorCollector) AddError(errorType ErrorType, message string, line, column int, file, suggestion string) {
-	error := &Error{
+	err := &Error{
 		Type:       errorType,
 		Message:    message,
 		Line:       line,
@@ -85,7 +171,14 @@ func (ec *ErrorCollector) AddError(errorType ErrorType, message string, line, co
 		File:       file,
 		Suggestion: suggestion,
 	}
-	ec.errors = append(ec.errors, error)
+	if err.SourceContext == "" && ec.source != "" {
+		context, sourceLine, lineNumStr := ExtractSourceContext(ec.source, line, column)
+		err.SourceContext = context
+		err.SourceLine = sourceLine
+		err.LineNumberStr = lineNumStr
+		err.Highlight = BuildHighlight(ec.source, line, column, 0, file, errorType, message)
+	}
+	ec.errors = append(ec.errors, err)
 }
 
 // AddErrorInstance 添加一个错误实例
@@ -140,28 +233,44 @@ func (ec *ErrorCollector) Errors() []*Error {
 
 // HasErrors 检查是否有错误
 func (ec *ErrorCollector) HasErrors() bool {
-	return len(ec.errors) > 0
+	return ec.ErrorCount() > 0
 }
 
-// ReportErrors 报告错误
+// ErrorCount 返回错误数量（不含警告）
+func (ec *ErrorCollector) ErrorCount() int {
+	return len(ec.errors) - ec.WarningCount()
+}
+
+// WarningCount 返回警告数量
+func (ec *ErrorCollector) WarningCount() int {
+	return len(ec.GetErrorsByType(ErrorWarning))
+}
+
+// ReportErrors 报告错误（错误与警告分开统计个数）
 func (ec *ErrorCollector) ReportErrors() {
-	if len(ec.errors) == 0 {
+	errorCount, warningCount := ec.ErrorCount(), ec.WarningCount()
+	if errorCount+warningCount == 0 {
 		return
 	}
 
-	fmt.Printf("Found %d error(s):\n", len(ec.errors))
+	if errorCount > 0 {
+		fmt.Printf("Found %d error(s), %d warning(s):\n", errorCount, warningCount)
+	} else {
+		fmt.Printf("Found %d warning(s):\n", warningCount)
+	}
 	for i, err := range ec.errors {
 		fmt.Printf("%d. %s\n", i+1, err.String())
 	}
 }
 
-// GetErrorSummary 获取错误摘要
+// GetErrorSummary 获取错误摘要（错误与警告分开统计个数）
 func (ec *ErrorCollector) GetErrorSummary() string {
-	if len(ec.errors) == 0 {
+	errorCount, warningCount := ec.ErrorCount(), ec.WarningCount()
+	if errorCount+warningCount == 0 {
 		return "No errors found"
 	}
 
-	summary := fmt.Sprintf("Found %d error(s):\n", len(ec.errors))
+	summary := fmt.Sprintf("Found %d error(s), %d warning(s):\n", errorCount, warningCount)
 	for i, err := range ec.errors {
 		summary += fmt.Sprintf("%d. %s\n", i+1, err.String())
 	}
@@ -301,23 +410,25 @@ func ExtractSourceContext(source string, line, column int) (string, string, stri
 }
 
 // FormatErrorWithContext 格式化带上下文的错误信息
+// 错误为红色、警告为黄色高亮；源码中的错误位置会按高亮区间绘制 ^^^ 标记
 func FormatErrorWithContext(err *Error) string {
 	var result strings.Builder
 
 	var errorType string
+	var color string
 	switch err.Type {
 	case ErrorSyntax:
-		errorType = "Syntax Error"
+		errorType, color = "Syntax Error", ansiRed
 	case ErrorSemantic:
-		errorType = "Semantic Error"
+		errorType, color = "Semantic Error", ansiRed
 	case ErrorTypeError:
-		errorType = "Type Error"
+		errorType, color = "Type Error", ansiRed
 	case ErrorRuntime:
-		errorType = "Runtime Error"
+		errorType, color = "Runtime Error", ansiRed
 	case ErrorWarning:
-		errorType = "Warning"
+		errorType, color = "Warning", ansiYellow
 	default:
-		errorType = "Unknown Error"
+		errorType, color = "Unknown Error", ansiRed
 	}
 
 	if err.File != "" {
@@ -325,11 +436,21 @@ func FormatErrorWithContext(err *Error) string {
 	} else {
 		result.WriteString(fmt.Sprintf("%d:%d", err.Line, err.Column))
 	}
-	result.WriteString(fmt.Sprintf(": %s: %s", errorType, err.Message))
+	result.WriteString(": ")
+	if colorEnabled {
+		result.WriteString(ansiBold)
+		result.WriteString(color)
+	}
+	result.WriteString(errorType)
+	result.WriteString(": ")
+	result.WriteString(err.Message)
+	if colorEnabled {
+		result.WriteString(ansiReset)
+	}
 	result.WriteString("\n")
 
 	if err.SourceLine != "" {
-		result.WriteString(err.SourceContext)
+		result.WriteString(highlightSourceContext(err.SourceContext, err.Highlight))
 		result.WriteString("\n")
 	}
 
@@ -339,4 +460,44 @@ func FormatErrorWithContext(err *Error) string {
 	}
 
 	return result.String()
+}
+
+// highlightSourceContext 在源码上下文中着色并扩展错误高亮标记
+// 无颜色环境（NO_COLOR/TERM=dumb）下仍会扩展 ^ 标记为完整区间
+func highlightSourceContext(context string, hl *HighlightSpan) string {
+	if context == "" {
+		return ""
+	}
+	lines := strings.Split(context, "\n")
+	hlColor := ansiRed
+	hlLen := 1
+	if hl != nil {
+		if hl.Type == ErrorWarning {
+			hlColor = ansiYellow
+		}
+		if hl.Length > 1 {
+			hlLen = hl.Length
+		}
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		// 高亮行形如 "     |      ^"，去掉分隔符与空格后只剩 ^ 才能判定
+		stripped := strings.ReplaceAll(trimmed, "|", "")
+		stripped = strings.ReplaceAll(stripped, "^", "")
+		if strings.TrimSpace(stripped) != "" || !strings.Contains(trimmed, "^") {
+			continue
+		}
+		caretIdx := strings.Index(lines[i], "^")
+		if caretIdx < 0 {
+			continue
+		}
+		base := lines[i][:caretIdx]
+		if colorEnabled {
+			lines[i] = base + hlColor + strings.Repeat("^", hlLen) + ansiReset
+		} else if hlLen > 1 {
+			lines[i] = base + strings.Repeat("^", hlLen)
+		}
+		break
+	}
+	return strings.Join(lines, "\n")
 }
