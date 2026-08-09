@@ -9,38 +9,84 @@ import (
 	"kaula-compiler/internal/parser"
 )
 
-func TestMatchHang(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short mode")
-	}
-	src := `import std.io
-
-fn main() {
-    int x = 3
-    match x {
-        1 => {
-            println("one")
-        },
-        2 => println("two"),
-        _ => println("many")
-    }
-}
-`
+func tryParse(t *testing.T, name, src string) (ok bool, seconds float64) {
 	done := make(chan struct{})
-	var prog interface{}
-	var err error
 	go func() {
 		lx := lexer.NewLexer(src)
 		p := parser.NewParser(lx)
-		prog = p.Parse()
+		p.Parse()
 		close(done)
 	}()
 	select {
 	case <-done:
-		t.Logf("parse ok err=%v program=%v", err, prog != nil)
-	case <-time.After(8 * time.Second):
+		return true, 0
+	case <-time.After(5 * time.Second):
 		buf := make([]byte, 1<<20)
 		n := runtime.Stack(buf, true)
-		t.Fatalf("parser hung on match minimum\n%s", buf[:n])
+		t.Logf("HANG %s\n%s", name, buf[:n])
+		return false, 0
+	}
+}
+
+func TestMatchVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"match_ident_arms_block", `import std.io
+fn main() {
+    int x = 3
+    match x {
+        1 => { println("one") },
+        2 => { println("two") },
+        _ => { println("many") }
+    }
+}`},
+		{"match_ident_arms_expr", `import std.io
+fn main() {
+    int x = 3
+    match x {
+        1 => println("one"),
+        2 => println("two"),
+        _ => println("many")
+    }
+}`},
+		{"match_literal_target", `import std.io
+fn main() {
+    match(3) {
+        1 => println("one"),
+        2 => println("two"),
+        _ => println("many")
+    }
+}`},
+		{"match_enum", `import std.io
+enum Color {
+    Red, Green, Blue
+}
+fn main() {
+    Color c = Color.Red
+    match c {
+        Color.Red => println("red"),
+        Color.Green => println("green"),
+        _ => println("other")
+    }
+}`},
+		{"no_match_bare", `import std.io
+fn main() {
+    int x = 3
+    println(x)
+}`},
+		{"ident_lbrace_block", `import std.io
+fn main() {
+    x {
+        println("hi")
+    }
+}`},
+	}
+	for _, c := range cases {
+		ok, _ := tryParse(t, c.name, c.src)
+		if !ok {
+			t.Errorf("%s: hangs", c.name)
+		}
 	}
 }

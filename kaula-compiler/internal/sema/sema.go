@@ -365,7 +365,17 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 // analyzeImportStatement 分析导入语句
 func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 	moduleName := stmt.Module
-	sa.symbolTable.AddSymbol(moduleName, "module", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	if moduleName != "" {
+		sa.symbolTable.AddSymbol(moduleName, "module", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	}
+
+	if stmt.Path != "" {
+		// 路径导入（import "lib" / import "file"）：
+		// 跨文件可调用符号由本地文件收集器注册（funcs 的 pub 函数），
+		// 不参与 stdlib/第三方库配置解析
+		sa.importedModules[stmt.Path] = true
+		return
+	}
 
 	// 记录实际导入的模块
 	sa.importedModules[moduleName] = true
@@ -1512,18 +1522,18 @@ func (sa *SemanticAnalyzer) markNullCheckedInCondition(cond ast.Expression) {
 	isNullCheck := false
 	var checkedVar string
 
-	// x != null
+	// x != null (大写 NULL 兼容)
 	if binExpr.Operator == "!=" {
 		if ident, ok := binExpr.Left.(*ast.Identifier); ok {
-			if right, ok := binExpr.Right.(*ast.Identifier); ok && right.Name == "null" {
+			if right, ok := binExpr.Right.(*ast.Identifier); ok && (right.Name == "null" || right.Name == "NULL") {
 				isNullCheck = true
 				checkedVar = ident.Name
 			}
 		}
 	}
-	// null != x
+	// null != x (大写 NULL 兼容)
 	if binExpr.Operator == "!=" {
-		if left, ok := binExpr.Left.(*ast.Identifier); ok && left.Name == "null" {
+		if left, ok := binExpr.Left.(*ast.Identifier); ok && (left.Name == "null" || left.Name == "NULL") {
 			if ident, ok := binExpr.Right.(*ast.Identifier); ok {
 				isNullCheck = true
 				checkedVar = ident.Name
@@ -1597,12 +1607,15 @@ func (sa *SemanticAnalyzer) validateCondition(cond ast.Expression) {
 					e.Pos.Line, e.Pos.Column, "condition_type",
 					"请把字面量放到比较运算符右侧, 如: if (x == 5)")
 			}
-			// 右操作数不能是 true/false
+			// 右操作数不能是 true/false（除非左侧是布尔表达式, 如 if (flag == true))
 			if isBoolLiteralValue(e.Right) {
-				sa.errorCollector.AddSemanticError(
-					"比较表达式的右侧不能使用 true/false, 直接使用布尔变量或比较结果",
-					e.Pos.Line, e.Pos.Column, "condition_type",
-					"如: if (flag)、if (a > b)")
+				leftType := sa.inferExpressionType(e.Left)
+				if leftType != "bool" {
+					sa.errorCollector.AddSemanticError(
+						"比较表达式的右侧不能使用 true/false, 直接使用布尔变量或比较结果",
+						e.Pos.Line, e.Pos.Column, "condition_type",
+						"如: if (flag)、if (a > b)")
+				}
 			}
 		default:
 			// 算术/赋值等表达式禁止作为条件
@@ -1804,7 +1817,7 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 	if expr == nil {
 		return
 	}
-	if expr.Name == "null" || expr.Name == "true" || expr.Name == "false" {
+	if expr.Name == "null" || expr.Name == "NULL" || expr.Name == "true" || expr.Name == "false" {
 		return
 	}
 
@@ -2162,6 +2175,69 @@ func (sa *SemanticAnalyzer) checkNullableDereference(expr ast.Expression, line, 
 	}
 }
 
+// memberObjectClassName 推断成员访问对象表达式的类名。
+// 支持 self（method_<类名>_<方法名>/constructor_<类名> 作用域或符号表）、
+// 已声明类类型变量、嵌套成员链 (a.b.c, a/b 均为类类型)。
+func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
+	if sa.program == nil {
+		return ""
+	}
+	switch e := obj.(type) {
+	case *ast.Identifier:
+		if e.Name == "self" {
+			if sym := sa.symbolTable.GetSymbol("self"); sym != nil && sym.Type != "" {
+				name := strings.TrimSuffix(sym.Type, "*")
+				if sa.program.FindClass(name) != nil {
+					return name
+				}
+			}
+			// 兜底：从当前作用域名解析（method_<类名>_<方法名> / constructor_<类名>）
+			scopeName := sa.symbolTable.GetScopeName()
+			if strings.HasPrefix(scopeName, "method_") {
+				rest := strings.TrimPrefix(scopeName, "method_")
+				if idx := strings.LastIndex(rest, "_"); idx > 0 {
+					return rest[:idx]
+				}
+			} else if strings.HasPrefix(scopeName, "constructor_") {
+				return strings.TrimPrefix(scopeName, "constructor_")
+			}
+			return ""
+		}
+		if sym := sa.symbolTable.GetSymbol(e.Name); sym != nil && sym.Type != "" {
+			name := strings.TrimSuffix(sym.Type, "*")
+			if sa.program.FindClass(name) != nil {
+				return name
+			}
+		}
+	case *ast.MemberAccessExpression:
+		fieldType := sa.classFieldType(sa.memberObjectClassName(e.Object), e.Member)
+		if fieldType != "" {
+			name := strings.TrimSuffix(fieldType, "*")
+			if sa.program.FindClass(name) != nil {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// classFieldType 在已定义类中查找字段的 Kaula 类型名；找不到时返回空串
+func (sa *SemanticAnalyzer) classFieldType(className, fieldName string) string {
+	if className == "" || sa.program == nil {
+		return ""
+	}
+	classStmt := sa.program.FindClass(className)
+	if classStmt == nil {
+		return ""
+	}
+	for _, f := range classStmt.Fields {
+		if f != nil && f.Name == fieldName {
+			return f.Type
+		}
+	}
+	return ""
+}
+
 // inferExpressionType 推断表达式的类型
 func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	if expr == nil {
@@ -2172,7 +2248,7 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		if e.Name == "true" || e.Name == "false" {
 			return "bool"
 		}
-		if e.Name == "null" {
+		if e.Name == "null" || e.Name == "NULL" {
 			return "null"
 		}
 		symbol := sa.symbolTable.GetSymbol(e.Name)
@@ -2180,6 +2256,8 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 			return symbol.Type
 		}
 		return ""
+	case *ast.ParenExpression:
+		return sa.inferExpressionType(e.Inner)
 	case *ast.IntegerLiteral:
 		if e.Value <= 255 {
 			return "u8"
@@ -2314,6 +2392,12 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		// 动态对象成员访问（obj.field）的类型是 object
 		if sa.inferExpressionType(e.Object) == "object" {
 			return "object"
+		}
+		// 类字段访问（self.field / obj.field / 嵌套成员链）: 从类定义查字段类型
+		if className := sa.memberObjectClassName(e.Object); className != "" {
+			if fieldType := sa.classFieldType(className, e.Member); fieldType != "" {
+				return fieldType
+			}
 		}
 		return ""
 	case *ast.IndexExpression:

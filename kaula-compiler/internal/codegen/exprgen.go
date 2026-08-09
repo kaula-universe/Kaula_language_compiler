@@ -297,8 +297,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 
 // generateIdentifier 生成标识符代码
 func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
-	// 检查是否是 null 关键字
-	if e.Name == "null" {
+	// 检查是否是 null 关键字（小写 null 与兼容 C 习惯的大写 NULL）
+	if e.Name == "null" || e.Name == "NULL" {
 		return "NULL"
 	}
 
@@ -508,8 +508,19 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	case "EQ", "==":
 		leftType := eg.inferType(e.Left)
 		rightType := eg.inferType(e.Right)
+		// String 与 null/NULL 比较（x == null）: 比较底层指针
+		if leftType == "s" && isNullLiteralExpr(e.Right) {
+			return left + ".ptr == NULL"
+		}
+		if rightType == "s" && isNullLiteralExpr(e.Left) {
+			return right + ".ptr == NULL"
+		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
 			return "strcmp(" + left + ", " + right + ".ptr) == 0"
+		}
+		if leftType == "s" && rightType == "s" {
+			// 两侧都是 String (结构体/字面量): 用 .ptr 内容比较, 避免 String 与 char* 直接比较
+			return "strcmp(" + left + ".ptr, " + right + ".ptr) == 0"
 		}
 		if leftType == "cstr" && rightType == "cstr" {
 			return "strcmp(" + left + ", " + right + ") == 0"
@@ -518,8 +529,18 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	case "NE", "!=":
 		leftType := eg.inferType(e.Left)
 		rightType := eg.inferType(e.Right)
+		// String 与 null/NULL 比较（x != null）: 比较底层指针
+		if leftType == "s" && isNullLiteralExpr(e.Right) {
+			return left + ".ptr != NULL"
+		}
+		if rightType == "s" && isNullLiteralExpr(e.Left) {
+			return right + ".ptr != NULL"
+		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
 			return "strcmp(" + left + ", " + right + ".ptr) != 0"
+		}
+		if leftType == "s" && rightType == "s" {
+			return "strcmp(" + left + ".ptr, " + right + ".ptr) != 0"
 		}
 		if leftType == "cstr" && rightType == "cstr" {
 			return "strcmp(" + left + ", " + right + ") != 0"
@@ -683,6 +704,12 @@ func normalizePtrType(t string) string {
 	n := strings.ReplaceAll(t, "const", "")
 	n = strings.ReplaceAll(n, " ", "")
 	return n
+}
+
+// isNullLiteralExpr 判断表达式是否为 null/NULL 字面量
+func isNullLiteralExpr(expr ast.Expression) bool {
+	id, ok := expr.(*ast.Identifier)
+	return ok && (id.Name == "null" || id.Name == "NULL")
 }
 
 // generateStdlibArgs 根据函数签名生成参数列表
@@ -1272,8 +1299,36 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.BinaryExpression:
 		leftType := eg.inferType(e.Left)
 		rightType := eg.inferType(e.Right)
+		// 字符串 + 拼接: 嵌套表达式 (如 a + b + c) 两侧推断为 "s" 时结果仍为 string
+		if (e.Operator == "+" || e.Operator == "PLUS") && (leftType == "s" || rightType == "s") {
+			return "s"
+		}
 		if leftType == "f" || rightType == "f" {
 			return "f"
+		}
+		return "d"
+	case *ast.ParenExpression:
+		return eg.inferType(e.Inner)
+	case *ast.MemberAccessExpression:
+		// 动态对象成员访问
+		if eg.isObjectTyped(e.Object) {
+			return "obj"
+		}
+		// 类字段成员访问: 从类定义中查字段的 Kaula 类型
+		if fieldType := eg.memberFieldKaulaType(e); fieldType != "" {
+			switch {
+			case fieldType == "string" || fieldType == "str" || fieldType == "String":
+				return "s"
+			case fieldType == "cstring" || fieldType == "cstr":
+				return "cstr"
+			case isFloatTypeToken(fieldType):
+				return "f"
+			default:
+				if normalizePtrType(fieldType) == "char*" {
+					return "cstr"
+				}
+				return "d"
+			}
 		}
 		return "d"
 	case *ast.UnaryExpression:
@@ -1339,6 +1394,76 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	default:
 		return "d"
 	}
+}
+
+// isFloatTypeToken 判断 Kaula 类型名是否为浮点类型
+func isFloatTypeToken(t string) bool {
+	switch t {
+	case "float", "float32", "float64", "f32", "f64", "double", "single", "real":
+		return true
+	}
+	return false
+}
+
+// memberFieldKaulaType 返回类字段的 Kaula 类型名。
+// 找不到类/字段时返回空串。
+// 支持 self.field、类变量.field 以及嵌套成员链 (a.b.c, a/b 均为类类型)。
+func (eg *ExpressionGenerator) memberFieldKaulaType(e *ast.MemberAccessExpression) string {
+	if eg.codegen.program == nil {
+		return ""
+	}
+	className := eg.memberObjectClassName(e.Object)
+	if className == "" {
+		return ""
+	}
+	classStmt := eg.codegen.program.FindClass(className)
+	if classStmt == nil {
+		return ""
+	}
+	for _, f := range classStmt.Fields {
+		if f != nil && f.Name == e.Member {
+			return f.Type
+		}
+	}
+	return ""
+}
+
+// memberObjectClassName 推断成员访问对象表达式的类名。
+// 找不到已定义的类时返回空串。
+func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string {
+	if eg.codegen.program == nil {
+		return ""
+	}
+	switch e := obj.(type) {
+	case *ast.Identifier:
+		if e.Name == "self" {
+			if eg.codegen.currentClassName != "" {
+				return eg.codegen.currentClassName
+			}
+			if sym := eg.codegen.currentScope.GetSymbol("self"); sym != nil {
+				name := strings.TrimSuffix(sym.Type, "*")
+				if eg.codegen.program.FindClass(name) != nil {
+					return name
+				}
+			}
+			return ""
+		}
+		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
+			name := strings.TrimSuffix(sym.Type, "*")
+			if eg.codegen.program.FindClass(name) != nil {
+				return name
+			}
+		}
+	case *ast.MemberAccessExpression:
+		fieldType := eg.memberFieldKaulaType(e)
+		if fieldType != "" {
+			name := strings.TrimSuffix(fieldType, "*")
+			if eg.codegen.program.FindClass(name) != nil {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // generateTypeInferredPrintf 生成带类型推导的 printf 调用
@@ -2128,20 +2253,25 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 
 		case ast.PatternVariant:
 			// VariantName(x, y) → case Enum_Kind_VariantName: { auto_type x = ...; ... break; }
+			// 支持 "枚举名.变体名" 形式 (如 Color.Red)，去掉枚举名前缀
 			caseLabel := "    case "
 			if enumName != "" {
 				caseLabel += enumName + "_Kind_"
 			}
-			caseLabel += arm.Pattern.VariantName + ":\n"
+			variantName := arm.Pattern.VariantName
+			if idx := strings.LastIndex(variantName, "."); idx >= 0 {
+				variantName = variantName[idx+1:]
+			}
+			caseLabel += variantName + ":\n"
 			code.WriteString(caseLabel)
 			code.WriteString("    {\n")
 
 			// 生成绑定变量
 			if len(arm.Pattern.Bindings) > 0 {
 				// 查找枚举变体的字段类型
-				variant := eg.findEnumVariant(enumName, arm.Pattern.VariantName)
+				variant := eg.findEnumVariant(enumName, variantName)
 				for i, binding := range arm.Pattern.Bindings {
-					fieldAccess := targetCode + ".data." + arm.Pattern.VariantName + "_val"
+					fieldAccess := targetCode + ".data." + variantName + "_val"
 					if variant != nil && len(variant.FieldTypes) > 1 {
 						// 多字段时使用具体字段名
 						if i < len(variant.FieldNames) && variant.FieldNames[i] != "" {
