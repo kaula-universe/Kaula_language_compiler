@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -166,9 +167,9 @@ func (p *Parser) getAttributeName() string {
 
 // parseStatementIterative 迭代解析语句
 func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
-	// 消毒：子解析器返回的类型化 nil（如 (*VariableDeclaration)(nil)）会在
-	// 接口转换后逃过 stmt != nil 判断，这里统一归一为真正的 nil
 	defer func() {
+		// 消毒：子解析器返回的类型化 nil（如 (*VariableDeclaration)(nil)）会在
+		// 接口转换后逃过 stmt != nil 判断，这里统一归一为真正的 nil
 		if stmt != nil {
 			if v := reflect.ValueOf(stmt); v.Kind() == reflect.Ptr && v.IsNil() {
 				stmt = nil
@@ -1594,6 +1595,9 @@ func (p *Parser) parseContinueStatementIterative() *ast.ContinueStatement {
 }
 
 // parseImportStatementIterative 迭代解析 import 语句
+// 支持两种形式：
+//   1. import std.io           模块名导入
+//   2. import "lib" / "file"   路径导入（相对路径以当前文件目录为基准，Python 风格）
 func (p *Parser) parseImportStatementIterative() *ast.ImportStatement {
 	pos := ast.Position{
 		Line:   p.curTok.Line,
@@ -1604,6 +1608,12 @@ func (p *Parser) parseImportStatementIterative() *ast.ImportStatement {
 		Pos: pos,
 	}
 	p.nextToken()
+	if p.curTok.Type == lexer.TOKEN_STRING {
+		// 路径导入：import "path"
+		stmt.Path = p.curTok.Value
+		p.nextToken()
+		return stmt
+	}
 	if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
 		stmt.Module = p.curTok.Value
 		p.nextToken()
@@ -4208,6 +4218,11 @@ func (p *Parser) Validate(program *ast.Program) {
 
 	for _, stmt := range program.Statements {
 		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
+			if importStmt.Path != "" {
+				// 路径导入（Python 风格）：import "lib" / import "file"
+				p.resolvePathImport(importStmt)
+				continue
+			}
 			if importStmt.Module == "" {
 				p.error("import 语句缺少模块名称")
 			} else if !validModules[importStmt.Module] {
@@ -4251,6 +4266,93 @@ func (p *Parser) Validate(program *ast.Program) {
 	} else {
 		p.log("验证完成，未发现错误")
 	}
+}
+
+// resolvePathImport 解析路径导入语句（import "lib" / import "file"）
+// 规则（Python 风格）：
+//   - 相对路径以当前导入文件所在目录为基准，其次回退到工作目录；
+//   - 绝对路径（以 /、\ 或盘符开头）直接使用；
+//   - 目标为目录时视作 Kaula 库导入，目录内必须存在 kaula.json（可为空文件），
+//     否则报错「缺少 kaula.json，无法作为库导入」；导入库目录下的全部 .kl 文件；
+//   - 目标为文件时视作普通文件导入，无 kaula.json 要求；
+//   - 目标不存在时尝试补全 .kl 后缀。
+func (p *Parser) resolvePathImport(stmt *ast.ImportStatement) {
+	target := strings.TrimSpace(stmt.Path)
+	if target == "" {
+		p.error("import 路径为空")
+		return
+	}
+
+	// 统一分隔符（兼容 Windows 反斜杠）
+	target = strings.ReplaceAll(target, "\\", "/")
+
+	// 相对路径解析：优先以当前导入文件所在目录为基准（Python 风格）
+	if !filepath.IsAbs(target) {
+		dir := filepath.Dir(p.file)
+		if dir == "" {
+			dir = "."
+		}
+		cand := filepath.Join(dir, target)
+		stored := cand
+		if _, err := os.Stat(cand); err != nil {
+			// 当前文件目录下不存在，回退到工作目录
+			stored = target
+		}
+		if abs, err := filepath.Abs(stored); err == nil {
+			stored = abs
+		}
+		target = stored
+	}
+
+	info, err := os.Stat(target)
+	if err == nil && info.IsDir() {
+		// === 库导入：必须包含 kaula.json ===
+		if _, err := os.Stat(filepath.Join(target, "kaula.json")); err != nil {
+			p.error(fmt.Sprintf("目标文件夹 '%s' 缺少 kaula.json，无法作为库导入", stmt.Path))
+			return
+		}
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			p.error(fmt.Sprintf("读取库文件夹失败 '%s'：%v", stmt.Path, err))
+			return
+		}
+		var files []string
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			if strings.HasSuffix(strings.ToLower(entry.Name()), ".kl") {
+				files = append(files, filepath.Join(target, entry.Name()))
+			}
+		}
+		sort.Strings(files)
+		if len(files) == 0 {
+			p.error(fmt.Sprintf("库文件夹 '%s' 中没有可导入的 .kl 文件", stmt.Path))
+			return
+		}
+		stmt.IsLocal = true
+		stmt.LocalPaths = files
+		stmt.LocalPath = files[0]
+		return
+	}
+
+	if err == nil {
+		// === 文件导入：无 kaula.json 要求 ===
+		stmt.IsLocal = true
+		stmt.LocalPath = target
+		stmt.LocalPaths = []string{target}
+		return
+	}
+
+	// 目标不存在：尝试补全 .kl 后缀
+	fileCand := target + ".kl"
+	if fileInfo, err := os.Stat(fileCand); err == nil && !fileInfo.IsDir() {
+		stmt.IsLocal = true
+		stmt.LocalPath = fileCand
+		stmt.LocalPaths = []string{fileCand}
+		return
+	}
+	p.error(fmt.Sprintf("导入的文件或库不存在：%s", stmt.Path))
 }
 
 func (p *Parser) parseSizeOfExpressionIterative() *ast.SizeOfExpression {
@@ -4758,13 +4860,16 @@ func (p *Parser) parseMatchExpressionIterative() ast.Expression {
 
 	p.nextToken() // 跳过 match
 
-	// 解析 ( 目标表达式 )
+	// 解析 ( 目标表达式 ) 或无括号目标: match expr { ... }
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
 		expr.Target = p.parseExpressionIterative()
 		if p.curTok.Type == lexer.TOKEN_RPAREN {
 			p.nextToken()
 		}
+	} else if p.curTok.Type != lexer.TOKEN_LBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		// 无括号形式: match x { ... }，直接解析目标表达式
+		expr.Target = p.parseExpressionIterative()
 	}
 
 	// 解析 { 匹配分支列表 }

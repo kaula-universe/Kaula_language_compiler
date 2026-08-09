@@ -707,6 +707,15 @@ static inline String string_concat(String str1, String str2) {
 					break
 				}
 			}
+			// 返回类型含 struct/class 同样跳过: 返回类型生成的是 K_X* 指针,
+			// typedef struct K_X 在其后才生成, 前置声明会引用未定义类型
+			if !hasStructParam && cg.typeGenerator != nil &&
+				fnStmt.ReturnType != "" && fnStmt.ReturnType != "void" {
+				base := strings.TrimSuffix(strings.TrimPrefix(fnStmt.ReturnType, "*"), "*")
+				if cg.typeGenerator.structTypes[base] || cg.typeGenerator.classTypes[base] {
+					hasStructParam = true
+				}
+			}
 			if hasStructParam {
 				continue
 			}
