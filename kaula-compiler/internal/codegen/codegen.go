@@ -597,13 +597,9 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// std.string 仅使用头文件声明，不链接实现（避免 Windows C 运行时兼容性问题）
 	}
 
-	// 将泛型类型实例化代码注入到 typeCode 之前，
-	// 确保实例化类型定义在引用之前（如 Box<int> 的 typedef 必须先于使用它的代码）
-	if cg.genericTypeCode.Len() > 0 {
-		combined := cg.genericTypeCode.String() + typeCode.String()
-		typeCode.Reset()
-		typeCode.WriteString(combined)
-	}
+	// 泛型类型实例化代码保留在 genericTypeCode 中，
+	// 在最终组装时注入到函数原型（forwardDecls）之前，
+	// 确保实例化类型定义（如 K_Option_int 的 typedef）先于引用它的原型。
 
 	// 将 lambda 定义插入到 functionCode 之前
 	var lambdaCode strings.Builder
@@ -808,6 +804,7 @@ static inline String string_concat(String str1, String str2) {
 			resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
 			resultBuilder.WriteString(allIncludes.String())
 			resultBuilder.WriteString("\n\n")
+resultBuilder.WriteString(cg.genericTypeCode.String())
 			resultBuilder.WriteString(forwardDecls.String())
 			resultBuilder.WriteByte('\n')
 
@@ -840,7 +837,7 @@ static inline String string_concat(String str1, String str2) {
 		} else {
 			result = template
 			result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
-			result = strings.ReplaceAll(result, "{{forward_decls}}", forwardDecls.String())
+			result = strings.ReplaceAll(result, "{{forward_decls}}", cg.genericTypeCode.String()+forwardDecls.String())
 			result = strings.ReplaceAll(result, "{{global_vars}}", globalVars.String())
 			typeCodeWithClassGlobals := typeCode.String()
 			if classGlobalVars.Len() > 0 {
@@ -871,11 +868,11 @@ static inline String string_concat(String str1, String str2) {
 			_ = idxForward
 		}
 	} else {
-		fmt.Printf("[DEBUG] No-main path: hasMain=%v\n", hasMain)
 		var resultBuilder strings.Builder
-		resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + 16)
+		resultBuilder.Grow(allIncludes.Len() + cg.genericTypeCode.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + 16)
 		resultBuilder.WriteString(allIncludes.String())
 		resultBuilder.WriteString("\n")
+		resultBuilder.WriteString(cg.genericTypeCode.String())
 		resultBuilder.WriteString(forwardDecls.String())
 		resultBuilder.WriteString("\n")
 
@@ -1231,7 +1228,7 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 	cacheKey += ">"
 
 	// 检查缓存
-	if cached, ok := cg.genericTypeCache[cacheKey]; ok {
+if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 		return cached, nil
 	}
 
