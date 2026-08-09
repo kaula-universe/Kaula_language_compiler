@@ -1,0 +1,8 @@
+import std.io
+import "E:\Users\tf\Desktop\新建文件夹\kaula\test\path_import\util.kl"
+import "E:/Users/tf/Desktop/新建文件夹/kaula/test/path_import/mylib"
+
+fn main() {
+    println("abs triple(5) = ", util_triple(5))
+    lib_a_hello()
+}

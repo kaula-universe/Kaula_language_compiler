@@ -83,6 +83,10 @@ fn handle_request(req: HttpRequest*, res: HttpResponse*) {
 - 本地模块 import 名 = 文件名:
   - `import helper` → 文件 `helper.kl`
   - `import my.util` → 文件 `my/util.kl`(点号转目录),或兼容 `my.util.kl`
+- 路径导入(Python 风格,支持相对/绝对路径),用字符串引号:
+  - `import "helper.kl"` → 单文件导入,无额外要求
+  - `import "mylib"` → 库导入:目标目录必须含 `kaula.json`(可为空文件),导入该目录下全部 `.kl` 文件
+  - 相对路径以当前文件所在目录为基准,其次回退到工作目录
 
 ## 7. 注释
 

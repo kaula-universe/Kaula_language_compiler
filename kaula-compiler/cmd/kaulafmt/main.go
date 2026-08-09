@@ -48,34 +48,44 @@ func (f *Formatter) FormatProgram(program *ast.Program) string {
 
 	if importEnd > 0 {
 		// 收集该块所有 import,按 std vs 其它 分组
-		stdImports := []string{}
-		otherImports := []string{}
+		type importEntry struct {
+			stmt *ast.ImportStatement
+			key  string
+		}
+		stdImports := []importEntry{}
+		otherImports := []importEntry{}
 		for i := 0; i < importEnd; i++ {
 			imp := program.Statements[i].(*ast.ImportStatement)
 			entry := imp.Module
+			if entry == "" {
+				entry = imp.Path // 路径导入按路径排序
+			}
 			if strings.HasPrefix(entry, "std.") {
-				stdImports = append(stdImports, entry)
+				stdImports = append(stdImports, importEntry{stmt: imp, key: entry})
 			} else {
-				otherImports = append(otherImports, entry)
+				otherImports = append(otherImports, importEntry{stmt: imp, key: entry})
 			}
 		}
-		sort.Strings(stdImports)
-		sort.Strings(otherImports)
+		sort.SliceStable(stdImports, func(a, b int) bool { return stdImports[a].key < stdImports[b].key })
+		sort.SliceStable(otherImports, func(a, b int) bool { return otherImports[a].key < otherImports[b].key })
 
+		writeImport := func(imp *ast.ImportStatement) {
+			f.formatImportStatement(imp)
+		}
 		// 输出排序后的 import
 		first := true
-		for _, m := range stdImports {
+		for _, ie := range stdImports {
 			if !first {
-				f.buf.WriteString("\n")   // std 内部无空行
+				f.buf.WriteString("\n") // std 内部无空行
 			}
-			f.buf.WriteString("import " + m)
+			writeImport(ie.stmt)
 			first = false
 		}
-		for _, m := range otherImports {
+		for _, ie := range otherImports {
 			if !first {
 				f.buf.WriteString("\n\n") // std 与其它 / 其它之间空一行
 			}
-			f.buf.WriteString("import " + m)
+			writeImport(ie.stmt)
 			first = false
 		}
 
@@ -726,6 +736,11 @@ func (f *Formatter) formatTypeAliasStatement(stmt *ast.TypeAliasStatement) {
 
 func (f *Formatter) formatImportStatement(stmt *ast.ImportStatement) {
 	// Module 字段是裸名(如 "std.io" / "utils"),不加引号以匹配 parser 期望
+	if stmt.Path != "" {
+		// 路径导入（import "lib" / import "file"）保留原始写法
+		f.buf.WriteString(`import "` + stmt.Path + `"`)
+		return
+	}
 	f.buf.WriteString("import " + stmt.Module)
 }
 

@@ -1,5 +1,6 @@
 import std.io
 import std.string
+import std.i18n
 
 class Student {
     name: char*
@@ -239,6 +240,9 @@ fn show_menu() {
 }
 
 fn main() {
+    i18n_init()
+    i18n_setup_console()
+
     println("欢迎使用学生成绩管理系统!")
     while true {
         show_menu()

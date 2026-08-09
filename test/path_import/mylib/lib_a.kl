@@ -1,0 +1,7 @@
+import std.io
+import "lib_b.kl"
+
+pub fn lib_a_hello() {
+    println("hello from lib a")
+    println("lib_b value = ", lib_b_value())
+}

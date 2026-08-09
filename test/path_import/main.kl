@@ -1,0 +1,9 @@
+import std.io
+import "mylib"
+import "util.kl"
+
+fn main() {
+    lib_a_hello()
+    println("triple(7) = ", util_triple(7))
+    println("lib_b_value = ", lib_b_value())
+}
