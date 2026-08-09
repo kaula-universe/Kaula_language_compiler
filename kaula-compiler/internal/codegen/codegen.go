@@ -94,6 +94,19 @@ type CodeGenerator struct {
 
 	// 对象字面量初始化代码（注入 main 函数体内）
 	preludeInitCode strings.Builder
+
+	// 嵌套函数捕获信息：函数名 → 捕获列表（生成函数体与调用点共用）
+	nestedFuncCaptures map[string]nestedFuncInfo
+
+	// 当前正在生成函数体的捕获上下文（identifier 重写为 (*_cap_N)）
+	currentCaptures   []string
+	currentCaptureSet map[string]int
+
+	// 嵌套函数延迟定义队列：函数体生成时收集，定义提升到所在外层函数结束处输出
+	// （C 语言不允许函数内嵌定义，clang 拒绝 GNU nested functions）
+	pendingNestedFuncs    []string
+	nestedFuncPrototypes  strings.Builder
+	inFunctionBody        bool
 }
 
 // AddObjectDecl 添加动态对象字面量的静态变量声明（文件作用域）
@@ -765,6 +778,8 @@ static inline String string_concat(String str1, String str2) {
 		}
 	}
 
+	forwardDecls.WriteString(cg.nestedFuncPrototypes.String())
+
 	cacheDir := "cache"
 	if err := os.MkdirAll(cacheDir, 0755); err == nil {
 		os.WriteFile(filepath.Join(cacheDir, "all_includes.txt"), []byte(allIncludes.String()), 0644)
@@ -924,6 +939,13 @@ static inline String string_concat(String str1, String str2) {
 }
 
 func (cg *CodeGenerator) generateStatement(stmt ast.Statement) string {
+	// 嵌套函数（位于某函数体内）不生成在所在位置：提升为文件级定义
+	// （C 不允许函数内嵌定义；嵌套在块/if 内的嵌套函数同样入队）
+	if fn, ok := stmt.(*ast.FunctionStatement); ok && cg.inFunctionBody {
+		cg.pendingNestedFuncs = append(cg.pendingNestedFuncs,
+			cg.functionGenerator.GenerateFunctionStatement(fn))
+		return ""
+	}
 	return cg.statementGenerator.GenerateStatement(stmt)
 }
 

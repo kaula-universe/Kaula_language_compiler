@@ -3,8 +3,8 @@ import "libsub.kl"
 export var app_version = 3
 
 export fn hello_from_a() {
-    println("hello from exported fn")
-    println("sub_value = ", sub_value())
+    std.io.println("hello from exported fn")
+    std.io.println("sub_value = ", sub_value())
 }
 
 export const C_MAX = 100

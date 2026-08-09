@@ -31,7 +31,7 @@ class Student {
     }
     fn print_info(int index) {
         string g = self.grade()
-        println(index, ". ", self.name, " - ", self.score, " (", g, ")")
+        std.io.println(index, ". ", self.name, " - ", self.score, " (", g, ")")
     }
     constructor() {
         self.name = 0
@@ -72,23 +72,23 @@ fn find_empty_slot() int {
 fn add_student() int {
     int slot = find_empty_slot()
     if slot == 0 {
-        println("存储已满, 无法添加更多学生!")
+        std.io.println("存储已满, 无法添加更多学生!")
         return 0
     }
-    println("请输入学生姓名: ")
-    char* inputName = read_line()
-    string nameCopy = string_create(inputName)
+    std.io.println("请输入学生姓名: ")
+    char* inputName = std.io.read_line()
+    string nameCopy = std.string.string_create(inputName)
     char* nameStore = nameCopy.ptr
-    println("请输入成绩 (0-100): ")
-    char* scoreLine = read_line()
-    string scoreStr = string_create(scoreLine)
-    int inputScore = string_to_int(scoreStr)
+    std.io.println("请输入成绩 (0-100): ")
+    char* scoreLine = std.io.read_line()
+    string scoreStr = std.string.string_create(scoreLine)
+    int inputScore = std.string.string_to_int(scoreStr)
     if inputScore < 0 {
-        println("成绩无效, 必须在 0-100 之间!")
+        std.io.println("成绩无效, 必须在 0-100 之间!")
         return 0
     }
     if inputScore > 100 {
-        println("成绩无效, 必须在 0-100 之间!")
+        std.io.println("成绩无效, 必须在 0-100 之间!")
         return 0
     }
     if slot == 1 {
@@ -103,7 +103,7 @@ fn add_student() int {
         stu5.set(nameStore, inputScore)
     }
     string grade = grade_of(inputScore)
-    println("已添加学生: ", nameStore, ", 成绩: ", inputScore, " (", grade, ")")
+    std.io.println("已添加学生: ", nameStore, ", 成绩: ", inputScore, " (", grade, ")")
     return 1
 }
 
@@ -122,7 +122,7 @@ fn grade_of(score: int) string {
 }
 
 fn list_students() {
-    println("===== 学生名单 =====")
+    std.io.println("===== 学生名单 =====")
     int count = 0
     if stu1.filled == 1 {
         count = count + 1
@@ -145,9 +145,9 @@ fn list_students() {
         stu5.print_info(count)
     }
     if count == 0 {
-        println("暂无学生记录")
+        std.io.println("暂无学生记录")
     }
-    println("共 ", count, " 名学生")
+    std.io.println("共 ", count, " 名学生")
 }
 
 fn show_stats() {
@@ -206,15 +206,15 @@ fn show_stats() {
         }
     }
     if count == 0 {
-        println("暂无数据, 无法统计")
+        std.io.println("暂无数据, 无法统计")
         return
     }
     int avg = total / count
-    println("===== 统计信息 =====")
-    println("学生人数: ", count)
-    println("平均分: ", avg)
-    println("最高分: ", maxScore)
-    println("及格人数: ", passed)
+    std.io.println("===== 统计信息 =====")
+    std.io.println("学生人数: ", count)
+    std.io.println("平均分: ", avg)
+    std.io.println("最高分: ", maxScore)
+    std.io.println("及格人数: ", passed)
 }
 
 fn clear_all() {
@@ -223,32 +223,32 @@ fn clear_all() {
     stu3.clear()
     stu4.clear()
     stu5.clear()
-    println("已清空所有学生记录")
+    std.io.println("已清空所有学生记录")
 }
 
 fn show_menu() {
-    println("========================")
-    println("  学生成绩管理系统")
-    println("========================")
-    println("  1. 添加学生")
-    println("  2. 查看名单")
-    println("  3. 统计信息")
-    println("  4. 清空记录")
-    println("  0. 退出系统")
-    println("========================")
-    print("请选择操作: ")
+    std.io.println("========================")
+    std.io.println("  学生成绩管理系统")
+    std.io.println("========================")
+    std.io.println("  1. 添加学生")
+    std.io.println("  2. 查看名单")
+    std.io.println("  3. 统计信息")
+    std.io.println("  4. 清空记录")
+    std.io.println("  0. 退出系统")
+    std.io.println("========================")
+    std.io.print("请选择操作: ")
 }
 
 fn main() {
-    i18n_init()
-    i18n_setup_console()
+    std.i18n.i18n_init()
+    std.i18n.i18n_setup_console()
 
-    println("欢迎使用学生成绩管理系统!")
+    std.io.println("欢迎使用学生成绩管理系统!")
     while true {
         show_menu()
-        char* choiceLine = read_line()
+        char* choiceLine = std.io.read_line()
         if choiceLine == "0" {
-            println("感谢使用, 再见!")
+            std.io.println("感谢使用, 再见!")
             return
         } else if choiceLine == "1" {
             add_student()
@@ -259,7 +259,7 @@ fn main() {
         } else if choiceLine == "4" {
             clear_all()
         } else {
-            println("无效选项, 请输入 0-4")
+            std.io.println("无效选项, 请输入 0-4")
         }
     }
 }

@@ -9,10 +9,10 @@ enum Option<T> {
 fn pick(Option<int> opt) {
     match opt {
         Some(val) => {
-            println("got: ", val)
+            std.io.println("got: ", val)
         },
         None => {
-            println("nothing")
+            std.io.println("nothing")
         }
     }
 }
@@ -31,7 +31,7 @@ fn main() {
         2 => "two",
         _ => "many"
     }
-    println("x is ", description)
+    std.io.println("x is ", description)
 
     # 枚举变体解构
     pick(Option.Some(42))
@@ -41,21 +41,21 @@ fn main() {
     Status s = Status.Success
     match s {
         Success => {
-            println("status: success")
+            std.io.println("status: success")
         },
         Failure => {
-            println("status: failure")
+            std.io.println("status: failure")
         },
         _ => {
-            println("status: unknown")
+            std.io.println("status: unknown")
         }
     }
 
     # 字符串匹配
     string cmd = "stop"
     match cmd {
-        "start" => println("begin"),
-        "stop"  => println("end"),
-        _       => println("unknown")
+        "start" => std.io.println("begin"),
+        "stop"  => std.io.println("end"),
+        _       => std.io.println("unknown")
     }
 }

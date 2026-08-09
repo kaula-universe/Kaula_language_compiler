@@ -316,17 +316,18 @@ func (sc *StdlibConfig) GetCFunctionName(moduleName, funcName string) string {
 			return module.Prefix + funcName
 		}
 
-		// 通过后缀匹配查找
+		// 精确匹配优先：Kaula 名即 C 名（如 read_line 对应 io.h 中的 read_line，
+		// 而非后缀相似的 file_read_line）
+		if _, exists := module.Functions[funcName]; exists {
+			return funcName
+		}
+
+		// 通过后缀匹配查找（如 Kaula 名 printf 对应 C 名 file_printf）
 		suffix := "_" + funcName
 		for cFuncName := range module.Functions {
 			if strings.HasSuffix(cFuncName, suffix) {
 				return cFuncName
 			}
-		}
-
-		// 最后尝试直接匹配
-		if _, exists := module.Functions[funcName]; exists {
-			return funcName
 		}
 	}
 	return funcName

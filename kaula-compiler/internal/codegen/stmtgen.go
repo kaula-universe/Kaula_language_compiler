@@ -5,6 +5,7 @@ import (
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/core"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -1474,14 +1475,18 @@ func (sg *StatementGenerator) generateExportStatement(stmt *ast.ExportStatement)
 }
 
 // generateNonLocalStatement 生成 nonlocal 语句代码
+// nonlocal 是纯绑定声明：不产生新变量。若有初始值则对外层捕获变量赋值；
+// 若目标在外层不存在（sema 已报错），生成空代码防御。
 func (sg *StatementGenerator) generateNonLocalStatement(stmt *ast.NonLocalStatement) string {
-	code := "// Non-local variable\n"
-	code += stmt.Type + " " + stmt.Name
 	if stmt.Value != nil {
-		code += " = " + sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		if sg.codegen.currentCaptureSet != nil {
+			if idx, ok := sg.codegen.currentCaptureSet[stmt.Name]; ok {
+				return "(*_cap_" + strconv.Itoa(idx) + ") = " +
+					sg.codegen.expressionGenerator.GenerateExpression(stmt.Value) + ";\n"
+			}
+		}
 	}
-	code += ";\n"
-	return code
+	return ""
 }
 
 // generateBlockStatement 生成块语句代码
