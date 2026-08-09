@@ -1062,10 +1062,12 @@ func (c *ContinueStatement) SetPosition(pos Position) {
 
 // ImportStatement 表示import语句
 type ImportStatement struct {
-	Module    string // 模块名（如 "std.io" 或 "utils"）
-	IsLocal   bool   // 是否是本地 .kl 文件导入
-	LocalPath string // 解析后的本地 .kl 文件路径（仅 IsLocal=true 时有效）
-	Pos       Position
+	Module     string   // 模块名（如 "std.io" 或 "utils"）
+	Path       string   // 路径导入（import "lib" / import "file"），为空表示模块名导入
+	IsLocal    bool     // 是否是本地 .kl 文件导入
+	LocalPath  string   // 解析后的本地 .kl 文件路径（仅 IsLocal=true 时有效）
+	LocalPaths []string // 库导入展开后的全部 .kl 文件列表（仅路径库导入时有效）
+	Pos        Position
 }
 
 // statementNode 实现Statement接口

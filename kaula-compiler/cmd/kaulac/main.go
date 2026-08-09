@@ -23,108 +23,136 @@ import (
 	"time"
 )
 
+// localImportFiles 返回单个 import 语句覆盖的全部本地 .kl 文件
+// 库导入（import "lib"）展开为多个文件；文件导入（import "file"）为单文件
+func localImportFiles(imp *ast.ImportStatement) []string {
+	if len(imp.LocalPaths) > 0 {
+		return imp.LocalPaths
+	}
+	if imp.IsLocal && imp.LocalPath != "" {
+		return []string{imp.LocalPath}
+	}
+	return nil
+}
+
 // precompileLocalImports 预解析本地 .kl 文件 import
 // 返回: (pub 函数名集合, 合并后的 C 函数定义代码)
 func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, string) {
-	pubFuncs := make(map[string]bool)
-	var allCode string
-	compiled := make(map[string]bool)
+	state := &localCompileState{
+		pubFuncs:       make(map[string]bool),
+		compiled:       make(map[string]bool),
+		stdlibConfig:   stdlibConfig,
+		cfg:            cfg,
+		errorCollector: errorCollector,
+	}
 
 	var localFiles []string
 	for _, stmt := range program.Statements {
 		if importStmt, ok := stmt.(*ast.ImportStatement); ok && importStmt.IsLocal {
-			localFiles = append(localFiles, importStmt.LocalPath)
+			localFiles = append(localFiles, localImportFiles(importStmt)...)
 		}
 	}
-	if len(localFiles) == 0 {
-		return pubFuncs, ""
-	}
-
 	for _, localPath := range localFiles {
-		if compiled[localPath] {
-			continue
-		}
-		compiled[localPath] = true
+		state.compileFile(localPath, inputDir)
+	}
 
-		absPath := localPath
-		if !filepath.IsAbs(absPath) {
-			// 解析器按 (CWD, 输入文件目录) 两种相对基准解析 LocalPath，
-			// 这里先按输入目录尝试，失败则按 CWD 原样使用
-			if candidate := filepath.Join(inputDir, absPath); fileExists(candidate) {
-				absPath = candidate
-			}
-		}
+	return state.pubFuncs, state.allCode
+}
 
-		data, err := os.ReadFile(absPath)
-		if err != nil {
-			fmt.Printf("[Multi-file] Warning: Failed to read %s: %v\n", localPath, err)
-			continue
-		}
+// localCompileState 共享本地 import 编译状态（去重 + 依序输出）
+type localCompileState struct {
+	pubFuncs       map[string]bool
+	allCode        string
+	compiled       map[string]bool
+	stdlibConfig   *stdlib.StdlibConfig
+	cfg            *config.Config
+	errorCollector  *errors.ErrorCollector
+}
 
-		localSource := string(data)
-		localLex := lexer.NewLexer(localSource)
-		localLex.SetErrorCollector(errorCollector)
-		localParser := parser.NewParser(localLex)
-		localParser.SetErrorCollector(errorCollector)
-		localParser.EnableLogging(false)
-		localParser.SetSkipMainCheck(true)
-		errCountBefore := len(errorCollector.Errors())
-		localProgram := localParser.Parse()
+// compileFile 编译单个本地 .kl 文件
+// 先编译该文件自身的导入依赖（保证被调用函数先定义），再编译文件本身；
+// 这样跨文件调用（A 导入 B）时 B 的 C 定义始终先于 A 输出。
+func (s *localCompileState) compileFile(localPath string, inputDir string) {
+	if s.compiled[localPath] {
+		return
+	}
+	s.compiled[localPath] = true
 
-		if len(errorCollector.Errors()) > errCountBefore {
-			fmt.Printf("[Multi-file] Parse errors in %s\n", localPath)
-			for _, e := range errorCollector.Errors()[errCountBefore:] {
-				if e != nil {
-					fmt.Printf("[Multi-file]   %d:%d %s\n", e.Line, e.Column, e.Message)
-				}
-			}
-			continue
-		}
-
-		// 收集 pub 函数名
-		for _, stmt := range localProgram.Statements {
-			if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsPublic {
-				pubFuncs[fnStmt.Name] = true
-			}
-		}
-
-		// 语义分析（跳过 main 检查）
-		localAnalyzer := sema.NewSemanticAnalyzer()
-		if stdlibConfig != nil {
-			localAnalyzer.SetStdlibConfig(stdlibConfig)
-		}
-		localAnalyzer.SetSOREnabled(cfg.SOR)
-		localAnalyzer.Analyze(localProgram)
-
-		// 代码生成（本地文件使用 freestanding 模板，避免注入用户态/宿主入口）
-		localCfg := *cfg
-		localCfg.Boot = "none"
-		localCG := codegen.NewCodeGenerator(&localCfg)
-		if stdlibConfig != nil {
-			localCG.SetStdlibConfig(stdlibConfig)
-		}
-		localOutput := localCG.Generate(localProgram)
-
-		// 提取函数定义（去掉 includes 和 main）
-		funcCode := extractFunctionDefs(localOutput)
-		if funcCode != "" {
-			fmt.Printf("[Multi-file] Compiled local import: %s\n", localPath)
-			allCode += funcCode + "\n"
-		}
-
-		// 递归处理嵌套本地 import
-		nestedFuncs, nestedCode := precompileLocalImports(localProgram, filepath.Dir(absPath), stdlibConfig, cfg, errorCollector)
-		if len(nestedFuncs) > 0 {
-			for k, v := range nestedFuncs {
-				pubFuncs[k] = v
-			}
-		}
-		if nestedCode != "" {
-			allCode += nestedCode
+	absPath := localPath
+	if !filepath.IsAbs(absPath) {
+		// 路径导入在解析阶段已解析为相对文件/工作目录的路径，
+		// 这里先按输入目录尝试，失败则按 CWD 原样使用
+		if candidate := filepath.Join(inputDir, absPath); fileExists(candidate) {
+			absPath = candidate
 		}
 	}
 
-	return pubFuncs, allCode
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		fmt.Printf("[Multi-file] Warning: Failed to read %s: %v\n", localPath, err)
+		return
+	}
+
+	localSource := string(data)
+	localLex := lexer.NewLexer(localSource)
+	localLex.SetErrorCollector(s.errorCollector)
+	localParser := parser.NewParser(localLex)
+	localParser.SetErrorCollector(s.errorCollector)
+	localParser.SetFile(absPath)
+	localParser.EnableLogging(false)
+	localParser.SetSkipMainCheck(true)
+	errCountBefore := len(s.errorCollector.Errors())
+	localProgram := localParser.Parse()
+
+	if len(s.errorCollector.Errors()) > errCountBefore {
+		fmt.Printf("[Multi-file] Parse errors in %s\n", localPath)
+		for _, e := range s.errorCollector.Errors()[errCountBefore:] {
+			if e != nil {
+				fmt.Printf("[Multi-file]   %d:%d %s\n", e.Line, e.Column, e.Message)
+			}
+		}
+		return
+	}
+
+	// 先编译该文件自身的依赖（嵌套本地 import / 路径库导入）
+	for _, stmt := range localProgram.Statements {
+		if importStmt, ok := stmt.(*ast.ImportStatement); ok && importStmt.IsLocal {
+			for _, nestedPath := range localImportFiles(importStmt) {
+				s.compileFile(nestedPath, filepath.Dir(absPath))
+			}
+		}
+	}
+
+	// 收集 pub 函数名
+	for _, stmt := range localProgram.Statements {
+		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsPublic {
+			s.pubFuncs[fnStmt.Name] = true
+		}
+	}
+
+	// 语义分析（跳过 main 检查）
+	localAnalyzer := sema.NewSemanticAnalyzer()
+	if s.stdlibConfig != nil {
+		localAnalyzer.SetStdlibConfig(s.stdlibConfig)
+	}
+	localAnalyzer.SetSOREnabled(s.cfg.SOR)
+	localAnalyzer.Analyze(localProgram)
+
+	// 代码生成（本地文件使用 freestanding 模板，避免注入用户态/宿主入口）
+	localCfg := *s.cfg
+	localCfg.Boot = "none"
+	localCG := codegen.NewCodeGenerator(&localCfg)
+	if s.stdlibConfig != nil {
+		localCG.SetStdlibConfig(s.stdlibConfig)
+	}
+	localOutput := localCG.Generate(localProgram)
+
+	// 提取函数定义（去掉 includes 和 main）
+	funcCode := extractFunctionDefs(localOutput)
+	if funcCode != "" {
+		fmt.Printf("[Multi-file] Compiled local import: %s\n", localPath)
+		s.allCode += funcCode + "\n"
+	}
 }
 
 // extractFunctionDefs 从 C 代码中提取函数定义（去掉 #include 和 main 函数）
@@ -1320,30 +1348,33 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 			if !ok || !imp.IsLocal {
 				continue
 			}
-			absPath := imp.LocalPath
-			if !filepath.IsAbs(absPath) {
-				if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
-					absPath = candidate
+			for _, localPath := range localImportFiles(imp) {
+				absPath := localPath
+				if !filepath.IsAbs(absPath) {
+					if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+						absPath = candidate
+					}
 				}
-			}
-			data, err := os.ReadFile(absPath)
-			if err != nil {
-				continue
-			}
-			localLex := lexer.NewLexer(string(data))
-			localParser := parser.NewParser(localLex)
-			localParser.SetSkipMainCheck(true)
-			localParser.EnableLogging(false)
-			localProgram := localParser.Parse()
-			if localParser.HasErrors() {
-				continue
-			}
-			for _, s := range localProgram.Statements {
-				if fn, ok := s.(*ast.FunctionStatement); ok && fn.IsPublic {
-					pubFuncs[fn.Name] = true
+				data, err := os.ReadFile(absPath)
+				if err != nil {
+					continue
 				}
+				localLex := lexer.NewLexer(string(data))
+				localParser := parser.NewParser(localLex)
+				localParser.SetFile(absPath)
+				localParser.SetSkipMainCheck(true)
+				localParser.EnableLogging(false)
+				localProgram := localParser.Parse()
+				if localParser.HasErrors() {
+					continue
+				}
+				for _, s := range localProgram.Statements {
+					if fn, ok := s.(*ast.FunctionStatement); ok && fn.IsPublic {
+						pubFuncs[fn.Name] = true
+					}
+				}
+				visit(localProgram, filepath.Dir(absPath))
 			}
-			visit(localProgram, filepath.Dir(absPath))
 		}
 	}
 
@@ -1363,30 +1394,33 @@ func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool
 			if !ok || !imp.IsLocal {
 				continue
 			}
-			absPath := imp.LocalPath
-			if !filepath.IsAbs(absPath) {
-				if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
-					absPath = candidate
+			for _, localPath := range localImportFiles(imp) {
+				absPath := localPath
+				if !filepath.IsAbs(absPath) {
+					if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+						absPath = candidate
+					}
 				}
-			}
-			data, err := os.ReadFile(absPath)
-			if err != nil {
-				continue
-			}
-			localLex := lexer.NewLexer(string(data))
-			localParser := parser.NewParser(localLex)
-			localParser.SetSkipMainCheck(true)
-			localParser.EnableLogging(false)
-			localProgram := localParser.Parse()
-			if localParser.HasErrors() {
-				continue
-			}
-			for _, s := range localProgram.Statements {
-				if fn, ok := s.(*ast.FunctionStatement); ok {
-					allFuncs[fn.Name] = true
+				data, err := os.ReadFile(absPath)
+				if err != nil {
+					continue
 				}
+				localLex := lexer.NewLexer(string(data))
+				localParser := parser.NewParser(localLex)
+				localParser.SetFile(absPath)
+				localParser.SetSkipMainCheck(true)
+				localParser.EnableLogging(false)
+				localProgram := localParser.Parse()
+				if localParser.HasErrors() {
+					continue
+				}
+				for _, s := range localProgram.Statements {
+					if fn, ok := s.(*ast.FunctionStatement); ok {
+						allFuncs[fn.Name] = true
+					}
+				}
+				visit(localProgram, filepath.Dir(absPath))
 			}
-			visit(localProgram, filepath.Dir(absPath))
 		}
 	}
 
