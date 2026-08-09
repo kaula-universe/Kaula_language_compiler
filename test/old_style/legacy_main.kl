@@ -1,0 +1,6 @@
+import std.io
+import legacy
+
+fn main() {
+    std.io.println("legacy double(9) = ", legacy_double(9))
+}
