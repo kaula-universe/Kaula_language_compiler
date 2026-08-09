@@ -122,7 +122,8 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	}
 
 	// const 变量：纯编译期常量，不参与运行时内存分配
-	if stmt.IsConst {
+	// 注：export 导出的常量需要生成真实的 C 常量定义（跨文件/外部链接可见）
+	if stmt.IsConst && !stmt.IsExported {
 		if evaluated := sg.codegen.tryEvalConstExpr(stmt.Value); evaluated != "" {
 			sg.codegen.constTable[stmt.Name] = evaluated
 			return ""
@@ -163,6 +164,11 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	attrPrefix := generateVarAttributes(stmt.Attributes)
 
 	builder.WriteString(attrPrefix)
+
+	// export 修饰符：C 级导出声明
+	if stmt.IsExported {
+		builder.WriteString("KAULA_EXPORT ")
+	}
 
 	// static 存储修饰符
 	if stmt.IsStatic {
