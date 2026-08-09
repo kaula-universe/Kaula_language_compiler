@@ -451,7 +451,7 @@ func compileOneSource(clangPath, objDir string, s BuildSource, includeDirs []str
 	args := []string{"-c", "-O2"}
 
 	if s.Kind == "c++" {
-		args = append(args, "-x", "c++", "-std=c++11")
+		args = append(args, "-x", "c++", "-std=c++17")
 	} else {
 		args = append(args, "-x", "c", "-std=c11")
 	}

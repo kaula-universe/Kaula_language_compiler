@@ -2109,150 +2109,45 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 
-	// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）
-	// 裸机模式下跳过 std.lib（使用 -nostdlib，不需要标准库）
-	if cfg == nil || !cfg.Freestanding {
-		if useInstalledLibraries {
-			clangArgs = append(clangArgs,
-				"-x", "none",
-				filepath.Join(installedRoot, "lib", stdLibraryName),
-				filepath.Join(installedRoot, "lib", runtimeLibraryName),
-			)
-			fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName)
-			// 使用 freestanding 模块时链接 libkaula_freestanding.a（安装模式下）
-			for _, mod := range usedModules {
-				if strings.HasPrefix(mod, "freestanding.") {
-					freeLibPath := filepath.Join(installedRoot, "lib", "libkaula_freestanding.a")
-					if runtime.GOOS == "windows" {
-						freeLibPath = filepath.Join(installedRoot, "lib", "kaula_freestanding.lib")
-					}
-					if _, err := os.Stat(freeLibPath); err == nil {
-						clangArgs = append(clangArgs, "-x", "none", freeLibPath)
-						fmt.Printf("[Compile] Linked installed freestanding library: %s\n", freeLibPath)
-					}
-					break
-				}
-			}
-		} else {
-			stdLibPath := filepath.Join(objectCacheDir, "std.lib")
-			// 计算当前模块集合的 hash，只有变化时才重新生成
-			libModulesKey := strings.Join(usedModules, ",") + "|kmm_v4|spend_call|allocator"
-			libKeyFile := filepath.Join(objectCacheDir, "std.lib.key")
-			rebuildLib := true
-			if keyData, err := os.ReadFile(libKeyFile); err == nil && string(keyData) == libModulesKey {
-				if _, err := os.Stat(stdLibPath); err == nil {
-					rebuildLib = false
-				}
-			}
-			if rebuildLib {
-				var objPaths []string
-				for _, ms := range moduleSources {
-					objPaths = append(objPaths, ms.objPath)
-				}
-				// Include runtime objects in the lib
-				for _, objName := range runtimeObjs {
-					runtimeObj := filepath.Join(objectCacheDir, objName)
-					if _, err := os.Stat(runtimeObj); err == nil {
-						objPaths = append(objPaths, runtimeObj)
-					}
-				}
-				arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
-				arCmd.Args = append(arCmd.Args, objPaths...)
-				if runtime.GOOS != "windows" {
-					// 非 Windows 平台使用 ar 归档（llvm-lib 是 Windows 工具）
-					arArgs := append([]string{"rcs", stdLibPath}, objPaths...)
-					arCmd = exec.Command("ar", arArgs...)
-				}
-				if _, err := arCmd.CombinedOutput(); err != nil {
-					// llvm-lib 不可用时回退到直接链接 .o 文件
-					fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
-					// 不写入 key 文件，下次继续尝试
-				} else {
-					os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
-					// 用 std.lib 替换所有 .o 文件
-					clangArgs = clangArgs[:0]
-					clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-					clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-					if poolCapacity > 0 {
-						clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-					}
-					for _, p := range validSrcPaths {
-						clangArgs = append(clangArgs, "-I", p)
-					}
-					for _, p := range validStdPaths {
-						clangArgs = append(clangArgs, "-I", p)
-					}
-					for _, p := range validFreePaths {
-						clangArgs = append(clangArgs, "-I", p)
-					}
-					clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-					fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
-				}
-			} else {
-				// std.lib 缓存命中，但需确认文件确实存在
-				if _, err := os.Stat(stdLibPath); err != nil {
-					// 文件不存在，清除 key 并重新构建
-					os.Remove(libKeyFile)
-					fmt.Printf("[Compile] Warning: std.lib key exists but file missing, rebuilding\n")
-					// 重新走 rebuild 逻辑
-					var objPaths []string
-					for _, ms := range moduleSources {
-						objPaths = append(objPaths, ms.objPath)
-					}
-					for _, objName := range runtimeObjs {
-						runtimeObj := filepath.Join(objectCacheDir, objName)
-						if _, err := os.Stat(runtimeObj); err == nil {
-							objPaths = append(objPaths, runtimeObj)
-						}
-					}
-					arCmd := exec.Command("llvm-lib", "/OUT:"+stdLibPath)
-					arCmd.Args = append(arCmd.Args, objPaths...)
-					if runtime.GOOS != "windows" {
-						// 非 Windows 平台使用 ar 归档（llvm-lib 是 Windows 工具）
-						arArgs := append([]string{"rcs", stdLibPath}, objPaths...)
-						arCmd = exec.Command("ar", arArgs...)
-					}
-					if _, err := arCmd.CombinedOutput(); err != nil {
-						fmt.Printf("[Compile] Warning: llvm-lib failed, using .o files directly\n")
-					} else {
-						os.WriteFile(libKeyFile, []byte(libModulesKey), 0644)
-						clangArgs = clangArgs[:0]
-						clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-						clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-						if poolCapacity > 0 {
-							clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-						}
-						for _, p := range validSrcPaths {
-							clangArgs = append(clangArgs, "-I", p)
-						}
-						for _, p := range validStdPaths {
-							clangArgs = append(clangArgs, "-I", p)
-						}
-						clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-						fmt.Printf("[Compile] Merged %d .o -> std.lib\n", len(objPaths))
-					}
-				} else {
-					clangArgs = clangArgs[:0]
-					clangArgs = append(clangArgs, "-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir)
-					clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-					if poolCapacity > 0 {
-						clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-					}
-					for _, p := range validSrcPaths {
-						clangArgs = append(clangArgs, "-I", p)
-					}
-					for _, p := range validStdPaths {
-						clangArgs = append(clangArgs, "-I", p)
-					}
-					for _, p := range validFreePaths {
-						clangArgs = append(clangArgs, "-I", p)
-					}
-					clangArgs = append(clangArgs, "-x", "none", stdLibPath)
-					fmt.Printf("[Compile] Using cached std.lib\n")
-				}
-			}
-		}
-	} // end if !cfg.Freestanding
+// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）
+ 	// 裸机模式下跳过 std.lib（使用 -nostdlib，不需要标准库）
+ 	// Windows 下直接链接 .o 文件，避免 llvm-lib 产生的 COFF 库损坏
+ 	if cfg == nil || !cfg.Freestanding {
+ 		if useInstalledLibraries {
+ 			clangArgs = append(clangArgs,
+ 				"-x", "none",
+ 				filepath.Join(installedRoot, "lib", stdLibraryName),
+ 				filepath.Join(installedRoot, "lib", runtimeLibraryName),
+ 			)
+ 			fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName)
+ 			// 使用 freestanding 模块时链接 libkaula_freestanding.a（安装模式下）
+ 			for _, mod := range usedModules {
+ 				if strings.HasPrefix(mod, "freestanding.") {
+ 					freeLibPath := filepath.Join(installedRoot, "lib", "libkaula_freestanding.a")
+ 					if runtime.GOOS == "windows" {
+ 						freeLibPath = filepath.Join(installedRoot, "lib", "kaula_freestanding.lib")
+ 					}
+ 					if _, err := os.Stat(freeLibPath); err == nil {
+ 						clangArgs = append(clangArgs, "-x", "none", freeLibPath)
+ 						fmt.Printf("[Compile] Linked installed freestanding library: %s\n", freeLibPath)
+ 					}
+ 					break
+ 				}
+ 			}
+ 		} else {
+ 			// Windows 下直接链接所有 .o 文件，避免 llvm-lib 问题
+ 			fmt.Printf("[Compile] Linking %d .o files directly\n", len(moduleSources)+len(runtimeObjs))
+ 			for _, ms := range moduleSources {
+ 				clangArgs = append(clangArgs, ms.objPath)
+ 			}
+ 			for _, objName := range runtimeObjs {
+ 				runtimeObj := filepath.Join(objectCacheDir, objName)
+ 				if _, err := os.Stat(runtimeObj); err == nil {
+ 					clangArgs = append(clangArgs, runtimeObj)
+ 				}
+ 			}
+ 		}
+ 	} // end if !cfg.Freestanding
 
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 
