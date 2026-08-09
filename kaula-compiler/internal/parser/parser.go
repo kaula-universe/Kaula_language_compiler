@@ -1302,8 +1302,13 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 					typeOrName = p.curTok.Value
 					p.nextToken()
 
-					// 检查后面是否跟着 * (Type*)
-					if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+					// 泛型类型参数（如 Option<int> opt）：参数上下文中的 < 只会是泛型类型
+					if p.curTok.Type == lexer.TOKEN_LT {
+						typeName = typeOrName + p.parseTypeStringForDecl()
+						typeOrName = ""
+						fmt.Printf("[PARAM-GENERIC] %s\n", typeName)
+					} else if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+						// 检查后面是否跟着 * (Type*)
 						typeName = typeOrName + "*"
 						typeOrName = ""
 						p.nextToken()
@@ -2574,6 +2579,12 @@ func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 			if p.curTok.Type == lexer.TOKEN_GT {
 				typeStr.WriteString(">")
 				p.nextToken()
+			}
+			// 泛型闭合后若跟随名称/逗号/右括号等终止符，说明类型已解析完
+			switch p.curTok.Type {
+			case lexer.TOKEN_IDENT, lexer.TOKEN_COMMA, lexer.TOKEN_RPAREN,
+				lexer.TOKEN_SEMICOLON, lexer.TOKEN_EOF, lexer.TOKEN_LBRACE:
+				return typeStr.String()
 			}
 		default:
 			return typeStr.String()
@@ -5000,6 +5011,35 @@ func (p *Parser) parseMatchArm() *ast.MatchArm {
 		// 如果遇到下一个模式的开始（标识符后跟 => 或 _ 后跟 =>），停止解析当前分支体
 		if p.isNextArmStart() {
 			break
+		}
+		// { 开头：解析为代码块（如 Some(val) => { ... }），
+		// 否则会被误解析成结构体字面量
+		if p.curTok.Type == lexer.TOKEN_LBRACE {
+			p.nextToken()
+			block := &ast.BlockStatement{
+				Pos: ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file},
+			}
+			for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+				if p.isNextArmStart() {
+					break
+				}
+				inner := p.parseStatementIterative()
+				if inner != nil {
+					block.Statements = append(block.Statements, inner)
+				} else {
+					p.nextToken()
+				}
+			}
+			if p.curTok.Type == lexer.TOKEN_RBRACE {
+				p.nextToken()
+			}
+			arm.Body = append(arm.Body, block)
+			// 块结束后的逗号表示分支结束
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+				break
+			}
+			continue
 		}
 		stmt := p.parseStatementIterative()
 		if stmt != nil {

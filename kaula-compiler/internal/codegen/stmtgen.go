@@ -188,6 +188,15 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	builder.WriteString(sg.generateVarDeclString(cType, stmt.Name))
 
 	if stmt.Value != nil {
+		// match 表达式作为变量初始化值：C 的 switch 不能作为表达式值，
+		// 改为声明后接 switch 赋值
+		if me, ok := stmt.Value.(*ast.MatchExpression); ok && cType != "auto" {
+			var b strings.Builder
+			b.WriteString(builder.String())
+			b.WriteString(";\n")
+			b.WriteString(sg.codegen.expressionGenerator.GenerateMatchAssign(me, stmt.Name))
+			return b.String()
+		}
 		builder.WriteString(" = ")
 		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 	} else if stmt.Nullable {
@@ -231,6 +240,15 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 	builder.WriteString(sg.generateVarDeclString(cType, stmt.Name))
 
 	if stmt.Value != nil {
+		// match 表达式作为 auto 变量初始化值：C 的 switch 不能作为表达式值，
+		// 改为声明后接 switch 赋值
+		if me, ok := stmt.Value.(*ast.MatchExpression); ok && cType != "auto" {
+			var b strings.Builder
+			b.WriteString(builder.String())
+			b.WriteString(";\n")
+			b.WriteString(sg.codegen.expressionGenerator.GenerateMatchAssign(me, stmt.Name))
+			return b.String()
+		}
 		builder.WriteString(" = ")
 		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 	}
