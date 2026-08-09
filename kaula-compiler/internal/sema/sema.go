@@ -43,6 +43,7 @@ type SemanticAnalyzer struct {
 	localImportFuncs   map[string]bool                // 本地 import 的 pub 函数名
 	localModuleFuncs   map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
 	localPubVars       map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
+	inElseIfChain      bool                           // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
 }
 
 // SetLocalImportFuncs 注册本地 import 的 pub 函数（跨文件调用）
@@ -1645,6 +1646,11 @@ func (sa *SemanticAnalyzer) collectTypeName(set map[string]bool, typeStr string)
 
 // analyzeIfStatement 分析 if 语句
 func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
+	// 检测 if-else if 链中的连续单变量 == 比较, 建议改用 match
+	// 只在链的最外层根 if 检测一次, 内层 else-if 跳过 (避免重复警告)
+	if !sa.inElseIfChain {
+		sa.checkIfChainForMatch(stmt)
+	}
 	if stmt.Condition != nil {
 		sa.analyzeExpression(stmt.Condition)
 		// 条件类型检查: 只允许布尔表达式 (bool 变量/true/false 或比较/逻辑运算)
@@ -1657,8 +1663,67 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	}
 	// 退出 if body 后，null checked 标记不再有效（简化实现：不清除，因为 else 分支可能也需要）
 	for _, elseStmt := range stmt.Else {
+		// else-if 嵌套: 作为链的一部分, 跳过独立检测
+		if nested, ok := elseStmt.(*ast.IfStatement); ok {
+			oldInChain := sa.inElseIfChain
+			sa.inElseIfChain = true
+			sa.analyzeStatement(nested)
+			sa.inElseIfChain = oldInChain
+			continue
+		}
 		sa.analyzeStatement(elseStmt)
 	}
+}
+
+// checkIfChainForMatch 检测 if-else if 链中的连续单变量 == 比较
+// 例如: if (x == a) { ... } else if (x == b) { ... } else if (x == c) { ... }
+// 触发 warning, 建议改用 match 表达式
+func (sa *SemanticAnalyzer) checkIfChainForMatch(stmt *ast.IfStatement) {
+	// 收集链上所有分支: 每个分支的条件是否是 同一变量 == 值
+	var chainVars []string
+	cur := stmt
+	for cur != nil {
+		varName := ""
+		if bin, ok := cur.Condition.(*ast.BinaryExpression); ok && bin.Operator == "==" {
+			if id, ok := bin.Left.(*ast.Identifier); ok {
+				varName = id.Name
+			} else if id, ok := bin.Right.(*ast.Identifier); ok {
+				varName = id.Name
+			}
+		}
+		chainVars = append(chainVars, varName)
+
+		// 寻找下一个 else if (Else 中嵌套的 IfStatement)
+		var next *ast.IfStatement
+		for _, elseStmt := range cur.Else {
+			if nested, ok := elseStmt.(*ast.IfStatement); ok {
+				next = nested
+				break
+			}
+		}
+		cur = next
+	}
+
+	// 至少 2 个分支且所有分支都是同一变量的 == 比较
+	if len(chainVars) < 2 {
+		return
+	}
+	first := chainVars[0]
+	if first == "" {
+		return
+	}
+	for _, v := range chainVars[1:] {
+		if v != first {
+			return
+		}
+	}
+
+	sa.errorCollector.AddSemanticWarning(
+		fmt.Sprintf("连续 %d 个分支对同一变量 '%s' 做 == 比较, 建议改用 match 表达式", len(chainVars), first),
+		stmt.Pos.Line, stmt.Pos.Column,
+		"if_chain_should_use_match",
+		fmt.Sprintf("建议改写为 match(%s) { ... } 形式, 更清晰且可穷尽所有情况", first),
+	)
 }
 
 // markNullCheckedInCondition 检测 if 条件中的 null 检查模式

@@ -1,0 +1,52 @@
+import std.io;
+
+fn main() int {
+    int x = 2;
+    int y = 3;
+
+    # 1. 不同变量的链: 不警告
+    if (x == 1) {
+        println("a");
+    } else if (y == 2) {
+        println("b");
+    }
+
+    # 2. 非 == 比较: 不警告
+    if (x > 1) {
+        println("c");
+    } else if (x < 5) {
+        println("d");
+    }
+
+    # 3. 只有 if 无 else if: 不警告
+    if (x == 1) {
+        println("e");
+    }
+
+    # 4. 链中途换变量: 不警告 (x, y, x)
+    if (x == 1) {
+        println("f");
+    } else if (y == 2) {
+        println("g");
+    } else if (x == 3) {
+        println("h");
+    }
+
+    # 5. 连续单变量 == 链: 警告
+    if (x == 1) {
+        println("i");
+    } else if (x == 2) {
+        println("j");
+    }
+
+    # 6. 嵌套在函数内更深层: 警告
+    if (x == 1) {
+        if (y == 2) {
+            println("k");
+        } else if (y == 3) {
+            println("l");
+        }
+    }
+
+    return 0;
+}

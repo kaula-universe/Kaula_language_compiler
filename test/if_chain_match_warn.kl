@@ -1,0 +1,15 @@
+import std.io;
+
+fn main() int {
+    int x = 2;
+    if (x == 1) {
+        println("one");
+    } else if (x == 2) {
+        println("two");
+    } else if (x == 3) {
+        println("three");
+    } else {
+        println("other");
+    }
+    return 0;
+}

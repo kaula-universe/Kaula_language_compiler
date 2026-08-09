@@ -358,8 +358,9 @@ func (f *Formatter) formatFunctionStatement(stmt *ast.FunctionStatement) {
 }
 
 func (f *Formatter) formatIfStatement(stmt *ast.IfStatement) {
-	f.buf.WriteString("if ")
+	f.buf.WriteString("if (")
 	f.formatExpression(stmt.Condition)
+	f.buf.WriteString(")")
 
 	if len(stmt.Body) > 0 {
 		f.buf.WriteString(" {\n")
@@ -407,8 +408,9 @@ func (f *Formatter) formatIfStatement(stmt *ast.IfStatement) {
 }
 
 func (f *Formatter) formatWhileStatement(stmt *ast.WhileStatement) {
-	f.buf.WriteString("while ")
+	f.buf.WriteString("while (")
 	f.formatExpression(stmt.Condition)
+	f.buf.WriteString(")")
 
 	if len(stmt.Body) > 0 {
 		f.buf.WriteString(" {\n")
@@ -425,7 +427,7 @@ func (f *Formatter) formatWhileStatement(stmt *ast.WhileStatement) {
 }
 
 func (f *Formatter) formatForStatement(stmt *ast.ForStatement) {
-	f.buf.WriteString("for ")
+	f.buf.WriteString("for (")
 	if stmt.Init != nil {
 		f.formatStatement(stmt.Init)
 		f.buf.WriteString("; ")
@@ -441,6 +443,7 @@ func (f *Formatter) formatForStatement(stmt *ast.ForStatement) {
 	if stmt.Update != nil {
 		f.formatStatement(stmt.Update)
 	}
+	f.buf.WriteString(")")
 
 	if len(stmt.Body) > 0 {
 		f.buf.WriteString(" {\n")
@@ -826,6 +829,7 @@ func (f *Formatter) formatConstructorStatement(stmt *ast.ConstructorStatement) {
 }
 
 func (f *Formatter) formatForInStatement(stmt *ast.ForInStatement) {
+	// 注意: parser 不支持 for (x in ...) 带括号形式, 保持无括号
 	f.buf.WriteString("for ")
 	if stmt.Variable != nil {
 		f.buf.WriteString(stmt.Variable.Name)

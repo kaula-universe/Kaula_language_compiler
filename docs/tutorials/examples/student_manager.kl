@@ -1,19 +1,19 @@
+import std.i18n
 import std.io
 import std.string
-import std.i18n
 
 class Student {
     name: char*
     score: int
     filled: int
     fn grade() string {
-        if self.score >= 90 {
+        if (self.score >= 90) {
             return "优秀"
-        } else if self.score >= 80 {
+        } else if (self.score >= 80) {
             return "良好"
-        } else if self.score >= 70 {
+        } else if (self.score >= 70) {
             return "中等"
-        } else if self.score >= 60 {
+        } else if (self.score >= 60) {
             return "及格"
         } else {
             return "不及格"
@@ -51,19 +51,19 @@ Student stu4 = Student()
 Student stu5 = Student()
 
 fn find_empty_slot() int {
-    if stu1.filled == 0 {
+    if (stu1.filled == 0) {
         return 1
     }
-    if stu2.filled == 0 {
+    if (stu2.filled == 0) {
         return 2
     }
-    if stu3.filled == 0 {
+    if (stu3.filled == 0) {
         return 3
     }
-    if stu4.filled == 0 {
+    if (stu4.filled == 0) {
         return 4
     }
-    if stu5.filled == 0 {
+    if (stu5.filled == 0) {
         return 5
     }
     return 0
@@ -71,7 +71,7 @@ fn find_empty_slot() int {
 
 fn add_student() int {
     int slot = find_empty_slot()
-    if slot == 0 {
+    if (slot == 0) {
         std.io.println("存储已满, 无法添加更多学生!")
         return 0
     }
@@ -83,21 +83,21 @@ fn add_student() int {
     char* scoreLine = std.io.read_line()
     string scoreStr = std.string.string_create(scoreLine)
     int inputScore = std.string.string_to_int(scoreStr)
-    if inputScore < 0 {
+    if (inputScore < 0) {
         std.io.println("成绩无效, 必须在 0-100 之间!")
         return 0
     }
-    if inputScore > 100 {
+    if (inputScore > 100) {
         std.io.println("成绩无效, 必须在 0-100 之间!")
         return 0
     }
-    if slot == 1 {
+    if (slot == 1) {
         stu1.set(nameStore, inputScore)
-    } else if slot == 2 {
+    } else if (slot == 2) {
         stu2.set(nameStore, inputScore)
-    } else if slot == 3 {
+    } else if (slot == 3) {
         stu3.set(nameStore, inputScore)
-    } else if slot == 4 {
+    } else if (slot == 4) {
         stu4.set(nameStore, inputScore)
     } else {
         stu5.set(nameStore, inputScore)
@@ -108,13 +108,13 @@ fn add_student() int {
 }
 
 fn grade_of(score: int) string {
-    if score >= 90 {
+    if (score >= 90) {
         return "优秀"
-    } else if score >= 80 {
+    } else if (score >= 80) {
         return "良好"
-    } else if score >= 70 {
+    } else if (score >= 70) {
         return "中等"
-    } else if score >= 60 {
+    } else if (score >= 60) {
         return "及格"
     } else {
         return "不及格"
@@ -124,27 +124,27 @@ fn grade_of(score: int) string {
 fn list_students() {
     std.io.println("===== 学生名单 =====")
     int count = 0
-    if stu1.filled == 1 {
+    if (stu1.filled == 1) {
         count = count + 1
         stu1.print_info(count)
     }
-    if stu2.filled == 1 {
+    if (stu2.filled == 1) {
         count = count + 1
         stu2.print_info(count)
     }
-    if stu3.filled == 1 {
+    if (stu3.filled == 1) {
         count = count + 1
         stu3.print_info(count)
     }
-    if stu4.filled == 1 {
+    if (stu4.filled == 1) {
         count = count + 1
         stu4.print_info(count)
     }
-    if stu5.filled == 1 {
+    if (stu5.filled == 1) {
         count = count + 1
         stu5.print_info(count)
     }
-    if count == 0 {
+    if (count == 0) {
         std.io.println("暂无学生记录")
     }
     std.io.println("共 ", count, " 名学生")
@@ -155,57 +155,57 @@ fn show_stats() {
     int count = 0
     int maxScore = 0
     int passed = 0
-    if stu1.filled == 1 {
+    if (stu1.filled == 1) {
         total = total + stu1.score
         count = count + 1
-        if stu1.score > maxScore {
+        if (stu1.score > maxScore) {
             maxScore = stu1.score
         }
-        if stu1.score >= 60 {
+        if (stu1.score >= 60) {
             passed = passed + 1
         }
     }
-    if stu2.filled == 1 {
+    if (stu2.filled == 1) {
         total = total + stu2.score
         count = count + 1
-        if stu2.score > maxScore {
+        if (stu2.score > maxScore) {
             maxScore = stu2.score
         }
-        if stu2.score >= 60 {
+        if (stu2.score >= 60) {
             passed = passed + 1
         }
     }
-    if stu3.filled == 1 {
+    if (stu3.filled == 1) {
         total = total + stu3.score
         count = count + 1
-        if stu3.score > maxScore {
+        if (stu3.score > maxScore) {
             maxScore = stu3.score
         }
-        if stu3.score >= 60 {
+        if (stu3.score >= 60) {
             passed = passed + 1
         }
     }
-    if stu4.filled == 1 {
+    if (stu4.filled == 1) {
         total = total + stu4.score
         count = count + 1
-        if stu4.score > maxScore {
+        if (stu4.score > maxScore) {
             maxScore = stu4.score
         }
-        if stu4.score >= 60 {
+        if (stu4.score >= 60) {
             passed = passed + 1
         }
     }
-    if stu5.filled == 1 {
+    if (stu5.filled == 1) {
         total = total + stu5.score
         count = count + 1
-        if stu5.score > maxScore {
+        if (stu5.score > maxScore) {
             maxScore = stu5.score
         }
-        if stu5.score >= 60 {
+        if (stu5.score >= 60) {
             passed = passed + 1
         }
     }
-    if count == 0 {
+    if (count == 0) {
         std.io.println("暂无数据, 无法统计")
         return
     }
@@ -242,21 +242,20 @@ fn show_menu() {
 fn main() {
     std.i18n.i18n_init()
     std.i18n.i18n_setup_console()
-
     std.io.println("欢迎使用学生成绩管理系统!")
-    while true {
+    while (true) {
         show_menu()
         char* choiceLine = std.io.read_line()
-        if choiceLine == "0" {
+        if (choiceLine == "0") {
             std.io.println("感谢使用, 再见!")
             return
-        } else if choiceLine == "1" {
+        } else if (choiceLine == "1") {
             add_student()
-        } else if choiceLine == "2" {
+        } else if (choiceLine == "2") {
             list_students()
-        } else if choiceLine == "3" {
+        } else if (choiceLine == "3") {
             show_stats()
-        } else if choiceLine == "4" {
+        } else if (choiceLine == "4") {
             clear_all()
         } else {
             std.io.println("无效选项, 请输入 0-4")
