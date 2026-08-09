@@ -294,6 +294,68 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		return fg.generateRootTreeFunction(stmt)
 	}
 
+	// 嵌套函数：在参数注册之后检测捕获的外层局部变量
+	// （main/prefix/tree/asm 均不会有外层函数作用域，捕获集为空）
+	captures := fg.codegen.detectCaptures(stmt)
+	if fg.codegen.inFunctionBody {
+		// 嵌套函数提升为文件级后，调用点（所在外层函数体）先于其定义出现，
+		// 必须在文件头部追加原型声明（forward declaration），否则 clang 报隐式声明错误
+		var proto strings.Builder
+		proto.WriteString(fg.mapReturnType(stmt.ReturnType))
+		proto.WriteByte(' ')
+		proto.WriteString(stmt.Name)
+		proto.WriteByte('(')
+		for i, param := range stmt.Params {
+			if i > 0 {
+				proto.WriteString(", ")
+			}
+			paramType := "int64_t"
+			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+				if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false); ctype != "" {
+					paramType = ctype
+				}
+			}
+			proto.WriteString(paramType)
+			proto.WriteByte(' ')
+			proto.WriteString(param)
+		}
+		for i := range captures {
+			if i > 0 || len(stmt.Params) > 0 {
+				proto.WriteString(", ")
+			}
+			capType := "int64_t"
+			if info := fg.codegen.nestedFuncCaptures[stmt.Name]; i < len(info.Types) && info.Types[i] != "" {
+				if ctype := fg.codegen.typeGenerator.convertType(info.Types[i], false); ctype != "" {
+					capType = ctype
+				}
+			}
+			proto.WriteString(capType)
+			proto.WriteString("*")
+		}
+		proto.WriteString(");\n")
+		fg.codegen.nestedFuncPrototypes.WriteString(proto.String())
+	}
+	if len(captures) > 0 {
+		info := nestedFuncInfo{Captures: captures, Types: make([]string, 0, len(captures))}
+		// 记录捕获变量的 Kaula 类型（_cap_N 指针的基类型）
+		for _, name := range captures {
+			sym := fg.codegen.lookupOuterSymbol(name)
+			if sym != nil {
+				info.Types = append(info.Types, sym.Type)
+			} else {
+				info.Types = append(info.Types, "")
+			}
+		}
+		if fg.codegen.nestedFuncCaptures == nil {
+			fg.codegen.nestedFuncCaptures = make(map[string]nestedFuncInfo)
+		}
+		fg.codegen.nestedFuncCaptures[stmt.Name] = info
+		stmt.Captures = captures
+	}
+	// 预注册函数体内的其他嵌套函数：确保调用点在定义语句之前时
+	// 也能找到捕获信息（生成调用实参）
+	fg.codegen.preRegisterNestedFuncs(stmt.Body)
+
 	if stmt.Name == "main" {
 		return fg.generateMainFunction(stmt)
 	}
@@ -343,11 +405,40 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
 		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
-	if len(stmt.Params) == 0 {
+	// 嵌套函数：追加捕获参数（按引用：指针）
+	for i, capName := range captures {
+		if len(stmt.Params) > 0 || i > 0 {
+			builder.WriteString(", ")
+		}
+		capType := "int64_t"
+		if info := fg.codegen.nestedFuncCaptures[stmt.Name]; i < len(info.Types) && info.Types[i] != "" {
+			if ctype := fg.codegen.typeGenerator.convertType(info.Types[i], false); ctype != "" {
+				capType = ctype
+			}
+		}
+		builder.WriteString(fmt.Sprintf("%s* _cap_%d", capType, i))
+		_ = capName
+	}
+	if len(stmt.Params) == 0 && len(captures) == 0 {
 		builder.WriteString("void")
 	}
 	builder.WriteString(") {\n")
 	fg.codegen.indent++
+
+	// 设置捕获重写上下文（函数体内的 identifier 重写为 (*_cap_N)）
+	prevCaptures, prevCaptureSet := fg.codegen.currentCaptures, fg.codegen.currentCaptureSet
+	if len(captures) > 0 {
+		set := make(map[string]int, len(captures))
+		for i, name := range captures {
+			set[name] = i
+		}
+		fg.codegen.currentCaptures = captures
+		fg.codegen.currentCaptureSet = set
+	}
+	defer func() {
+		fg.codegen.currentCaptures = prevCaptures
+		fg.codegen.currentCaptureSet = prevCaptureSet
+	}()
 
 	shouldUseKMM := !stmt.NoKMM && !stmt.Inline
 	if shouldUseKMM {
@@ -361,6 +452,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		var bodyBuilder strings.Builder
 		bodyIndent := fg.codegen.indentString()
 		fg.codegen.indent++
+		prevInFuncBody := fg.codegen.inFunctionBody
+		fg.codegen.inFunctionBody = true
 		for _, bodyStmt := range stmt.Body {
 			if bodyStmt == nil {
 				continue
@@ -368,6 +461,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			bodyBuilder.WriteString(fg.codegen.indentString())
 			bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
+		fg.codegen.inFunctionBody = prevInFuncBody
 		fg.codegen.indent--
 
 		if useKMM {
@@ -391,6 +485,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		}
 	} else {
 		indent := fg.codegen.indentString()
+		prevInFuncBody := fg.codegen.inFunctionBody
+		fg.codegen.inFunctionBody = true
 		for _, bodyStmt := range stmt.Body {
 			if bodyStmt == nil {
 				continue
@@ -398,6 +494,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			builder.WriteString(indent)
 			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
+		fg.codegen.inFunctionBody = prevInFuncBody
 	}
 
 	if !hasReturnStatement(stmt.Body) && stmt.ReturnType != "" && !isVoidType(stmt.ReturnType) {
@@ -406,6 +503,13 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}
 	fg.codegen.indent--
 	builder.WriteString("}\n")
+
+	// 提升嵌套函数定义到文件级（在所在外层函数之后输出）
+	// 调用点先于定义出现的问题由文件头部的原型声明（nestedFuncPrototypes）解决
+	for _, nestedCode := range fg.codegen.pendingNestedFuncs {
+		builder.WriteString(nestedCode)
+	}
+	fg.codegen.pendingNestedFuncs = nil
 
 	fg.codegen.ExitScope()
 	fg.codegen.currentFunctionReturnType = ""

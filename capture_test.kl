@@ -1,0 +1,74 @@
+import std.io
+
+// 1. nonlocal 声明：嵌套函数读写外层局部
+fn counter_test() {
+    int count = 0
+    fn bump() {
+        nonlocal int count
+        count = count + 1
+    }
+    fn read() -> int {
+        nonlocal int count
+        return count
+    }
+    bump()
+    bump()
+    bump()
+    std.io.println("counter=", read())
+}
+
+// 2. 嵌套函数自动捕获（无需 nonlocal）
+fn auto_capture_test() {
+    int total = 5
+    fn add(n: int) {
+        total = total + n
+    }
+    add(10)
+    add(100)
+    std.io.println("total=", total)
+}
+
+// 3. 深层嵌套：内层捕获外层函数的捕获参数（指针转发）
+fn deep_nested_test() {
+    int base = 3
+    fn level1() {
+        nonlocal int base
+        fn level2() {
+            nonlocal int base
+            base = base * 7
+        }
+        level2()
+    }
+    level1()
+    std.io.println("deep=", base)
+}
+
+// 4. 块内定义嵌套函数
+fn block_nested_test() {
+    int x = 1
+    if true {
+        fn twice() {
+            nonlocal int x
+            x = x * 2
+        }
+        twice()
+    }
+    std.io.println("x=", x)
+}
+
+// 5. 非捕获嵌套函数（无隐式参数，行为不变）
+fn plain_nested_test() {
+    fn helper() -> int {
+        return 42
+    }
+    std.io.println("helper=", helper())
+}
+
+fn main() {
+    counter_test()
+    auto_capture_test()
+    deep_nested_test()
+    block_nested_test()
+    plain_nested_test()
+    std.io.println("ALL-DONE")
+}

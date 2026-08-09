@@ -1,0 +1,7 @@
+import "../mylib"
+
+export lib_b_value
+
+export fn own_fn() i32 {
+    return 99
+}

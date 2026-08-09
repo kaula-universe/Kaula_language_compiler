@@ -24,8 +24,8 @@ enum Color {
 
 fn main() {
     int a = 100
-    println("Area: ", a)
+    std.io.println("Area: ", a)
 
     Color c = Color.Red
-    println("Color enum value")
+    std.io.println("Color enum value")
 }
