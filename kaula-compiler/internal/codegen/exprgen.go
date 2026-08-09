@@ -773,8 +773,93 @@ func (eg *ExpressionGenerator) generateStdlibArgs(args []ast.Expression, sig *st
 	return code
 }
 
+// generateEnumConstructor 生成枚举变体构造的 C 代码。
+// EnuName.Variant(args) → (K_EnuName){.kind=EnuName_Kind_Variant, .data.Variant_val=arg}
+// EnuName.Variant()      → (K_EnuName){.kind=EnuName_Kind_Variant}
+// 泛型枚举（Option<int>）按参数表达式推断具体类型参数并实例化。
+func (eg *ExpressionGenerator) generateEnumConstructor(enumBase string, variant *ast.EnumVariant, variantName string, args []ast.Expression) string {
+	enumStmt := eg.codegen.program.FindEnum(enumBase)
+	instName := enumBase
+
+	// 泛型枚举：从构造参数推断类型参数（如 Option<int>.Some(42) → int）
+	if enumStmt != nil && enumStmt.Generic {
+		var argTypes []string
+		for i, arg := range args {
+			t := eg.inferConcreteType(arg)
+			if t == "" && i < len(variant.FieldTypes) {
+				t = variant.FieldTypes[i]
+			}
+			if t != "" {
+				argTypes = append(argTypes, t)
+			}
+		}
+		if len(argTypes) == 0 {
+			argTypes = []string{"int"}
+		}
+		eg.codegen.InstantiateGenericType(enumBase, argTypes, 0)
+		instName = MangleGenericTypeName(enumBase, argTypes)
+	}
+
+	tag := kaulaStructTag(instName)
+	if len(variant.FieldTypes) == 0 {
+		// 无载荷变体：仅设置 kind
+		return "(" + tag + "){.kind=" + instName + "_Kind_" + variantName + "}"
+	}
+
+	// 带载荷变体：设置 kind 并填充 data 字段
+	parts := []string{".kind=" + instName + "_Kind_" + variantName}
+	for i, arg := range args {
+		fieldName := variantName + "_val"
+		if len(variant.FieldNames) > i && variant.FieldNames[i] != "" {
+			fieldName = variant.FieldNames[i]
+		} else if len(variant.FieldTypes) > 1 {
+			fieldName = fmt.Sprintf("%s_val%d", variantName, i)
+		}
+		fieldPart := ".data." + fieldName + "=" + eg.GenerateExpression(arg)
+		parts = append(parts, fieldPart)
+	}
+	return "(" + tag + "){\n        " + strings.Join(parts, ",\n        ") + "\n    }"
+}
+
+// inferConcreteType 从表达式推断 Kaula 类型名（用于泛型实例化参数推断）。
+func (eg *ExpressionGenerator) inferConcreteType(expr ast.Expression) string {
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral:
+		return "int"
+	case *ast.FloatLiteral:
+		return "double"
+	case *ast.StringLiteral:
+		return "string"
+	case *ast.BooleanLiteral:
+		return "bool"
+	case *ast.Identifier:
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil {
+			return sym.Type
+		}
+	case *ast.CallExpression:
+		return "int64"
+	case *ast.MemberAccessExpression:
+		return "int"
+	case *ast.UnaryExpression:
+		return eg.inferConcreteType(e.Right)
+	case *ast.BinaryExpression:
+		return eg.inferConcreteType(e.Right)
+	}
+	return ""
+}
+
 // generateMethodCall 生成方法调用代码
 func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccessExpression, args []ast.Expression) string {
+	// 枚举变体构造：EnuName.VariantName(args) 或 EnuName.VariantName
+	// 生成 tagged union 字面量（如 (K_Option_int){.kind=Option_int_Kind_Some, .data.Some_val=42}）
+	if ident, ok := memberAccess.Object.(*ast.Identifier); ok {
+		if eg.codegen.IsEnumType(ident.Name) {
+			if variant := eg.findEnumVariant(ident.Name, memberAccess.Member); variant != nil {
+				return eg.generateEnumConstructor(ident.Name, variant, memberAccess.Member, args)
+			}
+		}
+	}
+
 	// 动态对象方法调用 obj.method(args) → dynobj_invoke(obj, "method", nargs, box(arg)...)
 	if eg.isObjectTyped(memberAccess.Object) {
 		eg.codegen.needsObjRuntime = true
@@ -1755,10 +1840,35 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 		return object + "->" + e.Member
 	}
 
-	// 检查是否是枚举常量引用（如 Color.Red）
+	// 检查是否是枚举常量引用（如 Color.Red 或 Option.None）
 	if ident, ok := e.Object.(*ast.Identifier); ok {
 		if eg.codegen.IsEnumType(ident.Name) {
-			return ident.Name + "_Kind_" + e.Member
+			// 静态访问枚举类型：使用实例化后的 C 名称
+			cEnumName := eg.getEnumCName(ident.Name)
+			// 查找变体信息，判断是否需要生成 compound literal
+			if variant := eg.findEnumVariant(ident.Name, e.Member); variant != nil {
+				// 检查枚举是否为 tagged union（有数据变体）
+				enumStmt := eg.codegen.program.FindEnum(ident.Name)
+				hasDataVariants := false
+				if enumStmt != nil {
+					for _, v := range enumStmt.Variants {
+						if len(v.FieldTypes) > 0 {
+							hasDataVariants = true
+							break
+						}
+					}
+				}
+				if hasDataVariants {
+					// Tagged union：生成 compound literal
+					tag := kaulaStructTag(cEnumName)
+					if len(variant.FieldTypes) == 0 {
+						return "(" + tag + "){.kind=" + cEnumName + "_Kind_" + e.Member + "}"
+					}
+					// 有载荷变体静态访问不应直接使用（需函数调用语法）
+				}
+			}
+			// 简单枚举或有载荷变体的静态引用：使用 enum 常量
+			return cEnumName + "_Kind_" + e.Member
 		}
 	}
 
@@ -2191,13 +2301,235 @@ func (eg *ExpressionGenerator) generateLambdaTrampoline(expr *ast.LambdaExpressi
 //	        break;
 //	    }
 //	}
+// GenerateMatchAssign 生成 match 表达式作为赋值源的 C 代码：
+//
+//	switch (x) {
+//	case 1: { targetVar = expr; break; }
+//	...
+//	}
+//
+// 用于 `type v = match(x) { ... }`（C 的 switch 不能作为表达式值）。
+// generateStringMatchAssign 生成字符串匹配赋值的 C 代码（if-else 链）
+func (eg *ExpressionGenerator) generateStringMatchAssign(match *ast.MatchExpression, targetVar, targetCode string) string {
+	var code strings.Builder
+	first := true
+	for _, arm := range match.Arms {
+		if arm.Pattern == nil {
+			continue
+		}
+		if arm.Pattern.Kind == ast.PatternString {
+			if first {
+				code.WriteString("if (")
+				first = false
+			} else {
+				code.WriteString(" else if (")
+			}
+			code.WriteString("strcmp(")
+			code.WriteString(targetCode)
+			code.WriteString(".ptr, \"")
+			code.WriteString(arm.Pattern.StrValue)
+			code.WriteString("\") == 0")
+			code.WriteString(") {\n")
+			// 生成分支体语句；最后一条表达式语句作为结果赋值给 targetVar
+			for i, bodyStmt := range arm.Body {
+				if i == len(arm.Body)-1 {
+					if es, ok := bodyStmt.(*ast.ExpressionStatement); ok {
+						code.WriteString("    ")
+						code.WriteString(targetVar)
+						code.WriteString(" = ")
+						code.WriteString(eg.GenerateExpression(es.Expression))
+						code.WriteString(";\n")
+						continue
+					}
+				}
+				code.WriteString("    ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("}\n")
+		} else if arm.Pattern.Kind == ast.PatternWildcard {
+			code.WriteString("else {\n")
+			for i, bodyStmt := range arm.Body {
+				if i == len(arm.Body)-1 {
+					if es, ok := bodyStmt.(*ast.ExpressionStatement); ok {
+						code.WriteString("    ")
+						code.WriteString(targetVar)
+						code.WriteString(" = ")
+						code.WriteString(eg.GenerateExpression(es.Expression))
+						code.WriteString(";\n")
+						continue
+					}
+				}
+				code.WriteString("    ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("}\n")
+		}
+	}
+	return code.String()
+}
+
+func (eg *ExpressionGenerator) GenerateMatchAssign(match *ast.MatchExpression, targetVar string) string {
+	targetCode := eg.GenerateExpression(match.Target)
+
+	// 检查是否为字符串匹配
+	isStringMatch := false
+	for _, arm := range match.Arms {
+		if arm.Pattern != nil && arm.Pattern.Kind == ast.PatternString {
+			isStringMatch = true
+			break
+		}
+	}
+
+	if isStringMatch {
+		return eg.generateStringMatchAssign(match, targetVar, targetCode)
+	}
+
+	enumName := eg.inferEnumName(match.Target)
+	cEnumName := eg.inferEnumCName(match.Target)
+
+	var code strings.Builder
+
+	// 带数据变体的枚举用 .kind 访问
+	hasDataVariants := false
+	if enumName != "" {
+		if enumStmt := eg.codegen.program.FindEnum(enumName); enumStmt != nil {
+			for _, v := range enumStmt.Variants {
+				if len(v.FieldTypes) > 0 {
+					hasDataVariants = true
+					break
+				}
+			}
+		}
+	}
+	if hasDataVariants {
+		code.WriteString("switch (")
+		code.WriteString(targetCode)
+		code.WriteString(".kind) {\n")
+	} else {
+		code.WriteString("switch (")
+		code.WriteString(targetCode)
+		code.WriteString(") {\n")
+	}
+
+	for _, arm := range match.Arms {
+		if arm.Pattern == nil {
+			continue
+		}
+		switch arm.Pattern.Kind {
+		case ast.PatternWildcard:
+			code.WriteString("    default:\n")
+		case ast.PatternVariant:
+			caseLabel := "    case "
+			if cEnumName != "" {
+				caseLabel += cEnumName + "_Kind_"
+			}
+			variantName := arm.Pattern.VariantName
+			if idx := strings.LastIndex(variantName, "."); idx >= 0 {
+				variantName = variantName[idx+1:]
+			}
+			code.WriteString(caseLabel + variantName + ":\n")
+		case ast.PatternInteger:
+			code.WriteString(fmt.Sprintf("    case %d:\n", arm.Pattern.IntValue))
+		case ast.PatternBoolean:
+			if arm.Pattern.VariantName == "true" {
+				code.WriteString("    case 1:\n")
+			} else {
+				code.WriteString("    case 0:\n")
+			}
+		case ast.PatternString:
+			// 字符串模式无法直接 switch；生成 strcmp if 链由调用方处理（暂不支持）
+			code.WriteString("    /* string pattern: ")
+			code.WriteString(arm.Pattern.StrValue)
+			code.WriteString(" */\n")
+			continue
+		case ast.PatternVariable:
+			code.WriteString("    /* variable pattern */\n")
+			continue
+		}
+
+		code.WriteString("    {\n")
+		// 生成分支体语句；最后一条表达式语句作为结果赋值给 targetVar
+		for i, bodyStmt := range arm.Body {
+			if i == len(arm.Body)-1 {
+				if es, ok := bodyStmt.(*ast.ExpressionStatement); ok {
+					code.WriteString("        ")
+					code.WriteString(targetVar)
+					code.WriteString(" = ")
+					code.WriteString(eg.GenerateExpression(es.Expression))
+					code.WriteString(";\n")
+					break
+				}
+			}
+			code.WriteString("        ")
+			code.WriteString(eg.codegen.generateStatement(bodyStmt))
+		}
+		code.WriteString("        break;\n")
+		code.WriteString("    }\n")
+	}
+
+	code.WriteString("}\n")
+	return code.String()
+}
+
+// generateStringMatchExpression 生成字符串匹配的 C 代码（if-else 链）
+func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpression, targetCode string) string {
+	var code strings.Builder
+	first := true
+	for _, arm := range e.Arms {
+		if arm.Pattern == nil {
+			continue
+		}
+		if arm.Pattern.Kind == ast.PatternString {
+			if first {
+				code.WriteString("if (")
+				first = false
+			} else {
+				code.WriteString(" else if (")
+			}
+			code.WriteString("strcmp(")
+			code.WriteString(targetCode)
+			code.WriteString(".ptr, \"")
+			code.WriteString(arm.Pattern.StrValue)
+			code.WriteString("\") == 0")
+			code.WriteString(") {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("    ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("}\n")
+		} else if arm.Pattern.Kind == ast.PatternWildcard {
+			code.WriteString("else {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("    ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			code.WriteString("}\n")
+		}
+	}
+	return code.String()
+}
+
 func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) string {
 	targetCode := eg.GenerateExpression(e.Target)
+
+	// 检查是否为字符串匹配：任一分支包含字符串模式
+	isStringMatch := false
+	for _, arm := range e.Arms {
+		if arm.Pattern != nil && arm.Pattern.Kind == ast.PatternString {
+			isStringMatch = true
+			break
+		}
+	}
+
+	if isStringMatch {
+		return eg.generateStringMatchExpression(e, targetCode)
+	}
 
 	var code strings.Builder
 
 	// 尝试从目标表达式推断枚举类型名
 	enumName := eg.inferEnumName(e.Target)
+	cEnumName := eg.inferEnumCName(e.Target)
 	if enumName != "" {
 		// 检查枚举是否有数据变体
 		enumStmt := eg.codegen.program.FindEnum(enumName)
@@ -2248,8 +2580,8 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 			// VariantName(x, y) → case Enum_Kind_VariantName: { auto_type x = ...; ... break; }
 			// 支持 "枚举名.变体名" 形式 (如 Color.Red)，去掉枚举名前缀
 			caseLabel := "    case "
-			if enumName != "" {
-				caseLabel += enumName + "_Kind_"
+			if cEnumName != "" {
+				caseLabel += cEnumName + "_Kind_"
 			}
 			variantName := arm.Pattern.VariantName
 			if idx := strings.LastIndex(variantName, "."); idx >= 0 {
@@ -2274,7 +2606,11 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 							fieldAccess = fmt.Sprintf("%s.data.%s_val%d", targetCode, arm.Pattern.VariantName, i)
 						}
 					}
-					code.WriteString(fmt.Sprintf("        auto_type %s = %s;\n", binding, fieldAccess))
+					bindType := "auto"
+					if variant != nil && i < len(variant.FieldTypes) {
+						bindType = eg.matchBindingCType(variant, i, enumName, e.Target)
+					}
+					code.WriteString(fmt.Sprintf("        %s %s = %s;\n", bindType, binding, fieldAccess))
 				}
 			}
 
@@ -2333,7 +2669,9 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 	return code.String()
 }
 
-// inferEnumName 从目标表达式推断枚举类型名
+// inferEnumName 从目标表达式推断枚举类型名（源码名，如 Option/Status）。
+// 泛型枚举（如 Option<int>）返回基名 Option；C 枚举名（如 Option_int）由
+// inferEnumCName 单独计算，用于生成 case 标签前缀。
 func (eg *ExpressionGenerator) inferEnumName(expr ast.Expression) string {
 	if ident, ok := expr.(*ast.Identifier); ok {
 		// 从符号表查找变量类型
@@ -2343,9 +2681,74 @@ func (eg *ExpressionGenerator) inferEnumName(expr ast.Expression) string {
 			if enumStmt := eg.codegen.program.FindEnum(sym.Type); enumStmt != nil {
 				return enumStmt.Name
 			}
+			// 泛型枚举类型：Option<int> → 剥离泛型参数后查基定义
+			if lt := strings.Index(sym.Type, "<"); lt > 0 {
+				baseName := sym.Type[:lt]
+				if enumStmt := eg.codegen.program.FindEnum(baseName); enumStmt != nil {
+					return enumStmt.Name
+				}
+			}
 		}
 	}
 	return ""
+}
+
+// inferEnumCName 返回目标枚举的 C 类型名（用于 case 标签前缀）。
+// 非泛型枚举返回其名（如 Status → Status_Kind_Success）；
+// 泛型枚举返回实例化名（如 Option<int> → Option_int_Kind_Some）。
+func (eg *ExpressionGenerator) inferEnumCName(expr ast.Expression) string {
+	baseName := eg.inferEnumName(expr)
+	if baseName == "" {
+		return ""
+	}
+	if ident, ok := expr.(*ast.Identifier); ok {
+		sym := eg.codegen.GetSymbol(ident.Name)
+		if sym != nil && strings.Contains(sym.Type, "<") {
+			// 确保泛型类型已实例化（生成 typedef）
+			if lt := strings.Index(sym.Type, "<"); lt > 0 {
+				argsStr := sym.Type[lt+1 : len(sym.Type)-1]
+				var args []string
+				for _, part := range splitTopLevelCommas(argsStr) {
+					if strings.TrimSpace(part) != "" {
+						args = append(args, strings.TrimSpace(part))
+					}
+				}
+				if len(args) > 0 {
+					eg.codegen.InstantiateGenericType(baseName, args, 0)
+					return MangleGenericTypeName(baseName, args)
+				}
+			}
+		}
+	}
+	return baseName
+}
+
+// getEnumCName 从枚举基名获取实例化后的 C 类型名（用于静态访问如 Option.None）。
+// 查找 genericTypeCache 中该枚举的首个实例化（如 Option → Option_int）。
+func (eg *ExpressionGenerator) getEnumCName(enumBase string) string {
+	if eg.codegen == nil {
+		return enumBase
+	}
+	// 在缓存中查找该枚举的实例化
+	for key := range eg.codegen.genericTypeCache {
+		if strings.HasPrefix(key, enumBase+"<") {
+			// 从缓存键提取实例化名（去掉基名和<>）
+			// key 格式: "Option<int>" → 实例化名 "Option_int"
+			if idx := strings.Index(key, "<"); idx > 0 {
+				argsStr := key[idx+1 : len(key)-1]
+				var args []string
+				for _, part := range splitTopLevelCommas(argsStr) {
+					if strings.TrimSpace(part) != "" {
+						args = append(args, strings.TrimSpace(part))
+					}
+				}
+				if len(args) > 0 {
+					return MangleGenericTypeName(enumBase, args)
+				}
+			}
+		}
+	}
+	return enumBase
 }
 
 // findEnumVariant 查找枚举变体信息
@@ -2363,6 +2766,48 @@ func (eg *ExpressionGenerator) findEnumVariant(enumName, variantName string) *as
 		}
 	}
 	return nil
+}
+
+// matchBindingCType 计算 match 绑定变量的 C 类型。
+// 变体字段类型中的泛型参数（如 Option<T> 的 T）按目标变量的实际类型参数替换
+// （如 Option<int> → int → int64_t）。
+func (eg *ExpressionGenerator) matchBindingCType(variant *ast.EnumVariant, fieldIndex int, enumName string, target ast.Expression) string {
+	if variant == nil || fieldIndex >= len(variant.FieldTypes) {
+		return "auto"
+	}
+	fieldType := variant.FieldTypes[fieldIndex]
+	if eg.codegen.program == nil || eg.codegen.typeGenerator == nil {
+		return fieldType
+	}
+
+	// 解析目标变量的实际类型参数（如 Option<int>）
+	var typeArgs []string
+	if ident, ok := target.(*ast.Identifier); ok {
+		if sym := eg.codegen.GetSymbol(ident.Name); sym != nil {
+			if lt := strings.Index(sym.Type, "<"); lt > 0 {
+				argsStr := sym.Type[lt+1 : len(sym.Type)-1]
+				for _, part := range splitTopLevelCommas(argsStr) {
+					if strings.TrimSpace(part) != "" {
+						typeArgs = append(typeArgs, strings.TrimSpace(part))
+					}
+				}
+			}
+		}
+	}
+
+	// 若字段类型中残留泛型参数（如 T），按枚举声明的参数顺序替换为实际类型参数
+	if len(typeArgs) > 0 && enumName != "" {
+		if enumStmt := eg.codegen.program.FindEnum(enumName); enumStmt != nil {
+			for i, tp := range enumStmt.TypeParams {
+				if i < len(typeArgs) && strings.Contains(fieldType, tp.Name) {
+					fieldType = strings.ReplaceAll(fieldType, tp.Name, typeArgs[i])
+				}
+			}
+		}
+	}
+
+	// 映射到 C 类型（int → int64_t、string → String 等）
+	return eg.codegen.typeGenerator.MapKaulaTypeToC(fieldType)
 }
 
 // generateAttributeExpression 生成表达式级属性的 C 代码

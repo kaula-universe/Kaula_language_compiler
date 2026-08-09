@@ -2419,6 +2419,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	fmt.Printf("[Compile] Used modules: %v\n", usedModules)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		os.WriteFile(filepath.Join(os.TempDir(), "kaula_gen_fail.c"), []byte(cSource), 0644)
 		return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
 	}
 	fmt.Printf("[Compile] Successfully compiled: %s\n", outputFile)
