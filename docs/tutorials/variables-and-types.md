@@ -70,6 +70,28 @@ const max_retries = 3
 const app_name = "Kaula"
 ```
 
+### nonlocal：绑定外层函数作用域的变量
+
+在嵌套函数内部，可以用 `nonlocal` 显式声明绑定**外层函数**中的同名变量，
+读写均作用于外层变量（自动按引用捕获，详见 [functions.md](functions.md) 的
+「嵌套函数与闭包捕获」）：
+
+```kaula
+fn outer() {
+    int total = 0
+    fn add(int n) {
+        nonlocal int total
+        total = total + n
+    }
+    add(5)
+    add(7)
+    println("total = ", total)   # total = 12
+}
+```
+
+校验规则：外层函数必须已声明该变量，且类型一致；用于全局变量或本作用域
+已声明同名变量都会产生编译错误。
+
 ## 多参数输出
 
 `println` 支持同时输出多个值：
