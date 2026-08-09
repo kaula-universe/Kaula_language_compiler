@@ -4286,7 +4286,6 @@ func (p *Parser) Validate(program *ast.Program) {
 		"base":       true,
 
 		// 系统模块
-		"windows": true,
 		"syscall": true,
 	}
 
