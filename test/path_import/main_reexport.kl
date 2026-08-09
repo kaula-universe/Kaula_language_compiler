@@ -1,0 +1,9 @@
+import std.io
+import "reexport"
+
+fn main() {
+    std.io.println("own_fn = ", own_fn())
+    std.io.println("re-exported b_value = ", lib_b_value())
+    std.io.println("re-exported var = ", app_version)
+    hello_from_a()
+}

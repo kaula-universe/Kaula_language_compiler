@@ -720,9 +720,13 @@ type FunctionStatement struct {
 	Attributes  []*Attribute       // 统一属性列表（新）
 	IsPublic    bool               // pub 修饰符：导出给其他 .kl 文件
 	IsExported  bool               // export 修饰符：显式导出（含 pub 语义，跨文件可见 + C 级导出）
-	PrefixName  string             // 如果使用prefix，记录prefix名称
+PrefixName  string             // 如果使用prefix，记录prefix名称
 	IsAsm       bool               // 是否是 asm 函数（#[asm] 注解）
 	Pos         Position
+
+	// Captures 嵌套函数（定义在另一函数体内）的捕获变量列表，
+	// 与代码生成阶段的隐式捕获参数（按下标对应）一一对应；语义分析填充。
+	Captures []string
 }
 
 // statementNode 实现Statement接口
@@ -1126,10 +1130,13 @@ func (p *PackageStatement) GetPosition() Position    { return p.Pos }
 func (p *PackageStatement) SetPosition(pos Position) { p.Pos = pos }
 
 // NonLocalStatement 表示 nonlocal 语句
+// 语法: nonlocal <Type> <name> [= <value>]
+// 语义：绑定外层作用域同名变量（与 Python 的 nonlocal 类似），
+// 必须在外层函数作用域中存在同名变量；name 的读写均作用于外层变量。
 type NonLocalStatement struct {
-	Type  string
-	Name  string
-	Value Expression
+	Type  string // 变量类型
+	Name  string // 变量名
+	Value Expression // 赋值表达式（绑定后立即赋值）
 	Pos   Position
 }
 

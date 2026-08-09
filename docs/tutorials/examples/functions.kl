@@ -5,7 +5,7 @@ fn add(int a, int b) int {
 }
 
 fn greet(string name) {
-    println("Hello, ", name)
+    std.io.println("Hello, ", name)
 }
 
 fn factorial(int n) int {
@@ -17,10 +17,10 @@ fn factorial(int n) int {
 
 fn main() {
     int result = add(10, 20)
-    println("10 + 20 = ", result)
+    std.io.println("10 + 20 = ", result)
 
     greet("Kaula")
 
     int fact = factorial(5)
-    println("5! = ", fact)
+    std.io.println("5! = ", fact)
 }

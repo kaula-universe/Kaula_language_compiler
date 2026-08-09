@@ -6,11 +6,11 @@ fn main() {
     string name = "Kaula"
     bool flag = true
 
-    println("x = ", x)
-    println("y = ", y)
-    println("name = ", name)
-    println("flag = ", flag)
+    std.io.println("x = ", x)
+    std.io.println("y = ", y)
+    std.io.println("name = ", name)
+    std.io.println("flag = ", flag)
 
     auto z = x + 8
-    println("z = ", z)
+    std.io.println("z = ", z)
 }
