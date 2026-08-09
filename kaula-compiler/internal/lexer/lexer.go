@@ -569,8 +569,10 @@ func (l *Lexer) scanIdentifier() Token {
 	case "null":
 		tokenType = TOKEN_NULL
 	}
+	// 先记录 token 起始列, 再推进 column (与 clang/gcc 一致: 报告起始列)
+	startColumn := l.column
 	l.column += l.pos - start
-	return Token{Type: tokenType, Value: value, Line: l.line, Column: l.column}
+	return Token{Type: tokenType, Value: value, Line: l.line, Column: startColumn}
 }
 
 // scanNumber 扫描数字（支持 0x/0o/0b 前缀）

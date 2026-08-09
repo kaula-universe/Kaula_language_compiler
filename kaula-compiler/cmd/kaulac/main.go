@@ -596,64 +596,13 @@ func main() {
 	codegenTime := time.Since(codegenStart)
 	fmt.Printf("[Stage 3a] Code generation completed in %v\n", codegenTime)
 
-	// 检查并输出所有阶段的诊断信息（错误与警告分开统计）
+	// 检查所有阶段的诊断信息（错误与警告分开统计）
+	// 统计在此计算, 输出统一放到 Generated Code 之后、Compilation Results 之前
 	stage1Errs, stage1Warns := splitErrorsWarnings(errorCollector.Errors()[:stage1ErrorCount])
 	stage2Errs, stage2Warns := splitErrorsWarnings(errorCollector.Errors()[stage1ErrorCount:])
 	frontendWarnings := append(stage1Warns, stage2Warns...)
 	errorCount := len(stage1Errs) + len(stage2Errs) + len(cg.Errors()) + len(sorErrors)
 	warningCount := len(frontendWarnings)
-
-	if errorCount > 0 || warningCount > 0 {
-		fmt.Println("\n=== Compilation Errors / Warnings ===")
-
-		// 输出词法分析和语法分析错误（阶段 1 的错误）
-		if len(stage1Errs) > 0 {
-			fmt.Printf("\n[Lexing & Parsing Errors] (%d errors)\n", len(stage1Errs))
-			for _, err := range stage1Errs {
-				fmt.Println(errors.FormatErrorWithContext(err))
-			}
-		}
-
-		// 输出语义分析错误（阶段 2 新增的错误）
-		if len(stage2Errs) > 0 {
-			fmt.Printf("\n[Semantic Analysis Errors] (%d errors)\n", len(stage2Errs))
-			for _, err := range stage2Errs {
-				fmt.Println(errors.FormatErrorWithContext(err))
-			}
-		}
-
-		// 输出代码生成错误
-		if cg.HasErrors() {
-			fmt.Printf("\n[Code Generation Errors] (%d errors)\n", len(cg.Errors()))
-			for i, err := range cg.Errors() {
-				fmt.Printf("  %d. %s\n", i+1, err)
-			}
-		}
-
-		// 输出 SOR 错误
-		if len(sorErrors) > 0 {
-			fmt.Printf("\n[SOR Ownership Errors] (%d errors)\n", len(sorErrors))
-			for i, err := range sorErrors {
-				fmt.Printf("  %d. [%s] line %d: %s\n", i+1, err.Kind.String(), err.SourceLine, err.Message)
-				if err.Details != "" {
-					fmt.Printf("      %s\n", err.Details)
-				}
-			}
-		}
-
-		// 输出警告（黄色高亮）
-		if warningCount > 0 {
-			fmt.Printf("\n[Warnings] (%d warnings)\n", warningCount)
-			for _, err := range frontendWarnings {
-				fmt.Println(errors.FormatErrorWithContext(err))
-			}
-		}
-
-		fmt.Printf("\nSummary: %d error(s), %d warning(s)\n", errorCount, warningCount)
-		if errorCount > 0 {
-			os.Exit(1)
-		}
-	}
 
 	// 增量编译：检查缓存
 	var cacheFile string
@@ -705,22 +654,80 @@ func main() {
 	}
 
 	// Concurrent C compilation
-	compileResult := concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity, cfg)
+	// 前端已有错误时跳过 clang 编译（C 代码可能不完整, 错误总结在 Generated Code 后统一输出）
+	var compileResult *compileResult_t
+	if errorCount > 0 {
+		compileResult = &compileResult_t{
+			Error: fmt.Errorf("%d frontend error(s), C compilation skipped", errorCount),
+		}
+	} else {
+		compileResult = concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity, cfg)
+	}
 	stage3Time := time.Since(stage3Start)
 	fmt.Printf("[Stage 3] Code Gen + Compilation completed in %v\n", stage3Time)
 
 	totalTime := time.Since(totalStart)
 
 	fmt.Println("\n=== Generated Code ===")
-	fmt.Println(output)
+	fmt.Print(strings.TrimRight(output, "\n"))
+	fmt.Println()
+
+	// 输出所有阶段的诊断信息（错误与警告分开统计）— 放在 Generated Code 之后、Compilation Results 之前
+	if errorCount > 0 || warningCount > 0 {
+		fmt.Printf("\n%s=== Compilation Errors / Warnings ===%s\n", errors.ColorRed, errors.ColorReset)
+
+		// 输出词法分析和语法分析错误（阶段 1 的错误）
+		if len(stage1Errs) > 0 {
+			fmt.Printf("\n%s[Lexing & Parsing Errors] (%d errors)%s\n", errors.ColorRed, len(stage1Errs), errors.ColorReset)
+			for _, err := range stage1Errs {
+				fmt.Print(errors.FormatErrorWithContext(err))
+			}
+		}
+
+		// 输出语义分析错误（阶段 2 新增的错误）
+		if len(stage2Errs) > 0 {
+			fmt.Printf("\n%s[Semantic Analysis Errors] (%d errors)%s\n", errors.ColorRed, len(stage2Errs), errors.ColorReset)
+			for _, err := range stage2Errs {
+				fmt.Print(errors.FormatErrorWithContext(err))
+			}
+		}
+
+		// 输出代码生成错误
+		if cg.HasErrors() {
+			fmt.Printf("\n%s[Code Generation Errors] (%d errors)%s\n", errors.ColorRed, len(cg.Errors()), errors.ColorReset)
+			for i, err := range cg.Errors() {
+				fmt.Printf("  %d. %s\n", i+1, err)
+			}
+		}
+
+		// 输出 SOR 错误
+		if len(sorErrors) > 0 {
+			fmt.Printf("\n%s[SOR Ownership Errors] (%d errors)%s\n", errors.ColorRed, len(sorErrors), errors.ColorReset)
+			for i, err := range sorErrors {
+				fmt.Printf("  %d. [%s] line %d: %s\n", i+1, err.Kind.String(), err.SourceLine, err.Message)
+				if err.Details != "" {
+					fmt.Printf("      %s\n", err.Details)
+				}
+			}
+		}
+
+		// 输出警告（黄色高亮）
+		if warningCount > 0 {
+			fmt.Printf("\n%s[Warnings] (%d warnings)%s\n", errors.ColorYellow, warningCount, errors.ColorReset)
+			for _, err := range frontendWarnings {
+				fmt.Print(errors.FormatErrorWithContext(err))
+			}
+		}
+	}
 
 	fmt.Printf("\n=== Compilation Results ===\n")
-	fmt.Printf("Diagnostics: %d error(s), %d warning(s)\n", errorCount, warningCount)
 	if compileResult.Error != nil {
-		fmt.Printf("Status: FAILED - %v\n", compileResult.Error)
+		printSummary(false, warningCount, errorCount)
+		fmt.Printf("Error: %v\n", compileResult.Error)
 		fmt.Printf("Cache:  %s (available for manual compilation)\n", cacheFile)
+		os.Exit(1)
 	} else {
-		fmt.Printf("Status: SUCCESS\n")
+		printSummary(true, warningCount, errorCount)
 		fmt.Printf("Output: %s\n", compileResult.OutputFile)
 		fmt.Printf("Cache:  %s\n", cacheFile)
 	}
@@ -731,10 +738,31 @@ func main() {
 	fmt.Printf("Stage 3 (Codegen+Compile):    %v\n", stage3Time)
 	fmt.Printf("---------------------------------\n")
 	fmt.Printf("Total End-to-End:              %v\n", totalTime)
+}
 
-	if compileResult.Error == nil {
-		fmt.Printf("\n[Success] Compiled to: %s\n", compileResult.OutputFile)
+// printSummary 输出编译汇总行:
+//   Status: SUCCESS, WARNING 2, ERROR 0
+//   Status 白字; SUCCESS 绿 / FAILED 红;
+//   WARNING 有则黄、无则绿; ERROR 有则红、无则绿
+func printSummary(success bool, warnCount, errCount int) {
+	statusText := "SUCCESS"
+	statusColor := errors.ColorGreen
+	if !success {
+		statusText = "FAILED"
+		statusColor = errors.ColorRed
 	}
+	warnColor := errors.ColorGreen
+	if warnCount > 0 {
+		warnColor = errors.ColorYellow
+	}
+	errColor := errors.ColorGreen
+	if errCount > 0 {
+		errColor = errors.ColorRed
+	}
+	fmt.Printf("Status: %s%s%s, %sWARNING %d%s, %sERROR %d%s\n",
+		statusColor, statusText, errors.ColorReset,
+		warnColor, warnCount, errors.ColorReset,
+		errColor, errCount, errors.ColorReset)
 }
 
 type compileResult_t struct {

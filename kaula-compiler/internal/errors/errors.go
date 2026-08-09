@@ -6,12 +6,21 @@ import (
 	"strings"
 )
 
-// 终端 ANSI 颜色常量（用于终端高亮错误/警告）
+// 终端 ANSI 颜色常量（用于终端高亮错误/警告/成功）
 const (
 	ansiReset  = "\x1b[0m"
 	ansiBold   = "\x1b[1m"
 	ansiRed    = "\x1b[31m"
+	ansiGreen  = "\x1b[32m"
 	ansiYellow = "\x1b[33m"
+)
+
+// 导出别名 (供 main 包 printSummary 使用)
+const (
+	ColorReset  = ansiReset
+	ColorRed    = ansiRed
+	ColorGreen  = ansiGreen
+	ColorYellow = ansiYellow
 )
 
 // colorEnabled 是否启用终端颜色高亮
@@ -396,7 +405,7 @@ func ExtractSourceContext(source string, line, column int) (string, string, stri
 
 	columnStr := ""
 	for i := 0; i < column-1 && i < len(sourceLine); i++ {
-		if sourceLine[i] == '\t' {
+		if sourceLine[i] == '	' {
 			columnStr += "    "
 		} else {
 			columnStr += " "
@@ -404,7 +413,7 @@ func ExtractSourceContext(source string, line, column int) (string, string, stri
 	}
 	columnStr += "^"
 
-	context += "     | " + columnStr
+	context += "       | " + columnStr
 
 	return context, sourceLine, lineNumberStr
 }
@@ -463,6 +472,7 @@ func FormatErrorWithContext(err *Error) string {
 }
 
 // highlightSourceContext 在源码上下文中着色并扩展错误高亮标记
+// 参照 clang/gcc 输出: ^ 起头 + ~ 填充到 token 长度
 // 无颜色环境（NO_COLOR/TERM=dumb）下仍会扩展 ^ 标记为完整区间
 func highlightSourceContext(context string, hl *HighlightSpan) string {
 	if context == "" {
@@ -481,7 +491,7 @@ func highlightSourceContext(context string, hl *HighlightSpan) string {
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		trimmed := strings.TrimSpace(lines[i])
-		// 高亮行形如 "     |      ^"，去掉分隔符与空格后只剩 ^ 才能判定
+		// 高亮行形如 "      |      ^"，去掉分隔符与空格后只剩 ^ 才能判定
 		stripped := strings.ReplaceAll(trimmed, "|", "")
 		stripped = strings.ReplaceAll(stripped, "^", "")
 		if strings.TrimSpace(stripped) != "" || !strings.Contains(trimmed, "^") {
@@ -492,10 +502,12 @@ func highlightSourceContext(context string, hl *HighlightSpan) string {
 			continue
 		}
 		base := lines[i][:caretIdx]
+		// clang 风格: ^ 起头, 后面 ~ 填充到 hlLen (token 长度)
+		marker := "^" + strings.Repeat("~", hlLen-1)
 		if colorEnabled {
-			lines[i] = base + hlColor + strings.Repeat("^", hlLen) + ansiReset
-		} else if hlLen > 1 {
-			lines[i] = base + strings.Repeat("^", hlLen)
+			lines[i] = base + hlColor + marker + ansiReset
+		} else {
+			lines[i] = base + marker
 		}
 		break
 	}
