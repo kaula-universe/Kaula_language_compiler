@@ -158,6 +158,18 @@ spend(color) {
 - `call(default)` 仅允许在数组模式中作为兜底，覆盖剩余未消费元素
 - 强制消费流禁止在 `call` 子句内提前退出（return/break/continue 跳过剩余元素消费）
 
+#### nonlocal 与嵌套函数捕获
+
+- 嵌套函数（定义在另一函数体内的 `fn`）在注册后立即进入其函数作用域分析函数体，
+  其作用域 parent 为外层函数作用域，从而支持 nonlocal 绑定与捕获校验
+- `analyzeNonLocalStatement` 沿作用域链向上查找同名变量：
+  - 本作用域已声明 → 报错 `invalid_nonlocal`
+  - 仅存在于全局作用域 → 报错提示"全局变量无需 nonlocal"
+  - 不存在 → 报错；类型不匹配 → 报错
+  - 通过后以**外层真实类型**注册为本作用域符号（scope 标记 `nonlocal`）
+- `analyzeLambdaExpression` 检测 lambda 体引用的外层函数局部变量（捕获），
+  结果填入 `Captures` 字段；捕获 lambda 缺少回调环境传递通道，暂不支持（代码生成阶段拒绝）
+
 ### 核心类型
 
 ```go

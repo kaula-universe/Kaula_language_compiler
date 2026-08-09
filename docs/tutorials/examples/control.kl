@@ -1,40 +1,40 @@
 import std.io
 
 fn main() {
-    println("=== if/else ===")
+    std.io.println("=== if/else ===")
     int score = 85
     if (score >= 90) {
-        println("Grade: A")
+        std.io.println("Grade: A")
     } else if (score >= 80) {
-        println("Grade: B")
+        std.io.println("Grade: B")
     } else {
-        println("Grade: C")
+        std.io.println("Grade: C")
     }
 
-    println("=== while ===")
+    std.io.println("=== while ===")
     int i = 0
     while (i < 5) {
-        println("i = ", i)
+        std.io.println("i = ", i)
         i = i + 1
     }
 
     // range-based for: 替代 C 风格 for(init; cond; update)
-    println("=== for in range(N) ===")
+    std.io.println("=== for in range(N) ===")
     for j in range(3) {
-        println("j = ", j)
+        std.io.println("j = ", j)
     }
 
-    println("=== for in range(start, end) ===")
+    std.io.println("=== for in range(start, end) ===")
     for j in range(2, 6) {
-        println("j = ", j)
+        std.io.println("j = ", j)
     }
 
-    println("=== for in range(start, end, step) ===")
+    std.io.println("=== for in range(start, end, step) ===")
     for j in range(0, 10, 2) {
-        println("j = ", j)
+        std.io.println("j = ", j)
     }
 
-    println("=== for with break/continue ===")
+    std.io.println("=== for with break/continue ===")
     for k in range(10) {
         if (k == 2) {
             continue
@@ -42,6 +42,6 @@ fn main() {
         if (k > 5) {
             break
         }
-        println("k = ", k)
+        std.io.println("k = ", k)
     }
 }

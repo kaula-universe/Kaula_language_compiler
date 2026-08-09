@@ -302,6 +302,13 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		return "NULL"
 	}
 
+	// 嵌套函数捕获重写：外层局部变量 → (*_cap_N)
+	if eg.codegen.currentCaptureSet != nil {
+		if idx, ok := eg.codegen.currentCaptureSet[e.Name]; ok {
+			return "(*_cap_" + strconv.Itoa(idx) + ")"
+		}
+	}
+
 	// 编译期常量内联：如果在常量表中找到，直接返回字面量
 	// 这实现了真正的编译期常量求值，const 变量引用会被替换为求值后的字面量
 	if val, ok := eg.codegen.constTable[e.Name]; ok {
@@ -686,6 +693,10 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	// 根据参数数量选择不同的调用方式
 	if len(e.Args) == 0 {
 		// 无参数调用
+		capArgs := eg.codegen.captureArgsFor(funcName)
+		if capArgs != "" {
+			return funcName + "(" + capArgs + ")"
+		}
 		return funcName + "()"
 	} else {
 		// 尝试查找 stdlib 函数签名以生成类型正确的参数
@@ -693,7 +704,11 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		if eg.codegen.stdlibConfig != nil {
 			sig = eg.codegen.stdlibConfig.GetAnyFunctionSignature(funcName)
 		}
-		code := funcName + "(" + eg.generateStdlibArgs(e.Args, sig) + ")"
+		code := funcName + "(" + eg.generateStdlibArgs(e.Args, sig)
+		if capArgs := eg.codegen.captureArgsFor(funcName); capArgs != "" {
+			code += ", " + capArgs
+		}
+		code += ")"
 		return code
 	}
 }
@@ -868,16 +883,10 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		if eg.codegen.stdlibConfig != nil {
 			libName := ident.Name
 			if lib := eg.codegen.stdlibConfig.GetThirdPartyLibrary(libName); lib != nil {
-				if _, funcExists := lib.Functions[methodName]; funcExists {
+				if funcSig, funcExists := lib.Functions[methodName]; funcExists {
 					eg.codegen.usedThirdPartyLibs[libName] = true
-					code := methodName + "("
-					for i, arg := range args {
-						if i > 0 {
-							code += ", "
-						}
-						code += eg.GenerateExpression(arg)
-					}
-					code += ")"
+					// 使用签名生成参数（const char* 参数自动拆包 String）
+					code := methodName + "(" + eg.generateStdlibArgs(args, &funcSig) + ")"
 					return code
 				}
 			}
@@ -889,22 +898,6 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	if len(args) == 1 {
 		argCode := eg.GenerateExpression(args[0])
 		switch methodName {
-		case "add":
-			if eg.symbolTypeIsIntLike(memberAccess.Object) {
-				return "int_object_add(" + object + ", " + argCode + ")"
-			}
-		case "subtract":
-			if eg.symbolTypeIsIntLike(memberAccess.Object) {
-				return "int_object_subtract(" + object + ", " + argCode + ")"
-			}
-		case "multiply":
-			if eg.symbolTypeIsIntLike(memberAccess.Object) {
-				return "int_object_multiply(" + object + ", " + argCode + ")"
-			}
-		case "divide":
-			if eg.symbolTypeIsIntLike(memberAccess.Object) {
-				return "int_object_divide(" + object + ", " + argCode + ")"
-			}
 		case "concat":
 			if eg.symbolTypeIsStringLike(memberAccess.Object) {
 				return "string_object_concat(" + object + ", " + argCode + ")"

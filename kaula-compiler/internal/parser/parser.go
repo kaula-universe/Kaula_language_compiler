@@ -1839,11 +1839,11 @@ func (p *Parser) parseNonLocalStatementIterative() *ast.NonLocalStatement {
 		Pos: pos,
 	}
 	p.nextToken()
-	if p.curTok.Type == lexer.TOKEN_IDENT {
+	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Type = p.curTok.Value
 		p.nextToken()
 	}
-	if p.curTok.Type == lexer.TOKEN_IDENT {
+	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
 		p.nextToken()
 	}

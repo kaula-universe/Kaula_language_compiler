@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kaula-compiler/internal/ast"
+	"kaula-compiler/internal/astutil"
 	"kaula-compiler/internal/comptime"
 	"kaula-compiler/internal/core"
 	"kaula-compiler/internal/errors"
@@ -12,6 +13,7 @@ import (
 	"kaula-compiler/internal/symbol"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -307,6 +309,11 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		} else {
 			sa.symbolTable.AddSymbol(s.Name, "function", false, "global", s.Pos.Line, s.Pos.Column)
 		}
+		// 嵌套函数（定义在函数体内）：注册后立即进入其函数作用域分析函数体，
+		// 其作用域链 parent 为外层函数作用域，从而支持 nonlocal 绑定与捕获校验
+		if sa.currentFunction != nil {
+			sa.analyzeFunctionBody(s)
+		}
 	case *ast.ClassStatement:
 		sa.analyzeClassStatement(s)
 	case *ast.InterfaceStatement:
@@ -402,8 +409,6 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 			for funcName := range mod.Functions {
 				qualifiedName := fmt.Sprintf("%s.%s", stdlibKey, funcName)
 				sa.symbolTable.AddSymbol(qualifiedName, "stdlib_function", false, "global", 0, 0)
-				// 也注册无限定名，允许直接使用函数名
-				sa.symbolTable.AddSymbol(funcName, "stdlib_function", false, "global", 0, 0)
 			}
 			// 注册模块中声明的类型
 			for typeName := range mod.Types {
@@ -414,8 +419,6 @@ func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
 			for funcName := range lib.Functions {
 				qualifiedName := fmt.Sprintf("%s.%s", moduleName, funcName)
 				sa.symbolTable.AddSymbol(qualifiedName, "third_party_function", false, "global", 0, 0)
-				// 也注册无限定名，允许直接使用函数名
-				sa.symbolTable.AddSymbol(funcName, "third_party_function", false, "global", 0, 0)
 			}
 		} else {
 			// 未找到库配置，尝试按需分析 pkglib 中的库
@@ -1079,11 +1082,151 @@ func (sa *SemanticAnalyzer) analyzeEnumStatement(stmt *ast.EnumStatement) {
 }
 
 // analyzeNonLocalStatement 分析 nonlocal 语句
+// 语义（Python 风格）：绑定外层函数作用域中的同名变量。
+//  → 本作用域已声明同名变量：报错；
+//  → 外层函数作用域存在同名变量：校验类型并注册为本作用域符号
+//    （类型取外层真实类型，供后续引用解析），不产生新变量；
+//  → 仅存在于全局作用域：报错提示"全局变量无需 nonlocal"；
+//  → 完全不存在：报错。
 func (sa *SemanticAnalyzer) analyzeNonLocalStatement(stmt *ast.NonLocalStatement) {
-	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "nonlocal", stmt.Pos.Line, stmt.Pos.Column)
+	if stmt.Name == "" {
+		return
+	}
+	if sa.symbolTable != nil && sa.symbolTable.GetLocalSymbol(stmt.Name) != nil {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("nonlocal 变量 '%s' 已在本作用域声明，nonlocal 只能绑定外层作用域的变量", stmt.Name),
+			stmt.Pos.Line, stmt.Pos.Column, "invalid_nonlocal",
+			"删除本作用域的同名声明，或给变量改名为其它",
+		)
+		return
+	}
+
+	// 沿作用域链向上查找（跳过当前函数作用域，从外层开始）
+	var found *symbol.Symbol
+	globalCandidate := false
+	for sc := sa.symbolTable.GetParent(); sc != nil; sc = sc.GetParent() {
+		if sym := sc.GetLocalSymbol(stmt.Name); sym != nil {
+			if sc.GetScopeName() == "global" {
+				globalCandidate = true
+				break
+			}
+			if sym.Type == "function" || sym.Type == "type" {
+				globalCandidate = false
+				break
+			}
+			found = sym
+			break
+		}
+	}
+
+	if found == nil {
+		if globalCandidate {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("变量 '%s' 是全局变量，无需 nonlocal，直接访问即可", stmt.Name),
+				stmt.Pos.Line, stmt.Pos.Column, "invalid_nonlocal",
+				"删除 nonlocal 声明（全局变量在任意函数中均可直接读写）",
+			)
+		} else {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("未定义变量 '%s'，nonlocal 必须绑定外层函数作用域中的同名变量", stmt.Name),
+				stmt.Pos.Line, stmt.Pos.Column, "invalid_nonlocal",
+				"在外层函数中声明该变量，或使用全局变量",
+			)
+		}
+		return
+	}
+
+	// 类型一致性校验（宽松：声明类型未给出或与外层类型一致时通过）
+	if stmt.Type != "" && stmt.Type != found.Type {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("nonlocal 变量 '%s' 类型不匹配：声明为 '%s'，外层为 '%s'", stmt.Name, stmt.Type, found.Type),
+			stmt.Pos.Line, stmt.Pos.Column, "invalid_nonlocal",
+			"修正类型声明使其与外层变量一致",
+		)
+		return
+	}
+
+	// 注册为本作用域符号（scope 标记为 nonlocal）：
+	// 作用一是后续引用可以正常解析，作用二是让 codegen 识别为捕获目标。
+	// 类型一律用外层真实类型，保证后续类型推断一致。
+	sa.symbolTable.AddSymbol(stmt.Name, found.Type, found.Nullable, "nonlocal", stmt.Pos.Line, stmt.Pos.Column)
+
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
 	}
+}
+
+// analyzeLambdaExpression 分析 lambda/闭包表达式：
+// 在 lambda 参数作用域中分析函数体；检测函数体引用的外层函数局部变量
+// （捕获），结果填入 Captures 字段。捕获 lambda 因 C 回调缺少闭包环境
+// 传递通道暂不支持，由代码生成阶段拒绝（此处仅做分析与标注）。
+func (sa *SemanticAnalyzer) analyzeLambdaExpression(e *ast.LambdaExpression) {
+	oldSymbolTable := sa.symbolTable
+	sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "lambda")
+	sa.scope++
+
+	// 注册 lambda 参数（遮蔽捕获判定）
+	paramNames := make(map[string]bool, len(e.Params))
+	for i, param := range e.Params {
+		paramNames[param] = true
+		paramType := "int"
+		if i < len(e.ParamTypes) && e.ParamTypes[i] != "" {
+			paramType = e.ParamTypes[i]
+		}
+		sa.symbolTable.AddSymbol(param, paramType, false, "lambda_param", e.Pos.Line, e.Pos.Column)
+	}
+
+	// 分析函数体
+	for _, bodyStmt := range e.Body {
+		sa.analyzeStatement(bodyStmt)
+	}
+
+	// 捕获检测：引用的外层函数局部变量（非全局、非参数遮蔽）
+	collected := astutil.CollectIdentifiers(e.Body)
+	seen := make(map[string]bool)
+	var captures []string
+	for _, name := range orderedKeys(collected.Refs) {
+		if paramNames[name] || collected.Locals[name] {
+			continue
+		}
+		for sc := sa.symbolTable.GetParent(); sc != nil; sc = sc.GetParent() {
+			if sym := sc.GetLocalSymbol(name); sym != nil {
+				if sc.GetScopeName() == "global" {
+					break
+				}
+				if sym.Type == "function" || sym.Type == "type" {
+					break
+				}
+				if !seen[name] {
+					seen[name] = true
+					captures = append(captures, name)
+				}
+				break
+			}
+		}
+	}
+	if len(captures) > 0 {
+		sort.Strings(captures)
+		e.Captures = captures
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("lambda 捕获了外层函数局部变量（%s），暂不支持", strings.Join(captures, ", ")),
+			e.Pos.Line, e.Pos.Column, "lambda_capture_unsupported",
+			"将捕获变量提升为全局变量，或改用嵌套函数（fn 定义在外层函数体内，自动支持捕获）",
+		)
+	}
+
+	sa.symbolTable = oldSymbolTable
+	sa.scope--
+}
+
+// orderedKeys 返回 map keys 的排序切片
+func orderedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // analyzeVariableDeclaration 分析变量声明语句
@@ -1847,6 +1990,8 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 				sa.analyzeExpression(field.Value)
 			}
 		}
+	case *ast.LambdaExpression:
+		sa.analyzeLambdaExpression(e)
 	case *ast.PrefixCallExpression:
 		// 前缀调用表达式已在 analyzePrefixCallExpression 中处理
 	case *ast.SizeOfExpression, *ast.AlignOfExpression, *ast.OffsetOfExpression:
@@ -1970,6 +2115,17 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 			)
 			return
 		}
+		// 库函数必须使用限定名调用（如 std.io.println）；裸名一律视为未定义
+		if hint := sa.libQualifiedHint(expr.Name); hint != "" {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("未定义的变量: '%s'", expr.Name),
+				expr.Pos.Line,
+				expr.Pos.Column,
+				"undefined_variable",
+				fmt.Sprintf("%s 是库函数，必须使用限定形式调用, 例如: %s(...)", expr.Name, hint),
+			)
+			return
+		}
 		sa.errorCollector.AddSemanticError(
 			fmt.Sprintf("未定义的变量: '%s'", expr.Name),
 			expr.Pos.Line,
@@ -1977,7 +2133,6 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 			"undefined_variable",
 			"请确保变量已声明后再使用",
 		)
-		return
 	}
 	// 标记符号为已使用（unused 检查已注释）
 	// symbol.Referenced = true
@@ -1985,6 +2140,40 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 
 // classFieldAccessHint 在类方法/构造函数作用域内，若 name 是当前类的字段，
 // 返回提示用户改用 self.name 的字符串；否则返回空串。
+// libQualifiedHint 查询该裸名是否对应某个库函数；若是，返回其推荐的限定调用形式（如 std.io.println）
+func (sa *SemanticAnalyzer) libQualifiedHint(name string) string {
+	if sa.stdlibConfig == nil {
+		return ""
+	}
+	if hint := sa.libQualifiedHintIn(name, "std."); hint != "" {
+		return hint
+	}
+	if hint := sa.libQualifiedHintIn(name, "freestanding."); hint != "" {
+		return hint
+	}
+	if hint := sa.libQualifiedHintIn(name, ""); hint != "" {
+		return hint
+	}
+	for _, lib := range sa.stdlibConfig.ThirdParty {
+		if _, ok := lib.Functions[name]; ok && lib.Name != "" {
+			return fmt.Sprintf("%s.%s", lib.Name, name)
+		}
+	}
+	return ""
+}
+
+func (sa *SemanticAnalyzer) libQualifiedHintIn(name, prefix string) string {
+	for moduleKey, mod := range sa.stdlibConfig.Modules {
+		if !strings.HasPrefix(moduleKey, prefix) {
+			continue
+		}
+		if _, ok := mod.Functions[name]; ok {
+			return fmt.Sprintf("%s.%s", moduleKey, name)
+		}
+	}
+	return ""
+}
+
 func (sa *SemanticAnalyzer) classFieldAccessHint(name string) string {
 	if sa.program == nil {
 		return ""
@@ -2329,6 +2518,18 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		symbol := sa.symbolTable.GetSymbol(e.Name)
 		if symbol != nil {
 			return symbol.Type
+		}
+		return ""
+	case *ast.MatchExpression:
+		// match 表达式的类型取第一个臂返回表达式类型
+		for _, arm := range e.Arms {
+			if len(arm.Body) > 0 {
+				if es, ok := arm.Body[0].(*ast.ExpressionStatement); ok {
+					if t := sa.inferExpressionType(es.Expression); t != "" {
+						return t
+					}
+				}
+			}
 		}
 		return ""
 	case *ast.ParenExpression:
