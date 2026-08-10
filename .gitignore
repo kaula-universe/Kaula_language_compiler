@@ -3,7 +3,5 @@ kaula-compiler/kaulac.exe
 cache/
 kaula-compiler/cache/
 
-# pkglib 库自动构建产物（源码保留，忽略编译产物）
-pkglib/*/kbuild/
-pkglib/*/lib*.a
-pkglib/*/lib*.lib
+# pkglib 依赖目录（本地放库即用，不入库）
+pkglib/
