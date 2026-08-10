@@ -76,8 +76,13 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 		// 查找与目录同名的 .json 配置文件
 		configFile := filepath.Join(libDir, libName+".json")
 		if _, err := os.Stat(configFile); os.IsNotExist(err) {
-			// 没有配置文件，自动分析生成
-			fmt.Printf("No config for %s, auto-analyzing...\n", libName)
+			// 没有配置文件：先完整构建库（编译产物就绪），再解析处理调用签名
+			fmt.Printf("No config for %s, building before analyze...\n", libName)
+			if bRes, bErr := BuildLibrary(libDir); bErr != nil {
+				fmt.Printf("Warning: Build %s before analyze failed: %v\n", libName, bErr)
+			} else if bRes.HasLibraries {
+				fmt.Printf("Built %s before analyze (%d sources)\n", libName, bRes.Built)
+			}
 			result, analyzeErr := AnalyzePackage(libDir)
 			if analyzeErr != nil {
 				fmt.Printf("Warning: Failed to auto-analyze %s: %v\n", libName, analyzeErr)

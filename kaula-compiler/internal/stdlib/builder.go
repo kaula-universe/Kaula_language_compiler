@@ -17,6 +17,21 @@ import (
 // buildWorkDirName 存放桥接生成与编译产物的目录名（位于库目录内，已被 .gitignore 忽略）
 const buildWorkDirName = "kbuild"
 
+// skipDirNames 递归扫描时跳过的目录：示例/测试/文档/构建产物等非库源码目录。
+// 库目录可能以完整仓库形态（含 examples/、test_driver/、.git 等）放入 pkglib，
+// 只有真正构成库的源码与头文件才应参与分析/构建。
+var skipDirNames = map[string]bool{
+	".git": true, ".github": true,
+	"examples": true, "example": true,
+	"test_driver": true, "tests": true, "test": true,
+	"benchmarks": true, "benchmark": true,
+	"docs": true, "doc": true,
+	"scripts": true, "cmake": true,
+	"packaging": true,
+	"kbuild": true, "build": true, "dist": true, "out": true,
+	"third_party": true, "3rdparty": true, "vendor": true,
+}
+
 // BuildResult 表示一次静态库构建的结果
 type BuildResult struct {
 	Name         string   // 库名（与目录同名）
@@ -41,42 +56,93 @@ func (s BuildSource) IsCpp() bool {
 	return s.Kind == "c++"
 }
 
-// ScanPackageSources 扫描库目录内的可编译源文件（顶层 + 一级子目录）。
+// ScanPackageSources 递归扫描库目录内的可编译源文件。
 // 自动生成的桥接源 (*_kbridge.cpp) 同样会被纳入编译，从而链接 extern "C" 符号。
+// skipDirNames 中的目录（examples/、test_driver/、tests/、docs/ 等）不参与扫描。
 func ScanPackageSources(pkgDir string) ([]BuildSource, error) {
 	var sources []BuildSource
-	entries, err := os.ReadDir(pkgDir)
+	err := walkPkgTree(pkgDir, 4, func(absPath, relPath string, isDir bool) {
+		if isDir {
+			return
+		}
+		src, ok := classifySource(relPath)
+		if ok {
+			sources = append(sources, BuildSource{RelPath: relPath, AbsPath: absPath, Kind: src})
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			src, ok := classifySource(e.Name())
-			if ok {
-				rel := filepath.ToSlash(e.Name())
-				sources = append(sources, BuildSource{RelPath: rel, AbsPath: filepath.Join(pkgDir, e.Name()), Kind: src})
-			}
-			continue
-		}
-		// 递归一层子目录（C++ 库常用 backends/source 子目录结构）
-		sub := filepath.Join(pkgDir, e.Name())
-		subEntries, err := os.ReadDir(sub)
-		if err != nil {
-			continue
-		}
-		for _, se := range subEntries {
-			if se.IsDir() {
-				continue
-			}
-			src, ok := classifySource(se.Name())
-			if ok {
-				rel := filepath.ToSlash(filepath.Join(e.Name(), se.Name()))
-				sources = append(sources, BuildSource{RelPath: rel, AbsPath: filepath.Join(sub, se.Name()), Kind: src})
-			}
-		}
-	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].RelPath < sources[j].RelPath })
 	return sources, nil
+}
+
+// CollectHeaderDirs 递归收集库内 .h/.hpp 头文件所在目录（构建时的 include 搜索路径）。
+// 完整仓库形态的库（如 webview 的 core/include/... ）依赖这些目录解析内部相对包含。
+func CollectHeaderDirs(pkgDir string) ([]string, error) {
+	seen := make(map[string]bool)
+	var dirs []string
+	err := walkPkgTree(pkgDir, 8, func(absPath, relPath string, isDir bool) {
+		if isDir {
+			return
+		}
+		lower := strings.ToLower(relPath)
+		if !strings.HasSuffix(lower, ".h") && !strings.HasSuffix(lower, ".hpp") {
+			return
+		}
+		d := filepath.Dir(absPath)
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dirs, nil
+}
+
+// walkPkgTree 递归遍历库目录树，跳过 skipDirNames 中的目录。
+// maxDepth 限制扫描深度（防符号链接/深层嵌套失控）。
+func walkPkgTree(root string, maxDepth int, visit func(absPath, relPath string, isDir bool)) error {
+	var walk func(dir, rel string, depth int) error
+	walk = func(dir, rel string, depth int) error {
+		if depth > maxDepth {
+			return nil
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil // 不可读目录（权限等）跳过
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() {
+				lower := strings.ToLower(name)
+				if skipDirNames[lower] {
+					continue
+				}
+				if depth+1 > maxDepth {
+					continue
+				}
+				subRel := name
+				if rel != "" {
+					subRel = rel + "/" + name
+				}
+				visit(filepath.Join(dir, name), subRel, true)
+				if err := walk(filepath.Join(dir, name), subRel, depth+1); err != nil {
+					return err
+				}
+				continue
+			}
+			subRel := name
+			if rel != "" {
+				subRel = rel + "/" + name
+			}
+			visit(filepath.Join(dir, name), subRel, false)
+		}
+		return nil
+	}
+	return walk(root, "", 0)
 }
 
 // classifySource 判断文件名是否是需编译的 C/C++ 源码
@@ -179,13 +245,14 @@ func LibNeedsBuild(pkgDir string) bool {
 }
 
 // CppRuntimeLibraries 返回链接 C++ 库所需的运行时库：
-// llvm-mingw 提供 libc++/libc++abi，其他平台用 libstdc++
+// llvm-mingw 的 libc++.a 自包含 ABI 符号（再链 libc++abi 会触发
+// lld "was replaced" 重复符号错误），其他平台用 libstdc++
 func CppRuntimeLibraries(hasCpp bool) []string {
 	if !hasCpp {
 		return nil
 	}
 	if runtime.GOOS == "windows" {
-		return []string{"c++", "c++abi"}
+		return []string{"c++"}
 	}
 	if runtime.GOOS == "darwin" {
 		return nil // 系统自带
@@ -196,6 +263,54 @@ func CppRuntimeLibraries(hasCpp bool) []string {
 // LibArchivePath 返回库的静态归档文件路径（lib<name>.a）
 func LibArchivePath(pkgDir string) string {
 	return filepath.Join(pkgDir, "lib"+filepath.Base(pkgDir)+".a")
+}
+
+// listArchiveSymbols 用 llvm-nm 列出归档中已定义的代码符号名（T 段）。
+// 分析器在头文件签名提取失败时用它做诊断：库已完整构建，但调用签名
+// 未能从头文件解析出来（如纯 C++ 模板 API），符号清单可指导人工补充配置。
+func listArchiveSymbols(archivePath string) ([]string, error) {
+	if _, err := os.Stat(archivePath); err != nil {
+		return nil, err
+	}
+	nmPath := ""
+	if p, err := exec.LookPath("llvm-nm"); err == nil {
+		nmPath = p
+	} else if clangPath, err := findClangPath(); err == nil {
+		cand := filepath.Join(filepath.Dir(clangPath), "llvm-nm.exe")
+		if runtime.GOOS != "windows" {
+			cand = filepath.Join(filepath.Dir(clangPath), "llvm-nm")
+		}
+		if _, err := os.Stat(cand); err == nil {
+			nmPath = cand
+		}
+	}
+	if nmPath == "" {
+		return nil, fmt.Errorf("llvm-nm not found")
+	}
+	cmd := exec.Command(nmPath, "--defined-only", archivePath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+	var syms []string
+	for _, line := range strings.Split(string(out), "\n") {
+		// 格式："00000000 T symbol"（llvm-nm 的默认"地址 段 名字"三列布局）
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		// COFF 下代码段为 T/t；跳过 @feat.00 等汇编注解符号与 IID_ 数据（IID 在 R 段，天然被过滤）
+		if fields[1] != "T" && fields[1] != "t" {
+			continue
+		}
+		name := strings.TrimPrefix(fields[2], "__imp_")
+		if name == "" || strings.HasPrefix(name, "@") {
+			continue
+		}
+		syms = append(syms, name)
+	}
+	sort.Strings(syms)
+	return syms, nil
 }
 
 // ConfigStale 判断库的 JSON 配置是否已过期：配置缺失、或（且仅当配置由分析器自动生成时）
@@ -242,29 +357,31 @@ func ConfigStale(pkgDir, libName string) bool {
 			return true
 		}
 	}
-	// 检查所有头文件与源码是否比配置新
-	entries, err := os.ReadDir(pkgDir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := strings.ToLower(e.Name())
-		isHeader := strings.HasSuffix(name, ".h") || strings.HasSuffix(name, ".hpp")
-		isSource := strings.HasSuffix(name, ".c") || strings.HasSuffix(name, ".cpp") ||
-			strings.HasSuffix(name, ".cc") || strings.HasSuffix(name, ".cxx")
-		if !isHeader && !isSource {
-			continue
-		}
-		info, eerr := e.Info()
-		if eerr != nil {
-			continue
-		}
-		if info.ModTime().After(cfgInfo.ModTime()) {
+	// 检查所有头文件与源码是否比配置新（递归，跳过 skipDirNames 目录）
+	typeNameIs := func(name string) bool {
+		lower := strings.ToLower(filepath.Ext(name))
+		switch lower {
+		case ".h", ".hpp", ".c", ".cpp", ".cc", ".cxx", ".c++":
 			return true
 		}
+		return false
+	}
+	stale := false
+	_ = walkPkgTree(pkgDir, 8, func(absPath, relPath string, isDir bool) {
+		if isDir || stale {
+			return
+		}
+		if !typeNameIs(relPath) {
+			return
+		}
+		if info, eerr := os.Stat(absPath); eerr == nil {
+			if info.ModTime().After(cfgInfo.ModTime()) {
+				stale = true
+			}
+		}
+	})
+	if stale {
+		return true
 	}
 	return false
 }
@@ -354,8 +471,12 @@ func BuildLibrary(pkgDir string) (*BuildResult, error) {
 		return nil, fmt.Errorf("create build dir %s: %w", objDir, err)
 	}
 
-	// include 路径：库里目录本身（函数式包含 "imgui/xxx.h" 需要父目录）与库目录
+	// include 路径：库里目录本身（函数式包含 "imgui/xxx.h" 需要父目录）、库目录，
+	// 以及库内所有头文件所在目录（完整仓库形态的库，如 webview 的 core/include/...）
 	includeDirs := []string{filepath.Dir(pkgDir), pkgDir}
+	if hdrDirs, err := CollectHeaderDirs(pkgDir); err == nil {
+		includeDirs = append(includeDirs, hdrDirs...)
+	}
 
 	hasCpp := false
 	for _, s := range sources {
@@ -452,6 +573,9 @@ func compileOneSource(clangPath, objDir string, s BuildSource, includeDirs []str
 
 	if s.Kind == "c++" {
 		args = append(args, "-x", "c++", "-std=c++17")
+		// 单头 C++ 库（如 webview）在未定义 WEBVIEW_STATIC 时会把 API 宏展开为
+		// inline，导致实现函数不生成外部符号、静态库链接失败。统一按静态构建预定义。
+		args = append(args, "-DWEBVIEW_STATIC")
 	} else {
 		args = append(args, "-x", "c", "-std=c11")
 	}

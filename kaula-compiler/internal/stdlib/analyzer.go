@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -150,26 +152,27 @@ func findClangPath() (string, error) {
 	return "", fmt.Errorf("clang not found in PATH or common locations")
 }
 
-// classifyLibrary 分类库是单头文件还是多头文件
+// classifyLibrary 分类库是单头文件还是多头文件。
+// 递归遍历库目录树（跳过 skipDirNames 中的目录），支持完整仓库形态的库
+// （头文件分散在 core/include/ 等子目录中）。返回带头文件相对库目录路径。
 func classifyLibrary(libDir string) (string, []string, error) {
 	var headerFiles []string
-	entries, err := os.ReadDir(libDir)
-	if err != nil {
-		return "", nil, err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	err := walkPkgTree(libDir, 8, func(absPath, relPath string, isDir bool) {
+		if isDir {
+			return
 		}
-		name := entry.Name()
+		name := filepath.Base(relPath)
 		if strings.HasSuffix(name, ".h") || strings.HasSuffix(name, ".hpp") {
 			// 跳过扩展 API 头（sqlite3ext.h / glext.h 等）：
 			// 它们要求特殊的编译上下文（如 SQLITE_EXTENSION_INIT），不能作为普通头 include
 			if strings.HasSuffix(strings.ToLower(name), "ext.h") {
-				continue
+				return
 			}
-			headerFiles = append(headerFiles, name)
+			headerFiles = append(headerFiles, filepath.ToSlash(relPath))
 		}
+	})
+	if err != nil {
+		return "", nil, err
 	}
 	if len(headerFiles) == 0 {
 		return "", nil, fmt.Errorf("no header files found in %s", libDir)
@@ -177,6 +180,7 @@ func classifyLibrary(libDir string) (string, []string, error) {
 	if len(headerFiles) == 1 {
 		return "single_header", headerFiles, nil
 	}
+	sort.Strings(headerFiles)
 	return "multi_header", headerFiles, nil
 }
 
@@ -499,6 +503,9 @@ func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functi
 			if sourceFile != "" {
 				locFileNorm := strings.ReplaceAll(locFile, "\\", "/")
 				sourceNorm := strings.ReplaceAll(sourceFile, "\\", "/")
+				// filepath.Dir 在 Windows 返回反斜杠分隔路径，locFileNorm 已归一化为正斜杠，
+				// 必须同步归一化目录，否则 Contains 永远不匹配，误杀被包含头中的 C 函数
+				dirNorm := strings.ReplaceAll(filepath.Dir(sourceNorm), "\\", "/")
 				if isCpp {
 					if !strings.HasPrefix(locFileNorm, sourceNorm) &&
 						!strings.HasSuffix(locFileNorm, "/"+filepath.Base(sourceNorm)) &&
@@ -506,7 +513,7 @@ func extractFunctionDeclsRecursive(node *ClangASTNode, sourceFile string, functi
 						return
 					}
 				} else if !strings.HasPrefix(locFileNorm, sourceNorm) &&
-					!strings.Contains(locFileNorm, filepath.Dir(sourceNorm)) &&
+					!strings.Contains(locFileNorm, dirNorm) &&
 					!strings.HasSuffix(locFileNorm, "/"+filepath.Base(sourceNorm)) &&
 					!strings.HasSuffix(locFileNorm, "\\"+filepath.Base(sourceNorm)) {
 					return
@@ -616,6 +623,47 @@ func normalizeType(typeStr string) string {
 	return t
 }
 
+// pragmaLibRe 匹配 MSVC 风格的 #pragma comment(lib, "xxx.lib")
+var pragmaLibRe = regexp.MustCompile(`#pragma\s+comment\s*\(\s*lib\s*,\s*"([^"]+)"\s*\)`)
+
+// detectPragmaLibs 从库源码/头文件中提取 MSVC 的 #pragma comment(lib, ...) 依赖声明
+// （如 webview 的 ole32/shell32/shlwapi/user32/version/advapi32）。
+// 这类声明在 mingw/lld 下不会自动生效，但作为库作者声明的依赖清单，
+// 分析器据此自动写入配置的 libraries，免去人工补充。
+func detectPragmaLibs(pkgDir string) []string {
+	seen := make(map[string]bool)
+	var libs []string
+	_ = walkPkgTree(pkgDir, 10, func(absPath, relPath string, isDir bool) {
+		if isDir {
+			return
+		}
+		ext := strings.ToLower(filepath.Ext(relPath))
+		switch ext {
+		case ".c", ".h", ".hh", ".hpp", ".cc", ".cpp", ".cxx", ".c++":
+		default:
+			return
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			return
+		}
+		for _, m := range pragmaLibRe.FindAllSubmatch(data, -1) {
+			if len(m) < 2 {
+				continue
+			}
+			lib := strings.TrimSuffix(strings.ToLower(string(m[1])), ".lib")
+			// 跳过导入库/扩展名形如 "xxx.lib" 但实际是 .a 的情况（无）
+			if lib == "" || seen[lib] {
+				continue
+			}
+			seen[lib] = true
+			libs = append(libs, lib)
+		}
+	})
+	sort.Strings(libs)
+	return libs
+}
+
 // AnalyzePackage 分析指定包目录，生成配置
 func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 	analyzeMu.Lock()
@@ -628,8 +676,21 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 		return nil, fmt.Errorf("classify library %s: %w", libName, err)
 	}
 
-	// 2. 扫描链接库
+	// 2. 扫描链接库（目录内的 .a/.lib/.so/.dll + 源码中 #pragma comment(lib) 声明的依赖）
 	libraries, _ := scanLinkLibraries(pkgDir)
+	pragmaLibs := detectPragmaLibs(pkgDir)
+	for _, pl := range pragmaLibs {
+		dup := false
+		for _, l := range libraries {
+			if l == pl {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			libraries = append(libraries, pl)
+		}
+	}
 
 	// 3. 选择主头文件并读取内容用于宏检测
 	//    单头：唯一头文件；多头：优先与目录同名的头文件
@@ -639,7 +700,8 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 	} else {
 		mainHeaderFound := false
 		for _, h := range headerFiles {
-			baseName := strings.TrimSuffix(h, filepath.Ext(h))
+			// h 可为相对路径（core/include/webview/webview.h），主头匹配只看文件名
+			baseName := strings.TrimSuffix(filepath.Base(h), filepath.Ext(h))
 			if baseName == libName {
 				mainHeader = libName + "/" + h
 				mainHeaderFound = true
@@ -719,6 +781,18 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 	}
 
 	if len(functions) == 0 {
+		// 头文件签名提取失败：若库已完整构建（归档存在），用归档符号表辅助诊断，
+		// 让"先构建、后解析"的顺序产生实际价值
+		if syms, err := listArchiveSymbols(LibArchivePath(pkgDir)); err == nil && len(syms) > 0 {
+			preview := syms
+			if len(preview) > 12 {
+				preview = preview[:12]
+			}
+			return nil, fmt.Errorf("no callable C functions extracted from %s headers, "+
+				"but the built archive %s defines %d code symbols (e.g. %s). "+
+				"Add a C-compatible api header or hand-edit %s.json functions",
+				libName, LibArchivePath(pkgDir), len(syms), strings.Join(preview, ", "), libName)
+		}
 		if lastExtractErr != nil {
 			return nil, fmt.Errorf("extract functions from %s: %w", libName, lastExtractErr)
 		}
@@ -730,7 +804,8 @@ func AnalyzePackage(pkgDir string) (*LibAnalysisResult, error) {
 		mainBase := filepath.Base(mainHeader)
 		mainHasFunctions := false
 		for _, h := range effectiveHeaders {
-			if h == mainBase {
+			// effectiveHeaders 可含相对路径（core/include/...），比较文件名即可
+			if filepath.Base(h) == mainBase {
 				mainHasFunctions = true
 				break
 			}
