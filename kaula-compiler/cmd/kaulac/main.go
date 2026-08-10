@@ -2101,6 +2101,10 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 	// 添加 kmm_v4.o/spend_call.o/allocator.o（如果存在）— 裸机模式下跳过（依赖 OS 调用）
 	if !useInstalledLibraries && (cfg == nil || !cfg.Freestanding) {
+		// 无 std 模块源时（如仅使用第三方库）上面的 -x none 未生效，这里补上
+		if len(moduleSources) == 0 {
+			clangArgs = append(clangArgs, "-x", "none")
+		}
 		for _, objName := range runtimeObjs {
 			runtimeObj := filepath.Join(objectCacheDir, objName)
 			if _, err := os.Stat(runtimeObj); err == nil {
@@ -2134,19 +2138,22 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
  					break
  				}
  			}
- 		} else {
- 			// Windows 下直接链接所有 .o 文件，避免 llvm-lib 问题
- 			fmt.Printf("[Compile] Linking %d .o files directly\n", len(moduleSources)+len(runtimeObjs))
- 			for _, ms := range moduleSources {
- 				clangArgs = append(clangArgs, ms.objPath)
- 			}
- 			for _, objName := range runtimeObjs {
- 				runtimeObj := filepath.Join(objectCacheDir, objName)
- 				if _, err := os.Stat(runtimeObj); err == nil {
- 					clangArgs = append(clangArgs, runtimeObj)
- 				}
- 			}
- 		}
+} else {
+			// Windows 下直接链接所有 .o 文件，避免 llvm-lib 问题
+			// 同样需要 -x none 重置语言：本分支可能在无 std 模块源（如仅用
+			// 第三方库）时执行，此时前面的 -x c 会把 .o 当作 C 源码编译失败
+			fmt.Printf("[Compile] Linking %d .o files directly\n", len(moduleSources)+len(runtimeObjs))
+			clangArgs = append(clangArgs, "-x", "none")
+			for _, ms := range moduleSources {
+				clangArgs = append(clangArgs, ms.objPath)
+			}
+			for _, objName := range runtimeObjs {
+				runtimeObj := filepath.Join(objectCacheDir, objName)
+				if _, err := os.Stat(runtimeObj); err == nil {
+					clangArgs = append(clangArgs, runtimeObj)
+				}
+			}
+		}
  	} // end if !cfg.Freestanding
 
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
@@ -2190,23 +2197,10 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 			}
 			if resolvedLibDir != "" && (cfg == nil || !cfg.SkipAutoPkg) {
-				// 配置自愈（默认开启，--skip-auto-pkg 关闭）：
-				// 对 auto_generated 的配置在落后于头/源码时重新分析（生成桥接/新签名），
-				// 并合并旧配置里的人工库列表（如 imgui 的 d3d11/dwmapi/d3dcompiler），
-				// 避免重新分析丢掉人工链接项；缺失配置的库由导入阶段的按需分析自动处理。
-				if stdlib.ConfigStale(resolvedLibDir, lib.Name) {
-					fmt.Printf("[Info] Config for %s is stale, re-analyzing...\n", lib.Name)
-					if aRes, aErr := stdlib.AnalyzePackage(resolvedLibDir); aErr == nil {
-						// 合并旧配置的人工链接库/额外目录，防止自动分析丢项
-						if merged, mErr := stdlib.MergeLibrariesInto(resolvedLibDir, aRes); mErr == nil {
-							lib = *merged
-						} else {
-							fmt.Printf("[Warn] Merge config for %s failed: %v\n", lib.Name, mErr)
-						}
-					} else {
-						fmt.Printf("[Warn] Re-analyze %s failed: %v\n", lib.Name, aErr)
-					}
-				}
+				// 先完整构建：库编译产物（lib<name>.a）优先就绪。
+				// 构建只依赖源码扫描，无需函数签名；解析（提取调用签名、
+				// 生成桥接）在后执行，避免"解析先行"在签名提取失败时
+				// 连构建都被跳过。
 				result, bErr := ensureLibrary(resolvedLibDir, libForce)
 				if bErr != nil {
 					fmt.Printf("[Warn] Auto-build failed for %s: %v (continuing)\n", lib.Name, bErr)
@@ -2224,6 +2218,22 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 						if !already {
 							extraLibs = append(extraLibs, extra)
 						}
+					}
+				}
+				// 再解析：配置过期时重新分析（生成桥接/新签名），
+				// 并合并旧配置里的人工库列表（如 imgui 的 d3d11/dwmapi/d3dcompiler），
+				// 避免重新分析丢掉人工链接项；缺失配置的库由导入阶段的按需分析自动处理。
+				if stdlib.ConfigStale(resolvedLibDir, lib.Name) {
+					fmt.Printf("[Info] Config for %s is stale, re-analyzing...\n", lib.Name)
+					if aRes, aErr := stdlib.AnalyzePackage(resolvedLibDir); aErr == nil {
+						// 合并旧配置的人工链接库/额外目录，防止自动分析丢项
+						if merged, mErr := stdlib.MergeLibrariesInto(resolvedLibDir, aRes); mErr == nil {
+							lib = *merged
+						} else {
+							fmt.Printf("[Warn] Merge config for %s failed: %v\n", lib.Name, mErr)
+						}
+					} else {
+						fmt.Printf("[Warn] Re-analyze %s failed: %v\n", lib.Name, aErr)
 					}
 				}
 			}

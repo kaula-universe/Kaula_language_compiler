@@ -21,7 +21,8 @@
 ```
 stdlib/
 ├── stdlib.go      # 标准库配置加载
-└── analyzer.go    # C 头文件自动分析
+├── analyzer.go    # C 头文件自动分析
+└── builder.go     # 库归档构建（先构建、后解析）
 ```
 
 ## stdlib.json 结构
@@ -161,12 +162,26 @@ pkglib/
     └── imgui_kbridge.h/.cpp   # 自动生成，勿手改
 ```
 
-首次 `import imgui` 时编译器依次自动完成：
+首次 `import 某库` 时编译器依次自动完成：
 
-1. **自动分析**：无 `<库名>.json` → 用 Clang 提取函数签名并写配置；配置已存在但过期（自动生成配置 + 头/源码比配置新，或配置里登记的头文件已消失）→ 自动重新分析
-2. **自动桥接**（C++ 头文件）：生成 `<lib>_kbridge.h/.cpp`（`extern "C"`），并经 `clang -fsyntax-only` 编译自检，失败则回退并跳过该头
-3. **自动构建**：归档缺失或源码更新时，编译所有 `.c/.cpp` 为 `<lib> 的 `lib<name>.a`，C++ 库自动追加 `c++/c++abi` 运行时链接
+1. **自动构建（先）**：递归扫描库目录全部源码（自动跳过 `.git`/`examples`/`tests`/`docs`/`third_party` 等目录），归档缺失或源码更新时编译 `.c/.cpp` 为 `lib<name>.a`；同时按源码里的 `#pragma comment(lib, "...")` 声明（MSVC 风格，如 webview 的 `ole32/shell32/shLwapi/user32/version`）自动提取系统依赖写入配置；C++ 库自动追加 `c++` 运行时链接（llvm-mingw 的 `libc++.a` 自包含 ABI，无需再链 `c++abi`）
+2. **自动分析（后）**：无 `<库名>.json` → 用 Clang 从库内头文件提取函数签名并写配置；配置已存在但过期（自动生成配置 + 头/源码比配置新，或配置里登记的头文件已消失）→ 自动重新分析。**先构建后解析**：构建只依赖源码扫描、无需函数签名，因此即使签名提取失败，归档也已就绪（失败时用 `llvm-nm` 读归档符号表给出诊断，提示应补 C API 头或手改配置）
+3. **自动桥接**（C++ 头文件）：生成 `<lib>_kbridge.h/.cpp`（`extern "C"`），并经 `clang -fsyntax-only` 编译自检，失败则回退并跳过该头
 4. **自愈**：重新分析后自动合并旧配置里的人工项（`libraries/include_path/library_path`），手写/补的链接库不会丢
+
+### 递归扫描
+
+库目录按**完整仓库形态**放置即可（如 `webview/` 的 `core/include/...` 多级结构），
+构建与分析均递归扫描，并自动跳过常见非源码目录：`.git`、`.github`、`examples`、
+`test_driver`、`tests`、`docs`、`scripts`、`cmake`、`packaging`、`kbuild`、
+`build`、`dist`、`out`、`third_party`、`3rdparty`、`vendor` 等。
+
+### 依赖自动提取（`#pragma comment(lib)`）
+
+MSVC 风格的 `#pragma comment(lib, "xxx.lib")` 在 mingw/lld 下不会自动生效，
+但它是库作者声明的官方依赖清单：分析器从库内全部 `.c/.h/.hh/.cpp` 中提取
+这些声明并去重写入配置的 `libraries`（如 webview 自动得到
+`ole32/shell32/shlwapi/user32/version/advapi32`），免去人工补充。
 
 ### C++ 自动桥接规则
 
@@ -204,10 +219,12 @@ C++ 头文件无法被 Kaula 生成的 C 代码直接引用，编译器自动生
 ### 自动发现（实现）
 
 ```go
-// 编译器加载阶段（配置缺失即分析、过期即重分析）
+// 编译器加载阶段：先构建、后解析（配置缺失即构建+分析，过期即重建+重分析）
 libraries, err := stdlib.LoadPkgLibraries("pkglib/")
 for _, lib := range libraries {
     if stdlib.ConfigStale(libDir, lib.Name) { // 缺失/过期/登记头文件消失
+        // 构建产物与函数签名无关，先构建保证归档就绪再分析
+        buildResult, _ := stdlib.BuildLibrary(libDir, lib.Name)
         result, _ := stdlib.AnalyzePackage(libDir)
         stdlib.MergeLibrariesInto(libDir, result) // 合并人工链接项并写回
     }
@@ -357,7 +374,7 @@ fn main() {
 
 | 命令 | 作用 |
 |---|---|
-| `kaulac --build-pkglib <库名>` | 幂等指令：无配置先自动分析 → 过期自动重分析 → 构建归档（平时无需手动跑，import 时自动完成） |
+| `kaulac --build-pkglib <库名>` | 幂等指令：无配置先构建归档 → 自动分析 → 过期自动重建+重分析（合并人工项）→ 构建归档（平时无需手动跑，import 时自动完成） |
 | `kaulac --build-pkglib all` | 构建 pkglib 下全部库 |
 | `kaulac --analyze-pkg <库名>` | 强制手动重新解析（Clang 重新提取签名并重写 `<库名>.json`，常用于头文件改动后手动刷新） |
 | `kaulac --analyze-pkg-all` | 重新解析 pkglib 下全部库 |
@@ -379,7 +396,7 @@ fn main() {
 | import 解析 | `import 某库` 时配置中不存在该库，且 `pkglib/` 下有对应目录 | `tryAnalyzeMissingPackage`（按需分析并写配置） |
 | 编译自愈 | 正在使用的库配置过期（`auto_generated=true` 且头/源码比配置新、或登记头文件消失） | `compileCCode` → `ConfigStale` 触发重分析 + `MergeLibrariesInto` |
 
-其中"编译自愈"只针对**已 import（usedModules）**的库执行，未使用的库不会被强制重分析；`--skip-auto-pkg` 可关闭全部自动分析。
+其中"编译自愈"只针对**已 import（usedModules）**的库执行，未使用的库不会被强制重分析；`--skip-auto-pkg` 可关闭全部自动分析。自愈与加载阶段均为**先构建、后分析**的顺序：构建只依赖源码扫描，解析在归档就绪后执行，签名提取失败时可用归档符号表辅助定位。
 
 ### 编译器处理
 
