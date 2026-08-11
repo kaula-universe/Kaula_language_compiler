@@ -5,3 +5,9 @@ kaula-compiler/cache/
 
 # pkglib 依赖目录（本地放库即用，不入库）
 pkglib/
+
+# 本地生成的中间产物和测试执行文件
+kaula-compiler/build/
+kaula-compiler/dbg_build_log.txt
+test/*.exe
+test/*.o

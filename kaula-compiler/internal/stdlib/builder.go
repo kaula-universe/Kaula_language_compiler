@@ -245,14 +245,18 @@ func LibNeedsBuild(pkgDir string) bool {
 }
 
 // CppRuntimeLibraries 返回链接 C++ 库所需的运行时库：
-// llvm-mingw 的 libc++.a 自包含 ABI 符号（再链 libc++abi 会触发
-// lld "was replaced" 重复符号错误），其他平台用 libstdc++
+// - Windows (MSVC ABI)：clang 编译 .cpp 时自动链接 C++ 运行时，
+//   显式 -lc++ 会查找不存在的 c++.lib 导致链接失败，故返回 nil
+// - llvm-mingw 的 libc++.a 自包含 ABI 符号（再链 libc++abi 会触发
+//   lld "was replaced" 重复符号错误）
+// - macOS 系统自带
+// - 其他平台用 libstdc++
 func CppRuntimeLibraries(hasCpp bool) []string {
 	if !hasCpp {
 		return nil
 	}
 	if runtime.GOOS == "windows" {
-		return []string{"c++"}
+		return nil // MSVC clang 自动链接 C++ 运行时，无需显式 -lc++
 	}
 	if runtime.GOOS == "darwin" {
 		return nil // 系统自带
@@ -260,9 +264,16 @@ func CppRuntimeLibraries(hasCpp bool) []string {
 	return []string{"stdc++"}
 }
 
-// LibArchivePath 返回库的静态归档文件路径（lib<name>.a）
+// LibArchivePath 返回库的静态归档文件路径。
+// Windows (MSVC ABI)：使用 <name>.lib 命名（MSVC link.exe 的 -l<name> 搜索约定），
+//   llvm-ar 产出的 COFF 归档与 .lib 格式兼容。
+// 其他平台：使用 lib<name>.a（ld/GNU 约定）。
 func LibArchivePath(pkgDir string) string {
-	return filepath.Join(pkgDir, "lib"+filepath.Base(pkgDir)+".a")
+	name := filepath.Base(pkgDir)
+	if runtime.GOOS == "windows" {
+		return filepath.Join(pkgDir, name+".lib")
+	}
+	return filepath.Join(pkgDir, "lib"+name+".a")
 }
 
 // listArchiveSymbols 用 llvm-nm 列出归档中已定义的代码符号名（T 段）。
