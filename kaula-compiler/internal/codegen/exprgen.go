@@ -2504,6 +2504,9 @@ func (eg *ExpressionGenerator) GenerateMatchAssign(match *ast.MatchExpression, t
 func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpression, targetCode string) string {
 	var code strings.Builder
 	first := true
+	// 判断目标类型: char*/cstr 直接用裸指针, 其他(string 等)用 .ptr 成员
+	targetType := eg.inferType(e.Target)
+	usePtr := targetType != "cstr"
 	for _, arm := range e.Arms {
 		if arm.Pattern == nil {
 			continue
@@ -2517,7 +2520,10 @@ func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpress
 			}
 			code.WriteString("strcmp(")
 			code.WriteString(targetCode)
-			code.WriteString(".ptr, \"")
+			if usePtr {
+				code.WriteString(".ptr")
+			}
+			code.WriteString(", \"")
 			code.WriteString(arm.Pattern.StrValue)
 			code.WriteString("\") == 0")
 			code.WriteString(") {\n")

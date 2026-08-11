@@ -112,7 +112,8 @@ type Error struct {
 	Message       string
 	Line          int
 	Column        int
-	File          string
+	File          string // 真实文件名（如 test.kl / path/to/test.kl）
+	Code          string // 错误类别/错误码（如 undefined_variable / if_chain_should_use_match）
 	Suggestion    string
 	SourceContext string // 源码上下文
 	SourceLine    string // 错误所在的源码行
@@ -153,8 +154,9 @@ func (e *Error) String() string {
 
 // ErrorCollector 表示错误收集器
 type ErrorCollector struct {
-	errors []*Error
-	source string // 当前编译单元源码（用于给缺少上下文的错误补充源码与高亮）
+	errors   []*Error
+	source   string // 当前编译单元源码（用于给缺少上下文的错误补充源码与高亮）
+	fileName string // 当前编译单元文件名（用于错误首行显示）
 }
 
 // NewErrorCollector 创建一个新的错误收集器
@@ -164,6 +166,16 @@ func NewErrorCollector() *ErrorCollector {
 	}
 }
 
+// SetFile 设置当前编译单元的文件名；之后添加的错误首行会显示该文件名
+func (ec *ErrorCollector) SetFile(fileName string) {
+	ec.fileName = fileName
+}
+
+// GetFile 返回当前编译单元的文件名
+func (ec *ErrorCollector) GetFile() string {
+	return ec.fileName
+}
+
 // SetSource 设置当前编译单元的源码；
 // 之后通过 AddError 系列方法添加的、缺少源码上下文的错误会自动补充源码上下文与高亮区间
 func (ec *ErrorCollector) SetSource(source string) {
@@ -171,13 +183,14 @@ func (ec *ErrorCollector) SetSource(source string) {
 }
 
 // AddError 添加一个错误
-func (ec *ErrorCollector) AddError(errorType ErrorType, message string, line, column int, file, suggestion string) {
+func (ec *ErrorCollector) AddError(errorType ErrorType, message string, line, column int, code, suggestion string) {
 	err := &Error{
 		Type:       errorType,
 		Message:    message,
 		Line:       line,
 		Column:     column,
-		File:       file,
+		File:       ec.fileName, // 真实文件名来自 ErrorCollector（main 设置）
+		Code:       code,        // 错误码/类别（如 undefined_variable）
 		Suggestion: suggestion,
 	}
 	if err.SourceContext == "" && ec.source != "" {
@@ -185,7 +198,7 @@ func (ec *ErrorCollector) AddError(errorType ErrorType, message string, line, co
 		err.SourceContext = context
 		err.SourceLine = sourceLine
 		err.LineNumberStr = lineNumStr
-		err.Highlight = BuildHighlight(ec.source, line, column, 0, file, errorType, message)
+		err.Highlight = BuildHighlight(ec.source, line, column, 0, code, errorType, message)
 	}
 	ec.errors = append(ec.errors, err)
 }
@@ -398,28 +411,28 @@ func ExtractSourceContext(source string, line, column int) (string, string, stri
 		lineNumPadded := fmt.Sprintf("%4s", lineNum)
 		if i+1 == line {
 			context += fmt.Sprintf("%s > | %s\n", lineNumPadded, lines[i])
+			// 指示行紧跟错误行正下方 (gcc/clang 风格: ^~~~ 紧贴错误行)
+			columnStr := ""
+			for c := 0; c < column-1 && c < len(lines[i]); c++ {
+				if lines[i][c] == '	' {
+					columnStr += "    "
+				} else {
+					columnStr += " "
+				}
+			}
+			columnStr += "^"
+			context += "       | " + columnStr + "\n"
 		} else {
 			context += fmt.Sprintf("%s   | %s\n", lineNumPadded, lines[i])
 		}
 	}
 
-	columnStr := ""
-	for i := 0; i < column-1 && i < len(sourceLine); i++ {
-		if sourceLine[i] == '	' {
-			columnStr += "    "
-		} else {
-			columnStr += " "
-		}
-	}
-	columnStr += "^"
-
-	context += "       | " + columnStr
-
 	return context, sourceLine, lineNumberStr
 }
 
 // FormatErrorWithContext 格式化带上下文的错误信息
-// 错误为红色、警告为黄色高亮；源码中的错误位置会按高亮区间绘制 ^^^ 标记
+// 第一行: 文件名:行号:列号: 级别: 类别 (如 test.kl:3:13: Semantic Error: undefined_variable)
+// 第二行: 消息；错误为红色、警告为黄色高亮；源码中的错误位置会按高亮区间绘制 ^^^ 标记
 func FormatErrorWithContext(err *Error) string {
 	var result strings.Builder
 
@@ -440,18 +453,36 @@ func FormatErrorWithContext(err *Error) string {
 		errorType, color = "Unknown Error", ansiRed
 	}
 
-	if err.File != "" {
-		result.WriteString(fmt.Sprintf("%s:%d:%d", err.File, err.Line, err.Column))
-	} else {
-		result.WriteString(fmt.Sprintf("%d:%d", err.Line, err.Column))
-	}
-	result.WriteString(": ")
+	// 第一行: 文件名:行号:列号: 级别: 类别 (整行按级别着色: 警告黄/错误红)
 	if colorEnabled {
 		result.WriteString(ansiBold)
 		result.WriteString(color)
 	}
+	if err.File != "" {
+		if err.Line > 0 {
+			result.WriteString(fmt.Sprintf("%s:%d:%d: ", err.File, err.Line, err.Column))
+		} else {
+			result.WriteString(fmt.Sprintf("%s: ", err.File))
+		}
+	} else {
+		if err.Line > 0 {
+			result.WriteString(fmt.Sprintf("%d:%d: ", err.Line, err.Column))
+		}
+	}
 	result.WriteString(errorType)
-	result.WriteString(": ")
+	if err.Code != "" {
+		result.WriteString(": " + err.Code)
+	}
+	if colorEnabled {
+		result.WriteString(ansiReset)
+	}
+	result.WriteString("\n")
+
+	// 第二行: 消息
+	if colorEnabled {
+		result.WriteString(ansiBold)
+		result.WriteString(color)
+	}
 	result.WriteString(err.Message)
 	if colorEnabled {
 		result.WriteString(ansiReset)
@@ -460,7 +491,7 @@ func FormatErrorWithContext(err *Error) string {
 
 	if err.SourceLine != "" {
 		result.WriteString(highlightSourceContext(err.SourceContext, err.Highlight))
-		result.WriteString("\n")
+		// context 已以 \n 结尾, 不再追加空行
 	}
 
 	if err.Suggestion != "" {
