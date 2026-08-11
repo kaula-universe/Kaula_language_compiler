@@ -118,9 +118,13 @@ func (ipa *InterProcAnalyzer) AnalyzeInterProc(stmts []Stmt, tracker *OwnershipT
 	// 第二遍：分析所有权转移
 	for _, stmt := range stmts {
 		if stmt.Kind == StmtCall {
-			callSite := fmt.Sprintf("main:%d", stmt.Line)
+			callerName := stmt.CallerName
+			if callerName == "" {
+				callerName = "main"
+			}
+			callSite := fmt.Sprintf("%s:%d", callerName, stmt.Line)
 			for i, arg := range stmt.ArgNames {
-				mode := ModeOwned // 保守默认
+				mode := ModeUnrestricted // 默认值语义
 				if i < len(stmt.ArgOwnership) {
 					switch stmt.ArgOwnership[i] {
 					case "release":
@@ -129,6 +133,18 @@ func (ipa *InterProcAnalyzer) AnalyzeInterProc(stmts []Stmt, tracker *OwnershipT
 						mode = ModeOwned
 					default:
 						mode = ModeUnrestricted
+					}
+				}
+				// 修复 #25：参数级标注缺失时，回退到被调函数签名的参数模式
+				// （* 类型参数默认 ModeOwned：调用方消费所有权）
+				if i >= len(stmt.ArgOwnership) && mode == ModeUnrestricted {
+					if sig := ipa.sigs[stmt.FuncName]; sig != nil && i < len(sig.Params) {
+						switch sig.Params[i].Mode {
+						case ModeOwned:
+							mode = ModeOwned
+						case ModeReleased:
+							mode = ModeReleased
+						}
 					}
 				}
 				ipa.transfers[callSite] = append(ipa.transfers[callSite], OwnershipTransfer{

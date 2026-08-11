@@ -5,6 +5,7 @@ import (
 	"kaula-compiler/internal/ast"
 	"kaula-compiler/internal/core"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -95,6 +96,26 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 				// 这是模块函数调用，直接生成函数调用代码
 				return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 			}
+			// 修复 #25：跨函数参数所有权提升（* 类型形参 = ModeOwned，消费调用方指针）
+			if callee, ok := callExpr.Function.(*ast.Identifier); ok && callee.Name != "" {
+				if promotes := sg.sorCallArgPromotes(callee.Name, callExpr.Args); len(promotes) > 0 {
+					var pb strings.Builder
+					for _, argName := range promotes {
+						sizeExpr := ""
+						if size, ok := sg.sorPromoteSize(argName, argName); ok {
+							sizeExpr = size
+						} else {
+							// 兜底：指针 deref 大小（String 不需要 size，会在 emitPromoteForType 内绕过）
+							sizeExpr = "sizeof(*" + argName + ")"
+						}
+						pb.WriteString(sg.emitPromoteForType(argName, sizeExpr, "promote arg into callee", argName))
+					}
+					sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote，出口跳过 survivor_rewind
+					pb.WriteString(sg.codegen.expressionGenerator.GenerateExpression(s.Expression))
+					pb.WriteString(";\n")
+					return pb.String()
+				}
+			}
 		}
 		// 其他表达式语句
 		return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
@@ -157,6 +178,8 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			if stmt.Value != nil {
 				initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 			}
+			// 修复 #25：登记编译期可知的堆分配常量大小（promote 回退用）
+			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
 			return adapter.GenerateSmartVarAlloc(cType, stmt.Name, "", initValue)
 		}
 	}
@@ -206,9 +229,11 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	return builder.String()
 }
 
-// generateVarDeclString 生成 C 变量声明字符串，处理固定大小数组类型
+// formatCVarDecl 生成 C 变量声明字符串，处理固定大小数组类型
 // 例如 [128]u8 → C 类型 "uint8_t[128]" → 声明 "uint8_t dst[128]"
-func (sg *StatementGenerator) generateVarDeclString(cType, varName string) string {
+// 指针数组 [2]int* → C 类型 "int64_t*[2]" → 声明 "int64_t* dst[2]"
+// 此函数为包级函数，供 SOR 和非 SOR 路径共用，确保数组后缀搬运一致。
+func formatCVarDecl(cType, varName string) string {
 	openBracket := strings.Index(cType, "[")
 	if openBracket > 0 && strings.HasSuffix(cType, "]") {
 		baseType := cType[:openBracket]
@@ -216,6 +241,11 @@ func (sg *StatementGenerator) generateVarDeclString(cType, varName string) strin
 		return baseType + " " + varName + arrayPart
 	}
 	return cType + " " + varName
+}
+
+// generateVarDeclString 生成 C 变量声明字符串（StatementGenerator 方法包装）
+func (sg *StatementGenerator) generateVarDeclString(cType, varName string) string {
+	return formatCVarDecl(cType, varName)
 }
 
 // generateAutoDeclaration 生成 auto 声明代码（类型推导）
@@ -226,6 +256,8 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 	}
 
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+	sg.codegen.RecordDeclScopeDepth(stmt.Name)
+	sg.codegen.RecordAllocSizeFromAST(stmt.Name, stmt.Value)
 
 	// 记录数组字面量长度，供 spend 强制消费流使用
 	if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok {
@@ -233,6 +265,8 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 	}
 
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, false)
+	sg.codegen.RecordDeclScopeDepth(stmt.Name)
+	sg.codegen.RecordAllocSizeFromAST(stmt.Name, stmt.Value)
 
 	var builder strings.Builder
 	builder.Grow(64)
@@ -250,7 +284,10 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 			return b.String()
 		}
 		builder.WriteString(" = ")
-		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+		initCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		// 修复 #25：登记编译期可知的堆分配常量大小（promote 回退用）
+		sg.codegen.recordAllocSizeHint(stmt.Name, initCode)
+		builder.WriteString(initCode)
 	}
 	builder.WriteString(";\n")
 	return builder.String()
@@ -681,8 +718,8 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 	sg.codegen.EnterScope("if_body")
 
 	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
-	// 相邻 scope 合并优化：如果 body 包含分配调用，使用 offset_save/restore 代替 scope_push/pop
-	useOffset := !useKMM && bodyContainsAllocation(stmt.Body)
+	// 相邻 scope 合并优化：如果 body 包含 KMM 池分配调用，使用 offset_save/restore 代替 scope_push/pop
+	useOffset := !useKMM && bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
 
 	if useKMM {
 		sg.codegen.EnterKMMScope()
@@ -695,6 +732,11 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 	for _, bodyStmt := range stmt.Body {
 		bodyCode.WriteString(sg.codegen.indentString())
 		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
+	}
+	// 方案 A：在作用域退出前发射 per-object survivor_free
+	// 若末尾是 return，return 中已通过 generateSurvivorFreeForReturn 释放，此处为死代码，跳过
+	if !lastStmtIsReturn(stmt.Body) {
+		bodyCode.WriteString(sg.generateSurvivorFreeForScope())
 	}
 
 	if useOffset {
@@ -727,7 +769,7 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 		sg.codegen.EnterScope("else_body")
 
 		useKMMElse := sg.shouldUseKMMScopeForBody(stmt.Else)
-		useOffsetElse := !useKMMElse && bodyContainsAllocation(stmt.Else)
+		useOffsetElse := !useKMMElse && bodyContainsAllocation(stmt.Else, sg.codegen.IsFreestanding())
 
 		if useKMMElse {
 			sg.codegen.EnterKMMScope()
@@ -740,6 +782,11 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 		for _, elseStmt := range stmt.Else {
 			elseCode.WriteString(sg.codegen.indentString())
 			elseCode.WriteString(sg.codegen.generateStatement(elseStmt))
+		}
+		// 方案 A：在作用域退出前发射 per-object survivor_free
+		// 若末尾是 return，return 中已通过 generateSurvivorFreeForReturn 释放，此处为死代码，跳过
+		if !lastStmtIsReturn(stmt.Else) {
+			elseCode.WriteString(sg.generateSurvivorFreeForScope())
 		}
 
 		if useOffsetElse {
@@ -780,8 +827,8 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	sg.codegen.EnterScope("while_body")
 
 	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
-	// 相邻 scope 合并优化：如果循环体包含分配调用，使用 offset_save/restore 代替 scope_push/pop
-	useOffset := !useKMM && bodyContainsAllocation(stmt.Body)
+	// 相邻 scope 合并优化：如果循环体包含 KMM 池分配调用，使用 offset_save/restore 代替 scope_push/pop
+	useOffset := !useKMM && bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
 
 	if useKMM {
 		sg.codegen.EnterKMMScope()
@@ -794,6 +841,11 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	for _, bodyStmt := range stmt.Body {
 		bodyCode.WriteString(sg.codegen.indentString())
 		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
+	}
+	// 方案 A：在作用域退出前发射 per-object survivor_free
+	// 若末尾是 return，return 中已通过 generateSurvivorFreeForReturn 释放，此处为死代码，跳过
+	if !lastStmtIsReturn(stmt.Body) {
+		bodyCode.WriteString(sg.generateSurvivorFreeForScope())
 	}
 
 	if useOffset {
@@ -827,7 +879,8 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 // - 作用域合并：如果外层已有 KMM scope，内层不需要再插入
 // - SOR 模式：使用精确的变量决策信息判断（从符号表获取当前 scope 的变量，排除函数参数）
 // - 非 SOR 模式：基于符号表的类型分析 + 代码内容检测
-// 纯 Stack 变量、std_malloc 的变量或函数参数的 scope 可以省略，消除运行时开销
+// 纯 Stack 变量、系统 malloc（std_malloc，hosted 模式）分配的变量或
+// 函数参数的 scope 可以省略，消除运行时开销
 func (sg *StatementGenerator) needsKMMScope(bodyCode string) bool {
 	// 作用域合并：外层已有 KMM scope 时，内层跳过
 	if sg.codegen.IsInKMMScope() {
@@ -892,26 +945,29 @@ func (sg *StatementGenerator) shouldUseKMMScope() bool {
 	return false
 }
 
-// allocFuncNames 需要检测的动态分配函数名
+// allocFuncNames 需要检测的 KMM 池分配函数名
+// 注意：std_malloc 仅在 freestanding 模式下消耗 KMM 池（被重写为
+// kmm_v4_alloc_auto）；hosted 模式下它是系统 malloc，不在此列
 var allocFuncNames = map[string]bool{
 	"kmm_v4_malloc":     true,
 	"kmm_v4_alloc_auto": true,
-	"std_malloc":        true,
+	"kmm_v4_bump":       true,
 	"malloc":            true,
 }
 
-// bodyContainsAllocation 递归检测语句列表中是否包含动态分配调用
+// bodyContainsAllocation 递归检测语句列表中是否包含 KMM 池分配调用
 // 用于在循环体等内存热点处插入 KMM scope，削平峰值
-func bodyContainsAllocation(stmts []ast.Statement) bool {
+// isFreestanding: 用于判断 std_malloc 是否属于 KMM 池分配
+func bodyContainsAllocation(stmts []ast.Statement, isFreestanding bool) bool {
 	for _, stmt := range stmts {
-		if stmtContainsAllocation(stmt) {
+		if stmtContainsAllocation(stmt, isFreestanding) {
 			return true
 		}
 	}
 	return false
 }
 
-func stmtContainsAllocation(stmt ast.Statement) bool {
+func stmtContainsAllocation(stmt ast.Statement, isFreestanding bool) bool {
 	if stmt == nil {
 		return false
 	}
@@ -920,26 +976,26 @@ func stmtContainsAllocation(stmt ast.Statement) bool {
 		if s == nil {
 			return false
 		}
-		return exprContainsAllocation(s.Value)
+		return exprContainsAllocation(s.Value, isFreestanding)
 	case *ast.ExpressionStatement:
 		if s == nil {
 			return false
 		}
-		return exprContainsAllocation(s.Expression)
+		return exprContainsAllocation(s.Expression, isFreestanding)
 	case *ast.IfStatement:
 		if s == nil {
 			return false
 		}
-		if exprContainsAllocation(s.Condition) {
+		if exprContainsAllocation(s.Condition, isFreestanding) {
 			return true
 		}
 		for _, bs := range s.Body {
-			if stmtContainsAllocation(bs) {
+			if stmtContainsAllocation(bs, isFreestanding) {
 				return true
 			}
 		}
 		for _, bs := range s.Else {
-			if stmtContainsAllocation(bs) {
+			if stmtContainsAllocation(bs, isFreestanding) {
 				return true
 			}
 		}
@@ -947,11 +1003,11 @@ func stmtContainsAllocation(stmt ast.Statement) bool {
 		if s == nil {
 			return false
 		}
-		if exprContainsAllocation(s.Condition) {
+		if exprContainsAllocation(s.Condition, isFreestanding) {
 			return true
 		}
 		for _, bs := range s.Body {
-			if stmtContainsAllocation(bs) {
+			if stmtContainsAllocation(bs, isFreestanding) {
 				return true
 			}
 		}
@@ -960,7 +1016,7 @@ func stmtContainsAllocation(stmt ast.Statement) bool {
 			return false
 		}
 		for _, bs := range s.Body {
-			if stmtContainsAllocation(bs) {
+			if stmtContainsAllocation(bs, isFreestanding) {
 				return true
 			}
 		}
@@ -969,7 +1025,7 @@ func stmtContainsAllocation(stmt ast.Statement) bool {
 			return false
 		}
 		for _, bs := range s.Body {
-			if stmtContainsAllocation(bs) {
+			if stmtContainsAllocation(bs, isFreestanding) {
 				return true
 			}
 		}
@@ -978,7 +1034,7 @@ func stmtContainsAllocation(stmt ast.Statement) bool {
 			return false
 		}
 		for _, bs := range s.Statements {
-			if stmtContainsAllocation(bs) {
+			if stmtContainsAllocation(bs, isFreestanding) {
 				return true
 			}
 		}
@@ -986,62 +1042,71 @@ func stmtContainsAllocation(stmt ast.Statement) bool {
 		if s == nil {
 			return false
 		}
-		return exprContainsAllocation(s.Value)
+		return exprContainsAllocation(s.Value, isFreestanding)
 	}
 	return false
 }
 
-func exprContainsAllocation(expr ast.Expression) bool {
+func exprContainsAllocation(expr ast.Expression, isFreestanding bool) bool {
 	if expr == nil {
 		return false
 	}
 	switch e := expr.(type) {
 	case *ast.CallExpression:
-		if isAllocCall(e.Function) {
+		if isAllocCall(e.Function, isFreestanding) {
 			return true
 		}
 		for _, arg := range e.Args {
-			if exprContainsAllocation(arg) {
+			if exprContainsAllocation(arg, isFreestanding) {
 				return true
 			}
 		}
 	case *ast.BinaryExpression:
-		if exprContainsAllocation(e.Left) {
+		if exprContainsAllocation(e.Left, isFreestanding) {
 			return true
 		}
-		if exprContainsAllocation(e.Right) {
+		if exprContainsAllocation(e.Right, isFreestanding) {
 			return true
 		}
 	case *ast.UnaryExpression:
-		return exprContainsAllocation(e.Right)
+		return exprContainsAllocation(e.Right, isFreestanding)
 	case *ast.MemberAccessExpression:
-		return exprContainsAllocation(e.Object)
+		return exprContainsAllocation(e.Object, isFreestanding)
 	case *ast.ParenExpression:
-		return exprContainsAllocation(e.Inner)
+		return exprContainsAllocation(e.Inner, isFreestanding)
 	case *ast.TypeCastExpression:
-		return exprContainsAllocation(e.Expression)
+		return exprContainsAllocation(e.Expression, isFreestanding)
 	case *ast.ConditionalExpression:
-		if exprContainsAllocation(e.Condition) {
+		if exprContainsAllocation(e.Condition, isFreestanding) {
 			return true
 		}
-		if exprContainsAllocation(e.TrueExpr) {
+		if exprContainsAllocation(e.TrueExpr, isFreestanding) {
 			return true
 		}
-		if exprContainsAllocation(e.FalseExpr) {
+		if exprContainsAllocation(e.FalseExpr, isFreestanding) {
 			return true
 		}
 	}
 	return false
 }
 
-func isAllocCall(fn ast.Expression) bool {
+// isAllocCall 检查函数表达式是否为 KMM 池分配调用
+// isFreestanding: std_malloc 仅在 freestanding 下（重写为 kmm_v4_alloc_auto）
+// 消耗 KMM 池；hosted 模式下它是系统 malloc，不算 KMM 分配
+func isAllocCall(fn ast.Expression, isFreestanding bool) bool {
 	if fn == nil {
 		return false
 	}
 	switch e := fn.(type) {
 	case *ast.Identifier:
+		if e.Name == "std_malloc" {
+			return isFreestanding
+		}
 		return allocFuncNames[e.Name]
 	case *ast.MemberAccessExpression:
+		if e.Member == "std_malloc" {
+			return isFreestanding
+		}
 		return allocFuncNames[e.Member]
 	}
 	return false
@@ -1093,9 +1158,9 @@ func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement
 				}
 			}
 		}
-		// 内存热点检测：body 中含动态分配调用时插入 KMM scope
+		// 内存热点检测：body 中含 KMM 池分配调用时插入 KMM scope
 		// 每次循环迭代结束时 scope_pop 回收 bump 指针，削平峰值
-		if bodyContainsAllocation(bodyStmts) {
+		if bodyContainsAllocation(bodyStmts, sg.codegen.IsFreestanding()) {
 			return true
 		}
 		return false
@@ -1109,8 +1174,8 @@ func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement
 			}
 		}
 	}
-	// 内存热点检测：body 中含动态分配调用时插入 KMM scope
-	if bodyContainsAllocation(bodyStmts) {
+	// 内存热点检测：body 中含 KMM 池分配调用时插入 KMM scope
+	if bodyContainsAllocation(bodyStmts, sg.codegen.IsFreestanding()) {
 		return true
 	}
 	return false
@@ -1118,10 +1183,11 @@ func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement
 
 // needsKMMScopeNonSOR 非 SOR 模式下的智能 KMM 判断
 // 基于符号表分析变量类型，判断是否需要 KMM scope
+// 注意：hosted 模式下 std_malloc 是系统 malloc，不消耗 KMM 池；
+// freestanding 下它被重写为 kmm_v4_alloc_auto，由下方 "kmm_v4" 内容检测覆盖
 func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
-	// 快速检查：如果代码中没有内存分配相关操作，直接返回 false
-	if !strings.Contains(bodyCode, "std_malloc") &&
-		!strings.Contains(bodyCode, "kmm_v4") &&
+	// 快速检查：如果代码中没有 KMM 分配相关操作，直接返回 false
+	if !strings.Contains(bodyCode, "kmm_v4") &&
 		!strings.Contains(bodyCode, "string_concat") &&
 		!strings.Contains(bodyCode, "string_dup") {
 		return false
@@ -1422,6 +1488,44 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 
 	var b strings.Builder
 
+	// 修复 #25：return 前跨作用域提升返回值（必须在本函数作用域 pop 之前拷贝，
+	// 否则返回值指针在 kmm_v4_scope_pop 回卷后悬垂）
+	retPromoteLine := ""
+	promoteVarName := "" // 记录被提升的变量名，per-object free 时需要排除
+	if !isVoid && stmt.Value != nil {
+		if id, ok := stmt.Value.(*ast.Identifier); ok && sg.sorNeedsReturnPromote(id.Name) {
+			sizeExpr := ""
+			if sg.isStringTyped(id.Name) {
+				// 任务①：String 大小由 string_clone_global 内部决定，sizeExpr 可空
+				sizeExpr = "sizeof(String)"
+			} else if size, ok := sg.sorPromoteSize(id.Name, id.Name); ok {
+				sizeExpr = size
+			} else {
+				sizeExpr = "sizeof(*" + id.Name + ")"
+			}
+			retPromoteLine = sg.codegen.indentString() + sg.emitPromoteForType(id.Name, sizeExpr, "promote on return", id.Name)
+			promoteVarName = id.Name
+			sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+		}
+	}
+
+	// 方案 A：per-object survivor 回收——在 promote 之前发射，遍历整条作用域链。
+	// 排除被提升的返回值变量（promote 会把数据拷到幸存段，free 会造成 use-after-free）。
+	// 必须在 promote 之前执行：此时返回值变量仍指向原始位置，排除它即可；
+	// 其余 SOR 对象在此刻释放，避免 return 跳过外层作用域末尾 free 导致泄漏。
+	b.WriteString(sg.generateSurvivorFreeForReturn(promoteVarName))
+
+	if retPromoteLine != "" {
+		b.WriteString(retPromoteLine)
+	}
+
+	// 方案 C：若函数不向外 promote，return 前回卷 survivor 段
+	// （若 return 自身 promote 了返回值，funcEmitsPromote 已为 true，跳过）
+	if sg.codegen.kmmScopeDepth > 0 && !sg.codegen.funcEmitsPromote {
+		b.WriteString(sg.codegen.indentString())
+		b.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim on return */\n")
+	}
+
 	// 在 return 前补 scope_pop，防止作用域泄漏
 	// kmmScopeDepth 跟踪当前活跃的 do-while(0) KMM 作用域数量
 	// （作用域合并优化确保内层不会重复创建 scope，所以 depth 通常为 0 或 1）
@@ -1526,6 +1630,10 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 			for _, bodyStmt := range stmt.Statements {
 				code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
 			}
+			// 方案 A：per-object survivor 回收（末尾是 return 时跳过——return 中已释放）
+			if !lastStmtIsReturn(stmt.Statements) {
+				code += sg.generateSurvivorFreeForScope()
+			}
 			sg.codegen.indent--
 			code += indent + "}\n"
 			sg.codegen.ExitScope()
@@ -1537,6 +1645,10 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
 		for _, bodyStmt := range stmt.Statements {
 			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		// 方案 A：per-object survivor 回收（在 offset_restore 前发射，末尾是 return 时跳过）
+		if !lastStmtIsReturn(stmt.Statements) {
+			code += sg.generateSurvivorFreeForScope()
 		}
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
 		sg.codegen.ExitOffsetScope()
@@ -1558,6 +1670,10 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
 		for _, bodyStmt := range stmt.Statements {
 			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		// 方案 A：per-object survivor 回收（在 offset_restore 前发射，末尾是 return 时跳过）
+		if !lastStmtIsReturn(stmt.Statements) {
+			code += sg.generateSurvivorFreeForScope()
 		}
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
 		sg.codegen.ExitOffsetScope()
@@ -1593,6 +1709,10 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 				code += "if (" + name + ".ptr != NULL) { free(" + name + ".ptr); }\n"
 			}
 		}
+	}
+	// 方案 A：per-object survivor 回收（在 KMM_V4_SCOPE_END 前发射，末尾是 return 时跳过）
+	if !lastStmtIsReturn(stmt.Statements) {
+		code += sg.generateSurvivorFreeForScope()
 	}
 
 	sg.codegen.indent--
@@ -1685,16 +1805,19 @@ func (sg *StatementGenerator) analyzeBlockMallocsDetailed(stmts []ast.Statement)
 	return result
 }
 
-// isMallocCallExpr 检查表达式是否是 malloc 类调用
+// isMallocCallExpr 检查表达式是否是 KMM 分配调用
+// std_malloc 仅在 freestanding 模式下属于 KMM 分配（被重写为 kmm_v4_alloc_auto）；
+// hosted 模式下它是系统 malloc，与 KMM 池严格区分
 func (sg *StatementGenerator) isMallocCallExpr(call *ast.CallExpression) bool {
 	if call == nil || call.Function == nil {
 		return false
 	}
+	isFree := sg.codegen.IsFreestanding()
 	switch fn := call.Function.(type) {
 	case *ast.Identifier:
-		return fn.Name == "std_malloc" || fn.Name == "kmm_v4_malloc" || fn.Name == "kmm_v4_alloc_auto"
+		return (fn.Name == "std_malloc" && isFree) || fn.Name == "kmm_v4_malloc" || fn.Name == "kmm_v4_alloc_auto"
 	case *ast.MemberAccessExpression:
-		return fn.Member == "std_malloc" || fn.Member == "kmm_v4_malloc"
+		return (fn.Member == "std_malloc" && isFree) || fn.Member == "kmm_v4_malloc"
 	}
 	return false
 }
@@ -1728,6 +1851,8 @@ func (sg *StatementGenerator) extractMallocSizeBytes(call *ast.CallExpression) i
 // 语法: yield source -> target
 // 生成: /* SOR: yield source -> target */ target = source; source = NULL;
 // 优化: 当源表达式是字面量 0 时，yield 是纯死代码（target = 0, source = 0 → no-op），直接跳过
+// 修复 #25: 跨作用域 yield 时在转移点前插入 kmm_v4_scope_promote_p（提升到全局幸存段），
+// 否则源作用域 scope_pop 回卷后新持有者持有的指针悬垂。
 func (sg *StatementGenerator) generateYieldStatement(stmt *ast.YieldStatement) string {
 	srcCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Source)
 
@@ -1746,6 +1871,25 @@ func (sg *StatementGenerator) generateYieldStatement(stmt *ast.YieldStatement) s
 	b.WriteString(" = ")
 	b.WriteString(srcCode)
 	b.WriteString(";\n")
+	// 修复 #25：跨作用域所有权提升（必须在 source = 0 之前拷贝）
+	if srcIdent, isSrcIdent := stmt.Source.(*ast.Identifier); isSrcIdent {
+		// 源对象大小登记传播给目标（即使本次不提升，后续 return 提升也需要）
+		sg.codegen.PropagateInitSize(stmt.Target, srcIdent.Name)
+		if sg.sorNeedsCrossScopePromote(srcIdent.Name, stmt.Target) {
+			// 任务①：String 走 string_clone_global（emitPromoteForType 内部分支），
+			// 不需 sorPromoteSize；指针/聚合走大小解析。
+			sizeExpr := ""
+			if sg.isStringTyped(stmt.Target) {
+				sizeExpr = "sizeof(String)"
+			} else if size, ok := sg.sorPromoteSize(srcIdent.Name, srcCode); ok {
+				sizeExpr = size
+			} else {
+				sizeExpr = "sizeof(*" + srcCode + ")"
+			}
+			b.WriteString(sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", srcIdent.Name))
+			sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+		}
+	}
 	b.WriteString(srcCode)
 	b.WriteString(" = 0; /* SOR: ownership moved */\n")
 	return b.String()
@@ -1831,9 +1975,13 @@ func (sg *StatementGenerator) generateExtractStatement(stmt *ast.ExtractStatemen
 	// parsePrimaryExpressionIterative 会将 data[2] 解析为 IndexExpression
 	// 所以 Source 实际是 IndexExpression{Object: data, Index: 2}
 	var baseCode, idxCode string
+	var baseIdent *ast.Identifier
 	if idxExpr, ok := stmt.Source.(*ast.IndexExpression); ok {
 		baseCode = sg.codegen.expressionGenerator.GenerateExpression(idxExpr.Object)
 		idxCode = sg.codegen.expressionGenerator.GenerateExpression(idxExpr.Index)
+		if objIdent, isObjIdent := idxExpr.Object.(*ast.Identifier); isObjIdent {
+			baseIdent = objIdent
+		}
 	} else {
 		baseCode = sg.codegen.expressionGenerator.GenerateExpression(stmt.Source)
 		if stmt.Index != nil {
@@ -1856,9 +2004,388 @@ func (sg *StatementGenerator) generateExtractStatement(stmt *ast.ExtractStatemen
 	b.WriteString("[")
 	b.WriteString(idxCode)
 	b.WriteString("]; /* SOR: extracted value */\n")
+	// 修复 #25：跨作用域提取提升（元素拷贝到幸存段，防止源作用域回收后悬垂）
+	if baseIdent != nil {
+		// 源数组对象大小登记传播给目标（即使本次不提升，后续 return 提升也需要）
+		sg.codegen.PropagateInitSize(stmt.Target, baseIdent.Name)
+		if sg.sorNeedsCrossScopePromote(baseIdent.Name, stmt.Target) {
+			// 任务①：String 走 string_clone_global；指针/聚合走大小解析
+			sizeExpr := ""
+			if sg.isStringTyped(stmt.Target) {
+				sizeExpr = "sizeof(String)"
+			} else if size, ok := sg.sorPromoteSize(baseIdent.Name, baseCode); ok {
+				sizeExpr = size
+			} else {
+				sizeExpr = "sizeof(*" + baseCode + ")"
+			}
+			b.WriteString(sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", baseIdent.Name))
+			sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+		}
+	}
 	b.WriteString(baseCode)
 	b.WriteString("[")
 	b.WriteString(idxCode)
 	b.WriteString("] = 0; /* SOR: hollow — source slot now null */\n")
 	return b.String()
+}
+
+// ============================================================================
+// 修复 #25：跨作用域所有权提升（promote）判定辅助
+// kmm_v4_scope_promote_p 只对"堆分配对象 + 指针类型目标（含 void*）"有效，
+// 且仅在所有权穿越到更外层作用域（或目标未被 SOR 追踪，如全局）时发射，
+// 避免同层 yield/extract 的无意义拷贝。
+// 注意：yield/extract 的源对象在 SOR 决策中最终状态为 Moved → 硬编码 AllocStack+
+// DropNone（memory.go buildDecision），所以"堆分配"判定不能只看 AllocKind，
+// 还需接受 DropActionID==0（所有权已转移）的组合。
+// ============================================================================
+
+func (sg *StatementGenerator) sorActive() bool {
+	return sg.codegen.sorAdapter != nil && sg.codegen.sorAdapter.IsActive
+}
+
+// generateSurvivorFreeForScope 生成当前作用域中需要 per-object 回收的 survivor 对象的释放代码。
+// 方案 A：在作用域退出点发射 kmm_v4_survivor_free，精确回收 survivor 段 slab 桶中的对象。
+// 只对 SOR 决策为 DropAction=ScopeEnd && AllocKind=BumpPool 的指针变量发射。
+// 对非 survivor 指针（per-thread heap）调用 survivor_free 是安全的 no-op（返回 false）。
+func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
+	adapter := sg.codegen.GetSORAdapter()
+	if adapter == nil || !adapter.IsActive {
+		return ""
+	}
+	currentScope := sg.codegen.GetCurrentScope()
+	if currentScope == nil {
+		return ""
+	}
+	symbols := currentScope.GetAllSymbols()
+	if len(symbols) == 0 {
+		return ""
+	}
+	// 按名称排序确保输出稳定
+	names := make([]string, 0, len(symbols))
+	for name := range symbols {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	indent := sg.codegen.indentString()
+	for _, name := range names {
+		d := adapter.GetVarDecision(name)
+		if d == nil {
+			continue
+		}
+		// 核查表缺口 ⑤：统一通过 ShouldSkipSurvivorFree 判定。
+		// 这样 FFI user_data 保持、extern 返回值、DropAction 调整都能在
+		// SORCodeGenAdapter 一处收敛，不再把分配器/所有权判断散落到 stmtgen。
+		if skip, reason := adapter.ShouldSkipSurvivorFree(name, d); skip {
+			if reason != "" && reason != "no SOR decision" {
+				b.WriteString(indent)
+				b.WriteString("/* SOR: skip survivor_free for ")
+				b.WriteString(name)
+				b.WriteString(" (")
+				b.WriteString(reason)
+				b.WriteString(") */\n")
+			}
+			continue
+		}
+		// 必须是 C 指针类型（kmm_v4_alloc_auto 返回指针）
+		if !sg.isPointerTyped(name) {
+			continue
+		}
+		b.WriteString(indent)
+		b.WriteString("kmm_v4_survivor_free(")
+		b.WriteString(name)
+		b.WriteString("); /* sor: per-object reclaim */\n")
+	}
+	return b.String()
+}
+
+// generateSurvivorFreeForReturn 生成 return 前的 per-object survivor 回收代码。
+// 方案 A：return 会跳过所有外层作用域的末尾 free，因此需要遍历当前作用域到根的
+// 整条作用域链，对每个 SOR 决策为 DropAction=ScopeEnd && AllocKind=BumpPool 的
+// 指针变量发射 kmm_v4_survivor_free。
+// excludeName 指定不需要释放的变量名（通常是 return 值本身，已由 promote 处理）。
+// 对非 survivor 指针（per-thread heap / std_malloc）调用 survivor_free 是安全的 no-op。
+func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) string {
+	adapter := sg.codegen.GetSORAdapter()
+	if adapter == nil || !adapter.IsActive {
+		return ""
+	}
+
+	var b strings.Builder
+	indent := sg.codegen.indentString()
+	seen := make(map[string]bool) // 去重：同名变量只在最内层作用域释放一次
+
+	for scope := sg.codegen.GetCurrentScope(); scope != nil; scope = scope.GetParent() {
+		symbols := scope.GetAllSymbols()
+		if len(symbols) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(symbols))
+		for name := range symbols {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			if name == excludeName {
+				continue
+			}
+			d := adapter.GetVarDecision(name)
+			if d == nil {
+				continue
+			}
+			// 核查表缺口 ⑤：同作用域退出点，统一走 ShouldSkipSurvivorFree 网关
+			if skip, reason := adapter.ShouldSkipSurvivorFree(name, d); skip {
+				if reason != "" && reason != "no SOR decision" {
+					b.WriteString(indent)
+					b.WriteString("/* SOR: skip survivor_free on return for ")
+					b.WriteString(name)
+					b.WriteString(" (")
+					b.WriteString(reason)
+					b.WriteString(") */\n")
+				}
+				continue
+			}
+			if !sg.isPointerTyped(name) {
+				continue
+			}
+			b.WriteString(indent)
+			b.WriteString("kmm_v4_survivor_free(")
+			b.WriteString(name)
+			b.WriteString("); /* sor: reclaim on return */\n")
+		}
+	}
+	return b.String()
+}
+
+// isPointerTyped 目标变量在 C 中必须是指针类型（含 void*），(void**)&var 才合法
+func (sg *StatementGenerator) isPointerTyped(name string) bool {
+	if name == "" {
+		return false
+	}
+	kaulaType := sg.codegen.GetSymbolType(name)
+	if kaulaType == "" {
+		return false
+	}
+	cType := sg.codegen.typeGenerator.convertType(kaulaType, false)
+	return cType != "" && strings.HasSuffix(cType, "*")
+}
+
+// isStringTyped 判断是否是 std String 类型（struct {len; ptr}），不是 C 指针，
+// promote 不能走 (void**)&var 的 scope_promote_p，必须走 string_clone_global（任务①）。
+// 匹配 kaula 类型 "string"/"str"/"String" 以及 C 类型名 "String"。
+func (sg *StatementGenerator) isStringTyped(name string) bool {
+	if name == "" {
+		return false
+	}
+	kaulaType := sg.codegen.GetSymbolType(name)
+	if kaulaType == "string" || kaulaType == "str" || kaulaType == "String" {
+		return true
+	}
+	if kaulaType != "" {
+		if cType := sg.codegen.typeGenerator.convertType(kaulaType, false); cType == "String" {
+			return true
+		}
+	}
+	return false
+}
+
+// isPromotableAggregate 判断是否是"需要深提升回调的聚合类型"（任务②正解入口）。
+// 目前仅识别 class 类型（声明里含指针字段）；返回 true 时 emitPromoteForType
+// 会走 kmm_v4_scope_promote_p_deep 路径并合成类型化 cb（后续完善）。
+func (sg *StatementGenerator) isPromotableAggregate(name string) bool {
+	if name == "" {
+		return false
+	}
+	kaulaType := sg.codegen.GetSymbolType(name)
+	if kaulaType == "" {
+		return false
+	}
+	if sg.codegen.typeGenerator == nil {
+		return false
+	}
+	// classTypes[className]==true 标记 class/struct 类型，字段里可能有指针
+	return sg.codegen.typeGenerator.classTypes[kaulaType]
+}
+
+// emitPromoteForType 根据被提升变量的类型分派 promote 代码（任务①②的统一入口）：
+//   - String：target = string_clone_global(target)  （载荷从 survivor 段重分配，浅外壳+深载荷）
+//   - 含指针字段的 class 聚合：预留 kmm_v4_scope_promote_p_deep + 合成类型化 cb（任务②正解，
+//     当前先以带说明注释的 scope_promote_p 占位并在注释中标记 TODO，后续补回调合成）
+//   - 普通 POD 指针：kmm_v4_scope_promote_p((void**)&target, sizeExpr)（原路径）
+//
+// 参数：
+//   targetCVar：被 (void**)& 或 string_clone_global 作用的 C 变量（通常是目标名）
+//   sizeExpr：提升大小表达式（用于非 String 的浅拷贝字节数）
+//   commentTag：注释尾部 tag（"promote on return"/"promote cross-scope"/"promote arg into callee"）
+//   promotedSrc：仅调试/注释用，源对象的变量名或代码
+func (sg *StatementGenerator) emitPromoteForType(targetCVar, sizeExpr, commentTag, promotedSrc string) string {
+	// 任务③：extern 返回值来源的对象强制拒绝跨作用域 promote。
+	// extern 对 SOR 是 opaque：没有字段类型信息、没有分配器归属（可能是 libc/OS 内存），
+	// 任何形式的自动 promote 都无法保证内部指针和释放语义正确。必须：
+	//   a) 加入 codegen.errors（kaulac 报错）；
+	//   b) 在生成的 C 代码中插入 #error 和 abort，避免静默生成悬空代码。
+	if sg.sorActive() {
+		if extFn, ok := sg.codegen.sorAdapter.IsExternOrigin(targetCVar); ok {
+			msg := fmt.Sprintf("变量 '%s' 来自 extern 函数 '%s' 的返回值（对 SOR 不透明），"+
+				"不能跨作用域提升（%s）：请改用 #[no_kmm] 跳过该函数，或手动用 std_malloc 显式管理",
+				targetCVar, extFn, commentTag)
+			sg.codegen.error("[SOR extern-escape] " + msg)
+			// #error 触发 clang 编译中止；同时包装成 do{}while(0) 以便放语句位置
+			return fmt.Sprintf("/* SOR ERROR: %s (extern-origin '%s' from %s) */\n"+
+				"#error SOR_EXTERN_PROMOTE_FORBIDDEN: target=%s source_extern=%s\n"+
+				"do { abort(); } while(0);\n",
+				msg, targetCVar, extFn, targetCVar, extFn)
+		}
+		// 注：yield 路径下 targetCVar = yield 目标，而 extern 标记是沿别名传播的
+		// （escape.go checkExternSink 已把 extern fn 继承给目标），所以仅查 targetCVar 即可。
+	}
+	if sg.isStringTyped(targetCVar) {
+		// 任务①：String 特判走 string_clone_global
+		// src 是结构体本身（目标已持有拷贝，string_clone_global 再克隆载荷）
+		return fmt.Sprintf("%s = string_clone_global(%s); /* SOR: %s (String deep-clone payload via survivor) */\n",
+			targetCVar, targetCVar, commentTag)
+	}
+	if sg.isPromotableAggregate(targetCVar) {
+		// 任务② Bug 2 正解：含指针字段的聚合类型 → kmm_v4_scope_promote_p_deep + 合成类型化 cb。
+		// cb 由 EnsureDeepPromoteCB 首次调用时合成，后续同类型复用（去重）。
+		kaulaType := sg.codegen.GetSymbolType(targetCVar)
+		cbName := sg.codegen.EnsureDeepPromoteCB(kaulaType)
+		if cbName != "" {
+			return fmt.Sprintf("kmm_v4_scope_promote_p_deep((void**)&%s, %s, %s); /* SOR: %s (aggregate deep-promote via synthesized cb) */\n",
+				targetCVar, sizeExpr, cbName, commentTag)
+		}
+		// 安全性缺口修复（核查表 Bug 2 隐患①）：聚合声明通过却无法合成 cb，属于内部不一致。
+		// 不允许"仅注释后静默浅提升"——Bug 2 悬垂指针就是这样漏过的。升级为编译期硬报错：
+		//   a) Go 侧加入 codegen.errors（HasErrors 阻断后续流水线）；
+		//   b) C 侧 #error + abort，避免任何静默生成 dangling 代码。
+		msg := fmt.Sprintf("聚合类型 %q 的深提升回调合成失败（与 isPromotableAggregate 判定不一致，"+
+			"可能导致 Bug 2：浅提升后内部指针仍指向已释放段）；拒绝浅提升降级", kaulaType)
+		sg.codegen.error("[SOR deep-promote] " + msg)
+		return fmt.Sprintf("/* SOR FATAL: %s (kaulaType=%q target=%s) */\n"+
+			"#error SOR_DEEP_PROMOTE_CB_MISSING: type=%s var=%s  /* audit point Bug 2 */\n"+
+			"do { abort(); } while(0);\n",
+			msg, kaulaType, targetCVar, kaulaType, targetCVar)
+	}
+	// 默认：普通 POD 指针的浅拷贝提升（scope_promote_p 原路径）
+	return fmt.Sprintf("kmm_v4_scope_promote_p((void**)&%s, %s); /* SOR: %s */\n",
+		targetCVar, sizeExpr, commentTag)
+}
+
+// sorPromoteSize 返回提升所需的大小表达式（三级回退）：
+//  1. decision.SizeBytes（SOR 大小估算）
+//  2. 声明初始化处登记的常量大小（kmm_v4_alloc_auto(N)，覆盖 auto/void*/malloc 缓冲）
+//  3. C 指针 deref：sizeof(*code)（要求非 void*）——仅当对象确为 pointee 大小值时适用
+//
+// 注意 kmm_v4_scope_promote_p 拷贝的是 *ptr 指向的整个对象，size 必须是对象的实际
+// 分配大小；pointer-deref 的 sizeof(*var) 只等于对 malloc 缓冲的真实大小，可能偏小，
+// 因此登记大小（tier 2）优先于 deref（tier 3）。
+func (sg *StatementGenerator) sorPromoteSize(name, code string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	if d := sg.codegen.sorAdapter.GetVarDecision(name); d != nil && d.SizeBytes > 0 {
+		return fmt.Sprintf("%d", d.SizeBytes), true
+	}
+	if n, ok := sg.codegen.sorInitSizes[name]; ok && n > 0 {
+		return fmt.Sprintf("%d", n), true
+	}
+	if kaulaType := sg.codegen.GetSymbolType(name); kaulaType != "" {
+		cType := sg.codegen.typeGenerator.convertType(kaulaType, false)
+		if cType != "" && cType != "void*" && strings.HasSuffix(cType, "*") {
+			return "sizeof(*" + code + ")", true
+		}
+	}
+	return "", false
+}
+
+// sorNeedsCrossScopePromote 判断 yield/extract 转移是否需要跨作用域提升
+func (sg *StatementGenerator) sorNeedsCrossScopePromote(srcName, targetName string) bool {
+	if !sg.sorActive() {
+		return false
+	}
+	srcD := sg.codegen.sorAdapter.GetVarDecision(srcName)
+	if srcD == nil {
+		return false
+	}
+	// 源必须是堆分配对象：BumpPool(1)，或已转移所有权（DropNone=0）的堆对象
+	if srcD.AllocKindID != 1 && srcD.DropActionID != 0 {
+		return false
+	}
+	// 合法 promote 目标：C 指针（原口径）或 String struct（任务①）
+	if !sg.isPointerTyped(targetName) && !sg.isStringTyped(targetName) {
+		return false
+	}
+	// SOR 的 scopeID 不覆盖 if/while 块（恒为 0），必须叠加 codegen 块深度。
+	// 目标声明块比源浅（或未被 SOR 追踪，如全局）→ 目标生存期更长 → 需要提升
+	tgtD := sg.codegen.sorAdapter.GetVarDecision(targetName)
+	if tgtD == nil {
+		return true
+	}
+	if tgtD.ScopeID > srcD.ScopeID {
+		return false // 目标在更内层作用域：目标先于源回收，无需提升
+	}
+	if tgtD.ScopeID < srcD.ScopeID {
+		return true
+	}
+	// 同 SOR scope（含 if/while 块内声明）：看 codegen 作用域栈深度
+	return sg.codegen.GetDeclScopeDepth(targetName) < sg.codegen.GetDeclScopeDepth(srcName)
+}
+
+// sorNeedsReturnPromote 判断 return 是否需要提升返回值
+// BumpPool 分配 + DropScopeEnd（作用域结束回收）才需要；DropNone（已转移/已提升）不重复拷贝
+// 任务①：额外允许 String（非指针 struct）返回提升
+func (sg *StatementGenerator) sorNeedsReturnPromote(name string) bool {
+	if !sg.sorActive() {
+		return false
+	}
+	d := sg.codegen.sorAdapter.GetVarDecision(name)
+	if d == nil || d.AllocKindID != 1 || d.DropActionID != 1 {
+		return false
+	}
+	if sg.isStringTyped(name) {
+		return true // 任务①：String 类型不需要 size 查询即可 promote（string_clone_global 内部自决）
+	}
+	_, ok := sg.sorPromoteSize(name, name)
+	return ok
+}
+
+// sorCallArgPromotes 收集调用前需要提升的实参（修复 #25）
+// 被调函数的 * 类型形参（ModeOwned=消费所有权）接收的指针若留在调用方作用域段，
+// 调用方作用域 pop 后悬垂；调用点前提升到全局幸存段，保证被调方长期持有的安全。
+// 仅处理语句级的直接函数调用（表达式上下文中的调用不做提升，见 generateCallExpression）。
+// 任务①：额外接受 String 类型实参（struct，非指针）。
+func (sg *StatementGenerator) sorCallArgPromotes(funcName string, args []ast.Expression) []string {
+	if !sg.sorActive() || funcName == "" {
+		return nil
+	}
+	var promotes []string
+	for i, arg := range args {
+		id, ok := arg.(*ast.Identifier)
+		if !ok {
+			continue
+		}
+		if sg.codegen.sorAdapter.GetFuncParamMode(funcName, i) != 0 {
+			continue
+		}
+		d := sg.codegen.sorAdapter.GetVarDecision(id.Name)
+		if d == nil || d.AllocKindID != 1 {
+			continue
+		}
+		// 任务①：String 直接加入（无需 size，string_clone_global 自决）；
+		// 指针类型需有可解析大小（scope_promote_p 需要字节数）
+		if sg.isStringTyped(id.Name) {
+			promotes = append(promotes, id.Name)
+			continue
+		}
+		if _, ok := sg.sorPromoteSize(id.Name, id.Name); ok {
+			promotes = append(promotes, id.Name)
+		}
+	}
+	return promotes
 }

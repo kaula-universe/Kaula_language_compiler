@@ -1,0 +1,14 @@
+import std.io
+import std.option
+import std.error
+
+fn main() {
+    Option o = std.option.option_some_i64(42)
+    if std.option.option_is_some(&o) {
+        std.io.println("some: ", std.option.option_unwrap_i64(&o))
+    }
+    Result r = std.option.result_err(7, "boom")
+    if std.option.result_is_err(&r) {
+        std.io.println("err code: ", std.option.result_err_code(&r))
+    }
+}

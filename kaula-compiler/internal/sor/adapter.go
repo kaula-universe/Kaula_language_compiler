@@ -87,15 +87,47 @@ func extractStmtsFromAST(program *ast.Program) []Stmt {
 	if program == nil {
 		return stmts
 	}
+	// 预扫描 extern 函数声明（opaque C 函数）：名字 -> 返回类型。
+	// 其返回值对 SOR 不透明，需作为外部逃逸来源追踪。
+	externFns := collectExternFuncs(program)
+	caller := "" // 修复 #25：追踪当前所在函数名（跨函数转移定位）
 	for _, s := range program.Statements {
 		if s != nil {
-			extractStatement(s, &stmts)
+			extractStatement(s, &stmts, &caller, externFns)
 		}
 	}
 	return stmts
 }
 
-func extractStatement(s ast.Statement, stmts *[]Stmt) {
+// collectExternFuncs 收集程序中所有 extern 函数声明（名字 -> 返回类型）
+func collectExternFuncs(program *ast.Program) map[string]string {
+	externFns := make(map[string]string)
+	for _, s := range program.Statements {
+		if ext, ok := s.(*ast.ExternStatement); ok && ext != nil && ext.IsFunction && ext.Name != "" {
+			externFns[ext.Name] = ext.ReturnType
+		}
+	}
+	return externFns
+}
+
+// externCallName 若表达式是对 extern 函数的调用，返回函数名；否则返回 ""
+func externCallName(expr ast.Expression, externFns map[string]string) string {
+	if len(externFns) == 0 {
+		return ""
+	}
+	call, ok := expr.(*ast.CallExpression)
+	if !ok || call == nil {
+		return ""
+	}
+	if ident, ok := call.Function.(*ast.Identifier); ok && ident != nil {
+		if _, isExtern := externFns[ident.Name]; isExtern {
+			return ident.Name
+		}
+	}
+	return ""
+}
+
+func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns map[string]string) {
 	if s == nil {
 		return
 	}
@@ -123,7 +155,13 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 			}
 		}
 		_ = typeName
-		*stmts = append(*stmts, LetStmt(stmt.Pos.Line, stmt.Name+" = ...", srcName, stmt.Type, isComposite))
+		letStmt := LetStmt(stmt.Pos.Line, stmt.Name+" = ...", srcName, stmt.Type, isComposite)
+		// 初始化表达式是 extern 函数调用时，标记为外部逃逸来源
+		if fn := externCallName(stmt.Value, externFns); fn != "" {
+			letStmt.IsExternCall = true
+			letStmt.FuncName = fn
+		}
+		*stmts = append(*stmts, letStmt)
 
 	case *ast.YieldStatement:
 		if stmt == nil {
@@ -172,7 +210,7 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 			"extract "+srcName+childPath+" -> "+stmt.Target, srcName, childPath, stmt.Target))
 
 	case *ast.ExpressionStatement:
-		extractExprStmt(stmt, stmts)
+		extractExprStmt(stmt, stmts, *caller, externFns)
 
 	case *ast.IfStatement:
 		if stmt == nil {
@@ -181,13 +219,13 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 		// 插入分支入口标记
 		*stmts = append(*stmts, BranchEnterStmt(stmt.Pos.Line, "if (...)"))
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts)
+			extractStatement(bodyStmt, stmts, caller, externFns)
 		}
 		if len(stmt.Else) > 0 {
 			// 插入 else 标记
 			*stmts = append(*stmts, BranchElseStmt(stmt.Pos.Line, "else"))
 			for _, elseStmt := range stmt.Else {
-				extractStatement(elseStmt, stmts)
+				extractStatement(elseStmt, stmts, caller, externFns)
 			}
 		}
 		// 插入分支出口标记
@@ -200,7 +238,7 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 		// 插入循环入口标记（迭代次数未知，传 0）
 		*stmts = append(*stmts, LoopEnterStmt(stmt.Pos.Line, "while (...)", 0))
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts)
+			extractStatement(bodyStmt, stmts, caller, externFns)
 		}
 		// 插入循环出口标记
 		*stmts = append(*stmts, LoopExitStmt(stmt.Pos.Line, "endwhile"))
@@ -210,14 +248,14 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 			return
 		}
 		if stmt.Init != nil {
-			extractStatement(stmt.Init, stmts)
+			extractStatement(stmt.Init, stmts, caller, externFns)
 		}
 		// 尝试静态推断迭代次数
 		iterCount := estimateForLoopIterCount(stmt)
 		// 插入循环入口标记
 		*stmts = append(*stmts, LoopEnterStmt(stmt.Pos.Line, "for (...)", iterCount))
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts)
+			extractStatement(bodyStmt, stmts, caller, externFns)
 		}
 		// 插入循环出口标记
 		*stmts = append(*stmts, LoopExitStmt(stmt.Pos.Line, "endfor"))
@@ -226,16 +264,22 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 		if stmt == nil {
 			return
 		}
-		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts)
+		// 修复 #25：进入函数体后更新当前调用方函数名（退出时恢复）
+		savedCaller := *caller
+		if stmt.Name != "" {
+			*caller = stmt.Name
 		}
+		for _, bodyStmt := range stmt.Body {
+			extractStatement(bodyStmt, stmts, caller, externFns)
+		}
+		*caller = savedCaller
 
 	case *ast.PrefixStatement:
 		if stmt == nil {
 			return
 		}
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts)
+			extractStatement(bodyStmt, stmts, caller, externFns)
 		}
 
 	default:
@@ -244,7 +288,7 @@ func extractStatement(s ast.Statement, stmts *[]Stmt) {
 	}
 }
 
-func extractExprStmt(stmt *ast.ExpressionStatement, stmts *[]Stmt) {
+func extractExprStmt(stmt *ast.ExpressionStatement, stmts *[]Stmt, caller string, externFns map[string]string) {
 	if stmt == nil || stmt.Expression == nil {
 		return
 	}
@@ -252,9 +296,9 @@ func extractExprStmt(stmt *ast.ExpressionStatement, stmts *[]Stmt) {
 	case nil:
 		return
 	case *ast.CallExpression:
-		extractCallExpr(expr, stmts)
+		extractCallExpr(expr, stmts, caller)
 	case *ast.BinaryExpression:
-		extractBinaryExpr(expr, stmts)
+		extractBinaryExpr(expr, stmts, externFns)
 	case *ast.Identifier:
 		*stmts = append(*stmts, ReadStmt(stmt.Pos.Line, expr.Name, expr.Name))
 	case *ast.IndexExpression:
@@ -266,7 +310,7 @@ func extractExprStmt(stmt *ast.ExpressionStatement, stmts *[]Stmt) {
 	}
 }
 
-func extractCallExpr(expr *ast.CallExpression, stmts *[]Stmt) {
+func extractCallExpr(expr *ast.CallExpression, stmts *[]Stmt, caller string) {
 	if expr == nil || expr.Function == nil {
 		return
 	}
@@ -343,19 +387,26 @@ func extractCallExpr(expr *ast.CallExpression, stmts *[]Stmt) {
 				}
 			}
 			if len(argNames) > 0 {
-				*stmts = append(*stmts, CallStmt(expr.Pos.Line, funcName+"(...)", funcName, argNames, nil))
+				// 修复 #25：携带调用方函数名，跨函数转移定位不再依赖 "main" 占位
+				*stmts = append(*stmts, CallStmtIn(expr.Pos.Line, funcName+"(...)", funcName, caller, argNames, nil))
 			}
 		}
 	}
 }
 
-func extractBinaryExpr(expr *ast.BinaryExpression, stmts *[]Stmt) {
+func extractBinaryExpr(expr *ast.BinaryExpression, stmts *[]Stmt, externFns map[string]string) {
 	if expr == nil {
 		return
 	}
 	if expr.Operator == "=" || expr.Operator == "ASSIGN" {
 		if left, ok := expr.Left.(*ast.Identifier); ok {
-			*stmts = append(*stmts, WriteStmt(expr.Pos.Line, left.Name+" = ...", left.Name))
+			writeStmt := WriteStmt(expr.Pos.Line, left.Name+" = ...", left.Name)
+			// 右值为 extern 函数调用时，重新将该变量标记为外部逃逸来源
+			if fn := externCallName(expr.Right, externFns); fn != "" {
+				writeStmt.IsExternCall = true
+				writeStmt.FuncName = fn
+			}
+			*stmts = append(*stmts, writeStmt)
 		}
 	}
 }

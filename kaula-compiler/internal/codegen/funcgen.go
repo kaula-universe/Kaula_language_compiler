@@ -76,8 +76,9 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement)
 	return false
 }
 
-// bodyHasAllocationCall 扫描函数体是否包含内存分配调用
-// 纯计算函数（无 std_malloc/kmm_v4/yield/release/extract）可跳过 scope 管理
+// bodyHasAllocationCall 扫描函数体是否包含 KMM 分配调用
+// 纯计算函数（无 kmm_v4 分配 / yield / release / extract）可跳过 scope 管理
+// 注意：hosted 模式下 std_malloc 是系统 malloc，不消耗 KMM 池，不触发 scope
 func (fg *FunctionGenerator) bodyHasAllocationCall(bodyStmts []ast.Statement) bool {
 	for _, stmt := range bodyStmts {
 		if stmt == nil {
@@ -132,15 +133,18 @@ func (fg *FunctionGenerator) exprHasAllocCall(expr ast.Expression) bool {
 	}
 	switch e := expr.(type) {
 	case *ast.CallExpression:
+		// std_malloc 仅在 freestanding 模式下消耗 KMM 池（被重写为 kmm_v4_alloc_auto）；
+		// hosted 模式下它是系统 malloc，不触发 KMM scope 管理
+		isFree := fg.codegen.IsFreestanding()
 		if ident, ok := e.Function.(*ast.Identifier); ok {
 			name := ident.Name
-			if name == "std_malloc" || name == "kmm_v4_malloc" || name == "kmm_v4_alloc_auto" {
+			if (name == "std_malloc" && isFree) || name == "kmm_v4_malloc" || name == "kmm_v4_alloc_auto" {
 				return true
 			}
 		}
 		// 检查 std.memory.std_malloc 等链式调用
 		if member, ok := e.Function.(*ast.MemberAccessExpression); ok {
-			if member.Member == "std_malloc" || member.Member == "kmm_v4_malloc" {
+			if (member.Member == "std_malloc" && isFree) || member.Member == "kmm_v4_malloc" {
 				return true
 			}
 		}
@@ -246,9 +250,10 @@ func (fg *FunctionGenerator) shouldUseKMMScope() bool {
 
 // needsKMMScopeNonSOR 非 SOR 模式下的智能 KMM 判断
 // 基于符号表分析变量类型，判断是否需要 KMM scope
+// 注意：hosted 模式下 std_malloc 是系统 malloc，不在此列；
+// freestanding 下它被重写为 kmm_v4_alloc_auto，由下方 "kmm_v4" 内容检测覆盖
 func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
-	if !strings.Contains(bodyCode, "std_malloc") &&
-		!strings.Contains(bodyCode, "kmm_v4") &&
+	if !strings.Contains(bodyCode, "kmm_v4") &&
 		!strings.Contains(bodyCode, "string_concat") &&
 		!strings.Contains(bodyCode, "string_dup") {
 		return false
@@ -448,6 +453,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		if useKMM {
 			fg.codegen.EnterKMMScope()
 		}
+		// 方案 C：重置 promote 标志，body 生成期间若发射 promote_p 则置 true
+		fg.codegen.funcEmitsPromote = false
 
 		var bodyBuilder strings.Builder
 		bodyIndent := fg.codegen.indentString()
@@ -461,6 +468,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			bodyBuilder.WriteString(fg.codegen.indentString())
 			bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
+		// 方案 A：per-object survivor 回收（在 KMM_V4_SCOPE_END 前发射）
+		// 若末尾是 return，return 中已通过 generateSurvivorFreeForReturn 释放，此处为死代码，跳过
+		if !lastStmtIsReturn(stmt.Body) {
+			bodyBuilder.WriteString(fg.codegen.statementGenerator.generateSurvivorFreeForScope())
+		}
 		fg.codegen.inFunctionBody = prevInFuncBody
 		fg.codegen.indent--
 
@@ -471,16 +483,23 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		bodyCode := bodyBuilder.String()
 
 		if useKMM {
-			// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
-			// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
-			// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
-			// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
+		// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
+		// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
+		// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
+		// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
+		// 方案 C：函数入口 checkpoint，出口 rewind（仅对不向外 promote 的函数）
+		builder.WriteString(bodyIndent)
+		builder.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
+		builder.WriteString(bodyIndent)
+		builder.WriteString("KMM_V4_SCOPE_START {\n")
+		builder.WriteString(bodyCode)
+		builder.WriteString(bodyIndent)
+		builder.WriteString("} KMM_V4_SCOPE_END;\n")
+		if !fg.codegen.funcEmitsPromote {
 			builder.WriteString(bodyIndent)
-			builder.WriteString("KMM_V4_SCOPE_START {\n")
-			builder.WriteString(bodyCode)
-			builder.WriteString(bodyIndent)
-			builder.WriteString("} KMM_V4_SCOPE_END;\n")
-		} else {
+			builder.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
+		}
+	} else {
 			builder.WriteString(bodyCode)
 		}
 	} else {
@@ -638,6 +657,21 @@ func hasReturnStatement(stmts []ast.Statement) bool {
 	return false
 }
 
+// lastStmtIsReturn 检查语句列表的最后一条是否是 return。
+// 方案 A：若末尾是 return，则作用域末尾的 generateSurvivorFreeForScope 是死代码
+//（return 中已通过 generateSurvivorFreeForReturn 遍历作用域链释放），应跳过。
+func lastStmtIsReturn(stmts []ast.Statement) bool {
+	if len(stmts) == 0 {
+		return false
+	}
+	last := stmts[len(stmts)-1]
+	if last == nil {
+		return false
+	}
+	_, ok := last.(*ast.ReturnStatement)
+	return ok
+}
+
 func isVoidType(typeName string) bool {
 	return typeName == "void" || typeName == "Void"
 }
@@ -709,6 +743,8 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	if useKMM {
 		fg.codegen.EnterKMMScope()
 	}
+	// 方案 C：重置 promote 标志
+	fg.codegen.funcEmitsPromote = false
 
 	var bodyBuilder strings.Builder
 	for _, bodyStmt := range stmt.Body {
@@ -717,6 +753,11 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		}
 		bodyBuilder.WriteString(fg.codegen.indentString())
 		bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
+	}
+	// 方案 A：per-object survivor 回收（在 KMM_V4_SCOPE_END 前发射）
+	// 若末尾是 return，return 中已通过 generateSurvivorFreeForReturn 释放，此处为死代码，跳过
+	if !lastStmtIsReturn(stmt.Body) {
+		bodyBuilder.WriteString(fg.codegen.statementGenerator.generateSurvivorFreeForScope())
 	}
 
 	if useKMM {
@@ -743,10 +784,16 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 
 	if useKMM {
 		code.WriteString(fg.codegen.indentString())
+		code.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
+		code.WriteString(fg.codegen.indentString())
 		code.WriteString("KMM_V4_SCOPE_START {\n")
 		code.WriteString(finalBody.String())
 		code.WriteString(fg.codegen.indentString())
 		code.WriteString("} KMM_V4_SCOPE_END;\n")
+		if !fg.codegen.funcEmitsPromote {
+			code.WriteString(fg.codegen.indentString())
+			code.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
+		}
 	} else {
 		code.WriteString(finalBody.String())
 	}
@@ -837,16 +884,17 @@ func (fg *FunctionGenerator) analyzeBodyMallocs(bodyStmts []ast.Statement) (canB
 	return
 }
 
-// isMallocCall 检查调用是否是 malloc 类函数
+// isMallocCall 检查调用是否是 KMM 分配函数（std_malloc 仅在 freestanding 下属于 KMM 分配）
 func (fg *FunctionGenerator) isMallocCall(call *ast.CallExpression) bool {
 	if call == nil || call.Function == nil {
 		return false
 	}
+	isFree := fg.codegen.IsFreestanding()
 	switch fn := call.Function.(type) {
 	case *ast.Identifier:
-		return fn.Name == "std_malloc" || fn.Name == "kmm_v4_malloc" || fn.Name == "kmm_v4_alloc_auto"
+		return (fn.Name == "std_malloc" && isFree) || fn.Name == "kmm_v4_malloc" || fn.Name == "kmm_v4_alloc_auto"
 	case *ast.MemberAccessExpression:
-		return fn.Member == "std_malloc" || fn.Member == "kmm_v4_malloc"
+		return (fn.Member == "std_malloc" && isFree) || fn.Member == "kmm_v4_malloc"
 	}
 	return false
 }

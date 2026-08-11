@@ -3,6 +3,5 @@ kaula-compiler/kaulac.exe
 cache/
 kaula-compiler/cache/
 
-# pkglib 目录保留（放库即用挂载点），库内容不入库
-pkglib/*
-!pkglib/.gitkeep
+# pkglib 依赖目录（本地放库即用，不入库）
+pkglib/

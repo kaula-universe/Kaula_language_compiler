@@ -64,8 +64,23 @@ type CodeGenerator struct {
 
 	sorAdapter *SORCodeGenAdapter
 
+	// 修复 #25：变量声明时的堆分配常量大小登记（varName → 字节数）
+	// 供跨作用域 promote 在决策无 SizeBytes、且类型为 void* 时回退使用
+	sorInitSizes map[string]int
+
 	kmmScopeDepth    int
 	offsetScopeDepth int // 跟踪 offset_save/restore scope 嵌套深度，用于相邻 scope 合并优化
+
+	// 方案 C：survivor 段 checkpoint/rewind 追踪
+	// funcEmitsPromote: 当前函数是否发射了 kmm_v4_scope_promote_p（yield/extract/return promote）
+	// 若为 true，则函数出口/return 不发射 survivor_rewind（survivor 对象已逃逸到调用方）
+	funcEmitsPromote bool
+
+	// 修复 #25：符号声明时的 codegen 作用域栈深度（函数体=1，if/while/block=2+）
+	// SOR 分析器不把 if/while 块计为作用域（scopeID 恒为 0），
+	// 跨作用域 promote 判定需靠 codegen 自己的作用域栈
+	scopeDepth      int
+	declScopeDepth  map[string]int
 
 	sourceMap  *SourceMap
 	sourceFile string
@@ -107,6 +122,167 @@ type CodeGenerator struct {
 	pendingNestedFuncs    []string
 	nestedFuncPrototypes  strings.Builder
 	inFunctionBody        bool
+
+	// 任务②：深提升回调（kmm_v4_scope_promote_p_deep）的合成与去重
+	// deepPromoteCBEmitted: kaula 类型名 -> true（已经合成过，避免重复）
+	// deepPromoteCBCode: 合成的 static C 函数体（文件作用域，在 typedef 之后、函数代码之前输出）
+	deepPromoteCBEmitted map[string]struct{}
+	deepPromoteCBCode    strings.Builder
+}
+
+// EnsureDeepPromoteCB 为给定 kaula class/struct 类型合成类型化深提升回调。
+// 仅对需要 promote 的聚合类型（class 声明中可能含 * 字段）合成；每个类型只合成一次。
+// 返回 C 回调名（如 __kaula_deeppromote_Node），未实现的聚合类型 fallback 返回 ""（仍走浅 promote）。
+//
+// Bug 2 正解（任务②）：SOR 的跨作用域 promote 对含指针字段的对象需要把每个 * 字段
+// 都递归提升并改写为 survivor 段新地址。此函数为每个类生成静态 C 函数：
+//   static int __kaula_deeppromote_<T>(void* promoted_obj) {
+//       K_<T>* self = (K_<T>*)promoted_obj;
+//       self->ptr_field = kmm_v4_promote_deep(self->ptr_field, sizeof(*self->ptr_field), cb);
+//       ... （每个指针字段/字符串字段递归提升）
+//       return 0;
+//   }
+func (cg *CodeGenerator) EnsureDeepPromoteCB(kaulaType string) string {
+	if kaulaType == "" {
+		return ""
+	}
+	if cg.typeGenerator == nil || !cg.typeGenerator.classTypes[kaulaType] {
+		return "" // 非 class/struct：不需要 cb
+	}
+	if _, ok := cg.deepPromoteCBEmitted[kaulaType]; ok {
+		return "__kaula_deeppromote_" + kaulaType // 已合成过，直接复用
+	}
+	// 修复：递归类型（A 含字段 *B，B 含字段 *A / 自引用）在字段处理中会重入
+	// EnsureDeepPromoteCB，如果等到 body 合成完再登记 deepPromoteCBEmitted，就会
+	// 无限递归挂死。这里先"占位"登记，使重入路径能立即返回同名 cb（C 静态函数
+	// 允许前向声明/先使用后定义——但当前实现是直接写函数体，若子引用字段在 body
+	// 合成时需要父 cb 名，返回相同字符串只是在 C 表达式里被当作函数指针，没有
+	// 依赖字段信息，所以是安全的）。
+	cg.deepPromoteCBEmitted[kaulaType] = struct{}{}
+	fields := cg.typeGenerator.getClassFields(kaulaType)
+	if len(fields) == 0 {
+		// 无字段的空结构体：cb 直接返回 0（浅拷贝完全等价于深拷贝）
+		cb := fmt.Sprintf(
+			"/* SOR deep-promote callback for '%s' (no pointer fields, no-op) */\n"+
+				"static int __kaula_deeppromote_%s(void* promoted_obj) {\n"+
+				"    (void)promoted_obj;\n"+
+				"    return 0;\n"+
+				"}\n\n",
+			kaulaType, kaulaType)
+		cg.deepPromoteCBCode.WriteString(cb)
+		cg.deepPromoteCBEmitted[kaulaType] = struct{}{}
+		return "__kaula_deeppromote_" + kaulaType
+	}
+
+	cTagName := "K_" + kaulaType // class 在 C 中 typedef 为 struct K_<Name>
+
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf(
+		"/* SOR deep-promote callback for '%s' (Bug 2 fix):\n"+
+			"   对每个指针字段递归提升，把内部指针改写为 survivor 段地址。 */\n"+
+			"static int __kaula_deeppromote_%s(void* promoted_obj) {\n"+
+			"    %s* self = (%s*)promoted_obj;\n",
+		kaulaType, kaulaType, cTagName, cTagName))
+
+	hasPtrField := false
+	for _, f := range fields {
+		if f == nil || f.Name == "" {
+			continue
+		}
+		fcType := cg.typeGenerator.convertType(f.Type, f.Nullable)
+		// Bug 2 隐患②修复：指针字段不再一律传 NULL cb。
+		// 如果 pointeeType 本身就是 class/聚合类型，递归 EnsureDeepPromoteCB
+		// 合成 pointee 的深提升 cb 传进去，确保多级嵌套指针递归提升。
+		// POD pointee（基础类型、非 class）保持 NULL，避免无意义回调调用。
+		if fcType != "" && strings.HasSuffix(fcType, "*") && fcType != "void*" {
+			hasPtrField = true
+			pointeeType := strings.TrimRight(fcType, "*")
+			fieldCB := "NULL"
+			if cg.typeGenerator != nil && cg.typeGenerator.classTypes[f.Type] {
+				// f.Type 是原始 Kaula 类型名（class 注册名）；
+				// 如果它是 class，则 pointeeType 对应的就是该 class 的 C 结构。
+				if subCB := cg.EnsureDeepPromoteCB(f.Type); subCB != "" {
+					fieldCB = subCB
+				} else {
+					// 理论上不可达：classTypes[f.Type] 为 true 的 EnsureDeepPromoteCB
+					// 一定返回非空（fields==0 也返回 no-op cb）。但仍硬 guard：
+					// 强制在 C 编译期报错，避免 NULL cb 退化为浅提升漏过 Bug 2。
+					msg := fmt.Sprintf(
+						"字段 %q 类型 %q 是 class 但无法合成子 cb（多级嵌套指针将悬垂）",
+						f.Name, f.Type)
+					cg.error("[SOR deep-promote] " + msg)
+					body.WriteString(fmt.Sprintf(
+						"    #error SOR_SUB_CB_MISSING: owner=%s field=%s pointee_type=%s /* audit: Bug 2 nested */\n",
+						kaulaType, f.Name, f.Type))
+				}
+			}
+			// 字段本身是子指针：提升 pointee，把字段值改写为 survivor 段新地址
+			body.WriteString(fmt.Sprintf(
+				"    if (self->%s != NULL) {\n"+
+					"        void* _field_new = kmm_v4_promote_deep(self->%s, sizeof(%s), %s);\n"+
+					"        if (_field_new == NULL) return -1;\n"+
+					"        self->%s = (%s)_field_new;\n"+
+					"    }\n",
+				f.Name, f.Name, pointeeType, fieldCB, f.Name, fcType))
+		} else if f.Type == "string" || f.Type == "str" || f.Type == "String" || fcType == "String" {
+			// 任务①联动：String 字段的载荷单独分配，浅拷贝提升后 ptr 仍指向作用域段。
+			// 需要把 String.ptr 重新提升并改写字段的 {len, ptr}。
+			hasPtrField = true
+			body.WriteString(fmt.Sprintf(
+				"    /* String field '%s': re-clone payload into survivor via global allocator */\n"+
+					"    {\n"+
+					"        String _sclone = string_clone_global(self->%s);\n"+
+					"        if (_sclone.ptr == NULL && self->%s.len != 0) return -1;\n"+
+					"        self->%s = _sclone;\n"+
+					"    }\n",
+				f.Name, f.Name, f.Name, f.Name))
+		} else if fcType == "void*" {
+			// opaque void* 字段：只提升外壳（sizeof(void*) 实际是指针本身，
+			// 指向内容 SOR 不可知——保守按指向的字节无法提升，这里仅记 no-op）
+			// 注：如果 void* 实际是已知类型，调用方应该显式 cast；
+			// SOR 对 opaque 提升保持浅拷贝，与现有口径一致。
+			hasPtrField = true
+			body.WriteString(fmt.Sprintf(
+				"    /* void* field '%s' is opaque to SOR; leaving shallow-copy */\n",
+				f.Name))
+		} else if cg.typeGenerator != nil && cg.typeGenerator.classTypes[f.Type] {
+			// 内嵌聚合类型（非指针 class 字段，值语义）：外层 promote_deep 已经 memcpy
+			// 了整个结构体（包括内嵌值字段的字节内容），因此**不能**再调用
+			// kmm_v4_scope_promote_p_deep：后者对 &(self->f) 转 (void**) 会把值字段
+			// 的起始若干字节（刚好等于 sizeof(void*)）当成指针再分配一遍，会把
+			// 第一个指针字段错误地覆盖为新的 dangling 地址。
+			// 正确语义：直接对子结构体（已在 survivor 段）执行其深提升 cb，
+			// 仅递归处理其内部指针字段。
+			hasPtrField = true
+			innerCB := cg.EnsureDeepPromoteCB(f.Type)
+			if innerCB == "" {
+				// 与隐患①保持一致：classTypes[f.Type] 为真却无 cb → 内部不一致，
+				// 绝不静默漏过。
+				msg := fmt.Sprintf(
+					"内嵌 class 字段 %q 类型 %q 的深提升子 cb 合成失败", f.Name, f.Type)
+				cg.error("[SOR deep-promote] " + msg)
+				body.WriteString(fmt.Sprintf(
+					"    #error SOR_INNER_CB_MISSING: owner=%s field=%s type=%s /* audit: Bug 2 inline */\n",
+					kaulaType, f.Name, f.Type))
+				body.WriteString("    return -1;\n")
+				continue
+			}
+			body.WriteString(fmt.Sprintf(
+				"    /* inline class field '%s' (%s): already memcpy'd on promote; only re-run its cb on the address */\n"+
+					"    if (%s(&(self->%s)) != 0) return -1;\n",
+				f.Name, f.Type, innerCB, f.Name))
+		}
+	}
+
+	if !hasPtrField {
+		// 字段全部是 POD：无递归提升，cb 为 no-op（浅拷贝 == 深拷贝）
+		body.WriteString("    /* all POD fields; no recursive promotion needed */\n")
+	}
+	body.WriteString("    return 0;\n}\n\n")
+
+	cg.deepPromoteCBCode.WriteString(body.String())
+	cg.deepPromoteCBEmitted[kaulaType] = struct{}{}
+	return "__kaula_deeppromote_" + kaulaType
 }
 
 // AddObjectDecl 添加动态对象字面量的静态变量声明（文件作用域）
@@ -184,6 +360,95 @@ func (cg *CodeGenerator) ExitKMMScope() {
 	}
 }
 
+// PropagateInitSize 在 yield/extract 转移时把源对象的大小登记传播给目标变量
+// （修复 #25：目标变量自身初始化可能是 null，但转移来的对象大小来自源声明）
+func (cg *CodeGenerator) PropagateInitSize(dst, src string) {
+	if dst == "" || src == "" {
+		return
+	}
+	if n, ok := cg.sorInitSizes[src]; ok {
+		cg.sorInitSizes[dst] = n
+	}
+}
+
+func (cg *CodeGenerator) ExtractMallocSizeBytesFromAST(call *ast.CallExpression) int {
+	if call == nil || len(call.Args) == 0 {
+		return 0
+	}
+	arg := call.Args[0]
+	if lit, ok := arg.(*ast.IntegerLiteral); ok {
+		return int(lit.Value)
+	}
+	if sizeOf, ok := arg.(*ast.SizeOfExpression); ok {
+		if size, ok := cg.typeGenerator.GetTypeSize(sizeOf.TargetType); ok {
+			return size
+		}
+	}
+	return 0
+}
+
+// RecordDeclScopeDepth 在变量声明时记录其作用域栈深度（修复 #25）
+func (cg *CodeGenerator) RecordDeclScopeDepth(name string) {
+	if name != "" {
+		if _, ok := cg.declScopeDepth[name]; !ok {
+			cg.declScopeDepth[name] = cg.scopeDepth
+		}
+	}
+}
+
+// GetDeclScopeDepth 返回变量声明时的作用域栈深度
+func (cg *CodeGenerator) GetDeclScopeDepth(name string) int {
+	if d, ok := cg.declScopeDepth[name]; ok {
+		return d
+	}
+	return 0
+}
+
+// IsMallocLikeCall 检查是否为 malloc 类调用（包含 hosted std_malloc，不区分 freestanding）
+// 用于编译期大小登记
+func (cg *CodeGenerator) IsMallocLikeCall(call *ast.CallExpression) bool {
+	if call == nil || call.Function == nil {
+		return false
+	}
+	switch fn := call.Function.(type) {
+	case *ast.Identifier:
+		switch fn.Name {
+		case "std_malloc", "kmm_v4_malloc", "kmm_v4_alloc", "kmm_v4_alloc_auto", "kmm_v4_calloc", "kmm_v4_bump":
+			return true
+		}
+	case *ast.MemberAccessExpression:
+		switch fn.Member {
+		case "std_malloc", "kmm_v4_malloc", "kmm_v4_alloc", "kmm_v4_alloc_auto", "kmm_v4_calloc", "kmm_v4_bump":
+			return true
+		}
+	}
+	return false
+}
+
+// RecordAllocSizeFromAST 从 malloc 类调用的 AST 直接提取常量大小并登记（修复 #25）
+// 解决 hosted 模式下 std_malloc 不被重写、字符串登记失效的问题
+func (cg *CodeGenerator) RecordAllocSizeFromAST(name string, expr ast.Expression) {
+	if name == "" || expr == nil {
+		return
+	}
+	var call *ast.CallExpression
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		if cg.IsMallocLikeCall(e) {
+			call = e
+		}
+	case *ast.TypeCastExpression:
+		if c, ok := e.Expression.(*ast.CallExpression); ok && cg.IsMallocLikeCall(c) {
+			call = c
+		}
+	}
+	if call != nil {
+		if n := cg.ExtractMallocSizeBytesFromAST(call); n > 0 {
+			cg.sorInitSizes[name] = n
+		}
+	}
+}
+
 // EnterOffsetScope 进入 offset_save/restore 作用域
 // 用于相邻 scope 合并优化：当外层已有 offset scope 时，内层 BlockStatement 跳过重复包裹
 func (cg *CodeGenerator) EnterOffsetScope() {
@@ -200,6 +465,13 @@ func (cg *CodeGenerator) ExitOffsetScope() {
 // IsInOffsetScope 当前是否在 offset_save/restore 作用域内
 func (cg *CodeGenerator) IsInOffsetScope() bool {
 	return cg.offsetScopeDepth > 0
+}
+
+// IsFreestanding 判断是否为 freestanding（裸机）编译模式。
+// 该模式下没有 libc，std_malloc 会被重写为 kmm_v4_alloc_auto；
+// hosted 模式下 std_malloc 是系统 malloc 包装，与 kmm_v4 系列严格区分。
+func (cg *CodeGenerator) IsFreestanding() bool {
+	return cg.config != nil && cg.config.Freestanding
 }
 
 func (cg *CodeGenerator) GetStdlibConfig() *stdlib.StdlibConfig {
@@ -294,6 +566,9 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		sourceMap:           NewSourceMap("", ""),
 		constTable:          make(map[string]string),
 		arrayLens:           make(map[string]int),
+		sorInitSizes:        make(map[string]int),
+		declScopeDepth:      make(map[string]int),
+		deepPromoteCBEmitted: make(map[string]struct{}),
 	}
 
 	cg.typeGenerator = NewTypeGenerator(cg)
@@ -621,6 +896,16 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		functionCode.WriteString(combined)
 	}
 
+	// 任务② Bug 2 正解：深提升合成回调。
+	// cb 是 static C 函数（引用 K_<Class> 类型和 string_clone_global/kmm_v4_promote_deep），
+	// 必须在 typedef/class 定义之后、普通函数代码之前输出。
+	if cg.deepPromoteCBCode.Len() > 0 {
+		comment := "\n// --- SOR synthesized deep-promote callbacks (Bug 2 fix) ---\n\n"
+		combined := comment + cg.deepPromoteCBCode.String() + functionCode.String()
+		functionCode.Reset()
+		functionCode.WriteString(combined)
+	}
+
 	var allIncludes strings.Builder
 	allIncludes.Grow(2048)
 	if cg.config != nil && cg.config.Freestanding {
@@ -754,6 +1039,11 @@ static inline String string_concat(String str1, String str2) {
 				continue
 			}
 			returnType := tgReturnTypeToC(cg.typeGenerator, fnStmt.ReturnType)
+			// export 函数的定义带 KAULA_EXPORT，前置声明必须同样携带，
+			// 否则 clang 报 "redeclaration cannot add dllexport attribute"
+			if fnStmt.IsExported {
+				forwardDecls.WriteString("KAULA_EXPORT ")
+			}
 			forwardDecls.WriteString(returnType)
 			forwardDecls.WriteByte(' ')
 			forwardDecls.WriteString(fnStmt.Name)
@@ -997,6 +1287,7 @@ func (cg *CodeGenerator) RegisterPlugin(plugin Plugin) {
 func (cg *CodeGenerator) EnterScope(scopeName string) {
 	newScope := symbol.NewSymbolTable(cg.currentScope, scopeName)
 	cg.currentScope = newScope
+	cg.scopeDepth++
 	// 注册 SOR 作用域 ID 映射
 	if cg.sorAdapter != nil && cg.sorAdapter.IsActive {
 		cg.sorAdapter.RegisterScope(scopeName)
@@ -1008,6 +1299,9 @@ func (cg *CodeGenerator) ExitScope() {
 	if cg.currentScope != cg.symbolTable {
 		cg.currentScope = cg.currentScope.GetParent()
 	}
+	if cg.scopeDepth > 0 {
+		cg.scopeDepth--
+	}
 }
 
 // GetCurrentScope 获取当前作用域
@@ -1017,6 +1311,10 @@ func (cg *CodeGenerator) GetCurrentScope() *symbol.SymbolTable {
 
 // AddSymbol 添加一个符号到当前作用域
 func (cg *CodeGenerator) AddSymbol(name, symbolType string, nullable bool, scope string, line, column int) {
+	// 修复 #25：在首次添加符号时记录其声明时的作用域深度
+	if _, ok := cg.declScopeDepth[name]; !ok {
+		cg.declScopeDepth[name] = cg.scopeDepth
+	}
 	cg.currentScope.AddSymbol(name, symbolType, nullable, scope, line, column)
 }
 
@@ -1028,6 +1326,45 @@ func (cg *CodeGenerator) GetSymbol(name string) *symbol.Symbol {
 // HasSymbol 检查是否存在符号
 func (cg *CodeGenerator) HasSymbol(name string) bool {
 	return cg.currentScope.HasSymbol(name)
+}
+
+// GetSymbolType 获取符号的 Kaula 类型字符串（修复 #25：promote 判定用）
+func (cg *CodeGenerator) GetSymbolType(name string) string {
+	if s := cg.currentScope.GetSymbol(name); s != nil {
+		return s.Type
+	}
+	return ""
+}
+
+// recordAllocSizeHint 从初始化表达式登记编译期可知的堆分配常量大小（修复 #25）
+// 匹配 kmm_v4_alloc_auto(<常量>) 模式（std_malloc 已在表达式生成阶段重写为它）
+func (cg *CodeGenerator) recordAllocSizeHint(varName, initValue string) {
+	if varName == "" || initValue == "" {
+		return
+	}
+	idx := strings.Index(initValue, "kmm_v4_alloc_auto(")
+	if idx < 0 {
+		return
+	}
+	digits := make([]byte, 0, 16)
+	for i := idx + len("kmm_v4_alloc_auto("); i < len(initValue); i++ {
+		c := initValue[i]
+		if c >= '0' && c <= '9' {
+			digits = append(digits, c)
+			continue
+		}
+		break
+	}
+	if len(digits) == 0 {
+		return
+	}
+	n := 0
+	for _, d := range digits {
+		n = n*10 + int(d-'0')
+	}
+	if n > 0 {
+		cg.sorInitSizes[varName] = n
+	}
 }
 
 // GetLocalSymbol 获取当前作用域中的符号

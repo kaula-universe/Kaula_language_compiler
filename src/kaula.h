@@ -26,23 +26,34 @@ typedef struct {
 #define KAULA_PLATFORM_UNIX 0
 #define KAULA_PLATFORM_LINUX 0
 #define KAULA_PLATFORM_MACOS 0
+#define KAULA_PLATFORM_WEB 0
 #else
 // 平台检测
-#if defined(_WIN32) || defined(_WIN64)
+#if defined(__EMSCRIPTEN__)
+    // Emscripten/WASM 目标（浏览器运行时）
+    #define KAULA_PLATFORM_WINDOWS 0
+    #define KAULA_PLATFORM_UNIX 0
+    #define KAULA_PLATFORM_LINUX 0
+    #define KAULA_PLATFORM_MACOS 0
+    #define KAULA_PLATFORM_WEB 1
+#elif defined(_WIN32) || defined(_WIN64)
     #define KAULA_PLATFORM_WINDOWS 1
     #define KAULA_PLATFORM_UNIX 0
     #define KAULA_PLATFORM_LINUX 0
     #define KAULA_PLATFORM_MACOS 0
+    #define KAULA_PLATFORM_WEB 0
 #elif defined(__linux__)
     #define KAULA_PLATFORM_WINDOWS 0
     #define KAULA_PLATFORM_UNIX 1
     #define KAULA_PLATFORM_LINUX 1
     #define KAULA_PLATFORM_MACOS 0
+    #define KAULA_PLATFORM_WEB 0
 #elif defined(__APPLE__) && defined(__MACH__)
     #define KAULA_PLATFORM_WINDOWS 0
     #define KAULA_PLATFORM_UNIX 1
     #define KAULA_PLATFORM_LINUX 0
     #define KAULA_PLATFORM_MACOS 1
+    #define KAULA_PLATFORM_WEB 0
 #else
     #error "Unsupported platform"
 #endif
@@ -73,6 +84,9 @@ typedef struct {
 #if KAULA_PLATFORM_WINDOWS
     #define KAULA_TLS __declspec(thread)
 #elif KAULA_PLATFORM_UNIX
+    #define KAULA_TLS __thread
+#elif KAULA_PLATFORM_WEB
+    // Emscripten 单线程模式下 __thread 可用
     #define KAULA_TLS __thread
 #else
     #define KAULA_TLS

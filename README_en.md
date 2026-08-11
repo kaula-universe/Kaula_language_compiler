@@ -352,15 +352,15 @@ Based on 10M iteration benchmarks (Windows, Clang 16, x86-64):
 - **Per-Thread Heap**: Each thread batch-acquires memory from the global pool; allocation only advances the thread-local offset, no atomics, no locks
 - **Bump Allocation**: Allocation is pointer advancement, O(1) complexity, no fragmentation
 - **Scope-based Reclamation**: `kmm_v4_scope_push`/`kmm_v4_scope_pop` save/restore thread-local offset, batch reclaim on scope exit, no per-object free needed
-- **Inline Optimization**: Compiler rewrites `std_malloc` to `kmm_v4_alloc_auto` inline calls, eliminating function call overhead
+- **Inline Optimization**: Compiler rewrites `std_malloc` to `kmm_v4_alloc_auto` inline calls (freestanding mode only), eliminating function call overhead
 - **kmm_v4_free is a no-op**: No free list maintenance, zero-cost deallocation
 
 ```kaula
 // KMM V4 automatic scope management example
 fn process_data() {
     // Compiler auto-inserts kmm_v4_scope_push()
-    auto buf1 = std.memory.std_malloc(1024)   // inlined to kmm_v4_alloc_auto(1024)
-    auto buf2 = std.memory.std_malloc(2048)   // inlined to kmm_v4_alloc_auto(2048)
+    auto buf1 = std.memory.kmm_v4_alloc(1024)   // KMM V4 pool allocation, auto-reclaimed on scope exit
+    auto buf2 = std.memory.kmm_v4_alloc(2048)   // KMM V4 pool allocation
     // ... use buf1, buf2 ...
     // Compiler auto-inserts kmm_v4_scope_pop(), batch reclaim
 }

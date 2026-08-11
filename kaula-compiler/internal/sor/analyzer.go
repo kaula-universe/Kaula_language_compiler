@@ -104,6 +104,9 @@ type Stmt struct {
 	// "owned" 或 "release"。
 	ArgOwnership []string
 
+	// CallerName 是调用语句所在的函数名（修复 #25：跨函数转移定位用）。
+	CallerName string
+
 	// Children 是子语句列表（用于作用域/线程等嵌套结构）。
 	Children []Stmt
 
@@ -112,6 +115,12 @@ type Stmt struct {
 
 	// LoopIterCount 静态可确定的循环迭代次数（0=未知）
 	LoopIterCount int
+
+	// IsExternCall 标记该语句的值来自 opaque extern C 函数调用：
+	// StmtLet 时表示初始化表达式是 extern 函数调用（返回值指向外部不可追踪内存）；
+	// StmtWrite 时表示赋值的右值为 extern 函数调用。
+	// 供逃逸分析将此类变量标记为外部逃逸来源。
+	IsExternCall bool
 }
 
 // ============================================================================
@@ -649,6 +658,19 @@ func CallStmt(line int, source, funcName string, argNames []string, argOwnership
 		Line:         line,
 		Source:       source,
 		FuncName:     funcName,
+		ArgNames:     argNames,
+		ArgOwnership: argOwnership,
+	}
+}
+
+// CallStmtIn 创建一个带调用方函数名的函数调用语句（修复 #25）。
+func CallStmtIn(line int, source, funcName, callerName string, argNames []string, argOwnership []string) Stmt {
+	return Stmt{
+		Kind:         StmtCall,
+		Line:         line,
+		Source:       source,
+		FuncName:     funcName,
+		CallerName:   callerName,
 		ArgNames:     argNames,
 		ArgOwnership: argOwnership,
 	}

@@ -1,24 +1,36 @@
 #include "option.h"
 #include "../memory/memory.h"
+#include "../string/string.h"
+#include "../panic/panic.h"
 #include <stdio.h>
-#include <stdlib.h>
+
+// Option/Result 的 unwrap 失败属于可捕获 panic（std.panic 提供 try/catch）：
+// 在 try 块内调用可被 panic_try 捕获并降级处理；块外保持 abort 语义。
+#define PANIC_CODE_OPTION_NONE    1
+#define PANIC_CODE_RESULT_ERR     2
 
 static void panic_none(const char* op) {
-    fprintf(stderr, "Option::%s called on None\n", op);
-    abort();
+    char buf[160];
+    snprintf(buf, sizeof(buf), "Option::%s called on None", op);
+    panic_with_code(PANIC_CODE_OPTION_NONE, buf);
 }
 
 static void panic_err(const char* op) {
-    fprintf(stderr, "Result::%s called on Err\n", op);
-    abort();
+    char buf[160];
+    snprintf(buf, sizeof(buf), "Result::%s called on Err", op);
+    panic_with_code(PANIC_CODE_RESULT_ERR, buf);
 }
 
 static Result result_clone(const Result* r) {
     Result out;
     out.status = r->status;
+    out.ok_kind = r->ok_kind;
     out.value = r->value;
     out.err_code = r->err_code;
     out.err_msg = r->err_msg.ptr ? string_copy(r->err_msg) : STRING_EMPTY;
+    if (out.status == RESULT_OK && out.ok_kind == RESULT_OK_STRING && out.value.ok_str.ptr) {
+        out.value.ok_str = string_copy(out.value.ok_str);
+    }
     return out;
 }
 
@@ -158,6 +170,7 @@ void option_take(Option* opt, Option* out) {
 Result result_ok_i64(i64 val) {
     Result r;
     r.status = RESULT_OK;
+    r.ok_kind = RESULT_OK_I64;
     r.value.ok_i64 = val;
     r.err_code = 0;
     r.err_msg = STRING_EMPTY;
@@ -167,6 +180,7 @@ Result result_ok_i64(i64 val) {
 Result result_ok_f64(f64 val) {
     Result r;
     r.status = RESULT_OK;
+    r.ok_kind = RESULT_OK_F64;
     r.value.ok_f64 = val;
     r.err_code = 0;
     r.err_msg = STRING_EMPTY;
@@ -176,7 +190,30 @@ Result result_ok_f64(f64 val) {
 Result result_ok_ptr(void* val) {
     Result r;
     r.status = RESULT_OK;
+    r.ok_kind = RESULT_OK_PTR;
     r.value.ok_ptr = val;
+    r.err_code = 0;
+    r.err_msg = STRING_EMPTY;
+    return r;
+}
+
+Result result_ok_bool(bool_t val) {
+    Result r;
+    r.status = RESULT_OK;
+    r.ok_kind = RESULT_OK_BOOL;
+    r.value.ok_bool = val;
+    r.err_code = 0;
+    r.err_msg = STRING_EMPTY;
+    return r;
+}
+
+// 成功载荷为字符串：内部用 KMM 复制一份（原文可任意释放），
+// 该字符串所有权归 Result，须调用 result_destroy 回收
+Result result_ok_string(const char* val) {
+    Result r;
+    r.status = RESULT_OK;
+    r.ok_kind = RESULT_OK_STRING;
+    r.value.ok_str = val ? string_create(val) : STRING_EMPTY;
     r.err_code = 0;
     r.err_msg = STRING_EMPTY;
     return r;
@@ -185,6 +222,7 @@ Result result_ok_ptr(void* val) {
 Result result_err(int code, const char* msg) {
     Result r;
     r.status = RESULT_ERR;
+    r.ok_kind = RESULT_OK_I64;
     r.value.ok_i64 = 0;
     r.err_code = code;
     r.err_msg = msg ? string_create(msg) : STRING_EMPTY;
@@ -218,6 +256,18 @@ f64 result_unwrap_ok_f64(const Result* r) {
 void* result_unwrap_ok_ptr(const Result* r) {
     if (!r || r->status != RESULT_OK) panic_err("unwrap_ok_ptr");
     return r->value.ok_ptr;
+}
+
+bool_t result_unwrap_ok_bool(const Result* r) {
+    if (!r || r->status != RESULT_OK) panic_err("unwrap_ok_bool");
+    return r->value.ok_bool;
+}
+
+// 返回的 String 与 Result 共享底层缓冲区，结果所有权仍归 Result：
+// 使用该返回值后不要单独 free，随 result_destroy 一起回收
+String result_unwrap_ok_string(const Result* r) {
+    if (!r || r->status != RESULT_OK) panic_err("unwrap_ok_string");
+    return r->value.ok_str;
 }
 
 int result_err_code(const Result* r) {
@@ -257,7 +307,8 @@ Result result_and_then(const Result* r, Result (*flat_mapper)(const Result*)) {
 
 Option result_to_option(const Result* r) {
     Option opt;
-    if (!r || r->status != RESULT_OK) {
+    // 字符串载荷无法放入 Option 的数值/指针联合体，按 None 处理
+    if (!r || r->status != RESULT_OK || r->ok_kind == RESULT_OK_STRING) {
         return option_none();
     }
     opt.is_some = 1;
@@ -271,6 +322,7 @@ Result option_to_result(const Option* opt, int err_code, const char* err_msg) {
         return result_err(err_code, err_msg);
     }
     r.status = RESULT_OK;
+    r.ok_kind = RESULT_OK_I64;
     r.value.ok_i64 = opt->value.as_i64;
     r.err_code = 0;
     r.err_msg = STRING_EMPTY;
@@ -284,6 +336,10 @@ void result_destroy(Result* r) {
     if (r->err_msg.ptr) {
         string_free(r->err_msg);
         r->err_msg = STRING_EMPTY;
+    }
+    if (r->status == RESULT_OK && r->ok_kind == RESULT_OK_STRING && r->value.ok_str.ptr) {
+        string_free(r->value.ok_str);
+        r->value.ok_str = STRING_EMPTY;
     }
     r->err_code = 0;
 }

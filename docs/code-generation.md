@@ -325,15 +325,24 @@ KMM V4 采用 **per-thread heap + bump allocation + scope-based reclamation** �
 - **Bump Allocation**：分配即指针推进，O(1) 复杂度
 - **Scope-based Reclamation**：作用域退出时批量回收，`kmm_v4_free` 为 no-op
 
-### 代码生成的三大优化
+### 代码生成的分配路径
 
-#### 1. std_malloc inline 重写
+KMM V4 分配器（`kmm_v4_alloc` 系列）与系统分配器（`std_malloc`/`std_free`）是严格分离的两个系统：
 
-编译器将所有 `std_malloc` 调用无条件重写为 `kmm_v4_alloc_auto` inline 调用：
+- **KMM V4 分配器**：`kmm_v4_alloc`、`kmm_v4_calloc`、`kmm_v4_alloc_auto` 等 — 从线程本地 bump pool 分配，作用域退出自动回收
+- **系统分配器**：`std_malloc`、`std_free` — 包装系统 malloc/free，内存需手动释放，不受 scope 管理
+
+编译器根据模式处理 `std_malloc`：
+- **freestanding 模式**（无 libc）：`std_malloc` 重写为 `kmm_v4_alloc_auto`，从静态池分配
+- **hosted 模式**（默认）：`std_malloc` 保留为系统 malloc 调用，**不重写**，与 KMM 严格区分
+
+#### 1. kmm_v4_alloc_auto 内联优化
+
+编译器将 KMM 分配调用内联为 `kmm_v4_alloc_auto`：
 
 ```kaula
 // Kaula 源码
-auto buf = std.memory.std_malloc(1024)
+auto buf = std.memory.kmm_v4_alloc(1024)
 ```
 
 ```c
@@ -342,7 +351,6 @@ void* buf = kmm_v4_alloc_auto(1024);
 ```
 
 **关键规则**：
-- 当 KMM 启用时，`std_malloc` → `kmm_v4_alloc_auto` 是无条件重写
 - `kmm_v4_alloc_auto` 是 `static inline` 函数，编译器可完全内联
 - 消除函数调用开销，分配路径仅剩指针推进 + 比较
 
@@ -353,8 +361,8 @@ void* buf = kmm_v4_alloc_auto(1024);
 ```kaula
 // Kaula 源码
 fn process() {
-    auto a = std.memory.std_malloc(64)
-    auto b = std.memory.std_malloc(128)
+    auto a = std.memory.kmm_v4_alloc(64)
+    auto b = std.memory.kmm_v4_alloc(128)
     // ... 使用 a, b ...
 }
 ```
@@ -410,8 +418,8 @@ std.memory.kmm_v4_free(buf)
 代码生成器为不同的分配模式生成最优代码：
 
 ```kaula
-// 1. 普通分配
-auto p = std.memory.std_malloc(64)
+// 1. KMM 池普通分配
+auto p = std.memory.kmm_v4_alloc(64)
 // → kmm_v4_alloc_auto(64)
 
 // 2. 零初始化分配
@@ -425,13 +433,12 @@ auto s = std.memory.kmm_v4_strdup("hello")
 
 ### #[no_kmm] 属性
 
-使用 `#[no_kmm]` 属性可以在特定函数中禁用 KMM，回退到系统 malloc：
+使用 `#[no_kmm]` 属性可以在特定函数中禁用 KMM 作用域管理（但 `std_malloc` 仍保持系统 malloc 语义）：
 
 ```kaula
 #[no_kmm]
 fn raw_buffer() void* {
     // 此函数内不插入 scope_push/pop
-    // std_malloc 不会被重写为 kmm_v4_alloc_auto
     return std.memory.std_malloc(1024)
 }
 ```

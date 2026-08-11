@@ -395,15 +395,15 @@ Kaula 默认使用 KMM V4（Kaula Memory Manager V4）作为内存分配器，�
 - **Per-Thread Heap**：每个线程从全局池批量获取内存块，分配时只推进线程本地 offset，无原子操作、无锁
 - **Bump Allocation**：分配即指针推进，O(1) 复杂度，无碎片
 - **Scope-based Reclamation**：`kmm_v4_scope_push`/`kmm_v4_scope_pop` 保存/恢复线程本地 offset，作用域退出批量回收，无需逐个 free
-- **Inline 优化**：编译器将 `std_malloc` 重写为 `kmm_v4_alloc_auto` inline 调用，消除函数调用开销
+- **Inline 优化**：编译器将 `std_malloc` 重写为 `kmm_v4_alloc_auto` inline 调用（仅 freestanding 模式），消除函数调用开销
 - **kmm_v4_free 为 no-op**：无需维护 free list，释放零开销
 
 ```kaula
 // KMM V4 自动作用域管理示例
 fn process_data() {
     // 编译器自动插入 kmm_v4_scope_push()
-    auto buf1 = std.memory.std_malloc(1024)   // 内联为 kmm_v4_alloc_auto(1024)
-    auto buf2 = std.memory.std_malloc(2048)   // 内联为 kmm_v4_alloc_auto(2048)
+    auto buf1 = std.memory.kmm_v4_alloc(1024)   // KMM V4 池分配，作用域退出自动回收
+    auto buf2 = std.memory.kmm_v4_alloc(2048)   // KMM V4 池分配
     // ... 使用 buf1, buf2 ...
     // 编译器自动插入 kmm_v4_scope_pop()，批量回收
 }

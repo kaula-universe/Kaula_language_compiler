@@ -1,0 +1,23 @@
+import std.io
+import std.panic
+
+fn risky(flag: i32) {
+    if flag == 1 {
+        std.panic.panic("boom!")
+    }
+    std.io.println("risky done")
+}
+
+fn main() {
+    PanicFrame f
+    i32 caught = 0
+    if std.panic.panic_try(&f) == 0 {
+        risky(1)
+        std.panic.panic_leave(&f)
+    } else {
+        caught = 1
+        std.io.println("caught: ", std.panic.panic_message())
+        std.panic.panic_leave(&f)
+    }
+    std.io.println("recovered, caught=", caught)
+}

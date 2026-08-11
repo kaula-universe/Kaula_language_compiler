@@ -6,6 +6,7 @@
 
 ### 工具
 
+- [构建与部署指南](deployment.md) - 工具链构建、安装布局、程序分发、交叉编译与裸机部署
 - [工具索引](tools/README.md) - 全部命令行工具的总览与分类
 - [编译器 kaulac](tools/kaulac.md) - 全参数编译、缓存管理、pkglib 管理、裸机模式
 - [构建脚本 toolkit_build.py](tools/toolkit-build.md) - 一键全量/分目标构建
@@ -31,11 +32,15 @@
 
 - [增量编译缓存](cache-system.md) - SHA-256 验证、原子写入、自动清理
 - [错误处理](error-handling.md) - 错误类型、源码上下文、修复建议
-- [SOR 子所有权释放](sor-system.md) - 所有权原语、分析流程、内存优化
+- **SOR 子所有权释放](sor-system.md) - 所有权原语、分析流程、内存优化
 - [标准库集成](stdlib-integration.md) - 配置驱动、自动发现、第三方库
 - [核心运行时特性](core-runtime.md) - VO 系统、前缀系统、任务调度
 - [超时与内存控制](timeout-memory.md) - 资源监控、阶段统计、调试输出
 - [裸机开发指南](bare-metal.md) - freestanding 模式、内联汇编、原子操作、位域、extern 声明
+
+## 教程
+
+- [std 错误处理与可捕获 Panic](tutorials/error-and-panic.md) - Result/Option、Error 链、errno 桥接、panic_protect 捕获恢复
 
 ## 快速导航
 

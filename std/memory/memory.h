@@ -66,9 +66,16 @@ void* kmm_v4_calloc(size_t count, size_t size);
  *
  * 返回: 新的内存指针，失败返回 NULL
  *
- * 注意: bump allocator 不支持真正的 realloc
- * 如果 new_size > old_size，会分配新内存并复制
- * 如果 new_size <= old_size，返回原指针（不缩小）
+ * 注意：
+ *  - 对 survivor slab 指针（slab 分配器管理的小对象提升）：
+ *    若 new_size <= 原槽位 bucket_size，直接返回原指针（不缩小）；
+ *    若 new_size > 原槽位，分配新内存并复制，释放旧 slab 槽位（精确回收）。
+ *  - 对 bump 区域指针（主池 TLAB/扩展段/survivor 大对象区 bump）：
+ *    bump allocator 无 per-object header，无法得知 old_size，因此
+ *    new_size <= old_size 返回原指针的契约在此区域**不保证**。
+ *    实现采用 always-copy + 保守复制到区域尾（安全但无法精确返回原指针）。
+ *  - 非 KMM 区域指针：若开启 KMM_V4_ENABLE_FALLBACK，走 libc realloc；
+ *    否则返回新分配（调用方自行承担 old_size 未知的风险）。
  */
 void* kmm_v4_realloc(void* ptr, size_t new_size);
 

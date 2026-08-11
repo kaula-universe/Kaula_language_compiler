@@ -177,6 +177,12 @@ const (
 
 	// ErrResourceLeak 资源泄漏：作用域结束时资源仍处于 Owned 状态，未被释放或转移。
 	ErrResourceLeak
+
+	// ErrExternShallowPromote 外部逃逸源浅提升警告：
+	// extern（opaque C 函数）返回的值被移入 SOR 管理域（yield/release/extract），
+	// 但 promote 仅浅拷贝外壳，内部指向外部分配的指针不受 SOR 追踪。
+	// 作为警告（而非硬错误）随 FullAnalysisResult.Warnings 上报。
+	ErrExternShallowPromote
 )
 
 // SORError 表示 SOR 编译时验证发现的错误。
@@ -239,6 +245,8 @@ func (k ErrorKind) String() string {
 		return "Double-Release"
 	case ErrResourceLeak:
 		return "Resource-Leak"
+	case ErrExternShallowPromote:
+		return "Extern-Shallow-Promote"
 	default:
 		return fmt.Sprintf("Unknown(%d)", int(k))
 	}
