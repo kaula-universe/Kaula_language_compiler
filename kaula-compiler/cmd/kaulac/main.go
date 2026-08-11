@@ -1968,6 +1968,12 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	clangArgs := []string{"-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir}
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 	clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+	// Windows (MSVC ABI)：强制使用 lld 而非 MSVC link.exe。
+	// llvm-ar 产出的静态库归档含 COMDAT 节，MSVC link.exe 会报 LNK1143；
+	// lld 与 clang/llvm-ar 同源，对 LLVM 产出的 COFF 归档完全兼容。
+	if runtime.GOOS == "windows" {
+		clangArgs = append(clangArgs, "-fuse-ld=lld")
+	}
 	if poolCapacity > 0 {
 		clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
 	}
