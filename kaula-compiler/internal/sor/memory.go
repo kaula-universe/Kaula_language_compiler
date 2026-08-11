@@ -256,13 +256,17 @@ type PoolCapacityBreakdown struct {
 // FullAnalysisResult 完整分析结果
 type FullAnalysisResult struct {
 	SORErrors []SORError
+	// Warnings 非阻断诊断（当前：extern 逃逸源浅提升警告，Kind=ErrExternShallowPromote）
+	Warnings  []SORError
 	Decisions []*MemoryDecision
 	Escape    map[string]EscapeLevel
-	Liveness  *LivenessResult
-	InterProc *InterProcResult
-	Sizes     map[string]int
-	ExecLog   []string
-	Stmts     []Stmt
+	// ExternOrigins 外部逃逸来源表（变量名 -> extern 函数名）
+	ExternOrigins map[string]string
+	Liveness      *LivenessResult
+	InterProc     *InterProcResult
+	Sizes         map[string]int
+	ExecLog       []string
+	Stmts         []Stmt
 	// PoolCapacity 基于静态分析估算的 KMM V4 池容量（字节）
 	// 0 表示使用默认值
 	PoolCapacity int
@@ -323,6 +327,9 @@ func AnalyzeFullWithAST(program interface {
 	// 第三阶段：轻量逃逸分析
 	ea := NewEscapeAnalyzer()
 	result.Escape = ea.AnalyzeEscape(stmts)
+	// extern（opaque C 函数）返回值的逃逸来源与浅提升警告
+	result.Warnings = ea.GetWarnings()
+	result.ExternOrigins = ea.GetExternOrigins()
 	// 将逃逸结果应用到内存决策
 	// 只有高逃逸级别（EscReturn+）才强制分配策略，低级别逃逸暂设默认值，后续由大小路由优化
 	for _, d := range result.Decisions {
@@ -722,6 +729,30 @@ func SerializeFullAnalysisResult(result *FullAnalysisResult) map[string]interfac
 	}
 	out["escape"] = escapeMap
 
+	// extern_origins: 变量名 -> extern 函数名（外部逃逸来源，供 codegen 后续对接 deep promote）
+	if len(result.ExternOrigins) > 0 {
+		originsMap := make(map[string]interface{})
+		for v, fn := range result.ExternOrigins {
+			originsMap[v] = fn
+		}
+		out["extern_origins"] = originsMap
+	}
+
+	// extern_escape_warnings: extern 逃逸源浅提升警告（非阻断）
+	if len(result.Warnings) > 0 {
+		warnArr := make([]interface{}, 0, len(result.Warnings))
+		for _, w := range result.Warnings {
+			warnArr = append(warnArr, map[string]interface{}{
+				"kind":    w.Kind.String(),
+				"line":    w.SourceLine,
+				"object":  w.ObjectID,
+				"message": w.Message,
+				"details": w.Details,
+			})
+		}
+		out["extern_escape_warnings"] = warnArr
+	}
+
 	// sizes: obj_id -> size int
 	sizesMap := make(map[string]interface{})
 	for id, size := range result.Sizes {
@@ -745,10 +776,58 @@ func SerializeFullAnalysisResult(result *FullAnalysisResult) map[string]interfac
 			livenessArr = append(livenessArr, lm)
 		}
 		out["liveness"] = livenessArr
+
+		// 方案 A：序列化 scope_drop_points（scopeID → []varNames）
+		// 供 codegen 在作用域退出点生成 per-object survivor_free 代码
+		dropPoints := result.Liveness.GetAllScopeDropPoints()
+		if len(dropPoints) > 0 {
+			dpMap := make(map[string]interface{})
+			for scopeID, vars := range dropPoints {
+				dpMap[fmt.Sprintf("%d", scopeID)] = vars
+			}
+			out["scope_drop_points"] = dpMap
+		}
 	}
 
-	// 修复 #17：funcSigs 未被 codegen 消费，移除序列化以减少死数据
-	// 跨函数所有权传递特性上线时再恢复
+	// 修复 #25：恢复 funcSigs/transfers 序列化（跨函数所有权传递消费方已恢复）
+	if result.InterProc != nil {
+		funcSigs := make(map[string]interface{})
+		for fname, sig := range result.InterProc.FuncSigs {
+			params := make([]interface{}, 0, len(sig.Params))
+			for _, p := range sig.Params {
+				params = append(params, map[string]interface{}{
+					"name": p.Name,
+					"type": p.Type,
+					"mode": int(p.Mode),
+				})
+			}
+			returns := make([]interface{}, 0, len(sig.Returns))
+			for _, r := range sig.Returns {
+				returns = append(returns, map[string]interface{}{
+					"type": r.Type,
+					"mode": int(r.Mode),
+				})
+			}
+			funcSigs[fname] = map[string]interface{}{
+				"params":  params,
+				"returns": returns,
+			}
+		}
+		out["func_sigs"] = funcSigs
+
+		transfersArr := make([]interface{}, 0)
+		for site, ts := range result.InterProc.TransferPoints {
+			for _, t := range ts {
+				transfersArr = append(transfersArr, map[string]interface{}{
+					"call_site": site,
+					"var":       t.VarName,
+					"dir":       t.Direction,
+					"mode":      int(t.Mode),
+				})
+			}
+		}
+		out["transfers"] = transfersArr
+	}
 
 	return out
 }

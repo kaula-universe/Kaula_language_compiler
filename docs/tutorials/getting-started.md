@@ -56,8 +56,8 @@ Kaula 默认使用 KMM V4 作为内存分配器，无需手动 free：
 import std.memory
 
 fn main() {
-    // std_malloc 被编译器内联为 kmm_v4_alloc_auto
-    auto buf = std.memory.std_malloc(1024)
+    // 直接使用 KMM V4 池分配器，作用域退出自动回收
+    auto buf = std.memory.kmm_v4_alloc(1024)
     
     // 使用 buf...
     memset(buf, 0, 1024)

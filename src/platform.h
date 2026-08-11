@@ -19,6 +19,15 @@
     #define KAULA_PLATFORM_UNIX 0
     #define KAULA_PLATFORM_LINUX 0
     #define KAULA_PLATFORM_MACOS 0
+#elif defined(__EMSCRIPTEN__)
+    // Emscripten/WASM 目标（浏览器运行时）
+    // 注意：必须排在 __linux__ 之前——Emscripten 同时定义 __linux__，
+    // 否则会误判为 Linux 并拉入 pthread/unistd 等 WASM 不安全头。
+    // （与 kaula.h 检测链的链首顺序保持一致）
+    #define KAULA_PLATFORM_WINDOWS 0
+    #define KAULA_PLATFORM_UNIX 0
+    #define KAULA_PLATFORM_LINUX 0
+    #define KAULA_PLATFORM_MACOS 0
 #elif defined(__linux__)
     #define KAULA_PLATFORM_WINDOWS 0
     #define KAULA_PLATFORM_UNIX 1
@@ -35,6 +44,15 @@
     #define KAULA_PLATFORM_LINUX 0
     #define KAULA_PLATFORM_MACOS 0
 #endif
+#endif
+
+// KAULA_PLATFORM_WEB 兼容兜底（kaula.h 已定义时不重复定义）
+#ifndef KAULA_PLATFORM_WEB
+    #if defined(__EMSCRIPTEN__)
+        #define KAULA_PLATFORM_WEB 1
+    #else
+        #define KAULA_PLATFORM_WEB 0
+    #endif
 #endif
 
 // ==================== 平台特定头文件 ====================
@@ -55,6 +73,13 @@
     #include <sys/time.h>
     #include <unistd.h>
     #include <mach/mach_time.h>
+#elif KAULA_PLATFORM_WEB
+    // Emscripten/WASM：不包含 windows.h / pthread.h 等平台头，
+    // 仅使用 emscripten 提供的 WASM 安全标准头
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <time.h>  // CLOCK_MONOTONIC / clock_gettime（供 kaula_get_ticks 等使用）
 #endif
 
 // ==================== 跨平台线程支持 ====================

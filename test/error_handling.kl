@@ -1,0 +1,136 @@
+import std.io
+import std.option
+import std.error
+import std.panic
+import std.string
+
+# ---- Result/Option 基础 ----
+fn test_option() {
+    Option o = std.option.option_some_i64(42)
+    if std.option.option_is_some(&o) {
+        std.io.println("opt some: ", std.option.option_unwrap_i64(&o))
+    }
+    Option n = std.option.option_none()
+    if std.option.option_is_none(&n) {
+        std.io.println("opt none ok")
+    }
+    i64 v = std.option.option_unwrap_or_i64(&n, -1)
+    std.io.println("unwrap_or fallback: ", v)
+}
+
+fn test_result() {
+    Result ok = std.option.result_ok_i64(7)
+    if std.option.result_is_ok(&ok) {
+        std.io.println("ok value: ", std.option.result_unwrap_ok_i64(&ok))
+    }
+    Result bok = std.option.result_ok_bool(true)
+    if std.option.result_is_ok(&bok) {
+        std.io.println("ok bool: ", std.option.result_unwrap_ok_bool(&bok))
+    }
+    Result sok = std.option.result_ok_string("hello result")
+    if std.option.result_is_ok(&sok) {
+        string s = std.option.result_unwrap_ok_string(&sok)
+        std.io.println("ok string: ", s)
+        std.option.result_destroy(&sok)
+    }
+    Result err = std.option.result_err(7, "boom")
+    if std.option.result_is_err(&err) {
+        std.io.println("err code: ", std.option.result_err_code(&err))
+        string m = std.option.result_err_msg(&err)
+        std.io.println("err msg: ", m)
+        std.option.result_destroy(&err)
+    }
+}
+
+fn fallible(n: i64) Result {
+    if n == 0 {
+        return std.option.result_err(1, "n is zero")
+    }
+    return std.option.result_ok_i64(n * 2)
+}
+
+fn test_result_prop() {
+    Result r = fallible(4)
+    if std.option.result_is_ok(&r) {
+        std.io.println("prop ok: ", std.option.result_unwrap_ok_i64(&r))
+    }
+    Result r2 = fallible(0)
+    if std.option.result_is_err(&r2) {
+        std.io.println("prop err code: ", std.option.result_err_code(&r2))
+    }
+}
+
+# ---- Error 错误链 + errno ----
+fn test_error_chain() {
+    Error* inner = std.error.error_create(8, 101, "cannot open file", "app.kl", 10)
+    Error* mid = std.error.error_wrap(inner, 12, "load config failed")
+    Error* outer = std.error.error_wrap(mid, 11, "app startup failed")
+
+    if std.error.error_has_cause(outer) {
+        Error* c1 = std.error.error_cause(outer)
+        if std.error.error_has_cause(c1) {
+            string msg = std.string.string_create(std.error.error_get_message(std.error.error_cause(c1)))
+            std.io.println("inner msg: ", msg)
+        }
+    }
+    std.error.error_print_chain(outer)
+}
+
+fn test_errno() {
+    Error* e = std.error.error_from_errno(2, "open('nofile.txt')")
+    string typ = std.string.string_create(std.error.error_type_to_string(std.error.error_get_type(e)))
+    std.io.println("errno type: ", typ)
+    std.io.println("errno code: ", std.error.error_get_code(e))
+    string em = std.string.string_create(std.error.error_get_message(e))
+    std.io.println("errno msg: ", em)
+    string se = std.string.string_create(std.error.error_strerror(2))
+    std.io.println("strerror(2): ", se)
+}
+
+# ---- 可捕获 panic（panic_protect：回调模式） ----
+fn risky(flag: i32) {
+    if flag == 1 {
+        std.panic.panic("deliberate panic!")
+    }
+    Result bad = std.option.result_err(3, "unwrap me")
+    std.io.println("unwrapped: ", std.option.result_unwrap_ok_i64(&bad))
+}
+
+fn risky_body(ctx: void()) {
+    risky(1)
+}
+
+fn test_panic_catch() {
+    PanicFrame f
+    if std.panic.panic_protect(&f, &risky_body, null) == 1 {
+        string pm = std.string.string_create(std.panic.panic_message())
+        std.io.println("caught: ", pm)
+        std.io.println("code: ", std.panic.panic_last_code())
+    }
+}
+
+fn unwrap_body(ctx: void()) {
+    risky(0)
+}
+
+fn test_unwrap_catch() {
+    PanicFrame f
+    if std.panic.panic_protect(&f, &unwrap_body, null) == 1 {
+        string pm = std.string.string_create(std.panic.panic_message())
+        std.io.println("unwrap panicked: ", pm)
+        std.io.println("unwrap code: ", std.panic.panic_last_code())
+    } else {
+        std.io.println("unwrap did not panic")
+    }
+}
+
+fn main() {
+    test_option()
+    test_result()
+    test_result_prop()
+    test_error_chain()
+    test_errno()
+    test_panic_catch()
+    test_unwrap_catch()
+    std.io.println("ALL DONE")
+}

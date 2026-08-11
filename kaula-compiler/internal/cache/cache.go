@@ -32,6 +32,9 @@ type CacheEntry struct {
 	UsedModules []string `json:"used_modules"`
 	// 编译器版本
 	CompilerVersion string `json:"compiler_version"`
+	// 被 import 的本地 .kl 文件内容哈希（绝对路径 -> SHA256）
+	// 缓存键校验的一部分：任一被导入文件内容变化即视为缓存失效
+	ImportFiles map[string]string `json:"import_files,omitempty"`
 }
 
 // CacheManifest 表示缓存目录的清单文件
@@ -137,6 +140,11 @@ func computeHash(content []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// HashContent 计算内容的 SHA256 哈希（供调用方对 import 文件等外部内容计算哈希）
+func HashContent(content []byte) string {
+	return computeHash(content)
+}
+
 // GetCacheKey 生成缓存键（基于源文件路径）
 func (cm *CacheManager) GetCacheKey(sourcePath string) string {
 	// 使用源文件的绝对路径作为键
@@ -147,7 +155,9 @@ func (cm *CacheManager) GetCacheKey(sourcePath string) string {
 }
 
 // Check 检查缓存是否有效
-func (cm *CacheManager) Check(sourcePath string, sourceData []byte) *CacheResult {
+// imports 为入口文件传递闭包内所有被 import 的本地 .kl 文件的内容哈希
+// （绝对路径 -> SHA256），与源文件哈希共同构成缓存键校验
+func (cm *CacheManager) Check(sourcePath string, sourceData []byte, imports map[string]string) *CacheResult {
 	cacheKey := cm.GetCacheKey(sourcePath)
 	cCodePath := filepath.Join(cm.CacheDir, cacheKey+".c")
 	metaPath := filepath.Join(cm.CacheDir, cacheKey+".meta.json")
@@ -195,6 +205,19 @@ func (cm *CacheManager) Check(sourcePath string, sourceData []byte) *CacheResult
 		return &CacheResult{Hit: false, CCodePath: cCodePath}
 	}
 
+	// 验证被 import 文件的内容哈希：
+	// 旧条目不含 ImportFiles 而当前存在本地 import 时，判定失效（一次性重建）
+	if len(entry.ImportFiles) != len(imports) {
+		fmt.Printf("[Cache] Imported files changed (%d -> %d), rebuilding\n", len(entry.ImportFiles), len(imports))
+		return &CacheResult{Hit: false, CCodePath: cCodePath}
+	}
+	for path, hash := range imports {
+		if entry.ImportFiles[path] != hash {
+			fmt.Printf("[Cache] Imported file changed: %s, rebuilding\n", path)
+			return &CacheResult{Hit: false, CCodePath: cCodePath}
+		}
+	}
+
 	// 缓存命中！
 	fmt.Printf("[Cache] Cache hit for %s\n", sourcePath)
 	entry.LastAccessed = time.Now()
@@ -213,7 +236,8 @@ func (cm *CacheManager) Check(sourcePath string, sourceData []byte) *CacheResult
 }
 
 // Store 存储编译结果到缓存
-func (cm *CacheManager) Store(sourcePath string, sourceData []byte, cCode string, usedModules []string) error {
+// imports 为入口文件传递闭包内所有被 import 的本地 .kl 文件的内容哈希
+func (cm *CacheManager) Store(sourcePath string, sourceData []byte, cCode string, usedModules []string, imports map[string]string) error {
 	cacheKey := cm.GetCacheKey(sourcePath)
 	cCodePath := filepath.Join(cm.CacheDir, cacheKey+".c")
 
@@ -222,16 +246,17 @@ func (cm *CacheManager) Store(sourcePath string, sourceData []byte, cCode string
 	cCodeHash := computeHash(cCodeData)
 
 	entry := &CacheEntry{
-		SourcePath:    sourcePath,
-		SourceHash:    sourceHash,
-		SourceSize:    int64(len(sourceData)),
-		SourceModTime: time.Now(),
-		CCodeHash:     cCodeHash,
-		CCodeSize:     int64(len(cCodeData)),
-		CreatedAt:     time.Now(),
-		LastAccessed:  time.Now(),
-		UsedModules:   usedModules,
+		SourcePath:      sourcePath,
+		SourceHash:      sourceHash,
+		SourceSize:      int64(len(sourceData)),
+		SourceModTime:   time.Now(),
+		CCodeHash:       cCodeHash,
+		CCodeSize:       int64(len(cCodeData)),
+		CreatedAt:       time.Now(),
+		LastAccessed:    time.Now(),
+		UsedModules:     usedModules,
 		CompilerVersion: cm.CompilerVersion,
+		ImportFiles:     imports,
 	}
 
 	// 原子写入 C 代码文件

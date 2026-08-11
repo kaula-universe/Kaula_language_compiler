@@ -155,6 +155,21 @@ func escapeCString(s string) string {
 	return s
 }
 
+// decodedCStringLen 计算含转义序列字符串解码后的真实字节数。
+// 词法器保留 \" \n \\ 等转义序列的原始形式（每个序列占 2 个源字符），
+// 而 String.len 必须是解码后的长度，否则 string_concat/index_of 等按 len
+// 操作的运行时会多拷/多比较字节（把 '\0' 也计入）。
+func decodedCStringLen(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		n++
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+	}
+	return n
+}
+
 // escapeCIdentifier 转义 C 标识符中的特殊字符，防止代码注入
 func escapeCIdentifier(s string) string {
 	var builder strings.Builder
@@ -221,7 +236,7 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return strconv.FormatFloat(e.Value, 'f', -1, 64)
 	case *ast.StringLiteral:
 		escaped := escapeCString(e.Value)
-		return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", len(e.Value), escaped)
+		return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", decodedCStringLen(escaped), escaped)
 	case *ast.CharLiteral:
 		return "'" + e.Value + "'"
 	case *ast.BooleanLiteral:
@@ -391,6 +406,14 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 		if indexExpr, ok := e.Left.(*ast.IndexExpression); ok && eg.isObjectTyped(indexExpr.Object) {
 			eg.codegen.needsObjRuntime = true
 			return "dynobj_set(" + eg.GenerateExpression(indexExpr.Object) + ", " + eg.objectKeyCode(indexExpr.Index) + ", " + eg.boxDynamicValue(e.Right) + ")"
+		}
+	}
+
+	// 修复 #25：赋值语句登记 malloc 常量大小（声明与赋值分离场景）
+	// 如 tmp_buf = as<int*>(std_malloc(64)) → 后续 promote 需要 64
+	if e.Operator == "ASSIGN" || e.Operator == "=" {
+		if ident, ok := e.Left.(*ast.Identifier); ok {
+			eg.codegen.RecordAllocSizeFromAST(ident.Name, e.Right)
 		}
 	}
 
@@ -594,7 +617,8 @@ func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression)
 		if leftLit, ok := left.(*ast.StringLiteral); ok {
 			if rightLit, ok := right.(*ast.StringLiteral); ok {
 				merged := leftLit.Value + rightLit.Value
-				return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", len(merged), escapeCString(merged))
+				escaped := escapeCString(merged)
+				return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", decodedCStringLen(escaped), escaped)
 			}
 		}
 	}
@@ -627,10 +651,13 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 
 	funcName := eg.GenerateExpression(e.Function)
 
-	// 修复 #21：全局将 std_malloc 重写为 kmm_v4_alloc_auto
-	// 不再依赖 IsInKMMScope() 判断，统一所有动态分配走 KMM pool
-	// 作用域内的分配由 scope_pop 自动回收，作用域外的分配由 thread heap refill 回收
-	if funcName == "std_malloc" || funcName == "std.memory.std_malloc" {
+	// std_malloc 与 kmm_v4 系列是两个完全不同的分配器，禁止混用：
+	// - hosted 模式（默认）：std_malloc 保留为系统 malloc 包装（std_malloc/std_free 符号，
+	//   由 std/memory/memory.c 实现，内存需用 std_free 手动释放），不重写。
+	// - freestanding 模式：无 libc，std_malloc 是从静态池分配的唯一路径，
+	//   此时重写为 kmm_v4_alloc_auto（为便于区分，新代码应直接使用 kmm_v4_alloc）。
+	if (funcName == "std_malloc" || funcName == "std.memory.std_malloc") &&
+		eg.codegen.IsFreestanding() {
 		if len(e.Args) == 1 {
 			sizeArg := eg.GenerateExpression(e.Args[0])
 			return "kmm_v4_alloc_auto(" + sizeArg + ")"
@@ -920,9 +947,11 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 				// 使用 GetCFunctionName 自动添加模块前缀
 				cFuncName := eg.codegen.stdlibConfig.GetCFunctionName(stdlibKey, methodName)
 
-				// 修复 #21：全局将 std_malloc 重写为 kmm_v4_alloc_auto
-				// 统一所有动态分配走 KMM pool，不再依赖 IsInKMMScope() 判断
-				if cFuncName == "std_malloc" || methodName == "std_malloc" {
+				// 修复 #21：仅在 freestanding 模式下将 std_malloc 重写为
+				// kmm_v4_alloc_auto（无 libc）。hosted 模式保留 std_malloc
+				// 系统 malloc 语义，与 kmm_v4 系列分配器严格区分。
+				if (cFuncName == "std_malloc" || methodName == "std_malloc") &&
+					eg.codegen.IsFreestanding() {
 					if len(args) == 1 {
 						sizeArg := eg.GenerateExpression(args[0])
 						return "kmm_v4_alloc_auto(" + sizeArg + ")"

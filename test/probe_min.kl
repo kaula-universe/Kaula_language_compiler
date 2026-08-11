@@ -1,0 +1,5 @@
+import std.io
+
+fn main() {
+    std.io.println("hello probe")
+}

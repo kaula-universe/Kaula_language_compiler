@@ -1,0 +1,62 @@
+import std.memory
+import std.io
+
+fn make_buf() int* {
+	int* tmp_buf
+	tmp_buf = as<int*>(std.memory.kmm_v4_alloc(64))
+	if (tmp_buf == null) {
+		return null
+	}
+	tmp_buf[0] = 42
+	int* ret = null
+	yield tmp_buf -> ret
+	return ret
+}
+
+fn main() {
+	int* outer = null
+	if (true) {
+		int* inner_buf
+		inner_buf = as<int*>(std.memory.kmm_v4_alloc(64))
+		if (inner_buf == null) {
+			std.io.println("alloc fail")
+			return 1
+		}
+		inner_buf[0] = 7
+		yield inner_buf -> outer
+	}
+	# 覆盖块内作用域段：无 promote 时 outer 悬垂，此处会被噪声分配覆写
+	int* noise
+	noise = as<int*>(std.memory.kmm_v4_alloc(64))
+	noise[0] = 99
+	noise[1] = 98
+
+	int* p = make_buf()
+	if (p == null) {
+		std.io.println("make_buf fail")
+		return 2
+	}
+
+	std.io.println("yield: ", outer[0], " return: ", p[0])
+	if (outer[0] == 7) {
+		if (p[0] == 42) {
+			int* e = extract_case()
+			std.io.println("extract: ", e[0])
+			if (e[0] == 77) {
+				std.io.println("PROMOTE OK")
+				return 0
+			}
+		}
+	}
+	std.io.println("PROMOTE FAIL")
+	return 3
+}
+
+fn extract_case() int* {
+	[2]int* slots
+	slots[0] = as<int*>(std.memory.kmm_v4_alloc(64))
+	slots[0][0] = 77
+	int* e = null
+	extract slots[0] -> e
+	return e
+}

@@ -229,6 +229,18 @@
       ],
       "return": "String"
     },
+    "string_create_global": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "string_clone_global": {
+      "args": [
+        "String"
+      ],
+      "return": "String"
+    },
     "string_create_from_char": {
       "args": [
         "char"
@@ -2475,6 +2487,11 @@
     }
   },
   "std.error": {
+    "header": "error/error.h",
+    "types": {
+      "Error": {},
+      "ErrorType": {}
+    },
     "error_create": {
       "args": [
         "ErrorType",
@@ -2537,6 +2554,44 @@
         "const char*"
       ],
       "varargs": true
+    },
+    "error_wrap": {
+      "args": [
+        "Error*",
+        "ErrorType",
+        "const char*"
+      ],
+      "return": "Error*"
+    },
+    "error_cause": {
+      "args": [
+        "Error*"
+      ],
+      "return": "Error*"
+    },
+    "error_has_cause": {
+      "args": [
+        "Error*"
+      ],
+      "return": "bool"
+    },
+    "error_from_errno": {
+      "args": [
+        "int",
+        "const char*"
+      ],
+      "return": "Error*"
+    },
+    "error_strerror": {
+      "args": [
+        "int"
+      ],
+      "return": "const char*"
+    },
+    "error_print_chain": {
+      "args": [
+        "Error*"
+      ]
     }
   },
   "std.base": {
@@ -6308,110 +6363,280 @@
   },
   "std.option": {
     "header": "option/option.h",
-    "option_some": {
-      "args": [
-        "void()",
-        "size_t"
-      ],
-      "return": "Option"
+    "types": {
+      "Option": {},
+      "Result": {},
+      "ResultStatus": {},
+      "ResultOkKind": {}
     },
     "option_none": {
       "args": [],
       "return": "Option"
     },
+    "option_some_i64": {
+      "args": [
+        "i64"
+      ],
+      "return": "Option"
+    },
+    "option_some_f64": {
+      "args": [
+        "f64"
+      ],
+      "return": "Option"
+    },
+    "option_some_ptr": {
+      "args": [
+        "void()"
+      ],
+      "return": "Option"
+    },
+    "option_some_bool": {
+      "args": [
+        "bool"
+      ],
+      "return": "Option"
+    },
     "option_is_some": {
       "args": [
-        "Option"
+        "Option*"
       ],
-      "return": "bool_t"
+      "return": "bool"
     },
     "option_is_none": {
       "args": [
-        "Option"
+        "Option*"
       ],
-      "return": "bool_t"
+      "return": "bool"
     },
-    "option_unwrap": {
+    "option_unwrap_i64": {
       "args": [
-        "Option"
+        "Option*"
+      ],
+      "return": "i64"
+    },
+    "option_unwrap_f64": {
+      "args": [
+        "Option*"
+      ],
+      "return": "f64"
+    },
+    "option_unwrap_ptr": {
+      "args": [
+        "Option*"
       ],
       "return": "void()"
     },
-    "option_unwrap_or": {
+    "option_unwrap_bool": {
       "args": [
-        "Option",
+        "Option*"
+      ],
+      "return": "bool"
+    },
+    "option_unwrap_or_i64": {
+      "args": [
+        "Option*",
+        "i64"
+      ],
+      "return": "i64"
+    },
+    "option_unwrap_or_f64": {
+      "args": [
+        "Option*",
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "option_unwrap_or_ptr": {
+      "args": [
+        "Option*",
         "void()"
       ],
       "return": "void()"
     },
-    "option_map": {
+    "option_unwrap_or_bool": {
       "args": [
-        "Option",
-        "OptionMapFunc",
-        "void()"
+        "Option*",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "option_or": {
+      "args": [
+        "Option*",
+        "Option"
       ],
       "return": "Option"
     },
-    "option_and_then": {
+    "option_take": {
       "args": [
-        "Option",
-        "OptionBindFunc",
+        "Option*",
+        "Option*"
+      ]
+    },
+    "result_ok_i64": {
+      "args": [
+        "i64"
+      ],
+      "return": "Result"
+    },
+    "result_ok_f64": {
+      "args": [
+        "f64"
+      ],
+      "return": "Result"
+    },
+    "result_ok_ptr": {
+      "args": [
         "void()"
       ],
-      "return": "Option"
+      "return": "Result"
     },
-    "result_ok": {
+    "result_ok_bool": {
       "args": [
-        "void()",
-        "size_t"
+        "bool"
+      ],
+      "return": "Result"
+    },
+    "result_ok_string": {
+      "args": [
+        "const char*"
       ],
       "return": "Result"
     },
     "result_err": {
       "args": [
+        "int",
         "const char*"
       ],
       "return": "Result"
     },
     "result_is_ok": {
       "args": [
-        "Result"
+        "Result*"
       ],
-      "return": "bool_t"
+      "return": "bool"
     },
     "result_is_err": {
       "args": [
-        "Result"
+        "Result*"
       ],
-      "return": "bool_t"
+      "return": "bool"
     },
-    "result_unwrap": {
+    "result_unwrap_ok_i64": {
       "args": [
-        "Result"
+        "Result*"
+      ],
+      "return": "i64"
+    },
+    "result_unwrap_ok_f64": {
+      "args": [
+        "Result*"
+      ],
+      "return": "f64"
+    },
+    "result_unwrap_ok_ptr": {
+      "args": [
+        "Result*"
       ],
       "return": "void()"
     },
-    "result_unwrap_err": {
+    "result_unwrap_ok_bool": {
       "args": [
-        "Result"
+        "Result*"
       ],
+      "return": "bool"
+    },
+    "result_unwrap_ok_string": {
+      "args": [
+        "Result*"
+      ],
+      "return": "String"
+    },
+    "result_err_code": {
+      "args": [
+        "Result*"
+      ],
+      "return": "int"
+    },
+    "result_err_msg": {
+      "args": [
+        "Result*"
+      ],
+      "return": "String"
+    },
+    "result_to_option": {
+      "args": [
+        "Result*"
+      ],
+      "return": "Option"
+    },
+    "option_to_result": {
+      "args": [
+        "Option*",
+        "int",
+        "const char*"
+      ],
+      "return": "Result"
+    },
+    "result_destroy": {
+      "args": [
+        "Result*"
+      ]
+    }
+  },
+  "std.panic": {
+    "header": "panic/panic.h",
+    "types": {
+      "PanicFrame": {}
+    },
+    "panic_try": {
+      "args": [
+        "PanicFrame*"
+      ],
+      "return": "int"
+    },
+    "panic_protect": {
+      "args": [
+        "PanicFrame*",
+        "void(void())void",
+        "void()"
+      ],
+      "return": "int"
+    },
+    "panic_leave": {
+      "args": [
+        "PanicFrame*"
+      ]
+    },
+    "panic": {
+      "args": [
+        "const char*"
+      ]
+    },
+    "panic_with_code": {
+      "args": [
+        "int",
+        "const char*"
+      ]
+    },
+    "panicf": {
+      "args": [
+        "const char*"
+      ],
+      "varargs": true
+    },
+    "panic_message": {
+      "args": [],
       "return": "const char*"
     },
-    "result_map": {
-      "args": [
-        "Result",
-        "ResultMapFunc",
-        "void()"
-      ],
-      "return": "Result"
+    "panic_last_code": {
+      "args": [],
+      "return": "int"
     },
-    "result_and_then": {
-      "args": [
-        "Result",
-        "ResultBindFunc",
-        "void()"
-      ],
-      "return": "Result"
+    "panic_active": {
+      "args": [],
+      "return": "bool"
     }
   },
   "std.unicode": {

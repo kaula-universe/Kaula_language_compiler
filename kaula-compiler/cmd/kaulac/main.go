@@ -36,11 +36,14 @@ func localImportFiles(imp *ast.ImportStatement) []string {
 }
 
 // precompileLocalImports 预解析本地 .kl 文件 import
-// 返回: (pub 函数名集合, 合并后的 C 函数定义代码)
-func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, string) {
+// 返回: (pub 函数名集合, 合并后的 C 函数定义代码, 被导入文件内容哈希表)
+// 哈希表覆盖传递闭包内所有实际读取的 .kl 文件（绝对路径 -> SHA256），
+// 供增量缓存键校验使用
+func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, string, map[string]string) {
 	state := &localCompileState{
 		pubFuncs:       make(map[string]bool),
 		compiled:       make(map[string]bool),
+		fileHashes:     make(map[string]string),
 		stdlibConfig:   stdlibConfig,
 		cfg:            cfg,
 		errorCollector: errorCollector,
@@ -56,7 +59,7 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 		state.compileFile(localPath, inputDir)
 	}
 
-	return state.pubFuncs, state.allCode
+	return state.pubFuncs, state.allCode, state.fileHashes
 }
 
 // localCompileState 共享本地 import 编译状态（去重 + 依序输出）
@@ -64,9 +67,10 @@ type localCompileState struct {
 	pubFuncs       map[string]bool
 	allCode        string
 	compiled       map[string]bool
+	fileHashes     map[string]string // 已读 .kl 文件内容哈希（绝对路径 -> SHA256）
 	stdlibConfig   *stdlib.StdlibConfig
 	cfg            *config.Config
-	errorCollector  *errors.ErrorCollector
+	errorCollector *errors.ErrorCollector
 }
 
 // compileFile 编译单个本地 .kl 文件
@@ -92,6 +96,12 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 		fmt.Printf("[Multi-file] Warning: Failed to read %s: %v\n", localPath, err)
 		return
 	}
+
+	// 记录内容哈希，纳入增量缓存键校验（内容变化即缓存失效）
+	if abs, errAbs := filepath.Abs(absPath); errAbs == nil {
+		absPath = abs
+	}
+	s.fileHashes[absPath] = cache.HashContent(data)
 
 	localSource := string(data)
 	s.errorCollector.SetSource(localSource)
@@ -259,9 +269,18 @@ func extractFunctionDefs(cCode string) string {
 }
 
 // injectLocalCode 将本地导入的函数定义注入到主 C 代码中
-// 在 main 函数之前插入
+// 优先插入到最后一个 #include 之后（早于主文件的函数体），
+// 保证主文件中任意函数（不仅是 main）调用导入函数时声明可见。
 func injectLocalCode(mainCode, localCode string) string {
-	// 找到 "int main" 的位置
+	// 首选：最后一个 #include 行之后（主文件函数定义之前）
+	if lastInc := strings.LastIndex(mainCode, "#include"); lastInc >= 0 {
+		if endOfLine := strings.Index(mainCode[lastInc:], "\n"); endOfLine >= 0 {
+			insertAt := lastInc + endOfLine + 1
+			return mainCode[:insertAt] + "\n" + localCode + "\n" + mainCode[insertAt:]
+		}
+	}
+
+	// 兜底 1：找到 "int main" 的位置
 	mainIdx := strings.Index(mainCode, "int main(")
 	if mainIdx == -1 {
 		// 没有 main 函数：优先插入到注入锚点（用户态模板定义在 includes 之后），
@@ -298,6 +317,7 @@ func main() {
 	// 预扫描 os.Args，提取非 flag 参数和自定义 flag
 	// 修复：-o/--output 的值不应被误认为输入文件；子命令（compile/run 等）也不是输入文件
 	customArgs := []string{}
+	positionalArgs := []string{}
 	args := os.Args[1:]
 	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true}
 	for i := 0; i < len(args); i++ {
@@ -318,11 +338,34 @@ func main() {
 				customArgs = append(customArgs, args[i+1])
 				i++ // 跳过输出文件路径
 			}
-		default:
+		case arg == "-output-dir" || arg == "--output-dir":
+			// -output-dir 接受一个值（输出目录），同样需跳过下一个参数避免误判为输入文件
 			customArgs = append(customArgs, arg)
-			// 只将非 flag、非子命令的参数视为输入文件候选
-			if len(arg) > 0 && arg[0] != '-' && !knownSubcommands[arg] {
-				inputFile = arg
+			if i+1 < len(args) {
+				customArgs = append(customArgs, args[i+1])
+				i++
+			}
+		case arg == "-cflags" || arg == "--cflags" ||
+			arg == "-defines" || arg == "--defines" ||
+			arg == "-libs" || arg == "--libs":
+			// 取值旗标：跳过其值，避免被误判为输入文件
+			customArgs = append(customArgs, arg)
+			if i+1 < len(args) {
+				customArgs = append(customArgs, args[i+1])
+				i++
+			}
+		default:
+			if len(arg) > 0 && arg[0] != '-' {
+				// 位置参数（输入文件/子命令）单独收集，稍后拼接到 flag 之后：
+				// Go 的 flag.Parse 遇到第一个位置参数即停止解析，
+				// 若保持原顺序，排在输入文件后的旗标（如 -output-dir）会被静默忽略
+				positionalArgs = append(positionalArgs, arg)
+				// 只将非 flag、非子命令的参数视为输入文件候选
+				if !knownSubcommands[arg] {
+					inputFile = arg
+				}
+			} else {
+				customArgs = append(customArgs, arg)
 			}
 		}
 	}
@@ -347,8 +390,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 临时修改 os.Args 以供 flag.Parse() 使用
-	os.Args = append([]string{os.Args[0]}, customArgs...)
+	// 临时修改 os.Args 以供 flag.Parse() 使用（旗标在前，位置参数在后）
+	os.Args = append([]string{os.Args[0]}, append(customArgs, positionalArgs...)...)
 
 	// 加载配置（kaula.json + 命令行 flag，会调用 flag.Parse()）
 	cfg, err := config.LoadConfig()
@@ -543,6 +586,12 @@ func main() {
 		poolCapacity = fullResult.PoolCapacity
 		sorTime := time.Since(sorStart)
 		fmt.Printf("[Stage 2.5] SOR Analysis completed in %v\n", sorTime)
+		if os.Getenv("KAULA_SOR_DUMP") != "" {
+			fmt.Println(sor.FormatDecisionsSummary(fullResult.Decisions))
+			fmt.Println(sor.FormatEscapeSummary(fullResult.Escape))
+			fmt.Println(sor.FormatInterProcSummary(fullResult.InterProc))
+			fmt.Println(sor.FormatExternEscapeWarnings(fullResult.Warnings))
+		}
 		if poolCapacity > 0 {
 			fmt.Printf("         Pool Capacity: %d bytes (%.2f MB)\n", poolCapacity, float64(poolCapacity)/(1024.0*1024.0))
 		}
@@ -553,6 +602,18 @@ func main() {
 				fmt.Printf("  %d. [%s] line %d: %s\n", i+1, err.Kind.String(), err.SourceLine, err.Message)
 				if err.Details != "" {
 					fmt.Printf("      %s\n", err.Details)
+				}
+			}
+		}
+
+		// extern 逃逸源浅提升警告（非阻断）：extern 返回值移入 SOR 管理域时显式告知，
+		// 避免静默产生悬垂指针
+		if len(fullResult.Warnings) > 0 {
+			fmt.Printf("\n[SOR Extern-Escape Warnings] (%d warnings)\n", len(fullResult.Warnings))
+			for i, w := range fullResult.Warnings {
+				fmt.Printf("  %d. [%s] line %d: %s\n", i+1, w.Kind.String(), w.SourceLine, w.Message)
+				if w.Details != "" {
+					fmt.Printf("      %s\n", w.Details)
 				}
 			}
 		}
@@ -579,8 +640,8 @@ func main() {
 	}
 	cg.SetSourceFile(inputFile)
 
-	// 多文件编译：预解析本地 .kl 文件 import，收集 pub 函数名
-	localImportFuncs, localImportCode := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
+	// 多文件编译：预解析本地 .kl 文件 import，收集 pub 函数名与被导入文件内容哈希
+	localImportFuncs, localImportCode, importFileHashes := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
 	if len(localImportFuncs) > 0 {
 		cg.SetLocalImportFuncs(localImportFuncs)
 	}
@@ -612,14 +673,14 @@ func main() {
 		cacheKey := cacheManager.GetCacheKey(inputFile)
 		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
 
-		// 检查缓存是否命中
-		cacheResult := cacheManager.Check(inputFile, data)
+		// 检查缓存是否命中（校验含被 import 文件的内容哈希）
+		cacheResult := cacheManager.Check(inputFile, data, importFileHashes)
 		if cacheResult.Hit {
 			cacheHit = true
 			fmt.Printf("[Cache] Using cached C code: %s\n", cacheResult.CCodePath)
 		} else {
 			// 缓存未命中，存储新生成的代码
-			if err := cacheManager.Store(inputFile, data, output, usedModules); err != nil {
+			if err := cacheManager.Store(inputFile, data, output, usedModules, importFileHashes); err != nil {
 				fmt.Printf("[Cache] Warning: Failed to store cache: %v\n", err)
 			}
 			cacheHit = false
@@ -1292,9 +1353,20 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 	go func() {
 		defer wg.Done()
 
-		outputExe := filepath.Join(inputDir, inputName+".exe")
+		// 输出目录：指定了 -output-dir 则输出到该目录（不存在则创建），
+		// 否则保持原行为（落输入目录）
+		outDir := inputDir
+		if cfg.OutputDir != "" {
+			outDir = cfg.OutputDir
+			if err := os.MkdirAll(outDir, 0755); err != nil {
+				result.Error = fmt.Errorf("failed to create output directory %s: %w", outDir, err)
+				return
+			}
+		}
+
+		outputExe := filepath.Join(outDir, inputName+".exe")
 		if runtime.GOOS != "windows" {
-			outputExe = filepath.Join(inputDir, inputName)
+			outputExe = filepath.Join(outDir, inputName)
 		}
 		if isBootMode(cfg) {
 			// 裸机引导模式：输出可引导 ELF（或 raw bin）
@@ -1302,7 +1374,7 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 			if cfg.OutputFormat == "bin" {
 				ext = ".bin"
 			}
-			outputExe = filepath.Join(inputDir, inputName+ext)
+			outputExe = filepath.Join(outDir, inputName+ext)
 		}
 
 		var err error
@@ -2113,32 +2185,32 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 
-// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）
- 	// 裸机模式下跳过 std.lib（使用 -nostdlib，不需要标准库）
- 	// Windows 下直接链接 .o 文件，避免 llvm-lib 产生的 COFF 库损坏
- 	if cfg == nil || !cfg.Freestanding {
- 		if useInstalledLibraries {
- 			clangArgs = append(clangArgs,
- 				"-x", "none",
- 				filepath.Join(installedRoot, "lib", stdLibraryName),
- 				filepath.Join(installedRoot, "lib", runtimeLibraryName),
- 			)
- 			fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName)
- 			// 使用 freestanding 模块时链接 libkaula_freestanding.a（安装模式下）
- 			for _, mod := range usedModules {
- 				if strings.HasPrefix(mod, "freestanding.") {
- 					freeLibPath := filepath.Join(installedRoot, "lib", "libkaula_freestanding.a")
- 					if runtime.GOOS == "windows" {
- 						freeLibPath = filepath.Join(installedRoot, "lib", "kaula_freestanding.lib")
- 					}
- 					if _, err := os.Stat(freeLibPath); err == nil {
- 						clangArgs = append(clangArgs, "-x", "none", freeLibPath)
- 						fmt.Printf("[Compile] Linked installed freestanding library: %s\n", freeLibPath)
- 					}
- 					break
- 				}
- 			}
-} else {
+	// 合并所有 std .o 为单个 std.lib（减少链接器处理的文件数）
+	// 裸机模式下跳过 std.lib（使用 -nostdlib，不需要标准库）
+	// Windows 下直接链接 .o 文件，避免 llvm-lib 产生的 COFF 库损坏
+	if cfg == nil || !cfg.Freestanding {
+		if useInstalledLibraries {
+			clangArgs = append(clangArgs,
+				"-x", "none",
+				filepath.Join(installedRoot, "lib", stdLibraryName),
+				filepath.Join(installedRoot, "lib", runtimeLibraryName),
+			)
+			fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName)
+			// 使用 freestanding 模块时链接 libkaula_freestanding.a（安装模式下）
+			for _, mod := range usedModules {
+				if strings.HasPrefix(mod, "freestanding.") {
+					freeLibPath := filepath.Join(installedRoot, "lib", "libkaula_freestanding.a")
+					if runtime.GOOS == "windows" {
+						freeLibPath = filepath.Join(installedRoot, "lib", "kaula_freestanding.lib")
+					}
+					if _, err := os.Stat(freeLibPath); err == nil {
+						clangArgs = append(clangArgs, "-x", "none", freeLibPath)
+						fmt.Printf("[Compile] Linked installed freestanding library: %s\n", freeLibPath)
+					}
+					break
+				}
+			}
+		} else {
 			// Windows 下直接链接所有 .o 文件，避免 llvm-lib 问题
 			// 同样需要 -x none 重置语言：本分支可能在无 std 模块源（如仅用
 			// 第三方库）时执行，此时前面的 -x c 会把 .o 当作 C 源码编译失败
@@ -2154,7 +2226,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 			}
 		}
- 	} // end if !cfg.Freestanding
+	} // end if !cfg.Freestanding
 
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 

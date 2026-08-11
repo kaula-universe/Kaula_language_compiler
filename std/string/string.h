@@ -23,6 +23,13 @@ extern String string_create_from_bool(bool value);
 extern String string_copy(String str);
 extern String string_substring(String str, size_t start, size_t length);
 
+// 长寿命字符串（Task #18）：载荷从 KMM 幸存段（kmm_v4_alloc_global）分配。
+// 不受 scope_pop 回卷影响；SOR 浅提升（仅复制 {len,ptr} 外壳）后载荷
+// 指针依然有效——适用于 webview 回调、事件队列等需跨作用域存活的场景。
+// 回收方式：随幸存段 checkpoint/rewind 或 destroy_pool，无单独 free。
+extern String string_create_global(const char* str);
+extern String string_clone_global(String str);
+
 // 字符串操作函数
 extern size_t string_length(String str);
 extern char string_char_at(String str, size_t index);

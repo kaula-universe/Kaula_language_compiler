@@ -370,7 +370,7 @@ SOR 的活跃性分析精确计算每个变量的最后使用点，指导代码�
 ```kaula
 #[sor]
 fn process() {
-    auto buf = std.memory.std_malloc(1024)
+    auto buf = std.memory.kmm_v4_alloc(1024)
     
     yield buf -> owner         // 所有权转移
     

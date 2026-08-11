@@ -62,7 +62,7 @@ cat serial_out.txt   # 串口输出 "Hello, Kaula from bare metal!"
 
 从 `--freestanding` 输出不可引导的 COFF/EXE 到可引导 ELF 的全过程（boot stub 汇编、链接脚本、链接器调用）已内建到编译器，无需手动编写。
 
-> boot 模式与不带 `--boot` 的 freestanding 是两条独立流水线（见[编译选项](#编译选项)）：boot 模式由 `compileBootKernel` 用 `ld.lld` 手工链接，并同样启用 KMM 静态池（`-DKMM_V4_STATIC_POOL`），自动编译链接 `kmm_scoped_allocator_v4.o`；不带 `--boot` 的 freestanding 走 clang 直接链接，同样保留 `-DKMM_V4_STATIC_POOL`。两条路径都支持 `std.memory.std_malloc`（编译期重写为 `kmm_v4_alloc_auto`）。
+> boot 模式与不带 `--boot` 的 freestanding 是两条独立流水线（见[编译选项](#编译选项)）：boot 模式由 `compileBootKernel` 用 `ld.lld` 手工链接，并同样启用 KMM 静态池（`-DKMM_V4_STATIC_POOL`），自动编译链接 `kmm_scoped_allocator_v4.o`；不带 `--boot` 的 freestanding 走 clang 直接链接，同样保留 `-DKMM_V4_STATIC_POOL`。两条路径都支持 `std.memory.std_malloc`（freestanding 模式下编译期重写为 `kmm_v4_alloc_auto`；hosted 模式下保持系统 malloc 语义）。
 
 ### --boot
 
@@ -112,7 +112,7 @@ boot 模式需要同时启用 `--freestanding`。架构由 `--boot-arch`（或 `
 | riscv64 (PVH) | `--freestanding --boot pvh --boot-arch riscv64 --target-triple riscv64-none-elf` | `qemu-system-riscv64 -M virt -bios none -kernel ks_rv64.elf -nographic -m 128M` → `MMIO: OK!`（mmio_hello.kl，16550 UART @0x10000000） |
 | aarch64 (PVH) | `--freestanding --boot pvh --boot-arch aarch64 --target-triple aarch64-none-elf` | `qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel ks_aa64.elf -nographic -m 128M` → `AA64: OK!`（mmio_pl011.kl，PL011 @0x09000000） |
 
-堆分配验证（`heap_test.kl`，x86_64 PVH）：`std.memory.std_malloc(1024)` 经编译期重写为 `kmm_v4_alloc_auto` 从 BSS 静态池分配，写读回校验通过，串口输出 `HEAP: OK!`。
+堆分配验证（`heap_test.kl`，x86_64 PVH）：`std.memory.std_malloc(1024)` 在 freestanding 模式下编译期重写为 `kmm_v4_alloc_auto` 从 BSS 静态池分配，写读回校验通过，串口输出 `HEAP: OK!`。
 
 > 注意：riscv64 需要支持 RISC-V 后端的 clang（如 LLVM 21）；`--boot-arch i386` 等非默认架构建议显式传 `--target-triple`。
 
@@ -723,7 +723,7 @@ freestanding 模式使用 `freestanding.c.tmpl` 模板，提供：
 
 freestanding 两条流水线（带/不带 `--boot`）都定义 `KMM_V4_STATIC_POOL`，Kaula 内存分配器使用 BSS 段中的静态池，无需 `malloc`/`free`。
 
-> boot 模式会额外自动编译并链接 `kmm_scoped_allocator_v4.o`（与内核 C 同参 `-DKMM_V4_STATIC_POOL`），`std.memory.std_malloc` 等分配函数在 boot 模式下同样可用（编译期重写为 `kmm_v4_alloc_auto`，从 16MB BSS 池分配）。
+> boot 模式会额外自动编译并链接 `kmm_scoped_allocator_v4.o`（与内核 C 同参 `-DKMM_V4_STATIC_POOL`），`std.memory.std_malloc` 等分配函数在 boot 模式（freestanding）下同样可用（编译期重写为 `kmm_v4_alloc_auto`，从 16MB BSS 池分配）。
 
 ### 设计原理
 
@@ -841,7 +841,7 @@ fn _start() -> void {
 
 fn kaula_main() -> void {
     // KMM V4 自动管理作用域
-    auto buf = std.memory.std_malloc(4096)   // 从静态池分配（重写为 kmm_v4_alloc_auto）
+    auto buf = std.memory.std_malloc(4096)   // freestanding 模式下从静态池分配（重写为 kmm_v4_alloc_auto）
     // ... 使用 buf ...
     // 函数返回时自动回收
 }

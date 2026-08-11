@@ -373,6 +373,7 @@ func (la *LivenessAnalyzer) analyzeStmt(stmt Stmt) {
 // 但对于 hollow 清理和特殊释放，需要精确的插入点。
 //
 // 返回: map[int][]string — key = scopeID, value = 该作用域中需要在退出时处理的变量名
+// 方案 A：真正按 LastUseLine 排序（之前错误地用 sort.Strings 按变量名排序）
 func (la *LivenessAnalyzer) ComputeDropPoints(result *LivenessResult) map[int][]string {
 	if result == nil || result.scopeLastUse == nil {
 		return nil
@@ -386,10 +387,50 @@ func (la *LivenessAnalyzer) ComputeDropPoints(result *LivenessResult) map[int][]
 		// 按 LastUseLine 排序，方便代码生成时按顺序插入
 		sorted := make([]string, len(vars))
 		copy(sorted, vars)
-		sort.Strings(sorted)
+		sort.Slice(sorted, func(i, j int) bool {
+			li := result.GetLastUseLine(sorted[i])
+			lj := result.GetLastUseLine(sorted[j])
+			return li < lj
+		})
 		dropPoints[scopeID] = sorted
 	}
 	return dropPoints
+}
+
+// GetScopeLastUse 返回 scopeID 对应的需要在作用域退出时释放的变量列表
+// 方案 A：供 codegen 消费，生成 per-object survivor_free 代码
+func (r *LivenessResult) GetScopeLastUse(scopeID int) []string {
+	if r == nil || r.scopeLastUse == nil {
+		return nil
+	}
+	return r.scopeLastUse[scopeID]
+}
+
+// GetLastUseLine 返回变量的最后使用行号
+// 方案 A：供 ComputeDropPoints 按行号排序使用
+func (r *LivenessResult) GetLastUseLine(varName string) int {
+	if r == nil || r.lastUses == nil {
+		return 0
+	}
+	if info, ok := r.lastUses[varName]; ok {
+		return info.LastUseLine
+	}
+	return 0
+}
+
+// GetAllScopeDropPoints 返回所有 scopeID → []varNames 的映射
+// 方案 A：供序列化传递给 codegen
+func (r *LivenessResult) GetAllScopeDropPoints() map[int][]string {
+	if r == nil || r.scopeLastUse == nil {
+		return nil
+	}
+	result := make(map[int][]string, len(r.scopeLastUse))
+	for k, v := range r.scopeLastUse {
+		cp := make([]string, len(v))
+		copy(cp, v)
+		result[k] = cp
+	}
+	return result
 }
 
 // ============================================================================

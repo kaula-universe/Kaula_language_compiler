@@ -45,6 +45,11 @@ void* kmm_v4_alloc_aligned(size_t size, size_t alignment) {
     if (alignment <= KMM_V4_ALIGNMENT) {
         return kmm_v4_alloc_auto(size);
     }
+    // D3 修复：size + alignment 溢出检查
+    if (size == 0 || alignment == 0) return NULL;
+    if (size > SIZE_MAX - alignment) return NULL;
+    // alignment 必须是 2 的幂（调用方契约），用对齐公式安全地计算偏移
+    if ((alignment & (alignment - 1)) != 0) return NULL;
     size_t total = size + alignment;
     void* raw = kmm_v4_alloc_auto(total);
     if (raw == NULL) {

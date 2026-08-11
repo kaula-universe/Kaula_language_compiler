@@ -13,7 +13,12 @@
     __attribute__((aligned(KMM_V4_ALIGNMENT)))
     uint8_t g_kmm_v4_pool[KMM_V4_POOL_SIZE];
     size_t g_kmm_v4_pool_capacity = KMM_V4_POOL_SIZE;
-    
+
+    // 方案 A：survivor 段（slab 分配器 + per-object free）
+    __attribute__((aligned(KMM_V4_ALIGNMENT)))
+    uint8_t g_kmm_v4_survivor_storage[KMM_V4_SURVIVOR_REGION_SIZE];
+    kmm_survivor_state_t g_kmm_v4_survivor = {0};
+
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     KMM_ATOMIC_TYPE g_kmm_v4_offset = 0;  // 原子操作，无锁CAS
 #else

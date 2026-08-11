@@ -1,5 +1,9 @@
 #include "string.h"
 #include "../memory/memory.h"
+// Task #18：长寿命字符串需要 kmm_v4_alloc_global（幸存段分配，头文件内
+// static inline 定义），故直接包含分配器头。相对路径保证任意 -I 配置
+// 下可解析；memory.h 已先定义 KMM_V4_EXTERNAL_DECLS，两者兼容。
+#include "../../src/kmm_scoped_allocator_v4.h"
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -52,6 +56,38 @@ String string_copy(String str) {
     return string_from_cstr(str.ptr, str.len);
 }
 
+// ==================== 长寿命字符串（Task #18） ====================
+// 载荷从 KMM 幸存段分配（kmm_v4_alloc_global：小对象走 slab 桶，
+// 大对象走 bump 区），不受 scope_pop 回卷影响；SOR 浅提升（仅复制
+// {len,ptr} 外壳）后载荷指针依然有效，消除回调场景的悬垂风险
+// （见 kmm_scoped_allocator_v4.h Bug 2 注释的“长寿命分配 API”出路）。
+// String 外壳本身按值传递（寄存器/栈结构体），无需单独分配。
+
+// 辅助：从长寿命路径（幸存段）分配载荷缓冲区
+static char* alloc_data_global(size_t len) {
+    char* data = (char*)kmm_v4_alloc_global(len + 1);
+    if (data) data[len] = '\0';
+    return data;
+}
+
+// 从 C 字符串创建长寿命 String（复制语义，同 string_create）
+String string_create_global(const char* str) {
+    if (!str) return STRING_EMPTY;
+    size_t len = strlen(str);
+    String result = {.len = len, .ptr = alloc_data_global(len)};
+    if (result.ptr && len > 0) memcpy(result.ptr, str, len);
+    return result;
+}
+
+// string_copy 的长寿命版本：载荷转存到幸存段
+String string_clone_global(String str) {
+    // NULL 防御：与 string_concat 口径一致，NULL 侧视为空串
+    size_t len = (str.ptr != NULL) ? str.len : 0;
+    String result = {.len = len, .ptr = alloc_data_global(len)};
+    if (result.ptr && len > 0) memcpy(result.ptr, str.ptr, len);
+    return result;
+}
+
 String string_substring(String str, size_t start, size_t length) {
     if (start >= str.len) return STRING_EMPTY;
     if (start + length > str.len) length = str.len - start;
@@ -69,15 +105,19 @@ char string_char_at(String str, size_t index) {
 }
 
 void string_set_char_at(String str, size_t index, char c) {
-    if (index < str.len) str.ptr[index] = c;
+    // NULL 防御：string_realloc 失败会返回 {len>0, ptr=NULL}，不得向 NULL 写入
+    if (str.ptr != NULL && index < str.len) str.ptr[index] = c;
 }
 
 String string_concat(String str1, String str2) {
-    size_t total = str1.len + str2.len;
+    // NULL 防御：ptr 为 NULL 的一侧视为空串（如失败分配的结果），避免 memcpy(NULL)
+    size_t len1 = (str1.ptr != NULL) ? str1.len : 0;
+    size_t len2 = (str2.ptr != NULL) ? str2.len : 0;
+    size_t total = len1 + len2;
     char* data = alloc_data(total);
     if (data) {
-        if (str1.len > 0) memcpy(data, str1.ptr, str1.len);
-        if (str2.len > 0) memcpy(data + str1.len, str2.ptr, str2.len);
+        if (len1 > 0) memcpy(data, str1.ptr, len1);
+        if (len2 > 0) memcpy(data + len1, str2.ptr, len2);
     }
     return (String){.len = total, .ptr = data};
 }

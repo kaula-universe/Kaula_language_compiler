@@ -44,12 +44,24 @@ typedef enum {
     RESULT_ERR
 } ResultStatus;
 
+// Result 成功载荷的种类（ok_kind 说明 union 中哪个成员有效）
+typedef enum {
+    RESULT_OK_I64,
+    RESULT_OK_F64,
+    RESULT_OK_PTR,
+    RESULT_OK_BOOL,
+    RESULT_OK_STRING
+} ResultOkKind;
+
 typedef struct {
     ResultStatus status;
+    ResultOkKind ok_kind;
     union {
         i64   ok_i64;
         f64   ok_f64;
         void* ok_ptr;
+        bool_t ok_bool;
+        String ok_str;      // RESULT_OK_STRING：所有权归 Result，须 result_destroy
     } value;
     int    err_code;
     String err_msg;
@@ -58,6 +70,8 @@ typedef struct {
 Result result_ok_i64(i64 val);
 Result result_ok_f64(f64 val);
 Result result_ok_ptr(void* val);
+Result result_ok_bool(bool_t val);
+Result result_ok_string(const char* val);
 Result result_err(int code, const char* msg);
 
 bool_t result_is_ok(const Result* r);
@@ -65,6 +79,8 @@ bool_t result_is_err(const Result* r);
 i64    result_unwrap_ok_i64(const Result* r);
 f64    result_unwrap_ok_f64(const Result* r);
 void*  result_unwrap_ok_ptr(const Result* r);
+bool_t result_unwrap_ok_bool(const Result* r);
+String result_unwrap_ok_string(const Result* r);
 int    result_err_code(const Result* r);
 String result_err_msg(const Result* r);
 
