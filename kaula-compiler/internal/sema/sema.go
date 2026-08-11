@@ -2795,17 +2795,19 @@ func isPointerType(typeName string) bool {
 func (sa *SemanticAnalyzer) error(msg string, line, column int) {
 	suggestion := errors.GenerateSuggestion(msg)
 	context, sourceLine, lineNumStr := errors.ExtractSourceContext(sa.source, line, column)
+	fileName := sa.errorCollector.GetFile()
 	err := &errors.Error{
 		Type:          errors.ErrorSemantic,
 		Message:       msg,
 		Line:          line,
 		Column:        column,
-		File:          "",
+		File:          fileName,
+		Code:          "semantic",
 		Suggestion:    suggestion,
 		SourceContext: context,
 		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
-		Highlight:     errors.BuildHighlight(sa.source, line, column, 0, "", errors.ErrorSemantic, msg),
+		Highlight:     errors.BuildHighlight(sa.source, line, column, 0, "semantic", errors.ErrorSemantic, msg),
 	}
 	sa.errorCollector.AddErrorInstance(err)
 }

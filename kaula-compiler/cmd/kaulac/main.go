@@ -517,6 +517,7 @@ func main() {
 
 	errorCollector := errors.NewErrorCollector()
 	errorCollector.SetSource(input)
+	errorCollector.SetFile(inputBase) // 错误首行显示文件名（如 student_manager.kl）
 
 	// 并行启动：stdlib 配置加载 + 路径搜索（不依赖 Go 前端）
 	parallelStart := time.Now()
@@ -781,7 +782,14 @@ func main() {
 		}
 	}
 
-	fmt.Printf("\n=== Compilation Results ===\n")
+	// 标题颜色: 成功绿 / 有警告黄 / 失败红
+	titleColor := errors.ColorGreen
+	if compileResult.Error != nil {
+		titleColor = errors.ColorRed
+	} else if warningCount > 0 {
+		titleColor = errors.ColorYellow
+	}
+	fmt.Printf("\n%s=== Compilation Results ===%s\n", titleColor, errors.ColorReset)
 	if compileResult.Error != nil {
 		printSummary(false, warningCount, errorCount)
 		fmt.Printf("Error: %v\n", compileResult.Error)
