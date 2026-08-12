@@ -59,7 +59,7 @@ python toolkit_build.py --clean         # 清理所有构建产物
 | `all` | 全部（下方所有） |
 | `std` | `lib/kaula_std.lib`（Windows）/ `lib/libkaula_std.a`（其他） |
 | `freestanding` | `lib/kaula_freestanding.lib` / `lib/libkaula_freestanding.a` |
-| `runtime` | `lib/kaula_runtime.lib` / `lib/libkaula_runtime.a`（src/ + kaula-compiler/runtime/） |
+| `runtime` | `lib/kaula_runtime.lib` / `lib/libkaula_runtime.a`（src/ + compiler/runtime/） |
 | `compiler` | `bin/kaulac(.exe)`、`bin/kaulafmt(.exe)`、`bin/stdlib.json` |
 | `headers` | `include/{kaula,runtime,std,freestanding}`（仅复制头文件，跳过 `.c`） |
 
@@ -185,7 +185,7 @@ kaulac --freestanding --boot custom --boot-file myboot.S kernel.kl
 ```
 
 - `--freestanding` 使用 `-ffreestanding -nostdlib -nostartfiles`，自动链接 freestanding 库（`kaula_freestanding.lib` / `libkaula_freestanding.a`）
-- 内置引导模板与链接脚本：`kaula-compiler/templates/boot/`（`x86_64-pvh.S`、`x86_64-multiboot.S`、`i386-multiboot.S`、`riscv64.S`、`aarch64.S`）与 `templates/linker/`（`x86_64.ld`、`i386.ld`、`riscv64.ld`、`aarch64.ld`、`user.ld`）
+- 内置引导模板与链接脚本：`compiler/templates/boot/`（`x86_64-pvh.S`、`x86_64-multiboot.S`、`i386-multiboot.S`、`riscv64.S`、`aarch64.S`）与 `templates/linker/`（`x86_64.ld`、`i386.ld`、`riscv64.ld`、`aarch64.ld`、`user.ld`）
 - 输出格式：`elf`（默认，适合 QEMU `-kernel`）或 `bin`（裸映像，适合自定义加载器/烧录）
 - 常用入口：`_start`；架构由 `--target-triple` 推断，可用 `--boot-arch` 覆盖
 
