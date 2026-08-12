@@ -1,6 +1,6 @@
 """
 SOR (Sub-Ownership Release) 模型形式化验证
-与 kaula-compiler/internal/sor/ 源码中的显式检查一一对应。
+与 compiler/internal/sor/ 源码中的显式检查一一对应。
 """
 
 from z3 import *

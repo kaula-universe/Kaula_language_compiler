@@ -61,7 +61,7 @@ Stage 3: Code Generation + C 编译 // 并发生成 C 代码并调用 Clang
 ## 目录结构
 
 ```
-kaula-compiler/
+compiler/
 ├── cmd/
 │   ├── kaulac/main.go           # 编译器主入口
 │   └── kaulafmt/main.go         # 代码格式化工具

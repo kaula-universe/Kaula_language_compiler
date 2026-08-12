@@ -499,7 +499,7 @@ kaulac --no-cache program.kl   # 禁用缓存
 
 ```
 kaula/
-├── kaula-compiler/          # 编译器（Go 实现）
+├── compiler/          # 编译器（Go 实现）
 │   ├── cmd/kaulac/          # 编译器 CLI
 │   ├── internal/
 │   │   ├── lexer/           # 词法分析

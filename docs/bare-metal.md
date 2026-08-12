@@ -35,7 +35,7 @@ fn kaula_main() -> void {
 
 ```bash
 kaulac.exe --freestanding --boot pvh \
-    --template kaula-compiler\templates \
+    --template compiler\templates \
     hello_serial.kl
 ```
 

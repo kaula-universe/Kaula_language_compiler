@@ -2,7 +2,7 @@
 
 `loadtest` 是开发期验证工具：对 `.kl` 源文件执行词法→语法→语义全流程分析，输出解析错误数、语句数及语义错误，用于验证语义分析器行为。
 
-保存位置：`kaula-compiler/cmd/loadtest/`（未纳入 `build/bin`，需手动构建）。
+保存位置：`compiler/cmd/loadtest/`（未纳入 `build/bin`，需手动构建）。
 
 ## 用法
 
@@ -15,7 +15,7 @@
 | 参数 | 说明 |
 |------|------|
 | `<file.kl>` | 要分析的 Kaula 源文件 |
-| `<stdlib.json>` | 标准库配置路径（如 `build/bin/stdlib.json` 或仓库内 `kaula-compiler/stdlib.json`） |
+| `<stdlib.json>` | 标准库配置路径（如 `build/bin/stdlib.json` 或仓库内 `compiler/stdlib.json`） |
 
 ## 输出格式
 
@@ -34,7 +34,7 @@ NO SEMANTIC ERRORS
 ## 构建
 
 ```bash
-cd kaula-compiler/cmd/loadtest
+cd compiler/cmd/loadtest
 go build -o loadtest.exe
 ```
 
@@ -42,7 +42,7 @@ go build -o loadtest.exe
 
 ```bash
 # 用仓库内标准库配置验证一个源文件
-loadtest test.kl kaula-compiler/stdlib.json
+loadtest test.kl compiler/stdlib.json
 
 # 用构建产物的标准库配置
 loadtest test.kl build/bin/stdlib.json
