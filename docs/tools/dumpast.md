@@ -2,7 +2,7 @@
 
 `dumpast` 是开发期诊断工具：对 `.kl` 源文件执行词法+语法分析，把 AST 以树形文本打印到标准输出，便于调试解析器或观察语法结构。
 
-保存位置：`kaula-compiler/cmd/dumpast/`（未纳入 `build/bin`，需手动构建）。
+保存位置：`compiler/cmd/dumpast/`（未纳入 `build/bin`，需手动构建）。
 
 ## 用法
 
@@ -37,7 +37,7 @@ parse errors: false
 ## 构建
 
 ```bash
-cd kaula-compiler/cmd/dumpast
+cd compiler/cmd/dumpast
 go build -o dumpast.exe
 ```
 
