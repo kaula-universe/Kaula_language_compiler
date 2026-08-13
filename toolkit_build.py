@@ -35,7 +35,7 @@ class BuildConfig:
         self.std_dir = self.project_root / "std"
         self.src_dir = self.project_root / "src"
         self.freestanding_dir = self.project_root / "freestanding"
-        self.compiler_dir = self.project_root / "kaula-compiler"
+        self.compiler_dir = self.project_root / "compiler"
         self.pkglib_dir = self.project_root / "pkglib"
         self.runtime_dir = self.compiler_dir / "runtime"
 
@@ -96,12 +96,26 @@ class ProgressBar:
         self.width = width
         self.stream = stream or sys.stdout
         self.current = 0
+        self.current_label = ""  # ninja style: current task name
+        self.current_label = ""  # ninja 风格: 当前正在编译的任务名
         self.start_time = time.time()
         self.last_update = 0
         self._lock = threading.Lock()
         self._visible = False
         self._last_line = ""
         self._term_width = self._get_term_width()
+
+    def set_label(self, label):
+        """设置当前任务名 (ninja 风格: 只显示当前正在编译的文件)"""
+        with self._lock:
+            self.current_label = label
+            self._draw()
+
+    def set_label(self, label):
+        """Set current task name (ninja style: only the file being compiled shows)"""
+        with self._lock:
+            self.current_label = label
+            self._draw()
 
     def _get_term_width(self):
         try:
@@ -129,13 +143,23 @@ class ProgressBar:
     def _render(self):
         if self.total <= 0:
             return ""
+        CR = chr(13)
         pct = self.current / self.total
         filled = int(self.width * pct)
         # Use ASCII characters for cross-platform compatibility (Windows GBK, etc.)
         bar = "#" * filled + "-" * (self.width - filled)
         elapsed = time.time() - self.start_time
         eta_str = self._eta()
-        return f"\r{self.prefix} [{bar}] {self.current}/{self.total} ({pct*100:.0f}%) | {self._format_time(elapsed)} elapsed | ETA: {eta_str}"
+        # ninja style: [n/total] current task name
+        if self.current_label:
+            label = self.current_label
+            max_len = max(20, self._term_width - 30)
+            if len(label) > max_len:
+                label = label[: max_len - 3] + "..."
+            return CR + "[{}/{}] compile {} | {} elapsed".format(self.current, self.total, label, self._format_time(elapsed))
+        return CR + "{}{} [{}{}] {}/{} ({}%) | {} elapsed | ETA: {}".format(
+            self.prefix, " ", "#" * filled, "-" * (self.width - filled),
+            self.current, self.total, int(pct * 100), self._format_time(elapsed), eta_str)
 
     def update(self, n=1):
         with self._lock:
@@ -342,7 +366,7 @@ class CBuilder:
         if digest and out_obj.exists() and hash_path.exists():
             if hash_path.read_text(encoding="ascii").strip() == digest:
                 self.obj_files.append(out_obj)
-                print(f"  [cached]  {src_file.name}")
+                # ninja style: cached is silent (progress line shows current task)
                 return True
 
         if self.is_msvc:
@@ -360,17 +384,17 @@ class CBuilder:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode != 0:
                 err = result.stderr if result.stderr else result.stdout
-                print(f"  [-] 失败: {src_file.name}")
+                print(chr(10) + "  [-] 失败: " + src_file.name)
                 for line in err.strip().split("\n")[:5]:
-                    print(f"      {line}")
+                    print("      " + line)
                 return False
             self.obj_files.append(out_obj)
-            print(f"  [OK] {src_file.name}")
+            # ninja style: success is silent
             if digest:
                 hash_path.write_text(digest, encoding="ascii")
             return True
         except subprocess.TimeoutExpired:
-            print(f"  [-] 超时: {src_file.name}")
+            print(chr(10) + "  [-] 超时: " + src_file.name)
             return False
 
     def _make_static_lib(self, output_lib, obj_files):
@@ -394,7 +418,7 @@ class CBuilder:
                 print(f"[-] 创建静态库失败: {err}")
                 return False
             sz = output_lib.stat().st_size
-            print(f"[OK] 静态库: {output_lib} ({sz / 1024:.1f} KB)")
+            print(f"[成功] 静态库: {output_lib} ({sz / 1024:.1f} KB)")
             return True
         except subprocess.TimeoutExpired:
             print("[-] 创建静态库超时")
@@ -416,6 +440,7 @@ class CBuilder:
         fail = 0
         with ProgressBar(len(sources), "编译标准库", width=40) as pbar:
             for src in sources:
+                pbar.set_label(src.name)  # ninja style: show current file only
                 if self._compile_one(src):
                     ok += 1
                 else:
@@ -458,6 +483,7 @@ class CBuilder:
         freestanding_include_dirs = [str(self.config.freestanding_dir)]
         with ProgressBar(len(sources), "编译 freestanding", width=40) as pbar:
             for src in sources:
+                pbar.set_label(src.name)  # ninja style: show current file only
                 if self._compile_one(src, include_dirs=freestanding_include_dirs):
                     ok += 1
                 else:
@@ -498,6 +524,7 @@ class CBuilder:
         fail = 0
         with ProgressBar(len(sources), "编译运行时", width=40) as pbar:
             for src in sources:
+                pbar.set_label(src.name)  # ninja style: show current file only
                 # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
                 # unity-include freestanding 库，必须用 freestanding 优先的 -I 顺序，
                 # 否则会错误地包含 std/memory/memory.c（依赖 libc <string.h>）。
@@ -643,7 +670,7 @@ class GoBuilder:
                     print(err)
                     return False
                 sz = out_file.stat().st_size
-                print(f"[OK] {output_name}: {out_file} ({sz / 1024:.1f} KB)")
+                print(f"[成功] {output_name}: {out_file} ({sz / 1024:.1f} KB)")
                 if digest:
                     self.config.hash_dir.mkdir(parents=True, exist_ok=True)
                     hash_path.write_text(digest, encoding="ascii")
@@ -667,7 +694,7 @@ class GoBuilder:
         self.config.bin_dir.mkdir(parents=True, exist_ok=True)
         dest = self.config.bin_dir / "stdlib.json"
         shutil.copy2(src, dest)
-        print(f"[OK] stdlib.json -> {dest}")
+        print(f"[成功] stdlib.json -> {dest}")
         return True
 
 
@@ -722,12 +749,12 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
     failed_components = [name for name, ok in results.items() if ok is False]
     all_ok = not failed_components
     if all_ok:
-        print("\n[OK] 构建完成!")
+        print("\n[成功] 构建完成!")
         print(f"   可执行文件: {config.bin_dir}")
         print(f"   静态库:     {config.lib_dir}")
         print(f"   头文件:     {config.include_dir}")
     else:
-        print("\n[FAIL] 部分组件构建失败")
+        print("\n[失败] 部分组件构建失败")
         print(f"   失败组件: {', '.join(failed_components)}")
 
     return all_ok
@@ -741,21 +768,21 @@ def clean_all(config):
 
     if config.build_dir.exists():
         shutil.rmtree(config.build_dir)
-        print(f"[OK] 已删除: {config.build_dir}")
+        print(f"[成功] 已删除: {config.build_dir}")
 
     std_lib_a = config.std_dir / "libkaula_std.a"
     std_lib_lib = config.std_dir / "kaula_std.lib"
     for p in [std_lib_a, std_lib_lib]:
         if p.exists():
             p.unlink()
-            print(f"[OK] 已删除: {p}")
+            print(f"[成功] 已删除: {p}")
 
     obj_dir_old = config.project_root / "build"
     if obj_dir_old.exists() and obj_dir_old != config.build_dir:
         shutil.rmtree(obj_dir_old)
-        print(f"[OK] 已删除: {obj_dir_old}")
+        print(f"[成功] 已删除: {obj_dir_old}")
 
-    print("\n[OK] 清理完成!")
+    print("\n[成功] 清理完成!")
 
 
 def main():

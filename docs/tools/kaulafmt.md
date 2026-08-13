@@ -1,6 +1,6 @@
 # kaulafmt — Kaula 代码格式化工具
 
-`kaulafmt` 格式化 `.kl` 源文件，使代码符合统一风格。保存路径：`build/bin/kaulafmt.exe`（源码：`kaula-compiler/cmd/kaulafmt/`）。
+`kaulafmt` 格式化 `.kl` 源文件，使代码符合统一风格。保存路径：`build/bin/kaulafmt.exe`（源码：`compiler/cmd/kaulafmt/`）。
 
 ## 用法
 
@@ -67,7 +67,7 @@ kaulafmt -w main.kl       # 格式化并写回
 
 ```bash
 python toolkit_build.py                    # 随工具链整体构建
-cd kaula-compiler/cmd/kaulafmt && go build -o kaulafmt.exe   # 单独构建
+cd compiler/cmd/kaulafmt && go build -o kaulafmt.exe   # 单独构建
 ```
 
 ## 限制

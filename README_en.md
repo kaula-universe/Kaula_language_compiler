@@ -451,7 +451,7 @@ Full option list and kaula.json configuration in [docs/](docs/).
 
 ```
 kaula/
-├── kaula-compiler/          # Compiler (Go)
+├── compiler/          # Compiler (Go)
 │   ├── cmd/kaulac/          # Compiler CLI
 │   ├── internal/
 │   │   ├── lexer/           # Lexer
