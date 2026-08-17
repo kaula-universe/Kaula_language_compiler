@@ -2252,7 +2252,6 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		leftType := sa.inferExpressionType(expr.Left)
 		rightType := sa.inferExpressionType(expr.Right)
 		if leftType != "" && rightType != "" && leftType != rightType {
-			fmt.Printf("DBG-BINOP %s: left=%q(%s) right=%q(%s)\n", expr.Operator, leftType, expr.Left.String(), rightType, expr.Right.String())
 			switch expr.Operator {
 			case "+", "-", "*", "/", "%":
 				if !isNumericType(leftType) || !isNumericType(rightType) {

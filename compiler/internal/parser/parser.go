@@ -316,12 +316,17 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 		// 类型关键字开头，尝试解析变量声明
 		return p.parseVariableDeclarationIterative()
 	case lexer.TOKEN_MULTIPLY:
-		// * 开头可能是 C 风格指针声明: *Type name
+		// * 开头可能是 C 风格指针声明: *Type name，也可能是解引用表达式: *p = x
 		peekIsType := p.isTypeToken(p.peekTok.Type) || p.peekTok.Type == lexer.TOKEN_IDENT
 		if peekIsType {
-			return p.parseVariableDeclarationIterative()
+			// 先尝试按 *Type name 指针声明解析；失败则回退到表达式语句。
+			// parseVariableDeclarationIterative 在判定不是声明时会恢复 token 流，
+			// 因此回退时 * 仍位于 curTok，可正常进入解引用表达式分支。
+			if decl := p.parseVariableDeclarationIterative(); decl != nil {
+				return decl
+			}
 		}
-		// 否则作为表达式语句处理
+		// 否则（或指针声明解析失败）作为表达式语句处理，例如 *p = x
 		return p.parseExpressionStatementIterative()
 	case lexer.TOKEN_LBRACKET:
 		// [ 开头可能是固定大小数组声明: [N]type name 或 []type name
@@ -522,7 +527,9 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 
 	// 检查变量名后是否还有数组后缀 - 语法: Type name[N]
 	// （与 [N]Type name 前缀形式等价，demo 大量使用后缀形式）
-	if p.curTok.Type == lexer.TOKEN_LBRACKET {
+	// 注意：若类型已用 [N] 前缀形式（typeName 以 [ 开头），不能再有后缀，
+	// 否则会吞掉下一行的前缀数组声明（如 [10]Entity ents 后跟 [3400]f64 zb）。
+	if p.curTok.Type == lexer.TOKEN_LBRACKET && !strings.HasPrefix(stmt.Type, "[") {
 		p.nextToken() // consume '['
 		arraySize := ""
 		if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {

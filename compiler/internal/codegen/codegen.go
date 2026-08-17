@@ -935,6 +935,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// 该符号由 CRT 提供；本工具链不链接 CRT，必须自备定义（标准 _fltused stub）
 		if runtime.GOOS == "windows" {
 			allIncludes.WriteString("#if defined(_WIN32) || defined(_WIN64)\n")
+			allIncludes.WriteString("#define itoa K_itoa\n")
 			allIncludes.WriteString("int _fltused = 0;\n")
 			allIncludes.WriteString("#endif\n")
 		}
