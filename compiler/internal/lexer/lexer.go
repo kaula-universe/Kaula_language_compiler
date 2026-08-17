@@ -90,6 +90,7 @@ const (
 	TOKEN_ASSIGN
 	TOKEN_EQ
 	TOKEN_NE
+	TOKEN_NOT
 	TOKEN_LT
 	TOKEN_GT
 	TOKEN_AND
@@ -293,8 +294,8 @@ func (l *Lexer) Next() Token {
 				l.next()
 				return Token{Type: TOKEN_NE, Value: "!=", Line: l.line, Column: l.column}
 			} else {
-				l.error("unexpected token")
-				continue
+				l.next()
+				return Token{Type: TOKEN_NOT, Value: "!", Line: l.line, Column: l.column}
 			}
 		case char == '<':
 			if l.peek() == '=' {
@@ -625,6 +626,7 @@ func (l *Lexer) scanNumber() Token {
 	}
 
 	// 普通十进制/浮点数
+	isFloat := false
 	for l.pos < l.inputLen {
 		c := l.input[l.pos]
 		if c < 0x80 && isASCIIDigit(c) {
@@ -636,6 +638,7 @@ func (l *Lexer) scanNumber() Token {
 		}
 	}
 	if l.pos < l.inputLen && l.input[l.pos] == '.' {
+		isFloat = true
 		l.pos++
 		for l.pos < l.inputLen {
 			c := l.input[l.pos]
@@ -647,6 +650,30 @@ func (l *Lexer) scanNumber() Token {
 				break
 			}
 		}
+	}
+
+	// 科学计数法指数部分: [eE][+-]?digits，如 1e18、2.5e-3
+	if l.pos < l.inputLen && (l.input[l.pos] == 'e' || l.input[l.pos] == 'E') {
+		savePos := l.pos
+		expPos := l.pos + 1
+		if expPos < l.inputLen && (l.input[expPos] == '+' || l.input[expPos] == '-') {
+			expPos++
+		}
+		digitsStart := expPos
+		for expPos < l.inputLen && l.input[expPos] >= '0' && l.input[expPos] <= '9' {
+			expPos++
+		}
+		if expPos > digitsStart {
+			// 指数部分有效（至少一位数字），按浮点数处理
+			l.pos = expPos
+			isFloat = true
+		} else {
+			// 无效指数（如 1e、1e+），回退：保留 'e' 供标识符扫描
+			l.pos = savePos
+		}
+	}
+
+	if isFloat {
 		l.column += l.pos - start
 		return Token{Type: TOKEN_LITERAL_FLOAT, Value: l.input[start:l.pos], Line: l.line, Column: l.column}
 	} else {
@@ -958,6 +985,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "EQ"
 	case TOKEN_NE:
 		return "NE"
+	case TOKEN_NOT:
+		return "NOT"
 	case TOKEN_LT:
 		return "LT"
 	case TOKEN_GT:

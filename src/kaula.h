@@ -194,9 +194,6 @@ void time_destroy(TimeModule* tm);
 // void time_sleep(TimeModule* tm, double seconds);  // 已移至 std/time/time.h
 
 #ifndef KAULA_FREESTANDING
-// 包含 std/time/time.h 以获取 time_now 和 time_sleep 函数
-#include "../std/time/time.h"
-
 // 包含 std/io/io.h 以获取 println, print_int 等函数
 #include "../std/io/io.h"
 #endif // KAULA_FREESTANDING

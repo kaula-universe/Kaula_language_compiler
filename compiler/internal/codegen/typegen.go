@@ -250,7 +250,8 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 		closeBracket := strings.Index(typeLower, "]")
 		if closeBracket > 1 {
 			arraySize := typeLower[1:closeBracket]
-			elemType := typeLower[closeBracket+1:]
+			// 元素类型保留原始大小写递归映射（用户定义类型可能含大写，如 [4]Entity）
+			elemType := kaulaType[closeBracket+1:]
 			cElemType := tg.MapKaulaTypeToC(elemType)
 			return cElemType + "[" + arraySize + "]"
 		}

@@ -17,3 +17,5 @@ test/**/*.exe
 test/*.o
 docs/tutorials/examples/*.exe
 docs/tutorials/examples/cache/
+demo/*.exe
+*.exe
