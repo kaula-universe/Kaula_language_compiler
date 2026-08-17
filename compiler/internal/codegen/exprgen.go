@@ -1967,6 +1967,23 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpression) string {
 	exprCode := eg.GenerateExpression(e.Expression)
 	cType := eg.mapTypeToC(e.TargetType)
+	srcKind := eg.inferType(e.Expression)
+	switch e.TargetType {
+	case "cstring", "cstr":
+		// String 结构体 → const char*: 取 .ptr 字段
+		if srcKind == "s" {
+			return "(" + exprCode + ").ptr"
+		}
+		// 源已是 C 字符串（字面量 cstring / cstring 变量 / 指针），直接透传
+		if srcKind == "cstr" {
+			return exprCode
+		}
+	case "string", "str":
+		// 源已是 String 结构体，直接透传
+		if srcKind == "s" {
+			return exprCode
+		}
+	}
 	return "(" + cType + ")(" + exprCode + ")"
 }
 

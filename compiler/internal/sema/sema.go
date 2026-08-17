@@ -2252,6 +2252,7 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		leftType := sa.inferExpressionType(expr.Left)
 		rightType := sa.inferExpressionType(expr.Right)
 		if leftType != "" && rightType != "" && leftType != rightType {
+			fmt.Printf("DBG-BINOP %s: left=%q(%s) right=%q(%s)\n", expr.Operator, leftType, expr.Left.String(), rightType, expr.Right.String())
 			switch expr.Operator {
 			case "+", "-", "*", "/", "%":
 				if !isNumericType(leftType) || !isNumericType(rightType) {
@@ -2582,6 +2583,20 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		if e.Operator == "!" {
 			return "bool"
 		}
+		if e.Operator == "&" {
+			// 取地址: T -> T*
+			if operandType != "" {
+				return operandType + "*"
+			}
+			return ""
+		}
+		if e.Operator == "*" {
+			// 解引用: T* -> T
+			if strings.HasSuffix(operandType, "*") {
+				return strings.TrimSuffix(operandType, "*")
+			}
+			return ""
+		}
 		if e.Operator == "-" || e.Operator == "+" {
 			// 负号/正号运算：确保结果为有符号类型
 			if operandType == "u8" || operandType == "u16" || operandType == "u32" || operandType == "u64" {
@@ -2682,6 +2697,9 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 			return "object"
 		}
 		return ""
+	case *ast.TypeCastExpression:
+		// as<T>(e) / cstring(e) 的类型是目标类型
+		return e.TargetType
 	default:
 		return ""
 	}

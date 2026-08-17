@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -768,8 +769,13 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			// 固定大小数组类型 [N]elem → C 声明 "elem name[N]"
 			decl := cg.generateGlobalVarDeclString(cType, varDecl.Name)
 			isArray := strings.Contains(cType, "[") && strings.HasSuffix(cType, "]")
+			isStruct := cg.typeGenerator != nil && cg.typeGenerator.structTypes[varDecl.Type]
 			// 数组全局变量：标量初始化值转换为 {0}（字符串字面量初始化除外）
 			if isArray && !strings.HasPrefix(initValue, "\"") {
+				initValue = "{0}"
+			}
+			// 无初始化器的结构体全局变量：{0} 零初始化（C 不允许 struct = 0）
+			if isStruct && varDecl.Value == nil {
 				initValue = "{0}"
 			}
 			if prefix != "" {
@@ -925,6 +931,13 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		}
 	} else {
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n#include \"kaula_runtime.h\"\n")
+		// Windows (MSVC ABI / UCRT)：编译器对使用浮点的 TU 生成未定义引用 _fltused，
+		// 该符号由 CRT 提供；本工具链不链接 CRT，必须自备定义（标准 _fltused stub）
+		if runtime.GOOS == "windows" {
+			allIncludes.WriteString("#if defined(_WIN32) || defined(_WIN64)\n")
+			allIncludes.WriteString("int _fltused = 0;\n")
+			allIncludes.WriteString("#endif\n")
+		}
 	}
 
 	if cg.stdlibConfig != nil {

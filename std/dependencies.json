@@ -52,6 +52,7 @@
   "ssh":       ["base", "string", "memory", "crypto"],
   "random":    ["base", "memory"],
   "cmath":     ["base", "math"],
+  "algebra":   ["base", "math", "memory"],
   "decimal":   ["base", "string", "memory", "math"],
   "bitset":    ["base", "memory"],
   "deque":     ["base", "memory"],

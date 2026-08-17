@@ -518,6 +518,23 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		p.nextToken()
 	}
 
+	// 检查变量名后是否还有数组后缀 - 语法: Type name[N]
+	// （与 [N]Type name 前缀形式等价，demo 大量使用后缀形式）
+	if p.curTok.Type == lexer.TOKEN_LBRACKET {
+		p.nextToken() // consume '['
+		arraySize := ""
+		if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+			arraySize = p.curTok.Value
+			p.nextToken()
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACKET {
+			p.nextToken()
+			stmt.Type = "[" + arraySize + "]" + stmt.Type
+		} else {
+			p.error("expected ']' after array size")
+		}
+	}
+
 	// 检查是否有赋值
 	if p.curTok.Type == lexer.TOKEN_ASSIGN {
 		p.nextToken()
@@ -1463,17 +1480,9 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 	p.nextToken() // consume 'if'
 
 	// 解析 if 条件表达式
-	// 检查是否有括号
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		p.nextToken() // consume '('
-		stmt.Condition = p.parseExpressionIterative()
-		if p.curTok.Type == lexer.TOKEN_RPAREN {
-			p.nextToken() // consume ')'
-		}
-	} else {
-		// 没有括号，直接解析条件表达式
-		stmt.Condition = p.parseExpressionIterative()
-	}
+	// 直接交给表达式解析器：开头的 '(' 由分组表达式处理，
+	// 支持 (a) == (b) 这种首项是括号表达式的比较链
+	stmt.Condition = p.parseExpressionIterative()
 
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
@@ -1527,17 +1536,8 @@ func (p *Parser) parseWhileStatementIterative() *ast.WhileStatement {
 		Pos:  pos,
 	}
 	p.nextToken()
-	// 检查是否有括号
-	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		p.nextToken()
-		stmt.Condition = p.parseExpressionIterative()
-		if p.curTok.Type == lexer.TOKEN_RPAREN {
-			p.nextToken()
-		}
-	} else {
-		// 没有括号，直接解析条件表达式
-		stmt.Condition = p.parseExpressionIterative()
-	}
+	// 解析 while 条件表达式：同 if，开头的 '(' 由分组表达式处理
+	stmt.Condition = p.parseExpressionIterative()
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
@@ -3207,6 +3207,10 @@ func (p *Parser) precedence(tokenType lexer.TokenType) int {
 func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 	switch p.curTok.Type {
 	case lexer.TOKEN_IDENT:
+		// 类型构造符语法：cstring("...") / str("...") 等价于 as<cstring>("...")
+		if (p.curTok.Value == "cstring" || p.curTok.Value == "str") && p.peekTok.Type == lexer.TOKEN_LPAREN {
+			return p.parseTypeConstructorCastIterative()
+		}
 		return p.parseIdentifierIterative()
 	case lexer.TOKEN_LITERAL_INT:
 		return p.parseIntegerLiteralIterative()
@@ -3272,6 +3276,18 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		}
 		return &ast.UnaryExpression{
 			Operator: "~",
+			Right:    right,
+		}
+	case lexer.TOKEN_NOT:
+		// 逻辑非 !x
+		p.nextToken()
+		right := p.parsePrimaryExpressionIterative()
+		if right == nil {
+			p.error("! 后应该跟表达式")
+			return nil
+		}
+		return &ast.UnaryExpression{
+			Operator: "!",
 			Right:    right,
 		}
 	case lexer.TOKEN_PREFIX_REF:
@@ -3646,6 +3662,46 @@ func (p *Parser) parseStringLiteralIterative() *ast.StringLiteral {
 	literal := &ast.StringLiteral{Value: p.curTok.Value, Pos: pos}
 	p.nextToken()
 	return literal
+}
+
+// parseTypeConstructorCastIterative 解析类型构造符 cstring(expr) / str(expr)。
+//
+// 语法: cstring(expr)
+//
+// 语义上等价于 as<cstring>(expr)：把字符串字面量/string 值转换为 C 风格字符串。
+// 与 as<T> 一样是显式转换，不引入隐式转换。
+func (p *Parser) parseTypeConstructorCastIterative() ast.Expression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	targetType := p.curTok.Value
+	p.nextToken() // 跳过 cstring
+
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error(fmt.Sprintf("expected '(' after '%s', got %s", targetType, lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
+	p.nextToken()
+
+	expr := p.parseExpressionIterative()
+	if expr == nil {
+		p.error(fmt.Sprintf("expected expression in %s(...)", targetType))
+		return nil
+	}
+
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error(fmt.Sprintf("expected ')' to close %s(...', got %s", targetType, lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
+	p.nextToken()
+
+	return &ast.TypeCastExpression{
+		TargetType: targetType,
+		Expression: expr,
+		Pos:        pos,
+	}
 }
 
 // parseAsCastExpressionIterative 解析 as<T>(e) 类型转换表达式。

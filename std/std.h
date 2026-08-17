@@ -174,6 +174,9 @@
 // 复数运算
 #include "cmath/cmath.h"
 
+// 线性代数
+#include "algebra/algebra.h"
+
 // 高精度小数
 #include "decimal/decimal.h"
 
