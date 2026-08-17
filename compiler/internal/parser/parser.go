@@ -53,6 +53,7 @@ type Parser struct {
 	lexer          *lexer.Lexer
 	curTok         lexer.Token
 	peekTok        lexer.Token
+	lastTokLine    int // 最近一次被消费的 token 所在行（用于语句边界判断）
 	errorCollector *errors.ErrorCollector
 	logger         *log.Logger
 	loggingEnabled bool
@@ -95,6 +96,7 @@ func (p *Parser) log(format string, v ...interface{}) {
 
 // nextToken 前进到下一个 token
 func (p *Parser) nextToken() {
+	p.lastTokLine = p.curTok.Line
 	p.curTok = p.peekTok
 	p.peekTok = p.lexer.Next()
 }
@@ -3128,6 +3130,12 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 
 		// 如果没有运算符或优先级不够高，退出循环
 		if opPrecedence == 0 || precedence >= opPrecedence {
+			break
+		}
+
+		// 运算符出现在新行首（即左表达式结束 token 的下一行）视为语句边界，
+		// 不继续跨行拼接表达式。例：`*hx = x` 下一行 `*hy = y` 不会被解析成 `x * hy`
+		if opTok.Line != p.lastTokLine {
 			break
 		}
 
