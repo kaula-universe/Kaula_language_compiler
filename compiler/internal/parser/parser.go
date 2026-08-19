@@ -4355,6 +4355,9 @@ func (p *Parser) Validate(program *ast.Program) {
 		"std.testing":    true,
 		"std.i18n":       true,
 		"std.gui":        true,
+		"std.random":     true,
+		"std.algebra":    true,
+		"std.cmath":      true,
 
 		// 兼容旧版（不带 std. 前缀）
 		"io":         true,

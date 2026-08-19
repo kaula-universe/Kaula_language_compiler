@@ -9570,5 +9570,626 @@
         "char"
       ]
     }
+  },
+  "std.random": {
+    "header": "std/random/random.h",
+    "random_init": {
+      "args": []
+    },
+    "random_seed": {
+      "args": [
+        "u64"
+      ]
+    },
+    "random_seed_from_time": {
+      "args": []
+    },
+    "random_u32": {
+      "args": [],
+      "return": "u32"
+    },
+    "random_u64": {
+      "args": [],
+      "return": "u64"
+    },
+    "random_i32": {
+      "args": [],
+      "return": "i32"
+    },
+    "random_i64": {
+      "args": [],
+      "return": "i64"
+    },
+    "random_range_u32": {
+      "args": [
+        "u32",
+        "u32"
+      ],
+      "return": "u32"
+    },
+    "random_range_u64": {
+      "args": [
+        "u64",
+        "u64"
+      ],
+      "return": "u64"
+    },
+    "random_range_i32": {
+      "args": [
+        "i32",
+        "i32"
+      ],
+      "return": "i32"
+    },
+    "random_range_i64": {
+      "args": [
+        "i64",
+        "i64"
+      ],
+      "return": "i64"
+    },
+    "random_f32": {
+      "args": [],
+      "return": "f32"
+    },
+    "random_f64": {
+      "args": [],
+      "return": "f64"
+    },
+    "random_range_f32": {
+      "args": [
+        "f32",
+        "f32"
+      ],
+      "return": "f32"
+    },
+    "random_range_f64": {
+      "args": [
+        "f64",
+        "f64"
+      ],
+      "return": "f64"
+    },
+    "random_bool": {
+      "args": [],
+      "return": "bool"
+    },
+    "random_chance": {
+      "args": [
+        "f64"
+      ],
+      "return": "bool"
+    },
+    "random_bytes": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "random_generator_create": {
+      "args": [
+        "u64"
+      ],
+      "return": "void()"
+    },
+    "random_generator_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "random_generator_next": {
+      "args": [
+        "void()"
+      ],
+      "return": "u64"
+    },
+    "random_generator_next_f64": {
+      "args": [
+        "void()"
+      ],
+      "return": "f64"
+    },
+    "random_uuid": {
+      "args": [],
+      "return": "u64"
+    }
+  },
+  "std.cmath": {
+    "header": "std/cmath/cmath.h",
+    "complex_create": {
+      "args": [
+        "f64",
+        "f64"
+      ],
+      "return": "Complex"
+    },
+    "complex_conjugate": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_add": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_subtract": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_multiply": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_divide": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_negate": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_abs": {
+      "args": [
+        "void()"
+      ],
+      "return": "f64"
+    },
+    "complex_arg": {
+      "args": [
+        "void()"
+      ],
+      "return": "f64"
+    },
+    "complex_real": {
+      "args": [
+        "void()"
+      ],
+      "return": "f64"
+    },
+    "complex_imag": {
+      "args": [
+        "void()"
+      ],
+      "return": "f64"
+    },
+    "complex_exp": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_log": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_log10": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_pow": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_sqrt": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_sin": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_cos": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_tan": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_asin": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_acos": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_atan": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_sinh": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_cosh": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_tanh": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_asinh": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_acosh": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_atanh": {
+      "args": [
+        "void()"
+      ],
+      "return": "Complex"
+    },
+    "complex_equal": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "complex_is_zero": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "complex_is_real": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    }
+  },
+  "std.algebra": {
+    "header": "std/algebra/algebra.h",
+    "matrix_create": {
+      "args": [
+        "size_t",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "matrix_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "matrix_copy": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_identity": {
+      "args": [
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "matrix_zero": {
+      "args": [
+        "size_t",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "matrix_rows": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "matrix_cols": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "matrix_is_square": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "matrix_get": {
+      "args": [
+        "void()",
+        "size_t",
+        "size_t",
+        "void()"
+      ]
+    },
+    "matrix_set": {
+      "args": [
+        "void()",
+        "size_t",
+        "size_t",
+        "void()"
+      ]
+    },
+    "matrix_add": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_subtract": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_multiply": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_scale": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_transpose": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_inverse": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_solve": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "matrix_equal": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "rational_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "rational_normalize": {
+      "args": [
+        "void()"
+      ]
+    },
+    "rational_is_normalized": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "rational_is_zero": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "rational_is_negative": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "rational_is_integer": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "rational_compare": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "i32"
+    },
+    "rational_equal": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "rational_to_double": {
+      "args": [
+        "void()"
+      ],
+      "return": "f64"
+    },
+    "rational_to_string": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "bigint_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "bigint_is_zero": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "bigint_is_negative": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "bigint_is_odd": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "bigint_sign": {
+      "args": [
+        "void()"
+      ],
+      "return": "i32"
+    },
+    "bigint_bit_length": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "bigint_to_i64": {
+      "args": [
+        "void()"
+      ],
+      "return": "i64"
+    },
+    "bigint_compare": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "i32"
+    },
+    "bigint_divmod": {
+      "args": [
+        "void()",
+        "void()",
+        "void()",
+        "void()"
+      ]
+    },
+    "bigint_to_string": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "poly_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "poly_get_coefficient": {
+      "args": [
+        "void()",
+        "size_t",
+        "void()"
+      ]
+    },
+    "poly_set_coefficient": {
+      "args": [
+        "void()",
+        "size_t",
+        "void()"
+      ]
+    },
+    "poly_degree": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "poly_count": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "poly_is_zero": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "poly_is_constant": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "poly_divmod": {
+      "args": [
+        "void()",
+        "void()",
+        "void()",
+        "void()"
+      ]
+    },
+    "poly_equal": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    }
   }
 }
