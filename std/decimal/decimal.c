@@ -15,6 +15,7 @@ struct Decimal {
 };
 
 static void decimal_normalize(Decimal* dec);
+static Decimal* decimal_clone(const Decimal* dec);
 
 Decimal* decimal_create(f64 value) {
     Decimal* dec = (Decimal*)kmm_v4_malloc(sizeof(Decimal));
@@ -23,17 +24,18 @@ Decimal* decimal_create(f64 value) {
     dec->negative = value < 0;
     if (dec->negative) value = -value;
     
-    i64 scale = 15;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.*f", (int)scale, value);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.15f", value);
     
-    dec->length = (i64)strlen(buf);
-    dec->digits = (char*)kmm_v4_malloc(dec->length + 1);
-    strcpy(dec->digits, buf);
-    dec->scale = scale;
+    // Trim trailing zeros
+    char* dot = strchr(buf, '.');
+    if (dot) {
+        char* end = buf + strlen(buf) - 1;
+        while (end > dot && *end == '0') *end-- = '\0';
+        if (*end == '.') *end = '\0';
+    }
     
-    decimal_normalize(dec);
-    return dec;
+    return decimal_create_from_string(buf);
 }
 
 Decimal* decimal_create_from_string(const char* str) {
@@ -45,19 +47,26 @@ Decimal* decimal_create_from_string(const char* str) {
     
     i64 len = (i64)strlen(start);
     dec->scale = 0;
+    i64 int_len = len;
     
     for (i64 i = 0; i < len; i++) {
         if (start[i] == '.') {
             dec->scale = len - i - 1;
-            len = i;
+            int_len = i;
             break;
         }
     }
     
-    dec->length = len;
-    dec->digits = (char*)kmm_v4_malloc(len + 1);
-    strncpy(dec->digits, start, len);
-    dec->digits[len] = '\0';
+    // Copy all digits (integer + fractional) without the decimal point
+    dec->length = len - (dec->scale > 0 ? 1 : 0);
+    dec->digits = (char*)kmm_v4_malloc(dec->length + 1);
+    i64 pos = 0;
+    for (i64 i = 0; i < len; i++) {
+        if (start[i] != '.') {
+            dec->digits[pos++] = start[i];
+        }
+    }
+    dec->digits[pos] = '\0';
     
     decimal_normalize(dec);
     return dec;
@@ -96,11 +105,22 @@ static void decimal_pad(Decimal* dec, i64 new_scale) {
     dec->scale = new_scale;
 }
 
+static Decimal* decimal_clone(const Decimal* dec) {
+    Decimal* result = (Decimal*)kmm_v4_malloc(sizeof(Decimal));
+    if (!result) return NULL;
+    result->negative = dec->negative;
+    result->scale = dec->scale;
+    result->length = dec->length;
+    result->digits = (char*)kmm_v4_malloc(dec->length + 1);
+    strcpy(result->digits, dec->digits);
+    return result;
+}
+
 static Decimal* decimal_add_internal(const Decimal* a, const Decimal* b, bool_t subtract) {
     i64 max_scale = a->scale > b->scale ? a->scale : b->scale;
     
-    Decimal* aa = decimal_create_from_string(a->digits);
-    Decimal* bb = decimal_create_from_string(b->digits);
+    Decimal* aa = decimal_clone(a);
+    Decimal* bb = decimal_clone(b);
     decimal_pad(aa, max_scale);
     decimal_pad(bb, max_scale);
     
@@ -374,24 +394,36 @@ char* decimal_to_string(const Decimal* dec) {
 }
 
 char* decimal_to_string_with_precision(const Decimal* dec, i64 places) {
-    Decimal* copy = decimal_create_from_string(dec->digits);
-    copy->negative = dec->negative;
-    decimal_pad(copy, places);
+    // If we need more fractional digits than we have, pad with zeros
+    if (dec->length < places) {
+        i64 total_len = 1 + (places > 0 ? (places + 1) : 0) + (dec->negative ? 1 : 0);
+        char* result = (char*)kmm_v4_malloc(total_len + 1);
+        i64 pos = 0;
+        if (dec->negative) result[pos++] = '-';
+        result[pos++] = '0';
+        if (places > 0) {
+            result[pos++] = '.';
+            i64 zeros = places - dec->length;
+            for (i64 i = 0; i < zeros; i++) result[pos++] = '0';
+            for (i64 i = 0; i < dec->length; i++) result[pos++] = dec->digits[i];
+        }
+        result[pos] = '\0';
+        return result;
+    }
     
-    i64 int_len = copy->length - places;
-    if (int_len <= 0) int_len = 1;
+    // Normal case: dec->length >= places
+    i64 int_len = dec->length - places;
+    if (int_len < 0) int_len = 0;
     
-    i64 total_len = int_len + (places > 0 ? (places + 1) : 0) + (copy->negative ? 1 : 0);
+    i64 total_len = int_len + (places > 0 ? (places + 1) : 0) + (dec->negative ? 1 : 0);
     char* result = (char*)kmm_v4_malloc(total_len + 1);
     
     i64 pos = 0;
-    if (copy->negative) {
-        result[pos++] = '-';
-    }
+    if (dec->negative) result[pos++] = '-';
     
     for (i64 i = 0; i < int_len; i++) {
-        if (i < copy->length) {
-            result[pos++] = copy->digits[i];
+        if (i < dec->length) {
+            result[pos++] = dec->digits[i];
         } else {
             result[pos++] = '0';
         }
@@ -400,8 +432,8 @@ char* decimal_to_string_with_precision(const Decimal* dec, i64 places) {
     if (places > 0) {
         result[pos++] = '.';
         for (i64 i = int_len; i < int_len + places; i++) {
-            if (i < copy->length) {
-                result[pos++] = copy->digits[i];
+            if (i < dec->length) {
+                result[pos++] = dec->digits[i];
             } else {
                 result[pos++] = '0';
             }
@@ -409,7 +441,6 @@ char* decimal_to_string_with_precision(const Decimal* dec, i64 places) {
     }
     
     result[pos] = '\0';
-    decimal_destroy(copy);
     return result;
 }
 

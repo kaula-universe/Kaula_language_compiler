@@ -4385,6 +4385,7 @@ func (p *Parser) Validate(program *ast.Program) {
 		exeDir := filepath.Dir(filepath.Clean(exePath))
 		stdlibPaths = append(stdlibPaths,
 			filepath.Join(exeDir, "stdlib.json"),
+			filepath.Join(exeDir, "compiler", "stdlib.json"),
 			filepath.Join(exeDir, "..", "compiler", "stdlib.json"),
 		)
 	}
