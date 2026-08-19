@@ -5,15 +5,6 @@
 #include "../base/types.h"
 #include "../string/string.h"
 
-// ==================== 跨平台路径分隔符 ====================
-#if STD_PLATFORM_WINDOWS
-    #define PATH_SEPARATOR '\\'
-    #define PATH_SEPARATOR_STR "\\"
-#else
-    #define PATH_SEPARATOR '/'
-    #define PATH_SEPARATOR_STR "/"
-#endif
-
 // 标准输入输出函数
 extern void print(const char* format, ...);
 extern void println(const char* format, ...);
@@ -60,15 +51,7 @@ extern bool directory_create(const char* path);
 extern bool directory_remove(const char* path);
 extern bool directory_exists(const char* path);
 
-// 路径操作函数（跨平台）
-extern char* path_join(const char* path1, const char* path2);
-extern char* path_join_multiple(const char* path1, const char* path2, const char* path3);
-extern char* path_basename(const char* path);
-extern char* path_dirname(const char* path);
-extern bool path_is_absolute(const char* path);
-extern char* path_normalize(const char* path);
-extern char* path_to_unix(const char* path);
-extern char* path_to_windows(const char* path);
+// 路径操作已由 std.path 模块提供（path.h）
 
 // 输入输出错误处理
 extern int io_get_error();

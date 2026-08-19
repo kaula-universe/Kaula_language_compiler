@@ -93,33 +93,39 @@ char* template_render(Template* tpl, const void* data) {
         if (*p == '{' && *(p + 1) == '{') {
             p += 2;
             const char* var_start = p;
-            while (*p && *p != '}' && *(p + 1) != '}') p++;
-            
-            size_t var_len = p - var_start;
-            char* var_name = (char*)kmm_v4_malloc(var_len + 1);
-            strncpy(var_name, var_start, var_len);
-            var_name[var_len] = '\0';
-            
-            const char* value = template_find_variable(tpl, var_name);
-            if (value) {
-                size_t value_len = strlen(value);
-                if (pos + value_len >= capacity) {
-                    capacity *= 2;
-                    result = (char*)kmm_v4_realloc(result, capacity);
+            // 提取变量名：读到 '}' 为止
+            while (*p && *p != '}') p++;
+            if (!*p || *(p + 1) != '}') {
+                // 非法格式：{{... 缺少闭合 }}，当作普通文本处理
+                p = var_start - 2;
+            } else {
+                size_t var_len = p - var_start;
+                char* var_name = (char*)kmm_v4_malloc(var_len + 1);
+                strncpy(var_name, var_start, var_len);
+                var_name[var_len] = '\0';
+                
+                const char* value = template_find_variable(tpl, var_name);
+                if (value) {
+                    size_t value_len = strlen(value);
+                    if (pos + value_len >= capacity) {
+                        capacity *= 2;
+                        result = (char*)kmm_v4_realloc(result, capacity);
+                    }
+                    strcpy(result + pos, value);
+                    pos += value_len;
                 }
-                strcpy(result + pos, value);
-                pos += value_len;
+                
+                kmm_v4_free(var_name);
+                p += 2; // 跳过闭合 }}
+                continue;
             }
-            
-            kmm_v4_free(var_name);
-            p += 2;
-        } else {
-            if (pos + 1 >= capacity) {
-                capacity *= 2;
-                result = (char*)kmm_v4_realloc(result, capacity);
-            }
-            result[pos++] = *p++;
         }
+        // 普通字符
+        if (pos + 1 >= capacity) {
+            capacity *= 2;
+            result = (char*)kmm_v4_realloc(result, capacity);
+        }
+        result[pos++] = *p++;
     }
     
     result[pos] = '\0';

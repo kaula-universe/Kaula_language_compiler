@@ -1,4 +1,4 @@
-#include "io.h"
+﻿#include "io.h"
 #include "../memory/memory.h"
 #include "../format/format.h"
 #include <stdlib.h>
@@ -35,7 +35,7 @@
     #define CHDIR chdir
 #endif
 
-// ==================== 标准输入输出实现 ====================
+// ==================== 鏍囧噯杈撳叆杈撳嚭瀹炵幇 ====================
 
 void print(const char* format, ...) {
     va_list args;
@@ -52,8 +52,8 @@ void println(const char* format, ...) {
     printf("\n");
 }
 
-// println_multi 支持多参数自动类型推导打印
-// type参数: 0=int, 1=double, 2=string
+// println_multi 鏀寔澶氬弬鏁拌嚜鍔ㄧ被鍨嬫帹瀵兼墦鍗?
+// type鍙傛暟: 0=int, 1=double, 2=string
 void println_multi(int arg_count, ...) {
     va_list args;
     va_start(args, arg_count);
@@ -66,7 +66,7 @@ void println_multi(int arg_count, ...) {
                 break;
             case 1: { // double
                 double val = va_arg(args, double);
-                // 如果是整数值，不显示小数部分
+                // 濡傛灉鏄暣鏁板€硷紝涓嶆樉绀哄皬鏁伴儴鍒?
                 if (val == (long long)val && val >= -1e15 && val <= 1e15) {
                     printf("%lld", (long long)val);
                 } else {
@@ -100,7 +100,7 @@ void print_bool(bool value) {
     printf("%s", value ? "true" : "false");
 }
 
-// ==================== 标准输入函数实现 ====================
+// ==================== 鏍囧噯杈撳叆鍑芥暟瀹炵幇 ====================
 
 char read_char() {
     int c = getchar();
@@ -183,203 +183,7 @@ char* read_string(size_t max_length) {
     return buffer;
 }
 
-// ==================== 跨平台路径操作实现 ====================
-
-char* path_join(const char* path1, const char* path2) {
-    if (!path1 || !path2) {
-        return NULL;
-    }
-    
-    size_t len1 = strlen(path1);
-    size_t len2 = strlen(path2);
-    
-    // 检查 path1 是否已有分隔符
-    bool has_separator = false;
-    if (len1 > 0) {
-        char last_char = path1[len1 - 1];
-        has_separator = (last_char == '/' || last_char == '\\');
-    }
-    
-    size_t total_len = len1 + len2 + 1;
-    if (!has_separator) {
-        total_len += 2; // 需要添加分隔符
-    }
-    
-    char* result = (char*)kmm_v4_malloc(total_len);
-    if (!result) {
-        return NULL;
-    }
-    
-    strcpy(result, path1);
-    
-    if (!has_separator) {
-        strcat(result, PATH_SEPARATOR_STR);
-    }
-    
-    // 跳过 path2 开头的分隔符
-    const char* path2_start = path2;
-    while (*path2_start == '/' || *path2_start == '\\') {
-        path2_start++;
-    }
-    
-    strcat(result, path2_start);
-    
-    return result;
-}
-
-char* path_join_multiple(const char* path1, const char* path2, const char* path3) {
-    if (!path1 || !path2) {
-        return NULL;
-    }
-    
-    char* temp = path_join(path1, path2);
-    if (!temp) {
-        return NULL;
-    }
-    
-    if (!path3) {
-        return temp;
-    }
-    
-    char* result = path_join(temp, path3);
-    // temp 由 KMM 管理，作用域结束时自动回收
-    
-    return result;
-}
-
-char* path_basename(const char* path) {
-    if (!path) {
-        return NULL;
-    }
-    
-    const char* last_sep = NULL;
-    const char* p = path;
-    
-    while (*p) {
-        if (*p == '/' || *p == '\\') {
-            last_sep = p;
-        }
-        p++;
-    }
-    
-    if (last_sep) {
-        return kmm_v4_strdup(last_sep + 1);
-    } else {
-        return kmm_v4_strdup(path);
-    }
-}
-
-char* path_dirname(const char* path) {
-    if (!path) {
-        return NULL;
-    }
-    
-    const char* last_sep = NULL;
-    const char* p = path;
-    
-    while (*p) {
-        if (*p == '/' || *p == '\\') {
-            last_sep = p;
-        }
-        p++;
-    }
-    
-    if (last_sep) {
-        size_t len = last_sep - path;
-        char* result = (char*)kmm_v4_malloc(len + 1);
-        if (!result) {
-            return NULL;
-        }
-        strncpy(result, path, len);
-        result[len] = '\0';
-        return result;
-    } else {
-        return kmm_v4_strdup(".");
-    }
-}
-
-bool path_is_absolute(const char* path) {
-    if (!path) {
-        return false;
-    }
-    
-#if STD_PLATFORM_WINDOWS
-    // Windows: 检查盘符 (C:\) 或 UNC 路径 (\\server)
-    if ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) {
-        return path[1] == ':';
-    }
-    return path[0] == '\\' && path[1] == '\\';
-#else
-    // Unix: 检查是否以 / 开头
-    return path[0] == '/';
-#endif
-}
-
-char* path_normalize(const char* path) {
-    if (!path) {
-        return NULL;
-    }
-    
-    // 简化实现：统一使用当前平台的分隔符
-    char* result = kmm_v4_strdup(path);
-    if (!result) {
-        return NULL;
-    }
-    
-    char* p = result;
-    while (*p) {
-        if (*p == '/') {
-            *p = PATH_SEPARATOR;
-        }
-        p++;
-    }
-    
-    return result;
-}
-
-char* path_to_unix(const char* path) {
-    if (!path) {
-        return NULL;
-    }
-    
-    char* result = kmm_v4_strdup(path);
-    if (!result) {
-        return NULL;
-    }
-    
-    char* p = result;
-    while (*p) {
-        if (*p == '\\') {
-            *p = '/';
-        }
-        p++;
-    }
-    
-    return result;
-}
-
-char* path_to_windows(const char* path) {
-    if (!path) {
-        return NULL;
-    }
-    
-    char* result = kmm_v4_strdup(path);
-    if (!result) {
-        return NULL;
-    }
-    
-    char* p = result;
-    while (*p) {
-        if (*p == '/') {
-            *p = '\\';
-        }
-        p++;
-    }
-    
-    return result;
-}
-
-// ==================== 文件操作实现 ====================
+// ==================== 鏂囦欢鎿嶄綔瀹炵幇 ====================
 
 File file_open(const char* path, const char* mode) {
     if (!path || !mode) {
@@ -489,7 +293,7 @@ int file_scanf(File file, const char* format, ...) {
     return result;
 }
 
-// ==================== 文件状态函数实现 ====================
+// ==================== 鏂囦欢鐘舵€佸嚱鏁板疄鐜?====================
 
 bool file_exists(const char* path) {
     if (!path) {
@@ -537,7 +341,7 @@ bool file_is_directory(const char* path) {
     return S_ISDIR(st.st_mode);
 }
 
-// ==================== 目录操作实现 ====================
+// ==================== 鐩綍鎿嶄綔瀹炵幇 ====================
 
 bool directory_create(const char* path) {
     if (!path) {
@@ -560,7 +364,7 @@ bool directory_exists(const char* path) {
     return file_is_directory(path);
 }
 
-// ==================== 错误处理实现 ====================
+// ==================== 閿欒澶勭悊瀹炵幇 ====================
 
 static int g_io_error = 0;
 

@@ -184,31 +184,6 @@
       ],
       "return": "bool"
     },
-    "path_join": {
-      "args": [
-        "const char*",
-        "const char*"
-      ],
-      "return": "char*"
-    },
-    "path_basename": {
-      "args": [
-        "const char*"
-      ],
-      "return": "char*"
-    },
-    "path_dirname": {
-      "args": [
-        "const char*"
-      ],
-      "return": "char*"
-    },
-    "path_is_absolute": {
-      "args": [
-        "const char*"
-      ],
-      "return": "bool"
-    },
     "io_get_error": {
       "args": [],
       "return": "int"
@@ -10188,6 +10163,903 @@
       "args": [
         "void()",
         "void()"
+      ],
+      "return": "bool"
+    }
+  },
+  "std.bitset": {
+    "header": "std/bitset/bitset.h",
+    "bitset_create": {
+      "args": [
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "bitset_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "bitset_copy": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "bitset_size": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "bitset_count": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "bitset_get": {
+      "args": [
+        "void()",
+        "size_t"
+      ],
+      "return": "bool"
+    },
+    "bitset_set": {
+      "args": [
+        "void()",
+        "size_t",
+        "bool"
+      ]
+    },
+    "bitset_set_all": {
+      "args": [
+        "void()",
+        "bool"
+      ]
+    },
+    "bitset_set_bit": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "bitset_clear_bit": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "bitset_toggle_bit": {
+      "args": [
+        "void()",
+        "size_t"
+      ],
+      "return": "bool"
+    },
+    "bitset_all": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "bitset_any": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "bitset_none": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "bitset_and": {
+      "args": [
+        "void()",
+        "void()",
+        "void()"
+      ]
+    },
+    "bitset_or": {
+      "args": [
+        "void()",
+        "void()",
+        "void()"
+      ]
+    },
+    "bitset_xor": {
+      "args": [
+        "void()",
+        "void()",
+        "void()"
+      ]
+    },
+    "bitset_not": {
+      "args": [
+        "void()",
+        "void()"
+      ]
+    },
+    "bitset_shift_left": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "bitset_shift_right": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "bitset_find_first_set": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "bitset_find_last_set": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "bitset_find_next_set": {
+      "args": [
+        "void()",
+        "size_t"
+      ],
+      "return": "size_t"
+    },
+    "bitset_resize": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "bitset_to_string": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    }
+  },
+  "std.deque": {
+    "header": "std/deque/deque.h",
+    "deque_create": {
+      "args": [
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "deque_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "deque_size": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "deque_is_empty": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "deque_push_front": {
+      "args": [
+        "void()",
+        "void()"
+      ]
+    },
+    "deque_push_back": {
+      "args": [
+        "void()",
+        "void()"
+      ]
+    },
+    "deque_pop_front": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "deque_pop_back": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "deque_peek_front": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "deque_peek_back": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "deque_at": {
+      "args": [
+        "void()",
+        "size_t"
+      ],
+      "return": "void()"
+    },
+    "deque_clear": {
+      "args": [
+        "void()"
+      ]
+    },
+    "deque_reserve": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "deque_capacity": {
+      "args": [
+        "void()"
+      ],
+      "return": "size_t"
+    },
+    "deque_insert": {
+      "args": [
+        "void()",
+        "size_t",
+        "void()"
+      ]
+    },
+    "deque_remove": {
+      "args": [
+        "void()",
+        "size_t"
+      ]
+    },
+    "deque_swap": {
+      "args": [
+        "void()",
+        "void()"
+      ]
+    }
+  },
+  "std.ipaddress": {
+    "header": "std/ipaddress/ipaddress.h",
+    "ipaddress_create": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void()"
+    },
+    "ipaddress_create_from_bytes": {
+      "args": [
+        "void()",
+        "i32"
+      ],
+      "return": "void()"
+    },
+    "ipaddress_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "ipaddress_family": {
+      "args": [
+        "void()"
+      ],
+      "return": "i32"
+    },
+    "ipaddress_is_valid": {
+      "args": [
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_to_string": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "ipaddress_to_bytes": {
+      "args": [
+        "void()",
+        "void()"
+      ]
+    },
+    "ipaddress_equal": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_is_loopback": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_is_private": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_is_multicast": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_is_global": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_is_link_local": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_is_site_local": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_in_network": {
+      "args": [
+        "void()",
+        "void()",
+        "i32"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_parse_cidr": {
+      "args": [
+        "const char*",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "ipaddress_is_v4_mapped": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "ipaddress_to_v4": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    }
+  },
+  "std.decimal": {
+    "header": "std/decimal/decimal.h",
+    "decimal_create": {
+      "args": [
+        "f64"
+      ],
+      "return": "void()"
+    },
+    "decimal_create_from_string": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void()"
+    },
+    "decimal_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "decimal_add": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_subtract": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_multiply": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_divide": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_negate": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_abs": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_floor": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_ceil": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_round": {
+      "args": [
+        "void()",
+        "i64"
+      ],
+      "return": "void()"
+    },
+    "decimal_compare": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "i64"
+    },
+    "decimal_equal": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "decimal_less": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "decimal_greater": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "decimal_to_f64": {
+      "args": [
+        "void()"
+      ],
+      "return": "f64"
+    },
+    "decimal_to_i64": {
+      "args": [
+        "void()"
+      ],
+      "return": "i64"
+    },
+    "decimal_to_string": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_to_string_with_precision": {
+      "args": [
+        "void()",
+        "i64"
+      ],
+      "return": "void()"
+    },
+    "decimal_pow": {
+      "args": [
+        "void()",
+        "i64"
+      ],
+      "return": "void()"
+    },
+    "decimal_sqrt": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "decimal_get_precision": {
+      "args": [
+        "void()"
+      ],
+      "return": "i64"
+    },
+    "decimal_set_precision": {
+      "args": [
+        "void()",
+        "i64"
+      ]
+    }
+  },
+  "std.subprocess": {
+    "header": "std/subprocess/subprocess.h",
+    "subprocess_create": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void()"
+    },
+    "subprocess_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "subprocess_start": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "subprocess_wait": {
+      "args": [
+        "void()",
+        "i64"
+      ],
+      "return": "bool"
+    },
+    "subprocess_exit_code": {
+      "args": [
+        "void()"
+      ],
+      "return": "i32"
+    },
+    "subprocess_terminate": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "subprocess_kill": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "subprocess_running": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "subprocess_read_stdout": {
+      "args": [
+        "void()",
+        "void()",
+        "size_t"
+      ],
+      "return": "ssize_t"
+    },
+    "subprocess_read_stderr": {
+      "args": [
+        "void()",
+        "void()",
+        "size_t"
+      ],
+      "return": "ssize_t"
+    },
+    "subprocess_write_stdin": {
+      "args": [
+        "void()",
+        "void()",
+        "size_t"
+      ],
+      "return": "ssize_t"
+    },
+    "subprocess_pipe_stdout": {
+      "args": [
+        "void()",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "subprocess_pipe_stderr": {
+      "args": [
+        "void()",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "subprocess_pipe_stdin": {
+      "args": [
+        "void()",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "subprocess_set_working_directory": {
+      "args": [
+        "void()",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "subprocess_set_env": {
+      "args": [
+        "void()",
+        "const char*",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "subprocess_call": {
+      "args": [
+        "const char*"
+      ],
+      "return": "i32"
+    },
+    "subprocess_call_with_args": {
+      "args": [
+        "const char*",
+        "void()"
+      ],
+      "return": "i32"
+    },
+    "subprocess_output": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void()"
+    }
+  },
+  "std.template": {
+    "header": "std/template/template.h",
+    "template_load": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void()"
+    },
+    "template_create": {
+      "args": [
+        "const char*"
+      ],
+      "return": "void()"
+    },
+    "template_destroy": {
+      "args": [
+        "void()"
+      ]
+    },
+    "template_render": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "template_set_variable": {
+      "args": [
+        "void()",
+        "const char*",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "template_set_variable_int": {
+      "args": [
+        "void()",
+        "const char*",
+        "i64"
+      ],
+      "return": "bool"
+    },
+    "template_set_variable_float": {
+      "args": [
+        "void()",
+        "const char*",
+        "f64"
+      ],
+      "return": "bool"
+    },
+    "template_set_variable_bool": {
+      "args": [
+        "void()",
+        "const char*",
+        "bool"
+      ],
+      "return": "bool"
+    },
+    "template_clear_variables": {
+      "args": [
+        "void()"
+      ]
+    },
+    "template_add_filter": {
+      "args": [
+        "void()",
+        "const char*",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "template_has_variable": {
+      "args": [
+        "void()",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "template_render_string": {
+      "args": [
+        "const char*",
+        "void()"
+      ],
+      "return": "void()"
+    }
+  },
+  "std.archive": {
+    "header": "std/archive/archive.h",
+    "archive_open_read": {
+      "args": [
+        "const char*",
+        "i32"
+      ],
+      "return": "void()"
+    },
+    "archive_open_write": {
+      "args": [
+        "const char*",
+        "i32"
+      ],
+      "return": "void()"
+    },
+    "archive_close": {
+      "args": [
+        "void()"
+      ]
+    },
+    "archive_next_entry": {
+      "args": [
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "archive_read_entry": {
+      "args": [
+        "void()",
+        "void()",
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "archive_write_entry": {
+      "args": [
+        "void()",
+        "void()",
+        "void()",
+        "size_t"
+      ],
+      "return": "bool"
+    },
+    "archive_entry_name": {
+      "args": [
+        "void()"
+      ],
+      "return": "void()"
+    },
+    "archive_entry_size": {
+      "args": [
+        "void()"
+      ],
+      "return": "u64"
+    },
+    "archive_entry_mtime": {
+      "args": [
+        "void()"
+      ],
+      "return": "u64"
+    },
+    "archive_entry_is_directory": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool"
+    },
+    "archive_entry_set_name": {
+      "args": [
+        "void()",
+        "const char*"
+      ]
+    },
+    "archive_entry_set_size": {
+      "args": [
+        "void()",
+        "u64"
+      ]
+    },
+    "archive_entry_set_mtime": {
+      "args": [
+        "void()",
+        "u64"
+      ]
+    },
+    "archive_entry_set_is_directory": {
+      "args": [
+        "void()",
+        "bool"
+      ]
+    },
+    "archive_extract": {
+      "args": [
+        "void()",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "archive_extract_entry": {
+      "args": [
+        "void()",
+        "void()",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "archive_add_file": {
+      "args": [
+        "void()",
+        "const char*",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "archive_add_directory": {
+      "args": [
+        "void()",
+        "const char*",
+        "const char*"
+      ],
+      "return": "bool"
+    },
+    "archive_compress_file": {
+      "args": [
+        "const char*",
+        "const char*",
+        "i32"
+      ],
+      "return": "bool"
+    },
+    "archive_decompress_file": {
+      "args": [
+        "const char*",
+        "const char*",
+        "i32"
       ],
       "return": "bool"
     }
