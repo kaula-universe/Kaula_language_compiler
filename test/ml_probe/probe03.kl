@@ -1,0 +1,21 @@
+import std.math
+import std.io
+
+class Vec2 {
+    x: f64
+    y: f64
+
+    constructor(f64 x, f64 y) {
+        self.x = x
+        self.y = y
+    }
+
+    fn length() f64 {
+        return std.math.math_sqrt(self.x * self.x + self.y * self.y)
+    }
+}
+
+fn main() {
+    Vec2 v = Vec2(3.0, 4.0)
+    std.io.println("v = (", v.x, ", ", v.y, ") len = ", v.length())
+}

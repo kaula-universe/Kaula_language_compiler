@@ -1068,28 +1068,49 @@ func (eg *ExpressionGenerator) generateObjectMethodCall(objectAST ast.Expression
 
 // inferClassType 从 AST 表达式推断其所属的类名（若为 class 类型则返回类名，否则返回空串）
 func (eg *ExpressionGenerator) inferClassType(expr ast.Expression) string {
-	if eg.codegen.program == nil {
-		return ""
-	}
 	switch e := expr.(type) {
 	case *ast.Identifier:
 		// 直接的变量引用：查符号表获取其 Kaula 类型名
 		sym := eg.codegen.currentScope.GetSymbol(e.Name)
 		if sym != nil {
 			typeName := strings.TrimSuffix(sym.Type, "*")
-			if typeName != "" && eg.codegen.program.FindClass(typeName) != nil {
+			if typeName != "" && eg.codegen.findClassStmt(typeName) != nil {
 				return typeName
 			}
 		}
 	case *ast.MemberAccessExpression:
-		// obj.field：如果 field 的类型是 class，则返回该类名
-		// 暂不深入推断嵌套类型
+		// obj.field：解析字段类型。class 字段（含 A* 指针字段）在 C 中始终是指针，
+		// 若字段本身是 class 类型，则返回该类名，使上层成员访问改用 ->。
+		objType := eg.inferClassType(e.Object)
+		if objType == "" {
+			return ""
+		}
+		classStmt := eg.codegen.findClassStmt(objType)
+		if classStmt == nil {
+			return ""
+		}
+		for _, f := range classStmt.Fields {
+			if f.Name == e.Member {
+				fieldType := strings.TrimSuffix(f.Type, "*")
+				if eg.codegen.findClassStmt(fieldType) != nil {
+					return fieldType
+				}
+				return ""
+			}
+		}
+		return ""
+	case *ast.IndexExpression:
+		// arr[i] / ptr[i]：元素类型与数组变量类型相同（class 指针字段的数组元素）
+		elemType := eg.inferClassType(e.Object)
+		if elemType != "" && eg.codegen.findClassStmt(elemType) != nil {
+			return elemType
+		}
 		return ""
 	case *ast.CallExpression:
 		// ClassName(args...) 或 ClassName_new(...)：返回调用的类名
 		if ident, ok := e.Function.(*ast.Identifier); ok {
 			name := strings.TrimSuffix(ident.Name, "_new")
-			if eg.codegen.program.FindClass(name) != nil {
+			if eg.codegen.findClassStmt(name) != nil {
 				return name
 			}
 		}
@@ -1516,14 +1537,11 @@ func isFloatTypeToken(t string) bool {
 // 找不到类/字段时返回空串。
 // 支持 self.field、类变量.field 以及嵌套成员链 (a.b.c, a/b 均为类类型)。
 func (eg *ExpressionGenerator) memberFieldKaulaType(e *ast.MemberAccessExpression) string {
-	if eg.codegen.program == nil {
-		return ""
-	}
 	className := eg.memberObjectClassName(e.Object)
 	if className == "" {
 		return ""
 	}
-	classStmt := eg.codegen.program.FindClass(className)
+	classStmt := eg.codegen.findClassStmt(className)
 	if classStmt == nil {
 		return ""
 	}
@@ -1538,9 +1556,6 @@ func (eg *ExpressionGenerator) memberFieldKaulaType(e *ast.MemberAccessExpressio
 // memberObjectClassName 推断成员访问对象表达式的类名。
 // 找不到已定义的类时返回空串。
 func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string {
-	if eg.codegen.program == nil {
-		return ""
-	}
 	switch e := obj.(type) {
 	case *ast.Identifier:
 		if e.Name == "self" {
@@ -1549,7 +1564,7 @@ func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string 
 			}
 			if sym := eg.codegen.currentScope.GetSymbol("self"); sym != nil {
 				name := strings.TrimSuffix(sym.Type, "*")
-				if eg.codegen.program.FindClass(name) != nil {
+				if eg.codegen.findClassStmt(name) != nil {
 					return name
 				}
 			}
@@ -1557,7 +1572,7 @@ func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string 
 		}
 		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
 			name := strings.TrimSuffix(sym.Type, "*")
-			if eg.codegen.program.FindClass(name) != nil {
+			if eg.codegen.findClassStmt(name) != nil {
 				return name
 			}
 		}
@@ -1565,7 +1580,7 @@ func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string 
 		fieldType := eg.memberFieldKaulaType(e)
 		if fieldType != "" {
 			name := strings.TrimSuffix(fieldType, "*")
-			if eg.codegen.program.FindClass(name) != nil {
+			if eg.codegen.findClassStmt(name) != nil {
 				return name
 			}
 		}
