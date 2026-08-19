@@ -488,6 +488,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
 		// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
 		// 方案 C：函数入口 checkpoint，出口 rewind（仅对不向外 promote 的函数）
+		fg.codegen.funcHasKMMCheckpoint = true
 		builder.WriteString(bodyIndent)
 		builder.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
 		builder.WriteString(bodyIndent)
@@ -500,10 +501,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			builder.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
 		}
 	} else {
-			builder.WriteString(bodyCode)
-		}
-	} else {
-		indent := fg.codegen.indentString()
+		fg.codegen.funcHasKMMCheckpoint = false
+		builder.WriteString(bodyCode)
+	}
+} else {
+	indent := fg.codegen.indentString()
 		prevInFuncBody := fg.codegen.inFunctionBody
 		fg.codegen.inFunctionBody = true
 		for _, bodyStmt := range stmt.Body {
@@ -783,6 +785,7 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	fg.codegen.preludeInitCode.Reset()
 
 	if useKMM {
+		fg.codegen.funcHasKMMCheckpoint = true
 		code.WriteString(fg.codegen.indentString())
 		code.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
 		code.WriteString(fg.codegen.indentString())
@@ -795,6 +798,7 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 			code.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
 		}
 	} else {
+		fg.codegen.funcHasKMMCheckpoint = false
 		code.WriteString(finalBody.String())
 	}
 

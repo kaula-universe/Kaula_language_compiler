@@ -42,9 +42,23 @@ type SemanticAnalyzer struct {
 	arrayLens          map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
 	localImportFuncs   map[string]bool                // 本地 import 的 pub 函数名
 	localModuleFuncs   map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
+	localModuleFuncsByModule map[string]map[string]bool // 本地 import 模块名 -> 该模块全部函数名(限定调用检查用)
 	localPubVars       map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
 	localPubTypes      map[string]*LocalPubTypeInfo // 本地 import 的类型定义（class 含完整定义）
 	inElseIfChain      bool                           // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
+	usedFunctions      map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
+	libraryMode        bool                           // 库文件分析模式(跳过 unused-function 检查)
+	localModuleTypes   map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
+}
+
+// SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
+func (sa *SemanticAnalyzer) SetLocalModuleTypes(types map[string]bool) {
+	sa.localModuleTypes = types
+}
+
+// SetLibraryMode 标记当前分析的是库文件(import 的 .kl), 跳过 unused-function 检查
+func (sa *SemanticAnalyzer) SetLibraryMode(mode bool) {
+	sa.libraryMode = mode
 }
 
 // SetLocalImportFuncs 注册本地 import 的 pub 函数（跨文件调用）
@@ -56,6 +70,11 @@ func (sa *SemanticAnalyzer) SetLocalImportFuncs(funcs map[string]bool) {
 // 调用存在于被 import 模块但非 pub 的函数时, 报"未导出"错误
 func (sa *SemanticAnalyzer) SetLocalModuleFuncs(funcs map[string]bool) {
 	sa.localModuleFuncs = funcs
+}
+
+// SetLocalModuleFuncsByModule 注册本地 import 模块名 -> 函数名映射（限定调用检查用）
+func (sa *SemanticAnalyzer) SetLocalModuleFuncsByModule(funcs map[string]map[string]bool) {
+	sa.localModuleFuncsByModule = funcs
 }
 
 // SetLocalPubVars 注册本地 import / export 的变量名（跨文件变量引用）
@@ -147,6 +166,7 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 	}
 
 	sa.comptime = comptime.NewEvaluator()
+	sa.usedFunctions = make(map[string]bool)
 
 	// 注册本地 import 的类型（class/struct/enum/interface/type），
 	// 使跨文件类型引用通过 isTypeValid / 方法调用 / 字段访问的类型检查
@@ -171,6 +191,39 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 			sa.analyzeClassMembersBody(classStmt)
 		}
 	}
+
+	// 第三遍: 未使用的顶层函数警告 (clang -Wunused-function)
+	if sa.usedFunctions == nil {
+		sa.usedFunctions = make(map[string]bool)
+	}
+	if !sa.libraryMode {
+		sa.checkUnusedFunctions(program)
+	}
+}
+
+// checkUnusedFunctions 检查未使用的顶层函数 (clang -Wunused-function)。
+// 排除: main、pub 导出函数、被调用的函数。
+func (sa *SemanticAnalyzer) checkUnusedFunctions(program *ast.Program) {
+	if program == nil {
+		return
+	}
+	for _, stmt := range program.Statements {
+		fnStmt, ok := stmt.(*ast.FunctionStatement)
+		if !ok || fnStmt == nil {
+			continue
+		}
+		if fnStmt.Name == "main" || fnStmt.IsPublic {
+			continue
+		}
+		if sa.usedFunctions[fnStmt.Name] {
+			continue
+		}
+		sa.errorCollector.AddSemanticWarning(
+			fmt.Sprintf("未使用的函数: '%s'", fnStmt.Name),
+			fnStmt.Pos.Line, fnStmt.Pos.Column, "unused_function",
+			"如果该函数有意保留未使用, 请添加 pub 导出或删除",
+		)
+	}
 }
 
 // analyzeClassMembersBody 分析类方法体和构造函数体（第二遍调用，类符号已注册）
@@ -191,6 +244,7 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 
 		// 注册构造函数参数
 		for _, param := range ctor.Params {
+			sa.checkVariableShadow(param.Name, classStmt.Pos.Line, classStmt.Pos.Column)
 			sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", classStmt.Pos.Line, classStmt.Pos.Column)
 		}
 
@@ -199,8 +253,8 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 			sa.analyzeStatement(bodyStmt)
 		}
 
-		// 未使用检查已注释
-		// sa.checkUnusedSymbols()
+		// 未使用检查
+		sa.checkUnusedSymbols()
 
 		sa.symbolTable = oldSymbolTable
 		sa.scope--
@@ -221,6 +275,7 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 
 		// 注册方法参数
 		for _, param := range method.Params {
+			sa.checkVariableShadow(param.Name, method.Pos.Line, method.Pos.Column)
 			sa.symbolTable.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", method.Pos.Line, method.Pos.Column)
 		}
 
@@ -229,8 +284,8 @@ func (sa *SemanticAnalyzer) analyzeClassMembersBody(classStmt *ast.ClassStatemen
 			sa.analyzeStatement(bodyStmt)
 		}
 
-		// 未使用检查已注释
-		// sa.checkUnusedSymbols()
+		// 未使用检查
+		sa.checkUnusedSymbols()
 
 		sa.symbolTable = oldSymbolTable
 		sa.scope--
@@ -270,12 +325,25 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
 				paramType = stmt.ParamTypes[i]
 			}
+			sa.checkVariableShadow(param, stmt.Pos.Line, stmt.Pos.Column)
 			sa.symbolTable.AddSymbol(param, paramType, false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 		}
 	}
 
+	// 顺序扫描函数体: return 之后的语句不可达 (clang -Wunreachable-code)
+	reached := true
 	for _, bodyStmt := range stmt.Body {
+		if !reached {
+			sa.errorCollector.AddSemanticWarning(
+				"不可达代码: return 之后的语句不会执行",
+				bodyStmt.GetPosition().Line, bodyStmt.GetPosition().Column, "unreachable_code",
+				"删除该语句, 或调整 return 的位置",
+			)
+		}
 		sa.analyzeStatement(bodyStmt)
+		if _, isReturn := bodyStmt.(*ast.ReturnStatement); isReturn {
+			reached = false
+		}
 	}
 
 	// 检查 SOR 函数是否使用了 SOR 原语
@@ -294,10 +362,10 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 		sa.genericStack = sa.genericStack[:len(sa.genericStack)-1]
 	}
 
-	// 未使用检查(warning)已注释：函数带 #[unused] 注解则整体豁免
-	// if !ast.HasAttribute(stmt.Attributes, "unused") {
-	// 	sa.checkUnusedSymbols()
-	// }
+	// 未使用检查(warning): 函数带 #[unused] 注解则整体豁免
+	if !ast.HasAttribute(stmt.Attributes, "unused") {
+		sa.checkUnusedSymbols()
+	}
 
 	sa.currentFunction = oldFunction
 	sa.symbolTable = oldSymbolTable
@@ -381,6 +449,14 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		if prefixCall, ok := s.Expression.(*ast.PrefixCallExpression); ok {
 			sa.analyzePrefixCallExpression(prefixCall)
 			return
+		}
+		// 纯值表达式语句(无副作用): 结果未使用警告 (clang -Wunused-value)
+		if isPureValueExpression(s.Expression) {
+			sa.errorCollector.AddSemanticWarning(
+				"表达式结果未使用",
+				s.Pos.Line, s.Pos.Column, "unused_value",
+				"该表达式没有副作用, 结果被丢弃; 请删除该语句或将其赋值给变量",
+			)
 		}
 		sa.analyzeExpression(s.Expression)
 	case *ast.YieldStatement:
@@ -1109,6 +1185,14 @@ func (sa *SemanticAnalyzer) findClassStmt(name string) *ast.ClassStatement {
 }
 
 func (sa *SemanticAnalyzer) analyzeClassStatement(stmt *ast.ClassStatement) {
+	if stmt.Name == "" {
+		sa.errorCollector.AddSemanticError(
+			"class 声明必须带有名称",
+			stmt.Pos.Line, stmt.Pos.Column, "anonymous_type",
+			"当前编译器不支持匿名 class; 请为 class 命名, 如: class Foo { ... }",
+		)
+		return
+	}
 	sa.symbolTable.AddSymbol(stmt.Name, "class", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 	// 注册成员字段（scope=field_<类名>，供方法体 self.xxx / 裸字段名引用）
 	for _, field := range stmt.Fields {
@@ -1135,6 +1219,14 @@ func (sa *SemanticAnalyzer) analyzeInterfaceStatement(stmt *ast.InterfaceStateme
 
 // analyzeStructStatement 分析 struct 语句
 func (sa *SemanticAnalyzer) analyzeStructStatement(stmt *ast.StructStatement) {
+	if stmt.Name == "" {
+		sa.errorCollector.AddSemanticError(
+			"struct 声明必须带有名称",
+			stmt.Pos.Line, stmt.Pos.Column, "anonymous_type",
+			"当前编译器不支持匿名 struct; 请为 struct 命名, 如: struct Point { ... }",
+		)
+		return
+	}
 	sa.symbolTable.AddSymbol(stmt.Name, "struct", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 }
 
@@ -1308,14 +1400,35 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	}
 
 	// 2. 添加变量到符号表
-	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
+	sa.checkVariableShadow(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
+	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, sa.variableDeclScope(), stmt.Pos.Line, stmt.Pos.Column)
 
-	// [unused 检查已注释] 声明带 #[unused] 注解 → 豁免 unused 检查
-	// if ast.HasAttribute(stmt.Attributes, "unused") {
-	// 	if s := sa.symbolTable.GetSymbol(stmt.Name); s != nil {
-	// 		s.Unused = true
-	// 	}
-	// }
+	// 声明带初始化视为一次写入(只写不读检测用)
+	if stmt.Value != nil {
+		if s := sa.symbolTable.GetSymbol(stmt.Name); s != nil {
+			s.Written = true
+		}
+	}
+
+	// 字面量超类型范围警告 (clang -Wliteral-range): 窄整数类型赋超范围字面量
+	if stmt.Value != nil && !stmt.IsAuto {
+		if lit, ok := stmt.Value.(*ast.IntegerLiteral); ok {
+			if msg := integerLiteralRangeWarning(stmt.Type, lit.Value); msg != "" {
+				sa.errorCollector.AddSemanticWarning(
+					msg,
+					stmt.Pos.Line, stmt.Pos.Column, "literal_range",
+					"该字面量超出类型范围, 会发生截断; 请使用更大范围的类型或调整数值",
+				)
+			}
+		}
+	}
+
+	// 声明带 #[unused] 注解 → 豁免 unused 检查
+	if ast.HasAttribute(stmt.Attributes, "unused") {
+		if s := sa.symbolTable.GetSymbol(stmt.Name); s != nil {
+			s.Unused = true
+		}
+	}
 
 	// 记录数组字面量长度，供 spend 全集证明使用
 	if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok {
@@ -1348,6 +1461,28 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 			"",
 			"const name: type = value",
 		)
+	}
+
+	// 5. 未初始化变量警告 (clang -Wuninitialized): 非全局、非 const 的声明没有初始值
+	if stmt.Value == nil && !stmt.IsConst && !sa.symbolTable.IsGlobal() {
+		sa.errorCollector.AddSemanticWarning(
+			fmt.Sprintf("变量 '%s' 声明未初始化, 使用前请先赋值", stmt.Name),
+			stmt.Pos.Line, stmt.Pos.Column, "uninitialized",
+			"建议在声明时初始化: " + stmt.Name + " = 初始值",
+		)
+	}
+
+	// 6. 空指针安全: 可空值未判空即赋给非可空变量
+	if stmt.Value != nil && !stmt.IsAuto {
+		if id, ok := stmt.Value.(*ast.Identifier); ok {
+			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked && !isNullableTypeName(stmt.Type) {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("可空变量 '%s' 未判空即赋给非可空变量 '%s'", id.Name, stmt.Name),
+					stmt.Pos.Line, stmt.Pos.Column, "nullable_assigned",
+					"先判空再赋值, 或将目标声明为可空类型: "+stmt.Name+": "+stmt.Type+"?",
+				)
+			}
+		}
 	}
 }
 
@@ -1455,14 +1590,15 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 	}
 
 	// 添加到符号表
-	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+	sa.checkVariableShadow(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
+	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, sa.variableDeclScope(), stmt.Pos.Line, stmt.Pos.Column)
 
-	// [unused 检查已注释] 声明带 #[unused] 注解 → 豁免 unused 检查
-	// if ast.HasAttribute(stmt.Attributes, "unused") {
-	// 	if s := sa.symbolTable.GetSymbol(stmt.Name); s != nil {
-	// 		s.Unused = true
-	// 	}
-	// }
+	// 声明带 #[unused] 注解 → 豁免 unused 检查
+	if ast.HasAttribute(stmt.Attributes, "unused") {
+		if s := sa.symbolTable.GetSymbol(stmt.Name); s != nil {
+			s.Unused = true
+		}
+	}
 }
 
 // isTypeValid 检查类型是否有效
@@ -1559,6 +1695,11 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 	// 检查符号表中是否有该类型（类、结构体、枚举、接口等）
 	symbol := sa.symbolTable.GetSymbol(typeName)
 	if symbol != nil && (symbol.Type == "class" || symbol.Type == "struct" || symbol.Type == "enum" || symbol.Type == "interface" || symbol.Type == "type") {
+		return true
+	}
+
+	// 检查是否是本地 import 文件的类型（class/struct, 跨文件可见）
+	if sa.localModuleTypes != nil && sa.localModuleTypes[typeName] {
 		return true
 	}
 
@@ -1723,6 +1864,14 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 		// 空指针安全：检测 if x != null 模式，标记 x 为已检查
 		sa.markNullCheckedInCondition(stmt.Condition)
 	}
+	// 空体警告 (clang -Wempty-body)
+	if len(stmt.Body) == 0 {
+		sa.errorCollector.AddSemanticWarning(
+			"if 语句空体, 条件成立时没有任何操作",
+			stmt.Pos.Line, stmt.Pos.Column, "empty_body",
+			"如果条件不需要处理, 请删除整个 if 语句",
+		)
+	}
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
@@ -1835,6 +1984,14 @@ func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 		// 条件类型检查：只允许布尔表达式
 		sa.validateCondition(stmt.Condition)
 	}
+	// 空体警告 (clang -Wempty-body)
+	if len(stmt.Body) == 0 {
+		sa.errorCollector.AddSemanticWarning(
+			"while 语句空体, 条件为真时不做任何操作(可能死循环)",
+			stmt.Pos.Line, stmt.Pos.Column, "empty_body",
+			"如果循环体不需要处理, 请删除整个 while 语句",
+		)
+	}
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
@@ -1895,6 +2052,14 @@ func (sa *SemanticAnalyzer) validateCondition(cond ast.Expression) {
 						e.Pos.Line, e.Pos.Column, "condition_type",
 						"如: if (flag)、if (a > b)")
 				}
+			}
+		// 逻辑组合 && ||: 两侧递归校验必须是布尔条件
+		case "&&", "||":
+			if e.Left != nil {
+				sa.validateCondition(e.Left)
+			}
+			if e.Right != nil {
+				sa.validateCondition(e.Right)
 			}
 		default:
 			// 算术/赋值等表达式禁止作为条件
@@ -1959,11 +2124,13 @@ func (sa *SemanticAnalyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
 	if stmt.Variable != nil && stmt.Iterable != nil {
 		if isRangeCallExpr(stmt.Iterable) {
 			// range(...) 产生的值为整数类型
+			sa.checkVariableShadow(stmt.Variable.Name, stmt.Pos.Line, stmt.Pos.Column)
 			sa.symbolTable.AddSymbol(stmt.Variable.Name, "int", false, "local", stmt.Pos.Line, stmt.Pos.Column)
 		} else {
 			iterType := sa.inferExpressionType(stmt.Iterable)
 			elemType := inferElementType(iterType)
 			if elemType != "" {
+				sa.checkVariableShadow(stmt.Variable.Name, stmt.Pos.Line, stmt.Pos.Column)
 				sa.symbolTable.AddSymbol(stmt.Variable.Name, elemType, false, "local", stmt.Pos.Line, stmt.Pos.Column)
 			}
 		}
@@ -1999,6 +2166,22 @@ func inferElementType(typeStr string) string {
 func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
+		// 空指针安全: 可空值从非可空返回类型的函数返回
+		if id, ok := stmt.Value.(*ast.Identifier); ok {
+			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked {
+				retType := ""
+				if sa.currentFunction != nil {
+					retType = sa.currentFunction.ReturnType
+				}
+				if retType != "" && !isNullableTypeName(retType) {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("可空变量 '%s' 未判空即从返回类型 '%s' 的函数返回", id.Name, retType),
+						stmt.Pos.Line, stmt.Pos.Column, "nullable_returned",
+						"先判空再返回, 或将函数返回类型改为可空: "+retType+"?",
+					)
+				}
+			}
+		}
 	}
 }
 
@@ -2033,6 +2216,8 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 		sa.analyzeExpression(e.Condition)
 		sa.analyzeExpression(e.TrueExpr)
 		sa.analyzeExpression(e.FalseExpr)
+	case *ast.MatchExpression:
+		sa.analyzeMatchExpression(e)
 	case *ast.ArrayLiteral:
 		for _, elem := range e.Elements {
 			sa.analyzeExpression(elem)
@@ -2164,7 +2349,7 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 				expr.Pos.Line,
 				expr.Pos.Column,
 				"not_exported",
-				fmt.Sprintf("在 '%s' 的定义前添加 pub 修饰符: pub fn %s(...)", expr.Name, expr.Name),
+				fmt.Sprintf("发现以下同名函数, 但未使用pub修饰: %s; 添加 pub 修饰符: pub fn %s(...)", expr.Name, expr.Name),
 			)
 			return
 		}
@@ -2196,11 +2381,308 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 			expr.Pos.Line,
 			expr.Pos.Column,
 			"undefined_variable",
-			"请确保变量已声明后再使用",
+			sa.undefinedVariableSuggestion(expr.Name),
 		)
 	}
-	// 标记符号为已使用（unused 检查已注释）
-	// symbol.Referenced = true
+	// 标记符号为已使用(unused 检查用)
+	if symbol != nil {
+		symbol.Referenced = true
+		symbol.Read = true
+	}
+}
+
+// undefinedVariableSuggestion 为未定义标识符生成诊断建议：
+// 在本地 import 的所有文件中搜索相似函数名(编辑距离<=2), 命中则提示"发现以下相似函数"。
+func (sa *SemanticAnalyzer) undefinedVariableSuggestion(name string) string {
+	similar := sa.suggestSimilarLocalFunctions(name)
+	if len(similar) > 0 {
+		return "发现以下相似函数: " + strings.Join(similar, "、")
+	}
+	return "请确保变量已声明后再使用"
+}
+
+// suggestSimilarLocalFunctions 在本地 import 文件(含嵌套)的函数名集合中
+// 搜索与 name 编辑距离<=2 的相似函数名(排除同名), 最多返回 5 个, 按字典序。
+func (sa *SemanticAnalyzer) suggestSimilarLocalFunctions(name string) []string {
+	var similar []string
+	seen := make(map[string]bool)
+	for fn := range sa.localModuleFuncs {
+		if fn == name || seen[fn] {
+			continue
+		}
+		if levenshteinDistance(name, fn) <= 2 {
+			similar = append(similar, fn)
+			seen[fn] = true
+		}
+	}
+	sort.Strings(similar)
+	if len(similar) > 5 {
+		similar = similar[:5]
+	}
+	return similar
+}
+
+// levenshteinDistance 计算两个字符串的编辑距离(插入/删除/替换各计 1)。
+func levenshteinDistance(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	prev := make([]int, lb+1)
+	cur := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		cur[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			m := prev[j] + 1
+			if cur[j-1]+1 < m {
+				m = cur[j-1] + 1
+			}
+			if prev[j-1]+cost < m {
+				m = prev[j-1] + cost
+			}
+			cur[j] = m
+		}
+		prev, cur = cur, prev
+	}
+	return prev[lb]
+}
+
+// variableDeclScope 返回变量声明所在的 scope 标记(顶层为 global, 其余 local)
+func (sa *SemanticAnalyzer) variableDeclScope() string {
+	if sa.symbolTable.IsGlobal() {
+		return "global"
+	}
+	return "local"
+}
+
+// checkVariableShadow 检查变量声明是否遮蔽外层作用域同名符号(clang -Wshadow 语义)。
+// 排除类型/类/函数名等非变量符号, 避免误报。
+func (sa *SemanticAnalyzer) checkVariableShadow(name string, line, col int) {
+	if sa.symbolTable.HasLocalSymbol(name) {
+		return // 当前作用域重复声明, 由既有检查处理
+	}
+	outer := sa.symbolTable.GetSymbol(name)
+	if outer == nil {
+		return
+	}
+	switch outer.Type {
+	case "class", "struct", "interface", "type", "enum", "function", "extern", "module", "import":
+		return // 遮蔽类型/函数名不是 -Wshadow 的范畴
+	}
+	desc := "外层作用域中的同名符号"
+	switch outer.Scope {
+	case "global":
+		desc = "全局变量"
+	case "parameter":
+		desc = "函数参数"
+	case "lambda_param":
+		desc = "lambda 参数"
+	case "local":
+		desc = "外层局部变量"
+	default:
+		if strings.HasPrefix(outer.Scope, "field_") {
+			desc = "类字段"
+		}
+	}
+	sa.errorCollector.AddSemanticWarning(
+		fmt.Sprintf("变量 '%s' 遮蔽了%s", name, desc),
+		line, col, "shadowing",
+		fmt.Sprintf("考虑重命名, 避免与%s同名", desc),
+	)
+}
+
+// isUnsignedIntType 判断是否无符号整数类型
+func isUnsignedIntType(t string) bool {
+	switch t {
+	case "u8", "u16", "u32", "u64":
+		return true
+	}
+	return false
+}
+
+// isSignedIntType 判断是否有符号整数类型
+func isSignedIntType(t string) bool {
+	switch t {
+	case "i8", "i16", "i32", "i64", "int", "long":
+		return true
+	}
+	return false
+}
+
+// isZeroLiteral 判断表达式是否为整数 0 字面量
+func isZeroLiteral(expr ast.Expression) bool {
+	lit, ok := expr.(*ast.IntegerLiteral)
+	return ok && lit.Value == 0
+}
+
+// integerLiteralRangeWarning 检查整数字面量是否超出窄整数类型范围。
+// 超范围返回警告消息, 正常返回空串。
+func integerLiteralRangeWarning(typeName string, value uint64) string {
+	switch typeName {
+	case "u8":
+		if value > 255 {
+			return fmt.Sprintf("字面量 %d 超出 u8 范围 (0..255)", value)
+		}
+	case "u16":
+		if value > 65535 {
+			return fmt.Sprintf("字面量 %d 超出 u16 范围 (0..65535)", value)
+		}
+	case "u32":
+		if value > 4294967295 {
+			return fmt.Sprintf("字面量 %d 超出 u32 范围 (0..4294967295)", value)
+		}
+	case "i8":
+		if value > 127 {
+			return fmt.Sprintf("字面量 %d 超出 i8 范围 (-128..127)", value)
+		}
+	case "i16":
+		if value > 32767 {
+			return fmt.Sprintf("字面量 %d 超出 i16 范围 (-32768..32767)", value)
+		}
+	case "i32":
+		if value > 2147483647 {
+			return fmt.Sprintf("字面量 %d 超出 i32 范围", value)
+		}
+	case "i64", "int":
+		if value > 9223372036854775807 {
+			return fmt.Sprintf("字面量 %d 超出 i64 范围", value)
+		}
+	}
+	return ""
+}
+
+// isIntegerLiteralExpr 判断表达式是否为整数字面量
+func isIntegerLiteralExpr(expr ast.Expression) bool {
+	_, ok := expr.(*ast.IntegerLiteral)
+	return ok
+}
+
+// isLiteralExpr 判断表达式是否为数值字面量(整数/浮点)
+func isNumericLiteralExpr(expr ast.Expression) bool {
+	switch expr.(type) {
+	case *ast.IntegerLiteral, *ast.FloatLiteral:
+		return true
+	}
+	return false
+}
+
+// isAssignmentOperator 判断是否为赋值类运算符
+func isAssignmentOperator(op string) bool {
+	switch op {
+	case "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=":
+		return true
+	}
+	return false
+}
+
+// isPureValueExpression 判断表达式是否为无副作用的纯值表达式(用于 unused-value 警告)。
+// 函数调用/赋值/自增减等有副作用的表达式不算。
+func isPureValueExpression(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.BinaryExpression:
+		// 赋值类运算符有副作用
+		switch e.Operator {
+		case "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=":
+			return false
+		}
+		return true
+	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.StringLiteral, *ast.BooleanLiteral,
+		*ast.Identifier, *ast.MemberAccessExpression, *ast.IndexExpression:
+		return true
+	case *ast.UnaryExpression:
+		// 自增减/赋值有副作用; 正负号/取反/取址/解引用是纯值
+		switch e.Operator {
+		case "++", "--", "++pre", "--pre":
+			return false
+		}
+		return true
+	case *ast.ParenExpression:
+		return isPureValueExpression(e.Inner)
+	}
+	return false
+}
+
+// isSameIdentifier 判断两个表达式是否为同一个标识符(自比较检查用)
+func isSameIdentifier(a, b ast.Expression) bool {
+	la, okA := a.(*ast.Identifier)
+	lb, okB := b.(*ast.Identifier)
+	return okA && okB && la.Name == lb.Name
+}
+
+// sameIdentifierName 返回标识符表达式的名字(自比较检查用)
+func sameIdentifierName(expr ast.Expression) string {
+	if id, ok := expr.(*ast.Identifier); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// checkSignCompare 检查有符号/无符号整数比较(clang -Wsign-compare)。
+// 任一侧是整数字面量则跳过(字面量在比较中按上下文提升, 不构成符号性问题)。
+func (sa *SemanticAnalyzer) checkSignCompare(left, right ast.Expression, leftType, rightType, op string, pos ast.Position) {
+	if isUnsignedIntType(leftType) && isSignedIntType(rightType) &&
+		!isIntegerLiteralExpr(right) && !isIntegerLiteralExpr(left) {
+		sa.errorCollector.AddSemanticWarning(
+			fmt.Sprintf("比较 '%s' 在无符号类型 '%s' 和有符号类型 '%s' 之间进行", op, leftType, rightType),
+			pos.Line, pos.Column, "sign_compare",
+			"有符号/无符号混比可能产生意外结果, 建议显式转换后比较",
+		)
+		return
+	}
+	if isUnsignedIntType(rightType) && isSignedIntType(leftType) &&
+		!isIntegerLiteralExpr(left) && !isIntegerLiteralExpr(right) {
+		sa.errorCollector.AddSemanticWarning(
+			fmt.Sprintf("比较 '%s' 在有符号类型 '%s' 和无符号类型 '%s' 之间进行", op, leftType, rightType),
+			pos.Line, pos.Column, "sign_compare",
+			"有符号/无符号混比可能产生意外结果, 建议显式转换后比较",
+		)
+	}
+}
+
+// checkAlwaysTrueFalseCompare 检查恒真/恒假比较(clang -Wtype-limits 语义)。
+// 无符号类型与 0 比较: >= 0 恒真、< 0 恒假。
+func (sa *SemanticAnalyzer) checkAlwaysTrueFalseCompare(leftType, rightType, op string, pos ast.Position, rightIsZero, leftIsZero bool) {
+	if isUnsignedIntType(leftType) && rightIsZero {
+		if op == ">=" {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("比较 '%s' 恒为真(无符号类型 '%s' 永远 >= 0)", op, leftType),
+				pos.Line, pos.Column, "always_true_compare",
+				"该比较结果恒为 true, 可以移除",
+			)
+		} else if op == "<" {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("比较 '%s' 恒为假(无符号类型 '%s' 不可能 < 0)", op, leftType),
+				pos.Line, pos.Column, "always_false_compare",
+				"该比较结果恒为 false, 可以移除",
+			)
+		}
+		return
+	}
+	if isUnsignedIntType(rightType) && leftIsZero {
+		if op == "<=" {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("比较 '%s' 恒为真(无符号类型 '%s' 永远 >= 0)", op, rightType),
+				pos.Line, pos.Column, "always_true_compare",
+				"该比较结果恒为 true, 可以移除",
+			)
+		} else if op == ">" {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("比较 '%s' 恒为假(无符号类型 '%s' 不可能 < 0)", op, rightType),
+				pos.Line, pos.Column, "always_false_compare",
+				"该比较结果恒为 false, 可以移除",
+			)
+		}
+	}
 }
 
 // classFieldAccessHint 在类方法/构造函数作用域内，若 name 是当前类的字段，
@@ -2270,8 +2752,6 @@ func (sa *SemanticAnalyzer) classFieldAccessHint(name string) string {
 
 // checkUnusedSymbols 检查当前函数/方法/构造函数作用域中未被引用的局部变量和参数。
 // 产生 warning 级诊断；声明带 #[unused] 注解的符号豁免。
-// [已注释] unused 检查暂未启用
-/*
 func (sa *SemanticAnalyzer) checkUnusedSymbols() {
 	if sa.symbolTable == nil {
 		return
@@ -2296,21 +2776,57 @@ func (sa *SemanticAnalyzer) checkUnusedSymbols() {
 		if sym.Referenced || sym.Unused {
 			continue
 		}
+		// 只写不读: 被赋值过但从未被读取 (clang -Wunused-but-set-variable)
+		if sym.Written {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("变量 '%s' 被赋值但从未被读取", sym.Name),
+				sym.Line, sym.Column, "unused_but_set",
+				"该变量的值从未被使用, 检查是否遗漏了读取, 或删除赋值",
+			)
+			continue
+		}
+		// 参数报"未使用的参数", 局部变量报"未使用的变量"
+		msg := fmt.Sprintf("未使用的变量: '%s'", sym.Name)
+		code := "unused_variable"
+		if sym.Scope == "parameter" || sym.Scope == "lambda_param" {
+			msg = fmt.Sprintf("未使用的参数: '%s'", sym.Name)
+			code = "unused_parameter"
+		}
 		sa.errorCollector.AddSemanticWarning(
-			fmt.Sprintf("未使用的变量: '%s'", sym.Name),
-			sym.Line, sym.Column, "unused_variable",
+			msg,
+			sym.Line, sym.Column, code,
 			"如果该声明有意保留未使用，请添加 #[unused] 注解",
 		)
 	}
 }
-*/
 
 // analyzeBinaryExpression 分析二元表达式
 func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) {
 	if expr == nil {
 		return
 	}
-	sa.analyzeExpression(expr.Left)
+	if isAssignmentOperator(expr.Operator) {
+		// 赋值左值: 标记写入但不标记读取(只写不读检测用)
+		if id, ok := expr.Left.(*ast.Identifier); ok {
+			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil {
+				sym.Written = true
+				// 自己赋给自己 (clang -Wself-assign)
+				if rid, ok := expr.Right.(*ast.Identifier); ok && rid.Name == id.Name {
+					sa.errorCollector.AddSemanticWarning(
+						fmt.Sprintf("变量 '%s' 被赋值为自身, 该赋值语句没有效果", id.Name),
+						expr.Pos.Line, expr.Pos.Column, "self_assign",
+						"检查是否拼写错误, 或删除该赋值语句",
+					)
+				}
+			} else {
+				sa.analyzeIdentifier(id) // 未定义: 走完整报错路径
+			}
+		} else {
+			sa.analyzeExpression(expr.Left)
+		}
+	} else {
+		sa.analyzeExpression(expr.Left)
+	}
 	sa.analyzeExpression(expr.Right)
 	// 类型检查
 	if expr.Left != nil && expr.Right != nil {
@@ -2318,7 +2834,21 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		rightType := sa.inferExpressionType(expr.Right)
 		if leftType != "" && rightType != "" && leftType != rightType {
 			switch expr.Operator {
-			case "+", "-", "*", "/", "%":
+			case "+":
+				// 字符串拼接: "a" + x / x + "a" 放行(string_concat 系列)
+				isStrConcat := isStringLikeType(leftType) || isStringLikeType(rightType)
+				if !isNumericType(leftType) || !isNumericType(rightType) {
+					if !isStrConcat {
+						sa.errorCollector.AddSemanticError(
+							fmt.Sprintf("运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
+							expr.Pos.Line,
+							expr.Pos.Column,
+							"type_mismatch",
+							"确保运算符两侧的类型兼容",
+						)
+					}
+				}
+			case "-", "*", "/", "%":
 				if !isNumericType(leftType) || !isNumericType(rightType) {
 					sa.errorCollector.AddSemanticError(
 						fmt.Sprintf("运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
@@ -2354,6 +2884,54 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 					)
 				}
 			}
+		}
+	}
+
+	// 编译期除零检查 (clang -Wdivision-by-zero)
+	if (expr.Operator == "/" || expr.Operator == "%") && isZeroLiteral(expr.Right) {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("除零错误: 运算符 '%s' 的除数不能为 0", expr.Operator),
+			expr.Pos.Line, expr.Pos.Column, "division_by_zero",
+			"除数不能为 0; 请检查运算逻辑",
+		)
+	}
+
+	// 比较运算的符号性/恒真恒假警告 (clang -Wsign-compare / -Wtype-limits 语义)
+	switch expr.Operator {
+	case "==", "!=", "<", ">", "<=", ">=":
+		leftType := sa.inferExpressionType(expr.Left)
+		rightType := sa.inferExpressionType(expr.Right)
+		if leftType != "" && rightType != "" {
+			sa.checkSignCompare(expr.Left, expr.Right, leftType, rightType, expr.Operator, expr.Pos)
+			sa.checkAlwaysTrueFalseCompare(leftType, rightType, expr.Operator, expr.Pos,
+				isZeroLiteral(expr.Right), isZeroLiteral(expr.Left))
+		}
+		// 自比较 x == x 恒真 / x != x 恒假 (clang -Wtautological-compare, 报错)
+		if isSameIdentifier(expr.Left, expr.Right) {
+			if expr.Operator == "==" {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("比较 '%s' 恒为真(同一变量 '%s' 与自身比较)", expr.Operator, sameIdentifierName(expr.Left)),
+					expr.Pos.Line, expr.Pos.Column, "tautological_compare",
+					"该比较结果恒为 true, 检查是否拼写错误",
+				)
+			} else {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("比较 '%s' 恒为假(同一变量 '%s' 与自身比较)", expr.Operator, sameIdentifierName(expr.Left)),
+					expr.Pos.Line, expr.Pos.Column, "tautological_compare",
+					"该比较结果恒为 false, 检查是否拼写错误",
+				)
+			}
+		}
+		// 浮点 ==/!= 比较警告 (clang -Wfloat-equal): 两侧都是非字面量浮点表达式
+		if (expr.Operator == "==" || expr.Operator == "!=") &&
+			leftType != "" && rightType != "" &&
+			isFloatType(leftType) && isFloatType(rightType) &&
+			!isNumericLiteralExpr(expr.Left) && !isNumericLiteralExpr(expr.Right) {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("浮点类型 '%s' 与 '%s' 使用 '%s' 比较, 浮点精度可能导致意外结果", leftType, rightType, expr.Operator),
+				expr.Pos.Line, expr.Pos.Column, "float_compare",
+				"建议改用容差比较: 计算差的绝对值并与小阈值比较",
+			)
 		}
 	}
 }
@@ -2396,15 +2974,87 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		return
 	}
 
-	// 检查是否是标准库函数调用，验证是否已导入对应模块
-	if memberAccess, ok := expr.Function.(*ast.MemberAccessExpression); ok {
-		sa.checkStdlibImport(memberAccess, expr.Pos)
+	// 记录被调用的顶层函数(unused-function 检查用)
+	if ident, ok := expr.Function.(*ast.Identifier); ok && sa.usedFunctions != nil {
+		sa.usedFunctions[ident.Name] = true
 	}
 
-	sa.analyzeExpression(expr.Function)
-	for _, arg := range expr.Args {
-		sa.analyzeExpression(arg)
+	// 检查是否是标准库函数调用，验证是否已导入对应模块
+	if memberAccess, ok := expr.Function.(*ast.MemberAccessExpression); ok {
+		// 报错位置用成员名 token 的位置(CallExpression.Pos 未设置, 是零值)
+		sa.checkStdlibImport(memberAccess, memberAccess.Pos)
+		sa.checkLocalModuleCall(memberAccess, memberAccess.Pos)
+		// 空指针安全: 可空对象未判空直接调用方法
+		sa.checkNullableDereference(memberAccess.Object, memberAccess.Pos.Line, memberAccess.Pos.Column)
 	}
+
+	// 跨文件 class 构造调用(Matrix(4,4)): 类型名在 localModuleTypes(class) 中,
+	// 不是函数符号, 跳过 analyzeExpression 避免 undefined_variable
+	isCrossFileCtor := false
+	if ident, ok := expr.Function.(*ast.Identifier); ok && sa.localModuleTypes != nil && sa.localModuleTypes[ident.Name] {
+		isCrossFileCtor = true
+	}
+	if !isCrossFileCtor {
+		sa.analyzeExpression(expr.Function)
+	}
+	for i, arg := range expr.Args {
+		sa.analyzeExpression(arg)
+		// 空指针安全: 可空实参未判空即传给非可空形参
+		if id, ok := arg.(*ast.Identifier); ok {
+			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked {
+				if pt := sa.paramTypeAt(expr, i); pt != "" && !isNullableTypeName(pt) {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("可空变量 '%s' 未判空即作为实参传递, 但形参类型 '%s' 不接受 null", id.Name, pt),
+						id.Pos.Line, id.Pos.Column, "nullable_passed",
+						"先判空再传递: if "+id.Name+" != null { ... }",
+					)
+				}
+			}
+		}
+	}
+}
+
+// checkLocalModuleCall 检查本地 import 模块的限定调用 lib.fn:
+//  pub 函数放行; 模块内存在但非 pub 报 not_exported; 不存在报 undefined + 相似函数建议
+func (sa *SemanticAnalyzer) checkLocalModuleCall(memberAccess *ast.MemberAccessExpression, pos ast.Position) {
+	if sa.localModuleFuncsByModule == nil {
+		return
+	}
+	ident, ok := memberAccess.Object.(*ast.Identifier)
+	if !ok {
+		return
+	}
+	modFuncs, ok := sa.localModuleFuncsByModule[ident.Name]
+	if !ok {
+		return // 不是本地 import 模块(普通对象/类实例等), 保持现有行为
+	}
+	fnName := memberAccess.Member
+	// pub 函数: 放行
+	if sa.localImportFuncs[fnName] {
+		return
+	}
+	if _, exists := modFuncs[fnName]; exists {
+		// 模块内存在但非 pub
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("函数 '%s' 存在于被导入的模块, 但未通过 pub 导出", fnName),
+			pos.Line, pos.Column,
+			"not_exported",
+			fmt.Sprintf("发现以下同名函数, 但未使用pub修饰: %s; 添加 pub 修饰符: pub fn %s(...)", fnName, fnName),
+		)
+		return
+	}
+	// 模块内不存在: undefined + 在全部 import 函数中搜索相似名
+	similar := sa.suggestSimilarLocalFunctions(fnName)
+	suggestion := "请确保函数名正确"
+	if len(similar) > 0 {
+		suggestion = "发现以下相似函数: " + strings.Join(similar, "、")
+	}
+	sa.errorCollector.AddSemanticError(
+		fmt.Sprintf("函数 '%s' 不存在于模块 '%s' 中", fnName, ident.Name),
+		pos.Line, pos.Column,
+		"undefined_variable",
+		suggestion,
+	)
 }
 
 // checkStdlibImport 检查标准库模块是否已导入
@@ -2443,6 +3093,77 @@ func (sa *SemanticAnalyzer) checkStdlibImport(memberAccess *ast.MemberAccessExpr
 			pos.Column,
 			"missing_import",
 			fmt.Sprintf("在文件顶部添加: import %s%s;", namespace, moduleName),
+		)
+	}
+}
+
+// analyzeMatchExpression 分析 match 表达式, 并做枚举穷尽检查(类似 C switch 语义)。
+// 目标为枚举且无通配符/变量绑定臂时, 检查所有变体是否被覆盖。
+func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
+	if expr == nil {
+		return
+	}
+	if expr.Target != nil {
+		sa.analyzeExpression(expr.Target)
+	}
+	for _, arm := range expr.Arms {
+		if arm == nil {
+			continue
+		}
+		for _, bodyStmt := range arm.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
+	}
+	// 枚举穷尽检查 (clang -Wswitch 语义)
+	if expr.Target == nil || sa.program == nil {
+		return
+	}
+	// 通配符/变量绑定臂 = 有 default
+	hasDefault := false
+	covered := make(map[string]bool)
+	for _, arm := range expr.Arms {
+		if arm == nil || arm.Pattern == nil {
+			continue
+		}
+		switch arm.Pattern.Kind {
+		case ast.PatternWildcard, ast.PatternVariable, ast.PatternBoolean:
+			hasDefault = true
+		case ast.PatternVariant:
+			if arm.Pattern.VariantName != "" {
+				covered[arm.Pattern.VariantName] = true
+			}
+		}
+	}
+	targetType := sa.inferExpressionType(expr.Target)
+	enumStmt := sa.program.FindEnum(targetType)
+	if enumStmt == nil && strings.HasPrefix(targetType, "enum ") {
+		enumStmt = sa.program.FindEnum(strings.TrimPrefix(targetType, "enum "))
+	}
+	if enumStmt == nil || len(enumStmt.Variants) == 0 {
+		// 非枚举目标: 缺少 _ 通配符分支警告 (clang -Wswitch-default 语义)
+		if !hasDefault {
+			sa.errorCollector.AddSemanticWarning(
+				"match 缺少 _ 通配符分支",
+				expr.Pos.Line, expr.Pos.Column, "match_no_default",
+				"未匹配到任何分支时不会执行任何操作; 建议添加 _ => 分支兜底",
+			)
+		}
+		return
+	}
+	if hasDefault {
+		return
+	}
+	var missing []string
+	for _, v := range enumStmt.Variants {
+		if v != nil && !covered[v.Name] {
+			missing = append(missing, v.Name)
+		}
+	}
+	if len(missing) > 0 {
+		sa.errorCollector.AddSemanticWarning(
+			fmt.Sprintf("match 未覆盖枚举 '%s' 的全部变体, 缺少: %s", enumStmt.Name, strings.Join(missing, ", ")),
+			expr.Pos.Line, expr.Pos.Column, "non_exhaustive_match",
+			"建议添加缺少的变体分支, 或使用 _ 通配符分支",
 		)
 	}
 }
@@ -2502,6 +3223,42 @@ func (sa *SemanticAnalyzer) checkNullableDereference(expr ast.Expression, line, 
 	if symbol.Nullable && !symbol.NullChecked {
 		sa.error(fmt.Sprintf("nullable variable '%s' may be null, add null check before access (e.g., if %s != null { ... })", ident.Name, ident.Name), line, column)
 	}
+}
+
+// paramTypeAt 返回被调用函数第 i 个参数的类型; 顶层函数用 ParamTypes, 类方法用 Params[i].Type。
+// 查不到返回 ""(跳过检查)。
+func (sa *SemanticAnalyzer) paramTypeAt(expr *ast.CallExpression, i int) string {
+	if sa.program == nil {
+		return ""
+	}
+	switch f := expr.Function.(type) {
+	case *ast.Identifier:
+		for _, stmt := range sa.program.Statements {
+			if fn, ok := stmt.(*ast.FunctionStatement); ok && fn.Name == f.Name && i < len(fn.ParamTypes) {
+				return fn.ParamTypes[i]
+			}
+		}
+	case *ast.MemberAccessExpression:
+		className := sa.memberObjectClassName(f.Object)
+		if className == "" {
+			return ""
+		}
+		cls := sa.program.FindClass(className)
+		if cls == nil {
+			return ""
+		}
+		for _, m := range cls.Methods {
+			if m.Name == f.Member && i < len(m.Params) {
+				return m.Params[i].Type
+			}
+		}
+	}
+	return ""
+}
+
+// isNullableTypeName 判断类型名是否为可空类型(带 ? 后缀)
+func isNullableTypeName(typeName string) bool {
+	return strings.Contains(typeName, "?")
 }
 
 // memberObjectClassName 推断成员访问对象表达式的类名。
