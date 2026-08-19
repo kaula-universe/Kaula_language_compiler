@@ -933,10 +933,16 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n#include \"kaula_runtime.h\"\n")
 		// Windows (MSVC ABI / UCRT)：编译器对使用浮点的 TU 生成未定义引用 _fltused，
 		// 该符号由 CRT 提供；本工具链不链接 CRT，必须自备定义（标准 _fltused stub）
+		// 幂等守卫：多文件编译（injectLocalCode）会把各本地导入 .kl 各自生成
+		// 的函数定义连同其前导 _fltused 段一起注入同一 TU；带初始化的文件作用域
+		// 定义在 C 中重复即重定义错误，用 #ifndef 守卫保证整个 TU 只定义一次。
 		if runtime.GOOS == "windows" {
 			allIncludes.WriteString("#if defined(_WIN32) || defined(_WIN64)\n")
 			allIncludes.WriteString("#define itoa K_itoa\n")
+			allIncludes.WriteString("#ifndef _KAULA_FLTUSED\n")
+			allIncludes.WriteString("#define _KAULA_FLTUSED\n")
 			allIncludes.WriteString("int _fltused = 0;\n")
+			allIncludes.WriteString("#endif\n")
 			allIncludes.WriteString("#endif\n")
 		}
 	}
