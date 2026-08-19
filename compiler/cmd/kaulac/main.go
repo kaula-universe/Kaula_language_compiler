@@ -41,11 +41,13 @@ func localImportFiles(imp *ast.ImportStatement) []string {
 // 返回: (pub 函数名集合, 合并后的 C 函数定义代码, 被导入文件内容哈希表)
 // 哈希表覆盖传递闭包内所有实际读取的 .kl 文件（绝对路径 -> SHA256），
 // 供增量缓存键校验使用
-func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, string, map[string]string) {
+func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, string, []string, []string, map[string]string) {
 	state := &localCompileState{
 		pubFuncs:       make(map[string]bool),
 		compiled:       make(map[string]bool),
 		fileHashes:     make(map[string]string),
+		localHeaderSet: make(map[string]bool),
+		usedModuleSet:  make(map[string]bool),
 		stdlibConfig:   stdlibConfig,
 		cfg:            cfg,
 		errorCollector: errorCollector,
@@ -61,13 +63,17 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 		state.compileFile(localPath, inputDir)
 	}
 
-	return state.pubFuncs, state.allCode, state.fileHashes
+	return state.pubFuncs, state.allCode, state.localHeaders, state.usedModules, state.fileHashes
 }
 
 // localCompileState 共享本地 import 编译状态（去重 + 依序输出）
 type localCompileState struct {
 	pubFuncs       map[string]bool
 	allCode        string
+	localHeaders   []string        // 本地文件依赖的 std 模块头文件（注入到主 TU）
+	localHeaderSet map[string]bool // 去重
+	usedModules    []string        // 本地文件依赖的 std 模块（链接时合并到主 usedModules）
+	usedModuleSet  map[string]bool
 	compiled       map[string]bool
 	fileHashes     map[string]string // 已读 .kl 文件内容哈希（绝对路径 -> SHA256）
 	stdlibConfig   *stdlib.StdlibConfig
@@ -153,6 +159,7 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	localAnalyzer.SetLocalImportFuncs(collectLocalPubFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalModuleFuncs(collectLocalAllFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalPubVars(collectLocalPubVars(localProgram, depDir))
+	localAnalyzer.SetLocalPubTypes(collectLocalPubTypes(localProgram, depDir))
 	localAnalyzer.SetSOREnabled(s.cfg.SOR)
 	localAnalyzer.Analyze(localProgram)
 
@@ -164,6 +171,30 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 		localCG.SetStdlibConfig(s.stdlibConfig)
 	}
 	localOutput := localCG.Generate(localProgram)
+
+	// 收集本地文件依赖的 std 模块头文件（如 math/math.h、memory/memory.h），
+	// 注入到主 TU 中，使库内部 import std.xxx 的声明对调用方可见。
+	for _, line := range strings.Split(localOutput, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#include") {
+			continue
+		}
+		if strings.Contains(trimmed, "<") {
+			continue
+		}
+		if !s.localHeaderSet[trimmed] {
+			s.localHeaderSet[trimmed] = true
+			s.localHeaders = append(s.localHeaders, line)
+		}
+	}
+
+	// 收集本地文件依赖的 std 模块（链接阶段需要对应 .c 实现）
+	for _, m := range localCG.GetUsedModules() {
+		if !s.usedModuleSet[m] {
+			s.usedModuleSet[m] = true
+			s.usedModules = append(s.usedModules, m)
+		}
+	}
 
 	// 提取函数定义（去掉 includes 和 main）
 	funcCode := extractFunctionDefs(localOutput)
@@ -633,7 +664,8 @@ func main() {
 	localPubFuncs := collectLocalPubFuncs(program, inputDir)
 	localAllFuncs := collectLocalAllFuncs(program, inputDir)
 	localPubVars := collectLocalPubVars(program, inputDir)
-	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars)
+	localPubTypes := collectLocalPubTypes(program, inputDir)
+	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes)
 	stage2Time := time.Since(stage2Start)
 	if verbose { fmt.Printf("[Stage 2] Semantic Analysis completed in %v\n", stage2Time) }
 
@@ -710,17 +742,38 @@ func main() {
 	cg.SetSourceFile(inputFile)
 
 	// 多文件编译：预解析本地 .kl 文件 import，收集 pub 函数名与被导入文件内容哈希
-	localImportFuncs, localImportCode, importFileHashes := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
+	localImportFuncs, localImportCode, localHeaders, localUsedModules, importFileHashes := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
 	if len(localImportFuncs) > 0 {
 		cg.SetLocalImportFuncs(localImportFuncs)
+	}
+	if len(localPubTypes) > 0 {
+		cg.SetLocalPubTypes(localPubTypes)
 	}
 
 	output := cg.Generate(program)
 	usedModules := cg.GetUsedModules()
 
-	// 将本地导入的函数定义注入到主输出中（在 main 函数之前）
+	// 将本地导入的函数定义注入到主输出中（在 main 函数之前）。
+	// 本地文件依赖的 std 模块头文件（库内部 import std.xxx）随函数一起注入，
+	// 保证声明先于函数体可见，且与主程序自身 include 去重（头文件均有守卫）。
+	if len(localHeaders) > 0 {
+		localImportCode = strings.Join(localHeaders, "\n") + "\n" + localImportCode
+	}
 	if localImportCode != "" {
 		output = injectLocalCode(output, localImportCode)
+	}
+	// 本地文件依赖的 std 模块实现也需要参与链接（如库内部使用 std.math/memory）
+	if len(localUsedModules) > 0 {
+		seen := make(map[string]bool, len(usedModules)+len(localUsedModules))
+		for _, m := range usedModules {
+			seen[m] = true
+		}
+		for _, m := range localUsedModules {
+			if !seen[m] {
+				seen[m] = true
+				usedModules = append(usedModules, m)
+			}
+		}
 	}
 
 	codegenTime := time.Since(codegenStart)
@@ -1523,7 +1576,7 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 }
 
 // concurrentSemanticAnalysisWithConfig 并发执行语义分析（使用已加载的配置）
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, 	sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
 	var wg sync.WaitGroup
@@ -1538,6 +1591,7 @@ func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *st
 		sa.SetLocalImportFuncs(localPubFuncs)
 		sa.SetLocalModuleFuncs(localAllFuncs)
 		sa.SetLocalPubVars(localPubVars)
+		sa.SetLocalPubTypes(localPubTypes)
 		sa.SetSOREnabled(sorEnabled)
 		sa.Analyze(program)
 	}()
@@ -1701,6 +1755,63 @@ func collectLocalPubVars(program *ast.Program, inputDir string) map[string]bool 
 	return pubVars
 }
 
+// collectLocalPubTypes 扫描本地 import 的 .kl 文件，收集导出的类型定义
+// （class/struct/enum/interface/type 别名），供跨文件类型引用。
+// class 含完整字段与方法签名（classFieldType/memberObjectClassName 等需要），
+// struct/enum/interface/type 只需注册名称即可参与 isTypeValid / C 类型映射。
+func collectLocalPubTypes(program *ast.Program, inputDir string) map[string]*sema.LocalPubTypeInfo {
+	types := make(map[string]*sema.LocalPubTypeInfo)
+
+	var visit func(p *ast.Program, dir string)
+	visit = func(p *ast.Program, dir string) {
+		for _, stmt := range p.Statements {
+			imp, ok := stmt.(*ast.ImportStatement)
+			if !ok || !imp.IsLocal {
+				continue
+			}
+			for _, localPath := range localImportFiles(imp) {
+				absPath := localPath
+				if !filepath.IsAbs(absPath) {
+					if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+						absPath = candidate
+					}
+				}
+				data, err := os.ReadFile(absPath)
+				if err != nil {
+					continue
+				}
+				localLex := lexer.NewLexer(string(data))
+				localParser := parser.NewParser(localLex)
+				localParser.SetFile(absPath)
+				localParser.SetSkipMainCheck(true)
+				localParser.EnableLogging(false)
+				localProgram := localParser.Parse()
+				if localParser.HasErrors() {
+					continue
+				}
+				for _, s := range localProgram.Statements {
+					switch t := s.(type) {
+					case *ast.ClassStatement:
+						types[t.Name] = &sema.LocalPubTypeInfo{Kind: "class", Class: t}
+					case *ast.StructStatement:
+						types[t.Name] = &sema.LocalPubTypeInfo{Kind: "struct"}
+					case *ast.EnumStatement:
+						types[t.Name] = &sema.LocalPubTypeInfo{Kind: "enum"}
+					case *ast.InterfaceStatement:
+						types[t.Name] = &sema.LocalPubTypeInfo{Kind: "interface"}
+					case *ast.TypeAliasStatement:
+						types[t.Name] = &sema.LocalPubTypeInfo{Kind: "type"}
+					}
+				}
+				visit(localProgram, filepath.Dir(absPath))
+			}
+		}
+	}
+
+	visit(program, inputDir)
+	return types
+}
+
 type semaResult_t struct {
 	*errors.ErrorCollector
 }
@@ -1738,6 +1849,7 @@ func findStdlib() string {
 		exeDir := filepath.Dir(filepath.Clean(exePath))
 		candidates := []string{
 			filepath.Join(exeDir, "stdlib.json"),
+			filepath.Join(exeDir, "compiler", "stdlib.json"),
 			filepath.Join(exeDir, "..", "compiler", "stdlib.json"),
 		}
 		for _, p := range candidates {
@@ -2070,6 +2182,10 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// lld 与 clang/llvm-ar 同源，对 LLVM 产出的 COFF 归档完全兼容。
 	if runtime.GOOS == "windows" {
 		clangArgs = append(clangArgs, "-fuse-ld=lld")
+		// Windows 目标下 clang 对栈帧 >4KB 的函数默认生成 __chkstk 调用，
+		// 而本编译器不链接 CRT，导致 ld.lld 报 undefined symbol: __chkstk。
+		// 把探测阈值设到极大值即可避免（程序为单线程、栈充足，安全）。
+		clangArgs = append(clangArgs, "-mstack-probe-size=2147483647")
 	}
 	if poolCapacity > 0 {
 		clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
@@ -2184,6 +2300,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				defer func() { <-sem }()
 
 				compileCmd := exec.Command(clangPath, "-c", optLevel, cPath, "-o", objPath)
+				if runtime.GOOS == "windows" {
+					compileCmd.Args = append(compileCmd.Args, "-mstack-probe-size=2147483647")
+				}
 				for _, p := range validSrcPaths {
 					compileCmd.Args = append(compileCmd.Args, "-I", p)
 				}
@@ -2243,6 +2362,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			}
 			if needsRebuild {
 				rsCmd := exec.Command(clangPath, "-c", optLevel, rsSrc, "-o", rsObj)
+				if runtime.GOOS == "windows" {
+					rsCmd.Args = append(rsCmd.Args, "-mstack-probe-size=2147483647")
+				}
 				for _, p := range validSrcPaths {
 					rsCmd.Args = append(rsCmd.Args, "-I", p)
 				}

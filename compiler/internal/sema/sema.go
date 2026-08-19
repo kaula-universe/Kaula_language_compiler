@@ -43,6 +43,7 @@ type SemanticAnalyzer struct {
 	localImportFuncs   map[string]bool                // 本地 import 的 pub 函数名
 	localModuleFuncs   map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
 	localPubVars       map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
+	localPubTypes      map[string]*LocalPubTypeInfo // 本地 import 的类型定义（class 含完整定义）
 	inElseIfChain      bool                           // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
 }
 
@@ -60,6 +61,17 @@ func (sa *SemanticAnalyzer) SetLocalModuleFuncs(funcs map[string]bool) {
 // SetLocalPubVars 注册本地 import / export 的变量名（跨文件变量引用）
 func (sa *SemanticAnalyzer) SetLocalPubVars(vars map[string]bool) {
 	sa.localPubVars = vars
+}
+
+// LocalPubTypeInfo 本地 import 的类型信息（与 cmd/kaulac 中收集器定义对应）。
+type LocalPubTypeInfo struct {
+	Kind  string
+	Class *ast.ClassStatement
+}
+
+// SetLocalPubTypes 注册本地 import 的类型定义（跨文件类型引用）。
+func (sa *SemanticAnalyzer) SetLocalPubTypes(types map[string]*LocalPubTypeInfo) {
+	sa.localPubTypes = types
 }
 
 // NewSemanticAnalyzer 创建一个新的语义分析器
@@ -135,6 +147,10 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 	}
 
 	sa.comptime = comptime.NewEvaluator()
+
+	// 注册本地 import 的类型（class/struct/enum/interface/type），
+	// 使跨文件类型引用通过 isTypeValid / 方法调用 / 字段访问的类型检查
+	sa.registerLocalPubTypes()
 
 	// 第一遍：将所有函数和变量添加到符号表（不分析函数体/方法体/构造函数体）
 	sa.funcReturnTypes = make(map[string]string)
@@ -1043,6 +1059,55 @@ func (sa *SemanticAnalyzer) analyzeObjectStatement(stmt *ast.ObjectStatement) {
 }
 
 // analyzeClassStatement 分析 class 语句
+// registerLocalPubTypes 把本地 import 的类型注册到符号表。
+// class 同时注册字段与方法返回类型，保证跨文件的方法调用/字段访问可被类型检查。
+func (sa *SemanticAnalyzer) registerLocalPubTypes() {
+	if len(sa.localPubTypes) == 0 {
+		return
+	}
+	if sa.funcReturnTypes == nil {
+		sa.funcReturnTypes = make(map[string]string)
+	}
+	for name, info := range sa.localPubTypes {
+		if info == nil || info.Kind != "class" || info.Class == nil {
+			kind := "struct"
+			if info != nil {
+				kind = info.Kind
+			}
+			// 非 class 类型（struct/enum/interface/type 别名）：仅注册名字
+			sa.symbolTable.AddSymbol(name, kind, false, "global", 0, 0)
+			continue
+		}
+		classStmt := info.Class
+		sa.symbolTable.AddSymbol(name, "class", false, "global", classStmt.Pos.Line, classStmt.Pos.Column)
+		for _, field := range classStmt.Fields {
+			if field == nil {
+				continue
+			}
+			sa.symbolTable.AddSymbol(field.Name, field.Type, field.Nullable, "field_"+name, field.Pos.Line, field.Pos.Column)
+		}
+		for _, m := range classStmt.Methods {
+			if m != nil {
+				sa.funcReturnTypes[name+"."+m.Name] = m.ReturnType
+			}
+		}
+	}
+}
+
+// findClassStmt 查找类定义：优先查主程序 AST，其次查本地 import 的类型。
+// 支持跨文件类（import "ml/nn.kl"）的字段类型推断与成员访问解析。
+func (sa *SemanticAnalyzer) findClassStmt(name string) *ast.ClassStatement {
+	if sa.program != nil {
+		if stmt := sa.program.FindClass(name); stmt != nil {
+			return stmt
+		}
+	}
+	if info := sa.localPubTypes[name]; info != nil && info.Class != nil {
+		return info.Class
+	}
+	return nil
+}
+
 func (sa *SemanticAnalyzer) analyzeClassStatement(stmt *ast.ClassStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, "class", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 	// 注册成员字段（scope=field_<类名>，供方法体 self.xxx / 裸字段名引用）
@@ -2191,7 +2256,7 @@ func (sa *SemanticAnalyzer) classFieldAccessHint(name string) string {
 	if className == "" {
 		return ""
 	}
-	classStmt := sa.program.FindClass(className)
+	classStmt := sa.findClassStmt(className)
 	if classStmt == nil {
 		return ""
 	}
@@ -2451,7 +2516,7 @@ func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
 		if e.Name == "self" {
 			if sym := sa.symbolTable.GetSymbol("self"); sym != nil && sym.Type != "" {
 				name := strings.TrimSuffix(sym.Type, "*")
-				if sa.program.FindClass(name) != nil {
+				if sa.findClassStmt(name) != nil {
 					return name
 				}
 			}
@@ -2469,7 +2534,7 @@ func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
 		}
 		if sym := sa.symbolTable.GetSymbol(e.Name); sym != nil && sym.Type != "" {
 			name := strings.TrimSuffix(sym.Type, "*")
-			if sa.program.FindClass(name) != nil {
+			if sa.findClassStmt(name) != nil {
 				return name
 			}
 		}
@@ -2477,7 +2542,7 @@ func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
 		fieldType := sa.classFieldType(sa.memberObjectClassName(e.Object), e.Member)
 		if fieldType != "" {
 			name := strings.TrimSuffix(fieldType, "*")
-			if sa.program.FindClass(name) != nil {
+			if sa.findClassStmt(name) != nil {
 				return name
 			}
 		}
@@ -2487,10 +2552,10 @@ func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
 
 // classFieldType 在已定义类中查找字段的 Kaula 类型名；找不到时返回空串
 func (sa *SemanticAnalyzer) classFieldType(className, fieldName string) string {
-	if className == "" || sa.program == nil {
+	if className == "" {
 		return ""
 	}
-	classStmt := sa.program.FindClass(className)
+	classStmt := sa.findClassStmt(className)
 	if classStmt == nil {
 		return ""
 	}

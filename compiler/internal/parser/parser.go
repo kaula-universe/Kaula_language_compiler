@@ -3040,6 +3040,12 @@ func (p *Parser) parseConstructorStatementIterative() *ast.ConstructorStatement 
 			p.log("跳过参数类型：%s", p.curTok.Value)
 			p.nextToken()
 			p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+			// Type* name 形式（指针后缀）
+			if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+				param.Type += "*"
+				p.log("构造函数指针后缀：%s", param.Type)
+				p.nextToken()
+			}
 			if p.curTok.Type == lexer.TOKEN_QUESTION {
 				param.Nullable = true
 				p.log("跳过 QUESTION token")

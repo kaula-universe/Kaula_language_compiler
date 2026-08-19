@@ -40,6 +40,7 @@ func LookupPaths() []string {
 		exeDir := filepath.Dir(filepath.Clean(exePath))
 		candidates = append(candidates,
 			filepath.Join(exeDir, "version.json"),
+			filepath.Join(exeDir, "compiler", "version.json"),
 			filepath.Join(exeDir, "..", "compiler", "version.json"),
 			// 开发布局: build/bin/kaulac.exe -> ../../compiler/version.json
 			filepath.Join(exeDir, "..", "..", "compiler", "version.json"))

@@ -149,8 +149,11 @@ func LoadConfig() (*Config, error) {
 	config := DefaultConfig()
 
 	// 2. 从 kaula.json 加载项目配置
+	var cfgErr error
 	if err := loadProjectConfig(config); err != nil {
-		return nil, fmt.Errorf("failed to load kaula.json: %w", err)
+		// kaula.json 缺失或损坏（如空文件）时仍返回可用配置，
+		// 保证调用方不会拿到 nil config（命令行 flag 依然生效）
+		cfgErr = fmt.Errorf("failed to load kaula.json: %w", err)
 	}
 
 	// 3. 从命令行 flag 加载（覆盖配置文件）
@@ -159,7 +162,7 @@ func LoadConfig() (*Config, error) {
 	// 4. 规范化路径
 	normalizePaths(config)
 
-	return config, nil
+	return config, cfgErr
 }
 
 // loadProjectConfig 从 kaula.json 加载项目配置

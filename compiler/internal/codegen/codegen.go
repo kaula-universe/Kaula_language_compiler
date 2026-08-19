@@ -5,6 +5,7 @@ import (
 	"compiler/internal/ast"
 	"compiler/internal/config"
 	"compiler/internal/core"
+	"compiler/internal/sema"
 	"compiler/internal/stdlib"
 	"compiler/internal/symbol"
 	"compiler/internal/version"
@@ -48,6 +49,8 @@ type CodeGenerator struct {
 
 	usedThirdPartyLibs map[string]bool
 	localImportFuncs   map[string]bool
+	// 本地 import 的类型定义（跨文件 class/struct 等），用于 C 类型映射与成员访问解析
+	localPubTypes map[string]*sema.LocalPubTypeInfo
 
 	genericCache          map[string]*GenericInstanceCache
 	genericInstantiated   map[string]bool
@@ -510,6 +513,28 @@ func (cg *CodeGenerator) trackModuleUsage(moduleName string) {
 // SetLocalImportFuncs 注册本地导入的 pub 函数名
 func (cg *CodeGenerator) SetLocalImportFuncs(funcs map[string]bool) {
 	cg.localImportFuncs = funcs
+}
+
+// SetLocalPubTypes 注册本地导入的类型定义（跨文件 class/struct 等）。
+// 同时登记到 typeGenerator 的 struct/class 类型表，使 convertType / IsClassType
+// 能正确生成指针语义（class）或值语义（struct）的 C 类型。
+func (cg *CodeGenerator) SetLocalPubTypes(types map[string]*sema.LocalPubTypeInfo) {
+	cg.localPubTypes = types
+	if cg.typeGenerator == nil {
+		return
+	}
+	for name, info := range types {
+		if info == nil {
+			continue
+		}
+		switch info.Kind {
+		case "class":
+			cg.typeGenerator.structTypes[name] = true
+			cg.typeGenerator.classTypes[name] = true
+		case "struct":
+			cg.typeGenerator.structTypes[name] = true
+		}
+	}
 }
 
 func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
@@ -1781,17 +1806,31 @@ func (cg *CodeGenerator) IsEnumType(name string) bool {
 	return false
 }
 
+// findClassStmt 查找类定义：优先查主程序 AST，其次查本地 import 的类型。
+// 支持跨文件类（import "ml/nn.kl"）的字段类型推断与成员访问解析。
+func (cg *CodeGenerator) findClassStmt(name string) *ast.ClassStatement {
+	if cg.program != nil {
+		if stmt := cg.program.FindClass(name); stmt != nil {
+			return stmt
+		}
+	}
+	if info := cg.localPubTypes[name]; info != nil && info.Class != nil {
+		return info.Class
+	}
+	return nil
+}
+
 // IsClassType 检查指定名称是否是已定义的类类型（含已实例化的泛型类：如 Box_int）
 func (cg *CodeGenerator) IsClassType(name string) bool {
-	if cg.program == nil {
+	if cg.program == nil && len(cg.localPubTypes) == 0 {
 		return false
 	}
 	// 首先尝试直接查找（非泛型或已实例化的泛型类型在 typeGenerator.structTypes 中注册）
-	if cg.typeGenerator.structTypes[name] && cg.program.FindClass(name) != nil {
+	if cg.typeGenerator.structTypes[name] && cg.findClassStmt(name) != nil {
 		return true
 	}
 	// 查 AST 中的类定义
-	if cg.program.FindClass(name) != nil {
+	if cg.findClassStmt(name) != nil {
 		return true
 	}
 	return false

@@ -1,0 +1,28 @@
+export class P4 {
+    a: i32
+    b: i32
+    c: i32
+    d: i32
+
+    constructor(i32 a, i32 b, i32 c, i32 d) {
+        self.a = a
+        self.b = b
+        self.c = c
+        self.d = d
+    }
+}
+
+export class P4Holder {
+    cnt: i32
+    P4* items
+
+    constructor() {
+        self.cnt = 2
+        self.items = as<P4*>(std.memory.kmm_v4_calloc(2, 64))
+        for l in range(2) {
+            i32 x = l + 1
+            P4 p = P4(x, x, x, x)
+            self.items[l] = p
+        }
+    }
+}
