@@ -544,6 +544,12 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
+		// 自引用指针字段(如 Expr* a): struct 定义内 typedef 尚未生效,
+		// 必须用 struct 前缀 (struct K_Expr*), 否则 C 编译报
+		// "must use 'struct' tag to refer to type"
+		if field.Type == stmt.Name+"*" || field.Type == stmt.Name+" *" {
+			fieldType = "struct " + kaulaStructTag(stmt.Name) + "*"
+		}
 		// 位域: fieldName: type : width → type fieldName : width;
 		bitSuffix := ""
 		if field.BitWidth > 0 {

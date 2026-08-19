@@ -160,6 +160,7 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	localAnalyzer.SetLocalModuleFuncs(collectLocalAllFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalPubVars(collectLocalPubVars(localProgram, depDir))
 	localAnalyzer.SetLocalPubTypes(collectLocalPubTypes(localProgram, depDir))
+	localAnalyzer.SetLibraryMode(true) // 库文件: 跳过 unused-function 检查(函数可能被外部调用)
 	localAnalyzer.SetSOREnabled(s.cfg.SOR)
 	localAnalyzer.Analyze(localProgram)
 
@@ -215,8 +216,12 @@ func extractFunctionDefs(cCode string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// 跳过 #include 行
-		if strings.HasPrefix(trimmed, "#include") {
+		// 注意: #include 行不再跳过——库文件用到的 std 头(如 "memory/memory.h")
+		// 必须保留, 否则 kmm_v4_alloc 等函数在合并后的 C 中未声明。
+		// 所有头文件都有 include guard, 重复包含无害。
+
+		// 跳过 Windows 浮点 stub(每个生成 TU 各有一份, 提取会与主文件重复定义)
+		if strings.HasPrefix(trimmed, "int _fltused") {
 			continue
 		}
 
@@ -1704,6 +1709,8 @@ func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool
 	visit(program, inputDir)
 	return allFuncs
 }
+
+
 
 // collectLocalPubVars 扫描本地 import 的 .kl 文件，收集 pub/export 变量名
 // （跨文件变量引用不被判为未定义）

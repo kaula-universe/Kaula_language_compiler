@@ -81,6 +81,11 @@ type CodeGenerator struct {
 	// funcEmitsPromote: 当前函数是否发射了 kmm_v4_scope_promote_p（yield/extract/return promote）
 	// 若为 true，则函数出口/return 不发射 survivor_rewind（survivor 对象已逃逸到调用方）
 	funcEmitsPromote bool
+	// funcHasKMMCheckpoint: 当前函数入口是否生成了 __surv_cp checkpoint 声明
+	// (仅函数级 useKMM 时生成; return 里的 survivor_rewind(__surv_cp) 引用它, 无声明时不能发射)
+	funcHasKMMCheckpoint bool
+	// needsStringConcat: 代码中使用了字符串拼接("a" + x), 注入内联 string 运行时
+	needsStringConcat bool
 
 	// 修复 #25：符号声明时的 codegen 作用域栈深度（函数体=1，if/while/block=2+）
 	// SOR 分析器不把 if/while 块计为作用域（scopeID 恒为 0），
@@ -1011,6 +1016,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	}
 
 	// 动态对象运行时头文件（仅在代码中使用了 object 功能时注入）
+	// 注意: 字符串拼接("a" + x)不需要注入——std.h 默认链入 string/string.h,
+	// string_concat/string_concat_int/string_concat_float 声明与实现(kaula_std.lib)均可用
 	if cg.needsObjRuntime {
 		allIncludes.WriteString("#include \"obj/obj.h\"\n")
 		// 注入字符串运行时的最小内联实现（仅依赖 KMM 分配器，避免链接整个 std.string 模块）
@@ -1021,6 +1028,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 #include "base/types.h"
 #include "memory/memory.h"
 #include <string.h>
+#include <stdio.h>
 
 static inline String string_create(const char* str) {
     if (!str) { String r = {0, NULL}; return r; }
@@ -1041,6 +1049,18 @@ static inline String string_concat(String str1, String str2) {
     }
     String r = {total, data};
     return r;
+}
+
+static inline String string_concat_int(String s, int64_t v) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    return string_concat(s, string_create(buf));
+}
+
+static inline String string_concat_float(String s, double v) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%f", v);
+    return string_concat(s, string_create(buf));
 }
 #endif
 // --- end inline string runtime ---
@@ -1825,6 +1845,11 @@ func (cg *CodeGenerator) IsClassType(name string) bool {
 	if cg.program == nil && len(cg.localPubTypes) == 0 {
 		return false
 	}
+	// 跨文件 import 的 class(SetLocalImportTypes 注册): 类定义在库文件的 AST 中,
+	// 主 program.FindClass 查不到, 直接按 classTypes 注册放行
+	if cg.typeGenerator != nil && cg.typeGenerator.classTypes[name] {
+		return true
+	}
 	// 首先尝试直接查找（非泛型或已实例化的泛型类型在 typeGenerator.structTypes 中注册）
 	if cg.typeGenerator.structTypes[name] && cg.findClassStmt(name) != nil {
 		return true
@@ -1927,7 +1952,7 @@ func (cg *CodeGenerator) tryEvalConstExpr(expr ast.Expression) string {
 	case *ast.IntegerLiteral:
 		return strconv.FormatUint(e.Value, 10)
 	case *ast.FloatLiteral:
-		return strconv.FormatFloat(e.Value, 'f', -1, 64)
+		return formatFloatLiteral(e.Value)
 	case *ast.BooleanLiteral:
 		if e.Value {
 			return "1"
@@ -1993,16 +2018,16 @@ func (cg *CodeGenerator) evalBinaryOp(op, left, right string) string {
 	if lfErr == nil && rfErr == nil {
 		switch op {
 		case "+":
-			return strconv.FormatFloat(lf+rf, 'f', -1, 64)
+			return formatFloatLiteral(lf + rf)
 		case "-":
-			return strconv.FormatFloat(lf-rf, 'f', -1, 64)
+			return formatFloatLiteral(lf - rf)
 		case "*":
-			return strconv.FormatFloat(lf*rf, 'f', -1, 64)
+			return formatFloatLiteral(lf * rf)
 		case "/":
 			if rf == 0 {
 				return ""
 			}
-			return strconv.FormatFloat(lf/rf, 'f', -1, 64)
+			return formatFloatLiteral(lf / rf)
 		}
 	}
 	return ""

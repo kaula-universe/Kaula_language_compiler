@@ -3187,6 +3187,11 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 			Left:     left,
 			Operator: operator,
 			Right:    right,
+			Pos: ast.Position{
+				Line:   opTok.Line,
+				Column: opTok.Column,
+				File:   p.file,
+			},
 		}
 	}
 

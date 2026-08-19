@@ -453,28 +453,36 @@ func FormatErrorWithContext(err *Error) string {
 		errorType, color = "Unknown Error", ansiRed
 	}
 
-	// 第一行: 文件名:行号:列号: 级别: 类别 (整行按级别着色: 警告黄/错误红)
-	if colorEnabled {
-		result.WriteString(ansiBold)
-		result.WriteString(color)
-	}
+	// 第一行: 文件名(粗体):行号:列号: 等级词(错误红/警告黄): 类别
 	if err.File != "" {
+		if colorEnabled {
+			result.WriteString(ansiBold)
+		}
+		result.WriteString(err.File)
+		if colorEnabled {
+			result.WriteString(ansiReset)
+		}
 		if err.Line > 0 {
-			result.WriteString(fmt.Sprintf("%s:%d:%d: ", err.File, err.Line, err.Column))
+			result.WriteString(fmt.Sprintf(":%d:%d: ", err.Line, err.Column))
 		} else {
-			result.WriteString(fmt.Sprintf("%s: ", err.File))
+			result.WriteString(": ")
 		}
 	} else {
 		if err.Line > 0 {
 			result.WriteString(fmt.Sprintf("%d:%d: ", err.Line, err.Column))
 		}
 	}
-	result.WriteString(errorType)
-	if err.Code != "" {
-		result.WriteString(": " + err.Code)
+	// 等级词(如 Semantic Error / Warning): 错误红、警告黄, 粗体保持醒目
+	if colorEnabled {
+		result.WriteString(ansiBold)
+		result.WriteString(color)
 	}
+	result.WriteString(errorType)
 	if colorEnabled {
 		result.WriteString(ansiReset)
+	}
+	if err.Code != "" {
+		result.WriteString(": " + err.Code)
 	}
 	result.WriteString("\n")
 

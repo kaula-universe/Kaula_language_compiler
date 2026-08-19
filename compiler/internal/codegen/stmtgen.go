@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"os"
 	"compiler/internal/ast"
 	"compiler/internal/core"
 	"regexp"
@@ -162,6 +163,10 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
+	if os.Getenv("KAULA_DEBUG_VARDECL") != "" {
+		fmt.Printf("[DEBUG-VARDECL] name=%s type=%q nullable=%v cType=%q classTypes[Tensor]=%v\n",
+			stmt.Name, stmt.Type, stmt.Nullable, cType, sg.codegen.typeGenerator.classTypes[stmt.Type])
+	}
 	// class 类型变量: 引用语义, C 类型为指针 (K_A*)
 	if sg.codegen.typeGenerator != nil && sg.codegen.typeGenerator.classTypes[stmt.Type] && !strings.HasSuffix(cType, "*") {
 		cType += "*"
@@ -1521,7 +1526,8 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 
 	// 方案 C：若函数不向外 promote，return 前回卷 survivor 段
 	// （若 return 自身 promote 了返回值，funcEmitsPromote 已为 true，跳过）
-	if sg.codegen.kmmScopeDepth > 0 && !sg.codegen.funcEmitsPromote {
+	// 只有函数级 useKMM 生成了 __surv_cp 声明时才发射 rewind(否则引用未声明变量)
+	if sg.codegen.kmmScopeDepth > 0 && !sg.codegen.funcEmitsPromote && sg.codegen.funcHasKMMCheckpoint {
 		b.WriteString(sg.codegen.indentString())
 		b.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim on return */\n")
 	}
