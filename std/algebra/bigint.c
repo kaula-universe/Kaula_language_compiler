@@ -26,13 +26,13 @@ static u32 g_crt_inv_p1_mod_p2 = 0;
 
 #ifdef _MSC_VER
 #include <intrin.h>
-static u32 clz32(u32 x) {
+static u32 clz64(u64 x) {
     unsigned long idx;
-    return _BitScanReverse(&idx, x) ? (u32)(31 - idx) : 32;
+    return _BitScanReverse64(&idx, x) ? (u32)(63 - idx) : 64;
 }
 #else
-static u32 clz32(u32 x) {
-    return x ? (u32)__builtin_clz(x) : 32;
+static u32 clz64(u64 x) {
+    return x ? (u32)__builtin_clzll(x) : 64;
 }
 #endif
 
@@ -141,38 +141,38 @@ static void bigint_trim(BigInt* x) {
 static BigInt bigint_alloc(size_t count, bool_t negative) {
     BigInt x;
     x.count = count > 0 ? count : 1;
-    x.limbs = (u32*)kmm_v4_calloc(x.count, sizeof(u32));
+    // 用系统 malloc(limbs 跨函数/跨存储存活; survivor 段会在函数返回时被回收导致悬空)
+    x.limbs = (u64*)std_malloc(x.count * sizeof(u64));
+    if (x.limbs) memset(x.limbs, 0, x.count * sizeof(u64));
     x.negative = negative;
     return x;
 }
 
 BigInt bigint_from_i64(i64 value) {
-    BigInt x = bigint_alloc(2, value < 0);
+    BigInt x = bigint_alloc(1, value < 0);
     u64 v = value < 0 ? (u64)(-(value + 1)) + 1 : (u64)value;
-    x.limbs[0] = (u32)(v & 0xFFFFFFFFu);
-    x.limbs[1] = (u32)(v >> 32);
+    x.limbs[0] = v;
     bigint_trim(&x);
     return x;
 }
 
 BigInt bigint_from_u64(u64 value) {
-    BigInt x = bigint_alloc(2, false);
-    x.limbs[0] = (u32)(value & 0xFFFFFFFFu);
-    x.limbs[1] = (u32)(value >> 32);
+    BigInt x = bigint_alloc(1, false);
+    x.limbs[0] = value;
     bigint_trim(&x);
     return x;
 }
 
 BigInt bigint_copy(const BigInt* src) {
     BigInt x = bigint_alloc(src->count, src->negative);
-    memcpy(x.limbs, src->limbs, src->count * sizeof(u32));
+    memcpy(x.limbs, src->limbs, src->count * sizeof(u64));
     return x;
 }
 
 void bigint_destroy(BigInt* x) {
     if (!x) return;
     if (x->limbs) {
-        kmm_v4_free(x->limbs);
+        std_free(x->limbs);
         x->limbs = NULL;
     }
     x->count = 0;
@@ -198,15 +198,11 @@ int bigint_sign(const BigInt* x) {
 
 size_t bigint_bit_length(const BigInt* x) {
     if (bigint_is_zero(x)) return 0;
-    return (x->count - 1) * 32 + (size_t)(32 - clz32(x->limbs[x->count - 1]));
+    return (x->count - 1) * 64 + (size_t)(64 - clz64(x->limbs[x->count - 1]));
 }
 
 i64 bigint_to_i64(const BigInt* x) {
-    u64 v = 0;
-    size_t n = x->count < 2 ? x->count : 2;
-    for (size_t i = n; i-- > 0;) {
-        v = (v << 32) | x->limbs[i];
-    }
+    u64 v = x->count > 0 ? x->limbs[0] : 0;
     if (x->negative) v = ~v + 1;
     return (i64)v;
 }
@@ -247,11 +243,11 @@ static BigInt bigint_add_mag(const BigInt* a, const BigInt* b) {
     for (size_t i = 0; i < n; i++) {
         u64 av = i < a->count ? a->limbs[i] : 0;
         u64 bv = i < b->count ? b->limbs[i] : 0;
-        u64 s = av + bv + carry;
-        r.limbs[i] = (u32)(s & 0xFFFFFFFFu);
-        carry = s >> 32;
+        __uint128_t s = (__uint128_t)av + bv + carry;
+        r.limbs[i] = (u64)s;
+        carry = (u64)(s >> 64);
     }
-    r.limbs[n] = (u32)carry;
+    r.limbs[n] = carry;
     bigint_trim(&r);
     return r;
 }
@@ -263,9 +259,9 @@ static BigInt bigint_sub_mag(const BigInt* a, const BigInt* b) {
     for (size_t i = 0; i < n; i++) {
         u64 av = a->limbs[i];
         u64 bv = i < b->count ? b->limbs[i] : 0;
-        u64 d = av - bv - borrow;
-        borrow = (d >> 63) & 1;
-        r.limbs[i] = (u32)(d & 0xFFFFFFFFu);
+        __uint128_t d = (__uint128_t)av - bv - borrow;
+        borrow = (u64)(d >> 64) & 1;
+        r.limbs[i] = (u64)d;
     }
     bigint_trim(&r);
     return r;
@@ -301,15 +297,15 @@ static BigInt bigint_mul_schoolbook(const BigInt* a, const BigInt* b) {
     for (size_t i = 0; i < a->count; i++) {
         u64 carry = 0;
         for (size_t j = 0; j < b->count; j++) {
-            u64 cur = (u64)a->limbs[i] * b->limbs[j] + r.limbs[i + j] + carry;
-            r.limbs[i + j] = (u32)(cur & 0xFFFFFFFFu);
-            carry = cur >> 32;
+            __uint128_t cur = (__uint128_t)a->limbs[i] * b->limbs[j] + r.limbs[i + j] + carry;
+            r.limbs[i + j] = (u64)cur;
+            carry = (u64)(cur >> 64);
         }
         size_t k = i + b->count;
         while (carry > 0 && k < r.count) {
-            u64 s = (u64)r.limbs[k] + carry;
-            r.limbs[k] = (u32)(s & 0xFFFFFFFFu);
-            carry = s >> 32;
+            __uint128_t s = (__uint128_t)r.limbs[k] + carry;
+            r.limbs[k] = (u64)s;
+            carry = (u64)(s >> 64);
             k++;
         }
     }
@@ -324,30 +320,30 @@ static size_t bigint_digit_count(const BigInt* x) {
 
 static u32 bigint_get_digit(const BigInt* x, size_t index) {
     size_t bit = (size_t)NTT_DIGIT_BITS * index;
-    size_t limb = bit / 32;
-    size_t shift = bit % 32;
-    u64 v = limb < x->count ? x->limbs[limb] : 0;
-    if (shift + NTT_DIGIT_BITS > 32 && limb + 1 < x->count) {
-        v |= (u64)x->limbs[limb + 1] << 32;
+    size_t limb = bit / 64;
+    size_t shift = bit % 64;
+    __uint128_t v = limb < x->count ? x->limbs[limb] : 0;
+    if (shift + NTT_DIGIT_BITS > 64 && limb + 1 < x->count) {
+        v |= (__uint128_t)x->limbs[limb + 1] << 64;
     }
     return (u32)((v >> shift) & NTT_DIGIT_MASK);
 }
 
 static BigInt bigint_from_digits(const u64* digits, size_t count) {
     size_t bits = (size_t)NTT_DIGIT_BITS * count;
-    size_t limb_count = (bits + 31) / 32;
+    size_t limb_count = (bits + 63) / 64;
     BigInt r = bigint_alloc(limb_count, false);
     for (size_t j = 0; j < limb_count; j++) {
-        size_t start_bit = 32 * j;
+        size_t start_bit = 64 * j;
         size_t d0 = start_bit / NTT_DIGIT_BITS;
         size_t rem = start_bit % NTT_DIGIT_BITS;
-        u64 acc = 0;
-        for (int k = 0; k < 4; k++) {
+        __uint128_t acc = 0;
+        for (int k = 0; k < 5; k++) {
             if (d0 + (size_t)k < count) {
-                acc |= (u64)digits[d0 + (size_t)k] << (15 * k);
+                acc |= (__uint128_t)digits[d0 + (size_t)k] << (15 * k);
             }
         }
-        r.limbs[j] = (u32)((acc >> rem) & 0xFFFFFFFFu);
+        r.limbs[j] = (u64)((acc >> rem) & 0xFFFFFFFFFFFFFFFFull);
     }
     bigint_trim(&r);
     return r;
@@ -437,15 +433,15 @@ BigInt bigint_multiply(const BigInt* a, const BigInt* b) {
     return r;
 }
 
-static u32 bigint_divmod_small(BigInt* x, u32 divisor) {
+static u64 bigint_divmod_small(BigInt* x, u64 divisor) {
     u64 rem = 0;
     for (size_t i = x->count; i-- > 0;) {
-        u64 cur = (rem << 32) | x->limbs[i];
-        x->limbs[i] = (u32)(cur / divisor);
-        rem = cur % divisor;
+        __uint128_t cur = ((__uint128_t)rem << 64) | x->limbs[i];
+        x->limbs[i] = (u64)(cur / divisor);
+        rem = (u64)(cur % divisor);
     }
     bigint_trim(x);
-    return (u32)rem;
+    return rem;
 }
 
 static void bigint_divmod_mag(const BigInt* num, const BigInt* den,
@@ -464,11 +460,11 @@ static void bigint_divmod_mag(const BigInt* num, const BigInt* den,
         return;
     }
 
-    u32 shift = clz32(den->limbs[n - 1]);
+    u32 shift = clz64(den->limbs[n - 1]);
     size_t m = num->count - n;
     size_t u_count = m + n + 1;
-    u32* U = (u32*)kmm_v4_calloc(u_count, sizeof(u32));
-    u32* V = (u32*)kmm_v4_calloc(n, sizeof(u32));
+    u64* U = (u64*)kmm_v4_calloc(u_count, sizeof(u64));
+    u64* V = (u64*)kmm_v4_calloc(n, sizeof(u64));
     if (!U || !V) {
         if (U) kmm_v4_free(U);
         if (V) kmm_v4_free(V);
@@ -481,22 +477,22 @@ static void bigint_divmod_mag(const BigInt* num, const BigInt* den,
         for (size_t i = 0; i < num->count; i++) U[i] = num->limbs[i];
         for (size_t i = 0; i < n; i++) V[i] = den->limbs[i];
     } else {
-        u32 carry = 0;
+        u64 carry = 0;
         for (size_t i = 0; i < n; i++) {
-            u64 cur = ((u64)den->limbs[i] << shift) | carry;
-            V[i] = (u32)cur;
-            carry = (u32)(cur >> 32);
+            __uint128_t cur = ((__uint128_t)den->limbs[i] << shift) | carry;
+            V[i] = (u64)cur;
+            carry = (u64)(cur >> 64);
         }
         carry = 0;
         for (size_t i = 0; i < num->count; i++) {
-            u64 cur = ((u64)num->limbs[i] << shift) | carry;
-            U[i] = (u32)cur;
-            carry = (u32)(cur >> 32);
+            __uint128_t cur = ((__uint128_t)num->limbs[i] << shift) | carry;
+            U[i] = (u64)cur;
+            carry = (u64)(cur >> 64);
         }
         U[num->count] = carry;
     }
 
-    u32* Q = (u32*)kmm_v4_calloc(m + 1, sizeof(u32));
+    u64* Q = (u64*)kmm_v4_calloc(m + 1, sizeof(u64));
     if (!Q) {
         kmm_v4_free(U);
         kmm_v4_free(V);
@@ -505,57 +501,57 @@ static void bigint_divmod_mag(const BigInt* num, const BigInt* den,
         return;
     }
 
-    const u64 B = 1ull << 32;
+    const __uint128_t B = (__uint128_t)1 << 64;
     for (size_t j = m + 1; j-- > 0;) {
-        u64 top = ((u64)U[j + n] << 32) | U[j + n - 1];
-        u64 qhat = top / V[n - 1];
-        u64 rhat = top % V[n - 1];
-        while (qhat >= B || qhat * V[n - 2] > ((rhat << 32) | U[j + n - 2])) {
+        __uint128_t top = ((__uint128_t)U[j + n] << 64) | U[j + n - 1];
+        u64 qhat = (u64)(top / V[n - 1]);
+        u64 rhat = (u64)(top % V[n - 1]);
+        while ((__uint128_t)qhat * V[n - 2] > (((__uint128_t)rhat << 64) | U[j + n - 2])) {
             qhat--;
             rhat += V[n - 1];
-            if (rhat >= B) break;
+            if (rhat >= (u64)B) break;
         }
         u64 borrow = 0;
         for (size_t i = 0; i < n; i++) {
-            u64 p = qhat * V[i] + borrow;
-            borrow = p >> 32;
-            u64 sub = p & 0xFFFFFFFFu;
+            __uint128_t p = (__uint128_t)qhat * V[i] + borrow;
+            borrow = (u64)(p >> 64);
+            u64 sub = (u64)p;
             u64 uv = U[j + i];
             if (uv < sub) {
-                U[j + i] = (u32)(uv + B - sub);
+                U[j + i] = (u64)(uv + (u64)B - sub);
                 borrow++;
             } else {
-                U[j + i] = (u32)(uv - sub);
+                U[j + i] = uv - sub;
             }
         }
         if (U[j + n] < borrow) {
             u64 carry = 0;
             for (size_t i = 0; i < n; i++) {
-                u64 s = (u64)U[j + i] + V[i] + carry;
-                U[j + i] = (u32)(s & 0xFFFFFFFFu);
-                carry = s >> 32;
+                __uint128_t s = (__uint128_t)U[j + i] + V[i] + carry;
+                U[j + i] = (u64)s;
+                carry = (u64)(s >> 64);
             }
-            U[j + n] = (u32)(U[j + n] + carry);
+            U[j + n] = U[j + n] + carry;
             qhat--;
         } else {
-            U[j + n] = (u32)(U[j + n] - borrow);
+            U[j + n] = U[j + n] - borrow;
         }
-        Q[j] = (u32)qhat;
+        Q[j] = qhat;
     }
 
     BigInt q = bigint_alloc(m + 1, false);
-    memcpy(q.limbs, Q, (m + 1) * sizeof(u32));
+    memcpy(q.limbs, Q, (m + 1) * sizeof(u64));
     bigint_trim(&q);
 
     BigInt r = bigint_alloc(n, false);
     if (shift == 0) {
-        memcpy(r.limbs, U, n * sizeof(u32));
+        memcpy(r.limbs, U, n * sizeof(u64));
     } else {
-        u32 carry = 0;
+        u64 carry = 0;
         for (size_t i = n; i-- > 0;) {
-            u32 cur = U[i];
-            r.limbs[i] = (cur >> shift) | (carry << (32 - shift));
-            carry = cur & ((1u << shift) - 1u);
+            u64 cur = U[i];
+            r.limbs[i] = (cur >> shift) | (carry << (64 - shift));
+            carry = cur & (((u64)1 << shift) - 1u);
         }
     }
     bigint_trim(&r);
@@ -711,7 +707,7 @@ char* bigint_to_string(const BigInt* x) {
         s[0] = '0';
         return s;
     }
-    size_t chunks_capacity = (x->count * 32 + 28) / 29 + 4;
+    size_t chunks_capacity = (x->count * 64 + 28) / 29 + 4;
     u32* chunks = (u32*)kmm_v4_malloc(chunks_capacity * sizeof(u32));
     if (!chunks) return NULL;
     size_t n = bigint_decimal_chunks(x, chunks, chunks_capacity);

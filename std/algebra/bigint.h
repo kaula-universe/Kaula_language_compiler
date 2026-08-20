@@ -4,7 +4,7 @@
 #include "../base/types.h"
 
 typedef struct BigInt {
-    u32* limbs;
+    u64* limbs;
     size_t count;
     bool_t negative;
 } BigInt;

@@ -8769,7 +8769,6 @@
       "return": "bool_t"
     }
   },
-
   "freestanding.base": {
     "header": "freestanding/base/types.h",
     "to_i8": {
@@ -8959,7 +8958,6 @@
       "return": "bool"
     }
   },
-
   "freestanding.memory": {
     "header": "freestanding/memory/memory.h",
     "memset": {
@@ -9028,7 +9026,6 @@
       "return": "size_t"
     }
   },
-
   "freestanding.string": {
     "header": "freestanding/string/string.h",
     "strlen": {
@@ -9235,7 +9232,6 @@
       "return": "char*"
     }
   },
-
   "freestanding.math": {
     "header": "freestanding/math/math.h",
     "math_abs": {
@@ -9459,7 +9455,6 @@
       "return": "f64"
     }
   },
-
   "freestanding.io": {
     "header": "freestanding/io/io.h",
     "println": {
@@ -10048,18 +10043,18 @@
     },
     "bigint_destroy": {
       "args": [
-        "void()"
+        "BigInt*"
       ]
     },
     "bigint_is_zero": {
       "args": [
-        "void()"
+        "BigInt*"
       ],
       "return": "bool"
     },
     "bigint_is_negative": {
       "args": [
-        "void()"
+        "BigInt*"
       ],
       "return": "bool"
     },
@@ -10071,9 +10066,9 @@
     },
     "bigint_sign": {
       "args": [
-        "void()"
+        "BigInt*"
       ],
-      "return": "i32"
+      "return": "int"
     },
     "bigint_bit_length": {
       "args": [
@@ -10083,16 +10078,16 @@
     },
     "bigint_to_i64": {
       "args": [
-        "void()"
+        "BigInt*"
       ],
       "return": "i64"
     },
     "bigint_compare": {
       "args": [
-        "void()",
-        "void()"
+        "BigInt*",
+        "BigInt*"
       ],
-      "return": "i32"
+      "return": "int"
     },
     "bigint_divmod": {
       "args": [
@@ -10104,9 +10099,9 @@
     },
     "bigint_to_string": {
       "args": [
-        "void()"
+        "BigInt*"
       ],
-      "return": "void()"
+      "return": "char*"
     },
     "poly_destroy": {
       "args": [
@@ -10165,6 +10160,81 @@
         "void()"
       ],
       "return": "bool"
+    },
+    "types": {
+      "BigInt": {}
+    },
+    "bigint_from_i64": {
+      "args": [
+        "i64"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_from_string": {
+      "args": [
+        "const char*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_copy": {
+      "args": [
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_abs": {
+      "args": [
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_negate": {
+      "args": [
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_add": {
+      "args": [
+        "BigInt*",
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_subtract": {
+      "args": [
+        "BigInt*",
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_multiply": {
+      "args": [
+        "BigInt*",
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_divide": {
+      "args": [
+        "BigInt*",
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_mod": {
+      "args": [
+        "BigInt*",
+        "BigInt*"
+      ],
+      "return": "BigInt"
+    },
+    "bigint_gcd": {
+      "args": [
+        "BigInt*",
+        "BigInt*"
+      ],
+      "return": "BigInt"
     }
   },
   "std.bitset": {

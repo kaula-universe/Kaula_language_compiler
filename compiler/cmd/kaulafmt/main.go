@@ -193,7 +193,11 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 	case *ast.IntegerLiteral:
 		f.buf.WriteString(strconv.FormatUint(e.Value, 10))
 	case *ast.FloatLiteral:
-		f.buf.WriteString(strconv.FormatFloat(e.Value, 'g', -1, 64))
+		s := strconv.FormatFloat(e.Value, 'g', -1, 64)
+		if !strings.ContainsAny(s, ".eE") {
+			s += ".0"
+		}
+		f.buf.WriteString(s)
 	case *ast.StringLiteral:
 		f.buf.WriteString(`"` + e.Value + `"`)
 	case *ast.BooleanLiteral:
@@ -1120,9 +1124,52 @@ func (f *Formatter) formatPrefixCallExpression(expr *ast.PrefixCallExpression) {
 }
 
 func (f *Formatter) formatBinaryExpression(expr *ast.BinaryExpression) {
-	f.formatExpression(expr.Left)
+	f.formatBinaryOperand(expr.Left, expr.Operator, true)
 	f.buf.WriteString(" " + expr.Operator + " ")
-	f.formatExpression(expr.Right)
+	f.formatBinaryOperand(expr.Right, expr.Operator, false)
+}
+
+// binOpPrec 返回二元运算符优先级（与 parser 的 precedences 表一致）。
+// 未知运算符返回 0。
+func binOpPrec(op string) int {
+	switch op {
+	case "=":
+		return 1
+	case "||":
+		return 2
+	case "&&":
+		return 3
+	case "==", "!=", "^", "|":
+		return 4
+	case "<", ">", "<=", ">=", "<<", ">>", "&":
+		return 5
+	case "+", "-":
+		return 6
+	case "*", "/", "%":
+		return 7
+	}
+	return 0
+}
+
+// formatBinaryOperand 格式化二元表达式的操作数，必要时补括号以保持
+// 与原 AST 相同的求值顺序（a + (b * c) 的括号一旦丢失语义就变了）。
+func (f *Formatter) formatBinaryOperand(expr ast.Expression, parentOp string, isLeft bool) {
+	if bin, ok := expr.(*ast.BinaryExpression); ok {
+		childPrec := binOpPrec(bin.Operator)
+		parentPrec := binOpPrec(parentOp)
+		needParen := childPrec < parentPrec
+		// 左结合：右侧同优先级子表达式也必须加括号 (a - (b - c))
+		if !isLeft && childPrec == parentPrec {
+			needParen = true
+		}
+		if needParen {
+			f.buf.WriteString("(")
+			f.formatExpression(expr)
+			f.buf.WriteString(")")
+			return
+		}
+	}
+	f.formatExpression(expr)
 }
 
 func (f *Formatter) formatCallExpression(expr *ast.CallExpression) {
