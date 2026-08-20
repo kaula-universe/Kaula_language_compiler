@@ -233,7 +233,7 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	case *ast.IntegerLiteral:
 		return strconv.FormatUint(e.Value, 10)
 	case *ast.FloatLiteral:
-		return strconv.FormatFloat(e.Value, 'f', -1, 64)
+		return formatFloatLiteral(e.Value)
 	case *ast.StringLiteral:
 		escaped := escapeCString(e.Value)
 		return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", decodedCStringLen(escaped), escaped)
@@ -414,6 +414,16 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	if e.Operator == "ASSIGN" || e.Operator == "=" {
 		if ident, ok := e.Left.(*ast.Identifier); ok {
 			eg.codegen.RecordAllocSizeFromAST(ident.Name, e.Right)
+		}
+	}
+
+	// 字符串拼接: "a" + x / x + "a" → string_concat 系列(内联运行时)
+	// 必须在预计算左右表达式之前, 避免 String 值被当作指针算术
+	if e.Operator == "PLUS" || e.Operator == "+" {
+		lt := eg.inferType(e.Left)
+		rt := eg.inferType(e.Right)
+		if eg.isStringLikeFmt(lt) || eg.isStringLikeFmt(rt) {
+			return eg.generateStringConcat(e, lt, rt)
 		}
 	}
 
@@ -667,7 +677,8 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	// 检查是否是结构体构造函数调用（无参数的类型名调用）
 	if ident, ok := e.Function.(*ast.Identifier); ok && len(e.Args) == 0 && len(e.TypeArgs) == 0 {
 		if eg.codegen.IsStructType(ident.Name) {
-			return "(" + ident.Name + "){0}"
+			// 类型名走 mapTypeToC 映射(跨文件 struct 生成 K_<Name>)
+			return "(" + eg.mapTypeToC(ident.Name) + "){0}"
 		}
 	}
 
@@ -1220,6 +1231,34 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 	}
 }
 
+// isStringLikeFmt 判断 inferType 结果是否为字符串类("s"=String 值, "cstr"=char*)
+func (eg *ExpressionGenerator) isStringLikeFmt(t string) bool {
+	return t == "s" || t == "cstr"
+}
+
+// generateStringConcat 生成字符串拼接: "a" + x / x + "a" / "a" + "b"
+// 映射到内联运行时 string_concat / string_concat_int / string_concat_float
+func (eg *ExpressionGenerator) generateStringConcat(e *ast.BinaryExpression, lt, rt string) string {
+	eg.codegen.needsStringConcat = true
+	left := eg.GenerateExpression(e.Left)
+	right := eg.GenerateExpression(e.Right)
+	// 左侧是字符串: string_concat[_int|_float](left, right)
+	if eg.isStringLikeFmt(lt) {
+		if eg.isStringLikeFmt(rt) {
+			return "string_concat(" + left + ", " + right + ")"
+		}
+		if rt == "f" {
+			return "string_concat_float(" + left + ", " + right + ")"
+		}
+		return "string_concat_int(" + left + ", " + right + ")"
+	}
+	// 左侧非字符串, 右侧是字符串: 交换操作数(数字放右侧)
+	if lt == "f" {
+		return "string_concat_float(" + right + ", " + left + ")"
+	}
+	return "string_concat_int(" + right + ", " + left + ")"
+}
+
 // generatePrintlnWithFormat 生成带格式字符串的 println 调用
 func (eg *ExpressionGenerator) generatePrintlnWithFormat(args []ast.Expression) string {
 	var b strings.Builder
@@ -1233,8 +1272,14 @@ func (eg *ExpressionGenerator) generatePrintlnWithFormat(args []ast.Expression) 
 
 	// 输出参数
 	for i := 1; i < len(args); i++ {
+		argType := eg.inferType(args[i])
+		argCode := eg.GenerateExpression(args[i])
+		// string 变量(String*)需要解包为 char* 才能用 %s 打印
+		if argType == "s" || argType == "cstr" {
+			argCode = eg.maybeUnwrapString(argCode, argType)
+		}
 		b.WriteString(", ")
-		b.WriteString(eg.GenerateExpression(args[i]))
+		b.WriteString(argCode)
 	}
 
 	b.WriteString(")")
@@ -1459,6 +1504,16 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 			}
 		}
 		return "d"
+	case *ast.IndexExpression:
+		// 索引访问: 从对象类型推断元素类型(f64* → f64 → %f)
+		elemType := eg.indexElementKaulaType(e.Object)
+		if isFloatTypeToken(elemType) {
+			return "f"
+		}
+		if elemType == "string" || elemType == "str" {
+			return "s"
+		}
+		return "d"
 	case *ast.UnaryExpression:
 		operandType := eg.inferType(e.Right)
 		if e.Operator == "!" {
@@ -1518,13 +1573,78 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 				}
 			}
 		}
+		// 方法调用 obj.method(...)：从类定义查方法返回类型，
+		// 否则 println 等方法调用点的 printf 格式会把 f64 返回值当 %d
+		if member, ok := e.Function.(*ast.MemberAccessExpression); ok {
+			if retType := eg.memberMethodReturnType(member); retType != "" {
+				switch {
+				case retType == "string" || retType == "str":
+					return "s"
+				case isFloatTypeToken(retType):
+					return "f"
+				case normalizePtrType(retType) == "char*" || retType == "cstring":
+					return "cstr"
+				default:
+					return "d"
+				}
+			}
+			// stdlib 模块限定函数调用(std.math.math_sqrt)返回类型
+			if sigRet := eg.stdlibMemberFunctionSig(member); sigRet != "" {
+				switch {
+				case sigRet == "string" || sigRet == "str":
+					return "s"
+				case isFloatTypeToken(sigRet):
+					return "f"
+				case normalizePtrType(sigRet) == "char*" || sigRet == "cstring":
+					return "cstr"
+				default:
+					return "d"
+				}
+			}
+		}
 		return "d"
 	default:
 		return "d"
 	}
 }
 
+// indexElementKaulaType 返回索引访问的对象元素 Kaula 类型:
+//   self.values(f64* 字段) → "f64"; [3]f64 / []f64 变量 → "f64"
+// 用于 println(data[i]) 的格式推断(否则 f64 索引访问被当 %d 打印成 0)
+func (eg *ExpressionGenerator) indexElementKaulaType(obj ast.Expression) string {
+	t := ""
+	switch o := obj.(type) {
+	case *ast.MemberAccessExpression:
+		t = eg.memberFieldKaulaType(o)
+	case *ast.Identifier:
+		if sym := eg.codegen.currentScope.GetSymbol(o.Name); sym != nil {
+			t = sym.Type
+		}
+	}
+	t = strings.TrimSpace(t)
+	if strings.HasSuffix(t, "*") {
+		return strings.TrimSuffix(t, "*")
+	}
+	if strings.HasPrefix(t, "[") {
+		if idx := strings.Index(t, "]"); idx >= 0 {
+			return t[idx+1:]
+		}
+	}
+	return t
+}
+
 // isFloatTypeToken 判断 Kaula 类型名是否为浮点类型
+// formatFloatLiteral 格式化浮点字面量,整数值保留小数点(1000.0 -> "1000.0"),
+// 避免被 C 当成整数(整数除法等语义陷阱);指数形式(如 1e-300)保持短表示,
+// 不用定点展开
+func formatFloatLiteral(v float64) string {
+	s := strconv.FormatFloat(v, 'g', -1, 64)
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
+}
+
 func isFloatTypeToken(t string) bool {
 	switch t {
 	case "float", "float32", "float64", "f32", "f64", "double", "single", "real":
@@ -1548,6 +1668,67 @@ func (eg *ExpressionGenerator) memberFieldKaulaType(e *ast.MemberAccessExpressio
 	for _, f := range classStmt.Fields {
 		if f != nil && f.Name == e.Member {
 			return f.Type
+		}
+	}
+	return ""
+}
+
+// memberMethodReturnType 返回类方法的 Kaula 返回类型名。
+// 找不到类/方法时返回空串。支持 self.method() / 类变量.method()。
+func (eg *ExpressionGenerator) memberMethodReturnType(e *ast.MemberAccessExpression) string {
+	if eg.codegen.program == nil {
+		return ""
+	}
+	className := eg.memberObjectClassName(e.Object)
+	if className == "" {
+		return ""
+	}
+	classStmt := eg.codegen.program.FindClass(className)
+	if classStmt == nil {
+		return ""
+	}
+	for _, m := range classStmt.Methods {
+		if m != nil && m.Name == e.Member {
+			return m.ReturnType
+		}
+	}
+	return ""
+}
+
+// stdlibMemberFunctionSig 返回 stdlib 模块限定函数(std.math.math_sqrt)的 Kaula 返回类型名。
+// 解析规则与 generateMethodCall 的模块识别一致；查不到返回空串。
+func (eg *ExpressionGenerator) stdlibMemberFunctionSig(e *ast.MemberAccessExpression) string {
+	if eg.codegen.stdlibConfig == nil {
+		return ""
+	}
+	methodName := e.Member
+	moduleName := ""
+	isFreeModuleCall := false
+	if ident, ok := e.Object.(*ast.Identifier); ok {
+		moduleName = ident.Name
+	} else if nested, ok := e.Object.(*ast.MemberAccessExpression); ok {
+		moduleName = nested.Member
+		if innerIdent, ok := nested.Object.(*ast.Identifier); ok && innerIdent.Name == "freestanding" {
+			isFreeModuleCall = true
+		}
+	}
+	if moduleName == "" {
+		return ""
+	}
+	stdlibKey := moduleName
+	if isFreeModuleCall {
+		stdlibKey = "freestanding." + moduleName
+	} else if !strings.HasPrefix(stdlibKey, "std.") {
+		stdlibKey = "std." + moduleName
+	}
+	if module, exists := eg.codegen.stdlibConfig.Modules[stdlibKey]; exists {
+		if sig, ok := module.Functions[methodName]; ok {
+			return sig.Return
+		}
+	}
+	if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(methodName); isThirdParty {
+		if sig, ok := lib.Functions[methodName]; ok {
+			return sig.Return
 		}
 	}
 	return ""
@@ -1758,7 +1939,7 @@ func (eg *ExpressionGenerator) boxDynamicValue(expr ast.Expression) string {
 	case *ast.IntegerLiteral:
 		return "dynobj_box_i64(" + strconv.FormatUint(e.Value, 10) + ")"
 	case *ast.FloatLiteral:
-		return "dynobj_box_f64(" + strconv.FormatFloat(e.Value, 'f', -1, 64) + ")"
+		return "dynobj_box_f64(" + formatFloatLiteral(e.Value) + ")"
 	case *ast.BooleanLiteral:
 		if e.Value {
 			return "dynobj_box_bool(1)"

@@ -9,8 +9,10 @@ type Symbol struct {
 	Scope       string
 	Line        int
 	Column      int
-	// Referenced  bool // 是否被引用过（unused 检查用，已注释）
-	// Unused      bool // 声明带 #[unused] 注解，豁免 unused 检查（已注释）
+	Referenced  bool // 是否被引用过(unused 检查用)
+	Unused      bool // 声明带 #[unused] 注解, 豁免 unused 检查
+	Read        bool // 是否被读取过(右值/条件/参数等; 赋值左值不算)
+	Written     bool // 是否被写入过(声明初始化或赋值语句左值)
 	IsGeneric   bool
 	GenericInst *GenericInstanceInfo
 }
@@ -152,6 +154,11 @@ func (st *SymbolTable) HasLocalSymbol(name string) bool {
 	return exists
 }
 
+// IsGlobal 判断当前作用域是否为全局作用域(无父级)
+func (st *SymbolTable) IsGlobal() bool {
+	return st.parent == nil
+}
+
 // IsGenericType 检查是否是泛型类型
 func (st *SymbolTable) IsGenericType(name string) bool {
 	symbol, exists := st.symbols[name]
@@ -199,11 +206,11 @@ func (st *SymbolTable) GetSymbolsInScope(scope string) map[string]*Symbol {
 	return result
 }
 
-// Symbols 返回当前作用域中的所有符号（unused 检查遍历用，已注释）
-// func (st *SymbolTable) Symbols() []*Symbol {
-// 	out := make([]*Symbol, 0, len(st.symbols))
-// 	for _, s := range st.symbols {
-// 		out = append(out, s)
-// 	}
-// 	return out
-// }
+// Symbols 返回当前作用域中的所有符号(unused 检查遍历用)
+func (st *SymbolTable) Symbols() []*Symbol {
+	out := make([]*Symbol, 0, len(st.symbols))
+	for _, s := range st.symbols {
+		out = append(out, s)
+	}
+	return out
+}
