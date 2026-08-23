@@ -110,6 +110,38 @@ kaulac.exe --sor main.kl
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `sourcemap` | bool | `false` | 生成源码映射文件 |
+| `verbose` | bool | `false` | 详细输出 |
+
+### 调试
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `debug` | bool | `false` | 生成 DWARF 调试符号（`-g`） |
+| `debug_level` | string | `"line-tables"` | 调试级别：`line-tables` / `full` |
+
+### 包依赖
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `dependencies` | map | `{}` | 包依赖声明（`{"name": "version"}`） |
+| `registry` | string | `"https://gitee.com/kaula-universe"` | 包注册源 URL |
+| `patches` | map | `{}` | 本地路径覆盖（`{"name": {"path": "..."}}`） |
+
+### 离线/在线模式
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `offline` | bool | `false` | 强制离线模式（缓存未命中则报错） |
+| `online` | bool | `false` | 强制在线模式（忽略锁缓存） |
+
+### 工作空间
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `workspace` | object | `nil` | 工作空间配置 |
+| `workspace.members` | string[] | `[]` | 成员目录列表 |
+| `workspace.shared_deps` | map | `{}` | 共享依赖声明 |
+| `workspace.exclude` | string[] | `[]` | 排除的目录模式 |
 
 ## 完整配置示例
 
@@ -135,7 +167,23 @@ kaulac.exe --sor main.kl
   "c_defines": ["DEBUG=1", "PLATFORM_WINDOWS"],
   "c_libs": ["pthread", "m"],
 
-  "sourcemap": true
+  "sourcemap": true,
+  "debug": true,
+  "debug_level": "full",
+
+  "dependencies": {
+    "webview": "0.12",
+    "clay": "^1.0"
+  },
+  "registry": "https://gitee.com/kaula-universe",
+  "patches": {
+    "webview": { "path": "../webview-dev" }
+  },
+
+  "workspace": {
+    "members": ["packages/core", "app"],
+    "shared_deps": { "testing": "^1.0" }
+  }
 }
 ```
 
@@ -176,6 +224,10 @@ kaulac.exe --sor main.kl              # SOR 模式，默认 O3
 | `--defines <macros>` | `c_defines` | C 宏定义 |
 | `--libs <libs>` | `c_libs` | 链接库 |
 | `--sourcemap` | `sourcemap` | 源码映射 |
+| `--debug` | `debug` | 生成调试符号 |
+| `--debug-level <level>` | `debug_level` | 调试级别 |
+| `--offline` | `offline` | 强制离线模式 |
+| `--online` | `online` | 强制在线模式 |
 | `--freestanding` | `freestanding` | 裸机模式 |
 | `--target-triple <triple>` | `target_triple` | 目标三元组 |
 | `--link-script <path>` | `link_script` | 链接脚本路径 |
@@ -242,6 +294,46 @@ kaulac.exe --sor main.kl              # SOR 模式，默认 O3
 ```
 
 详见 [裸机开发指南](bare-metal.md)。
+
+### 调试构建
+
+```json
+{
+  "opt_level": "O0",
+  "debug": true,
+  "debug_level": "full",
+  "sourcemap": true,
+  "no_cache": true
+}
+```
+
+### 项目依赖管理
+
+```json
+{
+  "dependencies": {
+    "webview": "0.12",
+    "clay": "^1.0"
+  },
+  "registry": "https://gitee.com/kaula-universe",
+  "patches": {
+    "webview": { "path": "../webview-dev" }
+  }
+}
+```
+
+### 工作空间
+
+```json
+{
+  "workspace": {
+    "members": ["packages/core", "packages/utils", "app"],
+    "shared_deps": {
+      "testing": "^1.0"
+    }
+  }
+}
+```
 
 ## 配置文件位置
 

@@ -10,12 +10,14 @@ import (
 	errors "compiler/internal/errors"
 	"compiler/internal/lexer"
 	"compiler/internal/parser"
+	"compiler/internal/pkgcmd"
 	"compiler/internal/pkgmgr"
 	"compiler/internal/sema"
 	"compiler/internal/sor"
 	"compiler/internal/stdlib"
 	"compiler/internal/timeout"
 	"compiler/internal/version"
+	"compiler/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -358,6 +360,10 @@ func main() {
 	showCacheStats := false
 	initConfig := false
 	showVersion := false
+	workspaceCmd := ""  // workspace 子命令: init, build, list
+	workspaceArgs := []string{} // workspace 子命令参数
+	pkgCmd := ""        // pkg 子命令: add, build, list, remove, analyze
+	pkgArgs := []string{} // pkg 子命令参数
 
 	// 预扫描 os.Args，提取非 flag 参数和自定义 flag
 	// 修复：-o/--output 的值不应被误认为输入文件；子命令（compile/run 等）也不是输入文件
@@ -380,6 +386,28 @@ func main() {
 			// 版本旗标：输出版本信息后直接退出（放在 flag.Parse 前处理，
 			// 因为 flag 包未注册该旗标，交给 flag.Parse 会报 "flag provided but not defined"）
 			showVersion = true
+		case arg == "workspace":
+			// workspace 子命令
+			if i+1 < len(args) {
+				workspaceCmd = args[i+1]
+				i++
+				// 收集 workspace 子命令的其余参数
+				for i+1 < len(args) && len(args[i+1]) > 0 && args[i+1][0] != '-' {
+					workspaceArgs = append(workspaceArgs, args[i+1])
+					i++
+				}
+			}
+		case arg == "pkg":
+			// pkg 子命令
+			if i+1 < len(args) {
+				pkgCmd = args[i+1]
+				i++
+				// 收集 pkg 子命令的其余参数
+				for i+1 < len(args) && len(args[i+1]) > 0 && args[i+1][0] != '-' {
+					pkgArgs = append(pkgArgs, args[i+1])
+					i++
+				}
+			}
 		case arg == "-o" || arg == "--output":
 			// -o/--output 接受一个值（输出路径），需要跳过下一个参数避免误判为输入文件
 			customArgs = append(customArgs, arg)
@@ -433,6 +461,279 @@ func main() {
 		}
 		fmt.Println("Generated kaula.json with default configuration.")
 		return
+	}
+
+	// 处理 workspace 子命令
+	if workspaceCmd != "" {
+		switch workspaceCmd {
+		case "init":
+			if len(workspaceArgs) == 0 {
+				fmt.Println("Usage: kaulac workspace init <member1> [member2] ...")
+				fmt.Println("  Initialize a workspace with the given member directories.")
+				os.Exit(1)
+			}
+			wd, _ := os.Getwd()
+			if err := workspace.InitWorkspace(wd, workspaceArgs); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Workspace initialized with %d members.\n", len(workspaceArgs))
+			return
+		case "list":
+			wd, _ := os.Getwd()
+			ws, err := workspace.LoadWorkspace(wd)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			ws.ListMembers()
+			return
+		case "build":
+			wd, _ := os.Getwd()
+			ws, err := workspace.LoadWorkspace(wd)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			release := false
+			debug := false
+			for _, arg := range workspaceArgs {
+				if arg == "--release" {
+					release = true
+				}
+				if arg == "--debug" {
+					debug = true
+				}
+			}
+			if err := ws.BuildAll(release, debug); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "test":
+			wd, _ := os.Getwd()
+			ws, err := workspace.LoadWorkspace(wd)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := ws.TestAll(); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		default:
+			fmt.Printf("Unknown workspace command: %s\n", workspaceCmd)
+			fmt.Println("Available commands: init, list, build, test")
+			os.Exit(1)
+		}
+	}
+
+	// 处理 pkg 子命令
+	if pkgCmd != "" {
+		switch pkgCmd {
+		case "add":
+			// kaulac pkg add <git-url> [--name <name>] [--ref <branch>]
+			if len(pkgArgs) == 0 {
+				fmt.Println("Usage: kaulac pkg add <git-url-or-path> [--name <name>] [--ref <branch>]")
+				fmt.Println("  Add a package to pkglib from a Git repository or local path.")
+				fmt.Println("  Examples:")
+				fmt.Println("    kaulac pkg add https://github.com/user/lib.git")
+				fmt.Println("    kaulac pkg add https://github.com/user/lib.git --name mylib --ref main")
+				fmt.Println("    kaulac pkg add ../local-lib --name mylib")
+				os.Exit(1)
+			}
+			target, err := pkgcmd.NewPkgTarget("")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			source := pkgArgs[0]
+			name := ""
+			ref := ""
+			for i := 1; i < len(pkgArgs); i++ {
+				if pkgArgs[i] == "--name" && i+1 < len(pkgArgs) {
+					name = pkgArgs[i+1]
+					i++
+				} else if pkgArgs[i] == "--ref" && i+1 < len(pkgArgs) {
+					ref = pkgArgs[i+1]
+					i++
+				}
+			}
+
+			var info *pkgcmd.PackageInfo
+			if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") ||
+				strings.HasPrefix(source, "git://") || strings.HasSuffix(source, ".git") {
+				info, err = target.AddGitRepo(source, name, ref)
+			} else {
+				info, err = target.AddLocalPath(source, name)
+			}
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("[pkg] %s installed at %s\n", info.Name, info.Dir)
+			if info.HasArchive {
+				fmt.Printf("[pkg]   archive: ready\n")
+			}
+			if info.HasKLSource {
+				fmt.Printf("[pkg]   type: kaula source\n")
+			} else if info.HasSources {
+				fmt.Printf("[pkg]   type: c/c++ library\n")
+			} else if info.HasConfig {
+				fmt.Printf("[pkg]   type: header-only\n")
+			}
+			return
+
+		case "build":
+			// kaulac pkg build <name> [--force]
+			if len(pkgArgs) == 0 {
+				fmt.Println("Usage: kaulac pkg build <name> [--force]")
+				fmt.Println("  Build a package in pkglib.")
+				os.Exit(1)
+			}
+			target, err := pkgcmd.NewPkgTarget("")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			force := false
+			for _, arg := range pkgArgs {
+				if arg == "--force" {
+					force = true
+				}
+			}
+			name := pkgArgs[0]
+			_, err = target.Build(name, force)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+
+		case "analyze":
+			// kaulac pkg analyze <name>
+			if len(pkgArgs) == 0 {
+				fmt.Println("Usage: kaulac pkg analyze <name>")
+				fmt.Println("  Re-analyze a package and regenerate its JSON config.")
+				os.Exit(1)
+			}
+			target, err := pkgcmd.NewPkgTarget("")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			_, err = target.Analyze(pkgArgs[0])
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+
+		case "remove", "rm":
+			// kaulac pkg remove <name>
+			if len(pkgArgs) == 0 {
+				fmt.Println("Usage: kaulac pkg remove <name>")
+				fmt.Println("  Remove a package from pkglib.")
+				os.Exit(1)
+			}
+			target, err := pkgcmd.NewPkgTarget("")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := target.Remove(pkgArgs[0]); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("[pkg] %s removed\n", pkgArgs[0])
+			return
+
+		case "list", "ls":
+			// kaulac pkg list
+			target, err := pkgcmd.NewPkgTarget("")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			packages, err := target.List()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if len(packages) == 0 {
+				fmt.Println("No packages installed.")
+			} else {
+				fmt.Printf("Installed packages (%d):\n", len(packages))
+				for _, pkg := range packages {
+					types := []string{}
+					if pkg.HasArchive {
+						types = append(types, "built")
+					}
+					if pkg.HasSources {
+						types = append(types, "c/c++")
+					}
+					if pkg.HasKLSource {
+						types = append(types, "kaula")
+					}
+					if pkg.HasConfig {
+						types = append(types, "configured")
+					}
+					if pkg.IsGit {
+						types = append(types, "git")
+					}
+					typeStr := "empty"
+					if len(types) > 0 {
+						typeStr = strings.Join(types, ", ")
+					}
+					fmt.Printf("  %-20s %s\n", pkg.Name, typeStr)
+				}
+			}
+			return
+
+		case "fetch":
+			// kaulac pkg fetch - 强制联网拉取所有项目依赖
+			wd, _ := os.Getwd()
+			if err := pkgcmd.FetchProjectDeps(wd); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+
+		case "update":
+			// kaulac pkg update [name] - 更新依赖（全部或指定包）
+			wd, _ := os.Getwd()
+			if len(pkgArgs) > 0 {
+				// 更新单个包
+				for _, name := range pkgArgs {
+					if err := pkgcmd.UpdateSingleDep(wd, name); err != nil {
+						fmt.Printf("Error: %v\n", err)
+						os.Exit(1)
+					}
+				}
+			} else {
+				// 更新所有
+				if err := pkgcmd.UpdateProjectDeps(wd); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+			}
+			return
+
+		case "lock":
+			// kaulac pkg lock - 显示锁状态
+			wd, _ := os.Getwd()
+			if err := pkgcmd.ShowLockStatus(wd); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+
+		default:
+			fmt.Printf("Unknown pkg command: %s\n", pkgCmd)
+			fmt.Println("Available commands: add, build, analyze, remove, list, fetch, update, lock")
+			os.Exit(1)
+		}
 	}
 
 	// 处理 --version / -v 命令：输出编译器版本并退出
@@ -602,7 +903,11 @@ func main() {
 			registry = pkgmgr.DefaultRegistry
 		}
 		projectDir, _ := filepath.Abs(cfg.BasePath)
-		results, lock, depErr := pkgmgr.ResolveDependencies(registry, cfg.Dependencies, projectDir)
+		patches := make(map[string]pkgmgr.PatchConfig)
+		for name, p := range cfg.Patches {
+			patches[name] = pkgmgr.PatchConfig{Path: p.Path}
+		}
+		results, lock, depErr := pkgmgr.ResolveDependencies(registry, cfg.Dependencies, patches, cfg.Offline, projectDir)
 		if depErr != nil {
 			fmt.Printf("Error: %v\n", depErr)
 			os.Exit(1)
@@ -612,7 +917,9 @@ func main() {
 		}
 		for _, r := range results {
 			src := "lock"
-			if !r.FromLock {
+			if r.FromPatch {
+				src = "local"
+			} else if !r.FromLock {
 				src = "fetched"
 			}
 			fmt.Printf("[pkg] %s %s (%s)\n", r.Name, r.Version, src)
@@ -2181,7 +2488,15 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		if verboseMode { fmt.Printf("[Compile] PCH cache hit: %s\n", pchPath) }
 	}
 
-	clangArgs := []string{"-x", "c", "-", "-o", outputFile, optLevel, "-I", workDir}
+	clangArgs := []string{"-x", "c", "-", "-o", outputFile, optLevel}
+	// 调试符号：--debug 启用 DWARF 生成
+	if cfg != nil && cfg.Debug {
+		clangArgs = append(clangArgs, "-g")
+		if cfg.DebugLevel == "full" {
+			clangArgs = append(clangArgs, "-gdwarf-4")
+		}
+	}
+	clangArgs = append(clangArgs, "-I", workDir)
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 	clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
 	// Windows (MSVC ABI)：强制使用 lld 而非 MSVC link.exe。
@@ -2735,7 +3050,11 @@ func printUsage(exe string) {
 	fmt.Printf("  --sor                   启用 SOR 编译时所有权分析（默认 -O3）\n")
 	fmt.Printf("  --release               Release 模式 (-O3)\n")
 	fmt.Printf("  --opt <level>           优化级别 (O0/O1/O2/O3)，覆盖所有默认值\n")
+	fmt.Printf("  --debug                 生成 DWARF 调试符号 (-g)\n")
+	fmt.Printf("  --debug-level <level>   调试级别: line-tables (默认) / full (完整 DWARF)\n")
 	fmt.Printf("  --sourcemap             生成源码映射文件 (.kl.map.json)\n")
+	fmt.Printf("  --offline               强制离线模式（缓存未命中则报错）\n")
+	fmt.Printf("  --online                强制在线模式（忽略锁缓存）\n")
 	fmt.Printf("  --memory-limit <MB>     内存限制 (默认 4096 MB)\n")
 	fmt.Printf("  --timeout <sec>         编译超时限制 (默认 120 秒)\n")
 	fmt.Printf("  --template <path>       代码生成模板路径\n")
@@ -2759,6 +3078,24 @@ func printUsage(exe string) {
 	fmt.Printf("  在项目根目录创建 kaula.json 文件配置编译参数。\n")
 	fmt.Printf("  命令行参数优先级高于配置文件。\n")
 	fmt.Printf("  使用 --init 生成默认配置文件。\n")
+	fmt.Printf("\nPatches (Local Path Override):\n")
+	fmt.Printf("  在 kaula.json 中用 patches 字段覆盖远程依赖：\n")
+	fmt.Printf("  \"patches\": { \"mylib\": { \"path\": \"../mylib-dev\" } }\n")
+	fmt.Printf("\nWorkspace:\n")
+	fmt.Printf("  kaulac workspace init <members...>  初始化多包工作空间\n")
+	fmt.Printf("  kaulac workspace list              列出工作空间成员\n")
+	fmt.Printf("  kaulac workspace build [--release] [--debug]  构建所有成员\n")
+	fmt.Printf("  kaulac workspace test              运行所有成员的测试\n")
+	fmt.Printf("\nPackage Management (pkglib):\n")
+	fmt.Printf("  kaulac pkg add <url-or-path> [--name <name>] [--ref <branch>]\n")
+	fmt.Printf("                                    添加包到 pkglib（Git 仓库或本地路径）\n")
+	fmt.Printf("  kaulac pkg build <name> [--force]  构建指定包（C/C++ 库）\n")
+	fmt.Printf("  kaulac pkg analyze <name>          重新分析包并生成 JSON 配置\n")
+	fmt.Printf("  kaulac pkg remove <name>           从 pkglib 移除包\n")
+	fmt.Printf("  kaulac pkg list                    列出已安装的包\n")
+	fmt.Printf("  kaulac pkg fetch                   强制联网拉取所有项目依赖\n")
+	fmt.Printf("  kaulac pkg update [name]           更新依赖到最新版本（全部或指定包）\n")
+	fmt.Printf("  kaulac pkg lock                    显示 kaula.lock 锁状态\n")
 }
 
 // ensureLibrary 按需确保库：force 为 true 或归档缺失/源码更新时重建，
