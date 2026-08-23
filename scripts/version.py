@@ -158,7 +158,7 @@ def generate_release_version(cwd: Path = None) -> str:
     push_count = get_push_count(cwd)
     
     # x = merged PRs + direct pushes
-    x = pr_count + push_count + 1  # +1 for current commit being built
+    x = pr_count + push_count
     
     return f"v1.0.{x}"
 
