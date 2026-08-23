@@ -17,6 +17,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <signal.h>
 
 // 路径安全检查
 static bool is_path_safe(const char* path) {
