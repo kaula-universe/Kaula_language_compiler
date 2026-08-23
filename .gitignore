@@ -1,6 +1,7 @@
 # 编译器产物
 compiler/kaulac.exe
 cache/
+!compiler/internal/cache/
 compiler/cache/
 
 # pkglib 依赖目录（本地放库即用，不入库）

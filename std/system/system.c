@@ -51,7 +51,10 @@ static bool is_path_safe(const char* path) {
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/utsname.h>
-#include <sys/sysinfo.h>
+#include <sys/sysctl.h>
+#include <mach/mach_init.h>
+#include <mach/mach_host.h>
+#include <mach/vm_statistics.h>
 #include <dirent.h>
 #include <pwd.h>
 #include <errno.h>
@@ -189,6 +192,13 @@ size_t system_get_total_memory() {
         return info.ullTotalPhys;
     }
     return 0;
+#elif defined(__APPLE__)
+    uint64_t memsize = 0;
+    size_t len = sizeof(memsize);
+    if (sysctlbyname("hw.memsize", &memsize, &len, NULL, 0) == 0) {
+        return (size_t)memsize;
+    }
+    return 0;
 #else
     struct sysinfo info;
     if (sysinfo(&info) == 0) {
@@ -204,6 +214,13 @@ size_t system_get_available_memory() {
     info.dwLength = sizeof(MEMORYSTATUSEX);
     if (GlobalMemoryStatusEx(&info)) {
         return info.ullAvailPhys;
+    }
+    return 0;
+#elif defined(__APPLE__)
+    vm_statistics_data_t vm_stat;
+    mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+    if (host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&vm_stat, &count) == KERN_SUCCESS) {
+        return (size_t)vm_stat.free_count * (size_t)sysconf(_SC_PAGESIZE);
     }
     return 0;
 #else
