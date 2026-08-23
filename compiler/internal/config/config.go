@@ -82,11 +82,47 @@ type Config struct {
 	// 包注册源（默认 https://gitee.com/kaula-universe；可指向任意 git 仓库根/镜像）。
 	Registry string `json:"registry,omitempty"`
 
+	// ====== 本地路径覆盖（Patches） ======
+	// 用本地目录覆盖远程依赖（类似 Cargo [patch]）。
+	// 键为依赖名，path 指向本地包目录（含 kaula.json 或 pkglib config）。
+	Patches map[string]PatchConfig `json:"patches,omitempty"`
+
+	// ====== Workspace ======
+	// Workspace 模式下管理多个成员包。
+	Workspace *WorkspaceConfig `json:"workspace,omitempty"`
+
+	// ====== 调试 ======
+	// Debug 模式：生成 DWARF 调试符号（传 -g 给 Clang）。
+	Debug bool `json:"debug,omitempty"`
+	// DebugLevel 调试级别："line-tables"（默认，仅行号表）或 "full"（完整 DWARF 含类型信息）。
+	DebugLevel string `json:"debug_level,omitempty"`
+
+	// ====== 离线/在线模式 ======
+	// Offline 强制离线模式：缓存未命中则报错，不联网。
+	Offline bool `json:"offline,omitempty"`
+	// Online 强制在线模式：忽略锁缓存，联网刷新依赖。
+	Online bool `json:"online,omitempty"`
+
 	// ====== 第三方库构建 ======
 	BuildPkglib  string `json:"build_pkglib,omitempty"` // 构建指定 pkglib 库（或 "all"）后退出
 	ForcePKG     bool   `json:"force_pkg,omitempty"`    // 强制重新构建/重新分析 pkglib 库
 	SkipAutoPkg  bool   `json:"skip_auto_pkg,omitempty"` // 禁用使用库时的自动构建
 	AutoAnalyzePkg bool `json:"auto_analyze_pkg,omitempty"` // 自动分析缺失/过期的库配置
+}
+
+// PatchConfig 本地路径覆盖配置
+type PatchConfig struct {
+	Path string `json:"path"` // 本地包目录的绝对或相对路径
+}
+
+// WorkspaceConfig Workspace 配置
+type WorkspaceConfig struct {
+	// Members workspace 成员目录列表（每个成员含独立 kaula.json）
+	Members []string `json:"members,omitempty"`
+	// SharedDeps 所有成员共享的依赖声明
+	SharedDeps map[string]string `json:"shared_deps,omitempty"`
+	// Exclude 排除的目录模式
+	Exclude []string `json:"exclude,omitempty"`
 }
 
 // DefaultConfig 返回默认配置
@@ -101,6 +137,7 @@ func DefaultConfig() *Config {
 		SpendableSize:  10,
 		MemoryLimitMB:  4096,
 		TimeoutSec:     120,
+		DebugLevel:     "line-tables",
 	}
 }
 
@@ -165,6 +202,29 @@ func LoadConfig() (*Config, error) {
 	return config, cfgErr
 }
 
+// LoadConfigAt 从指定目录加载 kaula.json 配置（不读取命令行 flag）
+func LoadConfigAt(dir string) (*Config, error) {
+	config := DefaultConfig()
+	config.BasePath = dir
+
+	configFile := filepath.Join(dir, "kaula.json")
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return config, nil
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(data, config); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", configFile, err)
+	}
+
+	// 规范化路径
+	normalizePaths(config)
+
+	return config, nil
+}
+
 // loadProjectConfig 从 kaula.json 加载项目配置
 func loadProjectConfig(config *Config) error {
 	configFile := "kaula.json"
@@ -211,6 +271,12 @@ func loadFlags(config *Config) {
 	flag.BoolVar(&config.SOR, "sor", config.SOR, "启用 SOR 编译时所有权分析")
 	flag.BoolVar(&config.Release, "release", config.Release, "Release 模式 (-O3)")
 
+	// 调试
+	flag.BoolVar(&config.Debug, "debug", config.Debug, "生成 DWARF 调试符号 (-g)")
+	debugLevel := flag.String("debug-level", config.DebugLevel, "调试级别: line-tables / full")
+	flag.BoolVar(&config.Offline, "offline", config.Offline, "强制离线模式")
+	flag.BoolVar(&config.Online, "online", config.Online, "强制在线模式")
+
 	// 缓存
 	flag.BoolVar(&config.NoCache, "no-cache", config.NoCache, "禁用增量编译缓存")
 
@@ -245,6 +311,11 @@ func loadFlags(config *Config) {
 
 	flag.Parse()
 
+	// 解析调试级别
+	if *debugLevel != "" {
+		config.DebugLevel = *debugLevel
+	}
+
 	// 解析逗号/空格分隔的列表
 	if *cFlags != "" {
 		config.CFlags = splitList(*cFlags)
@@ -272,6 +343,15 @@ func normalizePaths(config *Config) {
 		if *p != "" && !filepath.IsAbs(*p) {
 			if abs, err := filepath.Abs(*p); err == nil {
 				*p = abs
+			}
+		}
+	}
+	// 规范化 patches 中的本地路径
+	for name, patch := range config.Patches {
+		if patch.Path != "" && !filepath.IsAbs(patch.Path) {
+			if abs, err := filepath.Abs(patch.Path); err == nil {
+				patch.Path = abs
+				config.Patches[name] = patch
 			}
 		}
 	}

@@ -4,6 +4,8 @@ Kaula 编译器命令行工具，负责词法/语法/语义分析、C 代码生�
 
 ```
 用法: kaulac [选项] <input.kl>
+      kaulac pkg <子命令>
+      kaulac workspace <子命令>
 ```
 
 ## 一、快速开始
@@ -189,3 +191,78 @@ Windows 平台自动附加 `ws2_32/wininet/gdi32/user32/advapi32`；非 Windows 
 - 无输入文件且无上述命令 → 打印 Usage 并退出
 - 输入文件非 `.kl` → 报错退出
 - 编译失败 → 打印错误、退出码非零
+
+## 十二、调试支持
+
+| 选项 | 说明 |
+|------|------|
+| `--debug` | 生成 DWARF 调试符号（`-g`） |
+| `--debug-level <level>` | 调试级别：`line-tables`（默认）/ `full` |
+
+```bash
+# 生成调试符号
+kaulac --debug main.kl
+
+# 完整调试（含类型信息）
+kaulac --debug --debug-level full main.kl
+
+# 配合 GDB 调试
+gdb ./main
+(gdb) source tools/debug/kaula_pretty_printers.py
+(gdb) break main.kl:10
+(gdb) run
+```
+
+详见 [debugging.md](debugging.md)。
+
+## 十三、离线/在线模式
+
+| 选项 | 说明 |
+|------|------|
+| `--offline` | 强制离线模式（缓存未命中则报错） |
+| `--online` | 强制在线模式（忽略锁缓存） |
+
+```bash
+# CI/CD 中使用离线模式
+kaulac --offline main.kl
+
+# 强制刷新依赖
+kaulac --online main.kl
+```
+
+## 十四、包管理 (pkg)
+
+详见 [package-management.md](package-management.md)。
+
+```bash
+kaulac pkg add <url-or-path> [--name <name>] [--ref <branch>]  # 添加包
+kaulac pkg build <name> [--force]                                # 构建包
+kaulac pkg analyze <name>                                        # 分析包
+kaulac pkg remove <name>                                         # 移除包
+kaulac pkg list                                                  # 列出包
+kaulac pkg fetch                                                 # 拉取依赖
+kaulac pkg update [name]                                         # 更新依赖
+kaulac pkg lock                                                  # 查看锁状态
+```
+
+## 十五、工作空间 (workspace)
+
+```bash
+kaulac workspace init <members...>              # 初始化工作空间
+kaulac workspace list                           # 列出成员
+kaulac workspace build [--release] [--debug]    # 构建所有成员
+kaulac workspace test                           # 运行测试
+```
+
+在 `kaula.json` 中配置工作空间：
+
+```json
+{
+  "workspace": {
+    "members": ["packages/core", "packages/utils", "app"],
+    "shared_deps": {
+      "testing": "^1.0"
+    }
+  }
+}
+```
