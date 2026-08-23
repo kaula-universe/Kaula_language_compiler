@@ -59,7 +59,43 @@ kaulac --debug main.kl
 
 # Release 模式
 kaulac --release main.kl
+
+# 查看版本
+kaulac --version
+# 输出: kaulac v1.0.42 (26.8.23-master-67ffac3, sor-oxide)
 ```
+
+---
+
+## 版本号
+
+Kaula 使用双版本号系统：
+
+| 类型 | 格式 | 示例 | 说明 |
+|------|------|------|------|
+| **发布版本** | `v1.0.x` | `v1.0.42` | x = 自 v1.0 以来的提交次数 |
+| **快照版本** | `YY.M.DD-branch-hash` | `26.8.23-master-67ffac3` | 构建时自动生成 |
+
+版本号自动生成：
+
+```bash
+# 查看当前版本
+python scripts/version.py
+# 输出: kaulac v1.0.42 (26.8.23-master-67ffac3, sor-oxide)
+
+# 更新 version.json（构建时自动调用）
+python scripts/version.py --update
+
+# 仅输出快照版本
+python scripts/version.py --snapshot
+# 输出: 26.8.23-master-67ffac3
+
+# 仅输出发布版本
+python scripts/version.py --release
+# 输出: v1.0.42
+```
+
+详见 [docs/tools/versioning.md](docs/tools/versioning.md)。
 
 ---
 
@@ -346,6 +382,7 @@ fn main() {
 kaula/
 ├── compiler/                  # 编译器（Go 实现）
 │   ├── cmd/kaulac/            # 编译器 CLI
+│   ├── version.json           # 版本数据源
 │   └── internal/
 │       ├── lexer/             # 词法分析
 │       ├── parser/            # 语法分析（递归下降）
@@ -358,13 +395,15 @@ kaula/
 │       ├── workspace/         # 工作空间管理
 │       ├── config/            # 配置加载
 │       ├── stdlib/            # 标准库配置
-│       └── ...
+│       └── version/           # 版本信息读取
 ├── src/                       # 运行时系统（C 实现）
 │   ├── kaula.h                # 跨平台头文件
 │   ├── kmm_scoped_allocator_v4.h  # KMM V4 内存管理
 │   └── ...
 ├── std/                       # 标准库（C 实现，62 个模块）
 ├── pkglib/                    # 第三方库
+├── scripts/
+│   └── version.py             # 版本号生成工具
 ├── tools/debug/               # GDB/LLDB 调试工具
 │   ├── kaula_pretty_printers.py
 │   └── kaula_lldb_formatters.py
@@ -373,7 +412,8 @@ kaula/
     │   ├── kaulac.md          # 命令行参考
     │   ├── package-management.md  # 包管理文档
     │   ├── debugging.md       # 调试文档
-    │   └── formatter.md       # 格式化文档
+    │   ├── formatter.md       # 格式化文档
+    │   └── versioning.md      # 版本号管理文档
     └── build-config.md        # 配置文件文档
 ```
 
@@ -387,6 +427,7 @@ kaula/
 | [docs/tools/package-management.md](docs/tools/package-management.md) | 包管理指南 |
 | [docs/tools/debugging.md](docs/tools/debugging.md) | 调试支持文档 |
 | [docs/tools/formatter.md](docs/tools/formatter.md) | 代码格式化文档 |
+| [docs/tools/versioning.md](docs/tools/versioning.md) | 版本号管理文档 |
 | [docs/build-config.md](docs/build-config.md) | 配置文件参考 |
 | [docs/tools/translate.py](docs/tools/translate.py) | 多语言翻译脚本 |
 

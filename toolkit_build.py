@@ -814,6 +814,19 @@ def main():
                         help="指定 C 编译器 (默认: clang，跨平台一致)")
     args = parser.parse_args()
 
+    # 更新版本号（构建前自动从 git 生成）
+    version_script = Path(__file__).parent / "scripts" / "version.py"
+    if version_script.exists():
+        try:
+            result = subprocess.run(
+                [sys.executable, str(version_script), "--update"],
+                capture_output=True, text=True, cwd=str(Path(__file__).parent)
+            )
+            if result.returncode == 0:
+                print(f"[+] {result.stdout.strip()}")
+        except Exception:
+            pass  # 版本更新失败不阻断构建
+
     config = BuildConfig()
     if args.install_dir:
         config.build_dir = Path(args.install_dir).resolve()
