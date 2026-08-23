@@ -12,6 +12,8 @@
 
 </div>
 
+> **Multi-language / 多语言阅读**：如需英文版或其他语言翻译，请使用 [docs/tools/translate.py](docs/tools/translate.py) 生成本地化文档，或直接阅读 `docs/` 目录下对应语言版本。
+
 ---
 
 ## Kaula 是什么
@@ -58,128 +60,6 @@ kaulac --debug main.kl
 # Release 模式
 kaulac --release main.kl
 ```
-
----
-
-## 核心特性
-
-### 类型系统
-
-```kaula
-i32 x = 42               # 显式类型
-auto y = 3.14             # 类型推导
-String name = "Kaula"
-bool flag = true
-i32* ptr = &x             # 指针
-i32? maybe = null         # 可空类型
-const MAX = 1024          # 编译期常量
-```
-
-### 函数与泛型
-
-```kaula
-fn add(i32 a, i32 b) i32 {
-    return a + b
-}
-
-export fn first<T>(T a, T b) T {
-    return a
-}
-```
-
-### 控制流
-
-```kaula
-if x > 0 {
-    println("positive")
-} else if x == 0 {
-    println("zero")
-} else {
-    println("negative")
-}
-
-for i in range(10) {
-    println(i)
-}
-
-while x > 0 {
-    x = x - 1
-}
-```
-
-### struct 与 class
-
-```kaula
-struct Point {
-    f64 x
-    f64 y
-}
-
-class Vec2 {
-    f64 x
-    f64 y
-
-    constructor(f64 x, f64 y) {
-        self.x = x
-        self.y = y
-    }
-
-    fn length() f64 {
-        return math_sqrt(self.x * self.x + self.y * self.y)
-    }
-}
-
-interface Printable {
-    fn to_string() String
-}
-```
-
-### enum 与 match
-
-```kaula
-enum Option<T> {
-    Some(T)
-    None
-}
-
-enum Result<T, E> {
-    Ok(T)
-    Err(E)
-}
-
-match result {
-    Ok(data) => println(data),
-    Err(e) => println("error: " + e),
-    _ => println("unknown")
-}
-```
-
-### SOR 子结构所有权
-
-Kaula 的核心安全机制——SOR（Sub-structural Ownership）在编译期追踪资源所有权，无需 GC 或引用计数开销：
-
-```kaula
-#[sor]
-fn process() {
-    auto buf = std.memory.kmm_v4_alloc(1024)
-
-    # yield: 转移所有权，原变量不可再访问
-    yield buf -> owner
-
-    # extract: 从集合中提取子结构所有权
-    extract owner[0] -> first_byte
-
-    # release: 将所有权分发到多个持有者
-    release owner -> [holder_a, holder_b]
-}
-```
-
-三大原语：
-- **yield** — 所有权转移（move 语义）
-- **extract** — 子结构提取（从复合类型中取出部分所有权）
-- **release** — 所有权分发（将一个资源拆分给多个持有者）
-
-启用方式：`--sor` 全局启用，或 `#[sor]` 单函数启用。
 
 ---
 
@@ -508,6 +388,27 @@ kaula/
 | [docs/tools/debugging.md](docs/tools/debugging.md) | 调试支持文档 |
 | [docs/tools/formatter.md](docs/tools/formatter.md) | 代码格式化文档 |
 | [docs/build-config.md](docs/build-config.md) | 配置文件参考 |
+| [docs/tools/translate.py](docs/tools/translate.py) | 多语言翻译脚本 |
+
+### 多语言文档
+
+使用翻译脚本生成本地化文档：
+
+```bash
+# 生成英文版
+python docs/tools/translate.py --lang en
+
+# 生成日文版
+python docs/tools/translate.py --lang ja
+
+# 生成所有支持语言
+python docs/tools/translate.py --all
+
+# 指定输入目录和输出目录
+python docs/tools/translate.py --lang en --input docs --output docs/en
+```
+
+支持语言：`zh`（中文，默认）、`en`（英文）、`ja`（日文）、`ko`（韩文）、`de`（德文）、`fr`（法文）
 
 ---
 
