@@ -6,6 +6,7 @@ Kaula 编译器命令行工具，负责词法/语法/语义分析、C 代码生�
 用法: kaulac [选项] <input.kl>
       kaulac pkg <子命令>
       kaulac workspace <子命令>
+      kaulac fmt <子命令>
 ```
 
 ## 一、快速开始
@@ -265,4 +266,25 @@ kaulac workspace test                           # 运行测试
     }
   }
 }
+```
+
+## 十六、格式化 (fmt)
+
+详见 [formatter.md](formatter.md)。
+
+```bash
+# 格式化文件（输出到 stdout）
+kaulac fmt file main.kl
+
+# 格式化文件（写回原文件）
+kaulac fmt file main.kl --write
+
+# 批量格式化
+kaulac fmt file main.kl utils.kl --write
+
+# 从 stdin 格式化
+echo 'code' | kaulac fmt stdin
+
+# 检查文件是否已格式化
+kaulac fmt check main.kl
 ```
