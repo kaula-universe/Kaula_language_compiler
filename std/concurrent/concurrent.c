@@ -3,6 +3,11 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#ifdef __APPLE__
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#endif
 
 #include "concurrent.h"
 #include "../memory/memory.h"
@@ -16,10 +21,16 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <semaphore.h>
+#include <errno.h>
 #ifndef __APPLE__
 #include <sys/sysinfo.h>
 #endif
 #include <time.h>
+#ifdef __APPLE__
+/* macOS 将未命名信号量(sem_init/sem_wait 等)标记为 deprecated，仍可用；
+   此处静默该警告。sem_timedwait 在 macOS 缺失，已用轮询替代。 */
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
 #endif
 
 // 线程实现
@@ -273,6 +284,29 @@ bool semaphore_trywait(Semaphore semaphore) {
 bool semaphore_timedwait(Semaphore semaphore, uint64_t timeout_ms) {
 #ifdef _WIN32
     return WaitForSingleObject((HANDLE)semaphore, (DWORD)timeout_ms) == WAIT_OBJECT_0;
+#elif defined(__APPLE__)
+    /* macOS 无 sem_timedwait，用 sem_trywait + nanosleep 轮询至超时 */
+    if (!semaphore) return false;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += (time_t)(timeout_ms / 1000);
+    deadline.tv_nsec += (long)((timeout_ms % 1000) * 1000000);
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000;
+    }
+    for (;;) {
+        if (sem_trywait((sem_t*)semaphore) == 0) return true;
+        if (errno != EAGAIN) return false;
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+            return false;
+        }
+        struct timespec nap = { .tv_sec = 0, .tv_nsec = 1000000 };
+        nanosleep(&nap, NULL);
+    }
 #else
     if (!semaphore) return false;
     struct timespec ts;

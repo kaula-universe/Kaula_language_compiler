@@ -4,6 +4,11 @@
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
+#ifdef __APPLE__
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#endif
 
 #include "system.h"
 #include "../memory/memory.h"
