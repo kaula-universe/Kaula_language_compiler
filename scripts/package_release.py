@@ -153,8 +153,8 @@ class ReleasePackager:
         """创建压缩包"""
         print("[3/4] Creating archive...")
 
-        _, _, ext = self.get_platform_info()
-        archive_name = f"{pkg_dir.name}{ext}"
+        sys_name, arch, ext = self.get_platform_info()
+        archive_name = f"{pkg_dir.name}-{sys_name}-{arch}{ext}"
         archive_path = self.release_dir / archive_name
 
         if ext == ".zip":
