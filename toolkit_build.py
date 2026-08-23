@@ -650,6 +650,10 @@ class GoBuilder:
 
         env = os.environ.copy()
         env["CGO_ENABLED"] = "0"
+        env["GOFLAGS"] = "-mod=mod"
+        env["GONOSUMCHECK"] = "*"
+        env["GONOSUMDB"] = "*"
+        env["GOWORK"] = "off"
 
         cmd = [self.go_cmd, "build"]
         if ldflags:
