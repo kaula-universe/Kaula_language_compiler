@@ -171,7 +171,7 @@ def generate_release_version(cwd: Path = None) -> tuple:
     return f"v1.0.{x}", local_ahead
 
 
-def update_version_json(project_root: Path, snapshot: str, release: str, codename: str = "sor-oxide"):
+def update_version_json(project_root: Path, snapshot: str, release: str, codename: str = "kaula"):
     """Update compiler/version.json with new versions."""
     version_file = project_root / "compiler" / "version.json"
     
@@ -210,8 +210,8 @@ Examples / 示例:
                         help="Print only snapshot version / 仅打印快照版本")
     parser.add_argument("--release", action="store_true",
                         help="Print only release version / 仅打印发布版本")
-    parser.add_argument("--codename", default="sor-oxide",
-                        help="Version codename / 版本代号 (default: sor-oxide)")
+    parser.add_argument("--codename", default="kaula",
+                        help="Version codename / 版本代号 (default: kaula)")
     
     args = parser.parse_args()
     
