@@ -654,14 +654,14 @@ class GoBuilder:
         cmd = [self.go_cmd, "build"]
         if ldflags:
             cmd.extend(["-ldflags", ldflags])
-        cmd.extend(["-o", str(out_file), "."])
+        cmd.extend(["-o", str(out_file), f"./cmd/{cmd_dir}"])
 
         # 简单的进度指示器 (Go 编译是单步完成的)
         with ProgressBar(1, f"Go 编译 {output_name}", width=30) as pbar:
             try:
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=300,
-                    cwd=str(cmd_path), env=env
+                    cwd=str(self.config.compiler_dir), env=env
                 )
                 pbar.update()
                 if result.returncode != 0:
