@@ -1,17 +1,29 @@
 #!/usr/bin/env python3
 """
-Kaula 多语言文档翻译脚本
+Kaula Documentation Translation Script / Kaula 多语言文档翻译脚本
 
-将 docs/ 目录下的中文 Markdown 文档翻译为指定目标语言。
-支持增量翻译、术语表自定义、代码块保护等功能。
+Translate Kaula Markdown docs from Chinese to other languages locally.
+将 Kaula 中文 Markdown 文档翻译为其他语言，纯本地翻译，无需 API。
 
-用法:
-    python translate.py --lang en                    # 翻译为英文
-    python translate.py --lang ja --input docs       # 指定输入目录
-    python translate.py --all                        # 翻译为所有支持语言
-    python translate.py --lang en --output docs/en   # 指定输出目录
-    python translate.py --list                       # 列出支持语言
-    python translate.py --lang en --dry-run          # 预览不写入
+Features / 功能:
+  - 8 languages: zh, en, ja, ko, de, fr, es, ru / 支持 8 种语言
+  - Code blocks preserved / 代码块保持不变
+  - Translation cache / 翻译缓存，支持增量更新
+  - Custom glossary / 自定义术语表
+  - Suffix filenames / 后缀文件名 (e.g. kaulac_en.md)
+
+Usage / 用法:
+    python translate.py --lang en                    # Translate to English / 翻译为英文
+    python translate.py --lang ja --input docs       # Specify input dir / 指定输入目录
+    python translate.py --all                        # All languages / 翻译为所有语言
+    python translate.py --lang en --output docs/en   # Specify output dir / 指定输出目录
+    python translate.py --list                       # List languages / 列出支持语言
+    python translate.py --lang en --dry-run          # Preview only / 预览不写入
+    python translate.py --lang en --file README.md   # Single file / 翻译单个文件
+
+Output / 输出:
+    docs/kaulac.md  ->  docs/kaulac_en.md
+    docs/build-config.md  ->  docs/build-config_ja.md
 """
 
 import argparse
@@ -23,6 +35,7 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
+# Set stdout encoding to UTF-8 (Windows compatible)
 # 设置标准输出编码为 UTF-8（Windows 兼容）
 if sys.platform == "win32":
     import io
@@ -366,7 +379,7 @@ def find_markdown_files(directory: Path) -> list:
     """查找目录下所有 Markdown 文件"""
     files = []
     # 排除的文件
-    excludes = {"translate.py", "README.md"}
+    excludes = {"translate.py"}
     for f in sorted(directory.rglob("*.md")):
         # 跳过已翻译的文件
         name = f.name
