@@ -1,11 +1,11 @@
-package parser
+﻿package parser
 
 import (
 	"fmt"
-	"compiler/internal/ast"
-	"compiler/internal/errors"
-	"compiler/internal/lexer"
-	"compiler/internal/stdlib"
+	"kaula/internal/ast"
+	"kaula/internal/errors"
+	"kaula/internal/lexer"
+	"kaula/internal/stdlib"
 	"log"
 	"os"
 	"path/filepath"
@@ -4382,7 +4382,7 @@ func (p *Parser) Validate(program *ast.Program) {
 
 	// 加载第三方库配置，将第三方库名称添加到有效模块列表
 	// 尝试多个路径（与 kaulac findStdlib 的候选一致: KAULA_HOME > exe 路径 > cwd 相对）
-	stdlibPaths := []string{"stdlib.json", "compiler/stdlib.json", "../stdlib.json"}
+	stdlibPaths := []string{"stdlib.json", "kaula/stdlib.json", "../stdlib.json"}
 	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
 		stdlibPaths = append(stdlibPaths, filepath.Join(envHome, "compiler", "stdlib.json"))
 	}

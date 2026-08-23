@@ -1,4 +1,4 @@
-package pkgcmd
+﻿package pkgcmd
 
 import (
 	"encoding/json"
@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"strings"
 
-	"compiler/internal/pkgmgr"
-	"compiler/internal/stdlib"
+	"kaula/internal/pkgmgr"
+	"kaula/internal/stdlib"
 )
 
 // PkgTarget 表示一个包管理目标目录

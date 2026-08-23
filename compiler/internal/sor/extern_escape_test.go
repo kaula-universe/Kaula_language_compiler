@@ -1,7 +1,7 @@
-package sor
+﻿package sor
 
 import (
-	"compiler/internal/ast"
+	"kaula/internal/ast"
 	"testing"
 )
 

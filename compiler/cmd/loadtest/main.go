@@ -1,14 +1,14 @@
-package main
+﻿package main
 
 import (
 	"fmt"
 	"os"
 
-	"compiler/internal/errors"
-	"compiler/internal/lexer"
-	"compiler/internal/parser"
-	"compiler/internal/sema"
-	"compiler/internal/stdlib"
+	"kaula/internal/errors"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
+	"kaula/internal/sema"
+	"kaula/internal/stdlib"
 )
 
 func main() {

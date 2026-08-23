@@ -1,12 +1,12 @@
-package main
+﻿package main
 
 import (
 	"fmt"
 	"os"
 
-	"compiler/internal/ast"
-	"compiler/internal/lexer"
-	"compiler/internal/parser"
+	"kaula/internal/ast"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
 )
 
 func dump(stmts []ast.Statement, depth int) {

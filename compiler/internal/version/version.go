@@ -1,4 +1,4 @@
-// Package version 提供 Kaula 编译器版本信息。
+﻿// Package version 提供 Kaula 编译器版本信息。
 // 版本号来源：compiler/version.json（单一数据源，避免在 Go 代码里硬编码）。
 //
 // 版本格式:
@@ -52,7 +52,7 @@ func LookupPaths() []string {
 			filepath.Join(exeDir, "..", "..", "compiler", "version.json"))
 	}
 	candidates = append(candidates,
-		"compiler/version.json",
+		"kaula/version.json",
 		"version.json")
 	return candidates
 }

@@ -1,24 +1,24 @@
-package main
+﻿package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"compiler/internal/ast"
-	"compiler/internal/cache"
-	"compiler/internal/codegen"
-	"compiler/internal/config"
-	errors "compiler/internal/errors"
-	"compiler/internal/formatter"
-	"compiler/internal/lexer"
-	"compiler/internal/parser"
-	"compiler/internal/pkgcmd"
-	"compiler/internal/pkgmgr"
-	"compiler/internal/sema"
-	"compiler/internal/sor"
-	"compiler/internal/stdlib"
-	"compiler/internal/timeout"
-	"compiler/internal/version"
-	"compiler/internal/workspace"
+	"kaula/internal/ast"
+	"kaula/internal/cache"
+	"kaula/internal/codegen"
+	"kaula/internal/config"
+	errors "kaula/internal/errors"
+	"kaula/internal/formatter"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
+	"kaula/internal/pkgcmd"
+	"kaula/internal/pkgmgr"
+	"kaula/internal/sema"
+	"kaula/internal/sor"
+	"kaula/internal/stdlib"
+	"kaula/internal/timeout"
+	"kaula/internal/version"
+	"kaula/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2019,7 +2019,7 @@ func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *st
 
 	go func() {
 		defer wg.Done()
-		sa := sema.NewSemanticAnalyzerWithConfig("compiler/stdlib.json", errorCollector)
+		sa := sema.NewSemanticAnalyzerWithConfig("kaula/stdlib.json", errorCollector)
 		if stdlibConfig != nil {
 			sa.SetStdlibConfig(stdlibConfig)
 		}
@@ -2297,7 +2297,7 @@ func findStdlib() string {
 	}
 
 	// 3. 工作目录相对路径
-	paths := []string{"stdlib.json", "compiler/stdlib.json", "../stdlib.json", "../../compiler/stdlib.json"}
+	paths := []string{"stdlib.json", "kaula/stdlib.json", "../stdlib.json", "../../compiler/stdlib.json"}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
 			return p

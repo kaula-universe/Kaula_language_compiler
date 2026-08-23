@@ -1,4 +1,4 @@
-package workspace
+﻿package workspace
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"compiler/internal/config"
+	"kaula/internal/config"
 )
 
 // Workspace 表示一个多包工作空间

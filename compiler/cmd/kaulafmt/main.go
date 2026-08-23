@@ -1,12 +1,12 @@
-// user-test: 增量编译手工验证注释 (请勿删除, 用户自行测试用)
+﻿// user-test: 增量编译手工验证注释 (请勿删除, 用户自行测试用)
 package main
 
 import (
 	"bytes"
 	"fmt"
-	"compiler/internal/ast"
-	"compiler/internal/lexer"
-	"compiler/internal/parser"
+	"kaula/internal/ast"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
 	"os"
 	"path/filepath"
 	"sort"

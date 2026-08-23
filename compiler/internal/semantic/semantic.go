@@ -1,8 +1,8 @@
-package semantic
+﻿package semantic
 
 import (
-	"compiler/internal/ast"
-	"compiler/internal/errors"
+	"kaula/internal/ast"
+	"kaula/internal/errors"
 )
 
 // Analyzer 表示语义分析器

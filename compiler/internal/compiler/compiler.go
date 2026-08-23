@@ -1,14 +1,14 @@
-package compiler
+﻿package compiler
 
 import (
 	"fmt"
-	"compiler/internal/ast"
-	"compiler/internal/codegen"
-	"compiler/internal/config"
-	"compiler/internal/lexer"
-	"compiler/internal/parser"
-	"compiler/internal/sema"
-	"compiler/internal/stdlib"
+	"kaula/internal/ast"
+	"kaula/internal/codegen"
+	"kaula/internal/config"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
+	"kaula/internal/sema"
+	"kaula/internal/stdlib"
 	"path/filepath"
 )
 

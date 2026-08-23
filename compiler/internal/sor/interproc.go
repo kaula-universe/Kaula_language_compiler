@@ -1,8 +1,8 @@
-package sor
+﻿package sor
 
 import (
 	"fmt"
-	"compiler/internal/ast"
+	"kaula/internal/ast"
 	"strings"
 )
 

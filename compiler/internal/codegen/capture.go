@@ -1,13 +1,13 @@
-package codegen
+﻿package codegen
 
 import (
 	"sort"
 	"strconv"
 	"strings"
 
-	"compiler/internal/ast"
-	"compiler/internal/astutil"
-	"compiler/internal/symbol"
+	"kaula/internal/ast"
+	"kaula/internal/astutil"
+	"kaula/internal/symbol"
 )
 
 // nestedFuncInfo 嵌套函数的捕获信息（用于生成调用点实参）

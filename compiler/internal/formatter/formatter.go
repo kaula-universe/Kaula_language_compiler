@@ -1,10 +1,10 @@
-package formatter
+﻿package formatter
 
 import (
 	"bytes"
-	"compiler/internal/ast"
-	"compiler/internal/lexer"
-	"compiler/internal/parser"
+	"kaula/internal/ast"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
 	"fmt"
 	"os"
 	"sort"

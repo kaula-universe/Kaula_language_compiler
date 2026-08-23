@@ -1,16 +1,16 @@
-package sema
+﻿package sema
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"compiler/internal/ast"
-	"compiler/internal/astutil"
-	"compiler/internal/comptime"
-	"compiler/internal/core"
-	"compiler/internal/errors"
-	"compiler/internal/stdlib"
-	"compiler/internal/symbol"
+	"kaula/internal/ast"
+	"kaula/internal/astutil"
+	"kaula/internal/comptime"
+	"kaula/internal/core"
+	"kaula/internal/errors"
+	"kaula/internal/stdlib"
+	"kaula/internal/symbol"
 	"os"
 	"path/filepath"
 	"sort"
@@ -113,7 +113,7 @@ func (sa *SemanticAnalyzer) isFunctionSOR() bool {
 
 func NewSemanticAnalyzer() *SemanticAnalyzer {
 	errorCollector := errors.NewErrorCollector()
-	return NewSemanticAnalyzerWithConfig("compiler/stdlib.json", errorCollector)
+	return NewSemanticAnalyzerWithConfig("kaula/stdlib.json", errorCollector)
 }
 
 // NewSemanticAnalyzerWithConfig 使用指定配置文件和错误收集器创建语义分析器

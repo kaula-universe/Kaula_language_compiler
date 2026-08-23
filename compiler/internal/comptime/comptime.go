@@ -1,8 +1,8 @@
-package comptime
+﻿package comptime
 
 import (
 	"fmt"
-	"compiler/internal/ast"
+	"kaula/internal/ast"
 )
 
 type ValueKind int
