@@ -12,7 +12,7 @@
 
 </div>
 
-> **Multi-language / 多语言阅读**：如需英文版或其他语言翻译，请使用 [docs/tools/translate.py](docs/tools/translate.py) 生成本地化文档，或直接阅读 `docs/` 目录下对应语言版本。
+> **Multi-language Support**：如需阅读英文或其他语言的文档，推荐使用 [docs/tools/translate.py](docs/tools/translate.py) 生成本地化文档方便阅读。Supported languages: English, 日本語, 한국어, Deutsch, Français, Español, Русский.
 
 ---
 
