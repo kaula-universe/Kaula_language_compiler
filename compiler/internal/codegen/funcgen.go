@@ -1,8 +1,8 @@
-package codegen
+﻿package codegen
 
 import (
 	"fmt"
-	"compiler/internal/ast"
+	"kaula/internal/ast"
 	"strings"
 )
 

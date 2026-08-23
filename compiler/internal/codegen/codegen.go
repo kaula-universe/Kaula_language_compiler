@@ -1,14 +1,14 @@
-package codegen
+﻿package codegen
 
 import (
 	"fmt"
-	"compiler/internal/ast"
-	"compiler/internal/config"
-	"compiler/internal/core"
-	"compiler/internal/sema"
-	"compiler/internal/stdlib"
-	"compiler/internal/symbol"
-	"compiler/internal/version"
+	"kaula/internal/ast"
+	"kaula/internal/config"
+	"kaula/internal/core"
+	"kaula/internal/sema"
+	"kaula/internal/stdlib"
+	"kaula/internal/symbol"
+	"kaula/internal/version"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -560,7 +560,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	stdlibPath := cfg.StdlibPath
 	if stdlibPath == "" {
 		// 与 kaulac findStdlib 一致的候选: 当前目录 / compiler/ / 上级
-		for _, cand := range []string{"stdlib.json", "compiler/stdlib.json", "../stdlib.json", "../../stdlib.json"} {
+		for _, cand := range []string{"stdlib.json", "kaula/stdlib.json", "../stdlib.json", "../../stdlib.json"} {
 			if _, err := os.Stat(cand); err == nil {
 				stdlibPath = cand
 				break

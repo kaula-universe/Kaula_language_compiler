@@ -1,10 +1,10 @@
-// Package astutil 提供跨解析器/语义/代码生成复用的 AST 工具。
+﻿// Package astutil 提供跨解析器/语义/代码生成复用的 AST 工具。
 package astutil
 
 import (
 	"reflect"
 
-	"compiler/internal/ast"
+	"kaula/internal/ast"
 )
 
 // CollectedRefs 收集结果：

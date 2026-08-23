@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"compiler/internal/lexer"
-	"compiler/internal/parser"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
 )
 
 func tryParse(t *testing.T, name, src string) (ok bool, seconds float64) {

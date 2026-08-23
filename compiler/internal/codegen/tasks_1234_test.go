@@ -1,4 +1,4 @@
-package codegen
+﻿package codegen
 
 import (
 	"os"
@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"compiler/internal/ast"
-	"compiler/internal/config"
+	"kaula/internal/ast"
+	"kaula/internal/config"
 )
 
 // --- 任务④：sizing 驱动的 slab 桶直接分配 ---

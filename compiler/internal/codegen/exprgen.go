@@ -1,10 +1,10 @@
-package codegen
+﻿package codegen
 
 import (
 	"fmt"
-	"compiler/internal/ast"
-	"compiler/internal/comptime"
-	"compiler/internal/stdlib"
+	"kaula/internal/ast"
+	"kaula/internal/comptime"
+	"kaula/internal/stdlib"
 	"regexp"
 	"strconv"
 	"strings"

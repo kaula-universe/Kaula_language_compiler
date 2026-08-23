@@ -1,8 +1,8 @@
-package codegen
+﻿package codegen
 
 import (
-	"compiler/internal/ast"
-	"compiler/internal/config"
+	"kaula/internal/ast"
+	"kaula/internal/config"
 )
 
 // Generator 表示代码生成器接口

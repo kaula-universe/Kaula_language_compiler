@@ -1,10 +1,10 @@
-package codegen
+﻿package codegen
 
 import (
 	"fmt"
 	"os"
-	"compiler/internal/ast"
-	"compiler/internal/core"
+	"kaula/internal/ast"
+	"kaula/internal/core"
 	"regexp"
 	"sort"
 	"strconv"

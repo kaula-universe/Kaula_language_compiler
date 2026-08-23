@@ -1,10 +1,10 @@
-package lexer
+﻿package lexer
 
 import (
 	"fmt"
 	"unicode"
 
-	"compiler/internal/errors"
+	"kaula/internal/errors"
 )
 
 // TokenType 表示token的类型

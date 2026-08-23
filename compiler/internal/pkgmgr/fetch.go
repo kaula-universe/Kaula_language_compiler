@@ -1,4 +1,4 @@
-package pkgmgr
+﻿package pkgmgr
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"compiler/internal/semver"
+	"kaula/internal/semver"
 )
 
 // 注册源: gitee 组织。包仓库命名约定: kaula-universe/<name>，

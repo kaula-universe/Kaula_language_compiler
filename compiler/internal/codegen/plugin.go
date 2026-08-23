@@ -1,7 +1,7 @@
-package codegen
+﻿package codegen
 
 import (
-	"compiler/internal/ast"
+	"kaula/internal/ast"
 )
 
 // Plugin 表示代码生成插件接口
