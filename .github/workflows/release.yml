@@ -167,6 +167,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
 
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find . -maxdepth 2 -name "*.zip" -o -name "*.tar.gz" | while read f; do
+            mv "$f" release/
+          done
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -203,9 +210,8 @@ jobs:
             tar -xzf kaula-*.tar.gz
             ```
           files: |
-            kaula-windows-x64/*.zip
-            kaula-linux-x64/*.tar.gz
-            kaula-macos-x64/*.tar.gz
+            release/*.zip
+            release/*.tar.gz
           draft: false
           prerelease: false
         env:
