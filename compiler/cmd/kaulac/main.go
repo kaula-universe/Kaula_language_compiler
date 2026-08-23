@@ -8,6 +8,7 @@ import (
 	"compiler/internal/codegen"
 	"compiler/internal/config"
 	errors "compiler/internal/errors"
+	"compiler/internal/formatter"
 	"compiler/internal/lexer"
 	"compiler/internal/parser"
 	"compiler/internal/pkgcmd"
@@ -364,6 +365,8 @@ func main() {
 	workspaceArgs := []string{} // workspace 子命令参数
 	pkgCmd := ""        // pkg 子命令: add, build, list, remove, analyze
 	pkgArgs := []string{} // pkg 子命令参数
+	fmtCmd := ""        // fmt 子命令: file, stdin, check
+	fmtArgs := []string{} // fmt 子命令参数
 
 	// 预扫描 os.Args，提取非 flag 参数和自定义 flag
 	// 修复：-o/--output 的值不应被误认为输入文件；子命令（compile/run 等）也不是输入文件
@@ -405,6 +408,17 @@ func main() {
 				// 收集 pkg 子命令的其余参数
 				for i+1 < len(args) && len(args[i+1]) > 0 && args[i+1][0] != '-' {
 					pkgArgs = append(pkgArgs, args[i+1])
+					i++
+				}
+			}
+		case arg == "fmt":
+			// fmt 子命令
+			if i+1 < len(args) {
+				fmtCmd = args[i+1]
+				i++
+				// 收集 fmt 子命令的其余参数
+				for i+1 < len(args) && len(args[i+1]) > 0 && args[i+1][0] != '-' {
+					fmtArgs = append(fmtArgs, args[i+1])
 					i++
 				}
 			}
@@ -732,6 +746,115 @@ func main() {
 		default:
 			fmt.Printf("Unknown pkg command: %s\n", pkgCmd)
 			fmt.Println("Available commands: add, build, analyze, remove, list, fetch, update, lock")
+			os.Exit(1)
+		}
+	}
+
+	// 处理 fmt 子命令
+	if fmtCmd != "" {
+		switch fmtCmd {
+		case "file":
+			// kaulac fmt file <file.kl> [--write]
+			if len(fmtArgs) == 0 {
+				fmt.Println("Usage: kaulac fmt file <file.kl> [--write]")
+				fmt.Println("  Format a Kaula source file.")
+				fmt.Println("  Without --write, prints formatted output to stdout.")
+				fmt.Println("  With --write, overwrites the file in-place.")
+				os.Exit(1)
+			}
+			writeBack := false
+			var files []string
+			for _, arg := range fmtArgs {
+				if arg == "--write" || arg == "-w" {
+					writeBack = true
+				} else {
+					files = append(files, arg)
+				}
+			}
+			if len(files) == 0 {
+				fmt.Println("Error: No input files specified")
+				os.Exit(1)
+			}
+			formatter := formatter.New()
+			for _, file := range files {
+				if len(file) < 3 || file[len(file)-3:] != ".kl" {
+					fmt.Printf("Error: %s is not a .kl file\n", file)
+					os.Exit(1)
+				}
+				if writeBack {
+					if err := formatter.FormatFileInPlace(file); err != nil {
+						fmt.Printf("Error formatting %s: %v\n", file, err)
+						os.Exit(1)
+					}
+					fmt.Printf("Formatted %s\n", file)
+				} else {
+					formatted, err := formatter.FormatFile(file)
+					if err != nil {
+						fmt.Printf("Error formatting %s: %v\n", file, err)
+						os.Exit(1)
+					}
+					fmt.Println(formatted)
+				}
+			}
+			return
+		case "stdin":
+			// kaulac fmt stdin - format from stdin
+			data, err := os.Stdin.Stat()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if (data.Mode() & os.ModeCharDevice) != 0 {
+				fmt.Println("Error: No input piped to stdin")
+				fmt.Println("Usage: echo 'code' | kaulac fmt stdin")
+				os.Exit(1)
+			}
+			var buf []byte
+			tmp := make([]byte, 1024)
+			for {
+				n, err := os.Stdin.Read(tmp)
+				if n > 0 {
+					buf = append(buf, tmp[:n]...)
+				}
+				if err != nil {
+					break
+				}
+			}
+			formatter := formatter.New()
+			formatted := formatter.FormatSource(string(buf))
+			fmt.Println(formatted)
+			return
+		case "check":
+			// kaulac fmt check <file.kl> - check if file is formatted
+			if len(fmtArgs) == 0 {
+				fmt.Println("Usage: kaulac fmt check <file.kl>")
+				fmt.Println("  Check if a file is properly formatted.")
+				fmt.Println("  Exits with 0 if formatted, 1 if not.")
+				os.Exit(1)
+			}
+			formatter := formatter.New()
+			for _, file := range fmtArgs {
+				if len(file) < 3 || file[len(file)-3:] != ".kl" {
+					fmt.Printf("Error: %s is not a .kl file\n", file)
+					os.Exit(1)
+				}
+				data, err := os.ReadFile(file)
+				if err != nil {
+					fmt.Printf("Error reading %s: %v\n", file, err)
+					os.Exit(1)
+				}
+				formatter.Reset()
+				formatted := formatter.FormatSource(string(data))
+				if string(data) != formatted {
+					fmt.Printf("%s is not formatted\n", file)
+					os.Exit(1)
+				}
+			}
+			fmt.Println("All files are formatted")
+			return
+		default:
+			fmt.Printf("Unknown fmt command: %s\n", fmtCmd)
+			fmt.Println("Available commands: file, stdin, check")
 			os.Exit(1)
 		}
 	}
