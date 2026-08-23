@@ -6,6 +6,12 @@
 #else
 #include <sys/mman.h>   // mmap, PROT_READ, MAP_PRIVATE 等
 #include <unistd.h>      // sysconf
+/* macOS 仅提供 MAP_ANON，无 MAP_ANONYMOUS；在此兼容 */
+#ifndef MAP_ANONYMOUS
+#ifdef MAP_ANON
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#endif
 #endif
 #endif
 #ifndef KAULA_FREESTANDING
