@@ -149,13 +149,17 @@ def generate_snapshot_version(cwd: Path = None) -> str:
     return f"{year}.{month}.{day}-{branch}-{commit_hash}"
 
 
-def generate_release_version(cwd: Path = None) -> str:
-    """Generate release version: v1.0.x where x = merged PRs + pushes + local ahead"""
+def generate_release_version(cwd: Path = None) -> tuple:
+    """Generate release version: v1.0.x and optional +N for unpushed commits
+    Returns: (version_str, local_ahead)"""
     if cwd is None:
         cwd = Path.cwd()
     
     pr_count = get_merged_pr_count(cwd)
     push_count = get_push_count(cwd)
+    
+    # x = PR + push
+    x = pr_count + push_count
     
     # 本地领先远程的提交数（未推送）
     local_ahead = run_git(["rev-list", "--count", f"origin/{get_branch(cwd)}..HEAD"], cwd)
@@ -164,12 +168,7 @@ def generate_release_version(cwd: Path = None) -> str:
     except ValueError:
         local_ahead = 0
     
-    # x = PR + push + 本地未推送数
-    x = pr_count + push_count
-    if local_ahead > 0:
-        x += local_ahead
-    
-    return f"v1.0.{x}"
+    return f"v1.0.{x}", local_ahead
 
 
 def update_version_json(project_root: Path, snapshot: str, release: str, codename: str = "sor-oxide"):
@@ -219,22 +218,25 @@ Examples / 示例:
     project_root = Path(__file__).parent.parent.resolve()
     
     snapshot = generate_snapshot_version(project_root)
-    release = generate_release_version(project_root)
+    release, local_ahead = generate_release_version(project_root)
     
     if args.update:
         version_file = update_version_json(project_root, snapshot, release, args.codename)
         print(f"Updated {version_file}")
         print(f"  release:  {release}")
         print(f"  snapshot: {snapshot}")
-        print(f"  codename: {args.codename}")
+        print(f"  ahead:    +{local_ahead}" if local_ahead > 0 else "")
         return
     
     if args.json:
-        print(json.dumps({
+        data = {
             "release": release,
             "snapshot": snapshot,
             "codename": args.codename
-        }, indent=2))
+        }
+        if local_ahead > 0:
+            data["ahead"] = local_ahead
+        print(json.dumps(data, indent=2))
         return
     
     if args.snapshot:
@@ -245,8 +247,9 @@ Examples / 示例:
         print(release)
         return
     
-    # Default: print both
-    print(f"kaulac {release} ({snapshot})")
+    # Default: print both with +N if unpushed
+    ahead_str = f" +{local_ahead}" if local_ahead > 0 else ""
+    print(f"kaulac {release}{ahead_str} ({snapshot})")
 
 
 if __name__ == "__main__":
