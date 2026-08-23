@@ -210,7 +210,7 @@ Examples / 示例:
         return
     
     # Default: print both
-    print(f"kaulac {release} ({snapshot}, {args.codename})")
+    print(f"kaulac {release} ({snapshot})")
 
 
 if __name__ == "__main__":

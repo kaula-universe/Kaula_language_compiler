@@ -104,7 +104,7 @@ func GetSnapshot() string {
 }
 
 // String 返回人类可读的版本描述。
-// 格式: kaulac v1.0.42 (26.8.23-master-67ffac3, sor-oxide)
+// 格式: kaulac v1.0.42 (26.8.23-master-67ffac3)
 func String() string {
 	info, err := load()
 	if err != nil {
@@ -114,13 +114,7 @@ func String() string {
 	s := "kaulac " + info.Version
 
 	if info.Snapshot != "" {
-		s += " (" + info.Snapshot
-		if info.Codename != "" {
-			s += ", " + info.Codename
-		}
-		s += ")"
-	} else if info.Codename != "" {
-		s += " (" + info.Codename + ")"
+		s += " (" + info.Snapshot + ")"
 	}
 
 	return s
