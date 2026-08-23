@@ -1,12 +1,13 @@
 name: Build and Release
 
 on:
-  permissions:
-    contents: write
-    push:
-      tags:
-        - 'v*'
-    workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
