@@ -106,6 +106,33 @@ def get_remote_commit_count(cwd: Path = None) -> int:
         return 0
 
 
+def get_merged_pr_count(cwd: Path = None) -> int:
+    """Count merged PRs (merge commits)."""
+    if cwd is None:
+        cwd = Path.cwd()
+    
+    # Count merge commits (PRs merged into main branches)
+    # Merge commits have 2+ parents
+    count = run_git(["rev-list", "--count", "--merges", "HEAD"], cwd)
+    try:
+        return int(count)
+    except ValueError:
+        return 0
+
+
+def get_push_count(cwd: Path = None) -> int:
+    """Count direct pushes (non-merge commits)."""
+    if cwd is None:
+        cwd = Path.cwd()
+    
+    # Count non-merge commits (direct pushes)
+    count = run_git(["rev-list", "--count", "--no-merges", "HEAD"], cwd)
+    try:
+        return int(count)
+    except ValueError:
+        return 0
+
+
 def generate_snapshot_version(cwd: Path = None) -> str:
     """Generate snapshot version: YY.M.DD-branch-hash"""
     if cwd is None:
@@ -123,15 +150,15 @@ def generate_snapshot_version(cwd: Path = None) -> str:
 
 
 def generate_release_version(cwd: Path = None) -> str:
-    """Generate release version: v1.0.x"""
+    """Generate release version: v1.0.x where x = merged PRs + pushes"""
     if cwd is None:
         cwd = Path.cwd()
     
-    local_count = get_commit_count_since_v1_0(cwd)
-    remote_count = get_remote_commit_count(cwd)
+    pr_count = get_merged_pr_count(cwd)
+    push_count = get_push_count(cwd)
     
-    # Use the larger of local and remote count, then +1 for the new commit
-    x = max(local_count, remote_count) + 1
+    # x = merged PRs + direct pushes
+    x = pr_count + push_count + 1  # +1 for current commit being built
     
     return f"v1.0.{x}"
 
