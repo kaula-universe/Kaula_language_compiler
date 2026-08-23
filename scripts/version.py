@@ -150,15 +150,24 @@ def generate_snapshot_version(cwd: Path = None) -> str:
 
 
 def generate_release_version(cwd: Path = None) -> str:
-    """Generate release version: v1.0.x where x = merged PRs + pushes"""
+    """Generate release version: v1.0.x where x = merged PRs + pushes + local ahead"""
     if cwd is None:
         cwd = Path.cwd()
     
     pr_count = get_merged_pr_count(cwd)
     push_count = get_push_count(cwd)
     
-    # x = merged PRs + direct pushes
+    # 本地领先远程的提交数（未推送）
+    local_ahead = run_git(["rev-list", "--count", f"origin/{get_branch(cwd)}..HEAD"], cwd)
+    try:
+        local_ahead = int(local_ahead)
+    except ValueError:
+        local_ahead = 0
+    
+    # x = PR + push + 本地未推送数
     x = pr_count + push_count
+    if local_ahead > 0:
+        x += local_ahead
     
     return f"v1.0.{x}"
 
