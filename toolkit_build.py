@@ -805,7 +805,7 @@ def main():
     parser.add_argument("--clean", action="store_true",
                         help="清理所有构建产物")
     parser.add_argument("--target",
-                        choices=["all", "std", "freestanding", "runtime", "compiler", "headers"],
+                        choices=["all", "std", "freestanding", "runtime", "compiler", "headers", "package"],
                         default="all",
                         help="指定构建目标 (默认: all)")
     parser.add_argument("--install-dir", type=str, default=None,
@@ -899,6 +899,31 @@ def main():
             success = c_builder.install_headers()
         else:
             print("[-] 错误: 安装头文件需要 C 构建器")
+            success = False
+
+    elif args.target == "package":
+        # 先构建编译器
+        if go_builder:
+            ok1 = go_builder.build_kaulac()
+            ok2 = go_builder.build_kaulafmt()
+            ok3 = go_builder.install_stdlib_json()
+            if not (ok1 and ok2 and ok3):
+                print("[-] 错误: 编译器构建失败")
+                success = False
+            else:
+                # 调用打包脚本
+                package_script = Path(__file__).parent / "scripts" / "package_release.py"
+                if package_script.exists():
+                    result = subprocess.run(
+                        [sys.executable, str(package_script)],
+                        cwd=str(Path(__file__).parent)
+                    )
+                    success = result.returncode == 0
+                else:
+                    print(f"[-] 错误: {package_script} 不存在")
+                    success = False
+        else:
+            print("[-] 错误: 打包需要 Go 编译器")
             success = False
 
     sys.exit(0 if success else 1)
