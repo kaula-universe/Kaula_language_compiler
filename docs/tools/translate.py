@@ -365,7 +365,15 @@ class MarkdownTranslator:
 def find_markdown_files(directory: Path) -> list:
     """查找目录下所有 Markdown 文件"""
     files = []
+    # 排除的文件
+    excludes = {"translate.py", "README.md"}
     for f in sorted(directory.rglob("*.md")):
+        # 跳过已翻译的文件
+        name = f.name
+        if name in excludes:
+            continue
+        if any(name.endswith(f"_{code}.md") for code in SUPPORTED_LANGUAGES):
+            continue
         # 跳过已翻译的目录
         parts = f.parts
         if any(p in SUPPORTED_LANGUAGES for p in parts):
@@ -483,7 +491,7 @@ def main():
         if args.output:
             output_dir = Path(args.output)
         else:
-            output_dir = input_dir.parent / f"{input_dir.name}_{lang}"
+            output_dir = input_dir
 
         # 查找文件
         if args.file:
@@ -504,9 +512,14 @@ def main():
             try:
                 rel = f.relative_to(input_dir)
             except ValueError:
-                rel = f.name
+                rel = Path(f.name)
 
-            output_path = output_dir / rel
+            # 添加语言后缀: file.md -> file_en.md
+            stem = rel.stem
+            suffix = rel.suffix
+            translated_name = f"{stem}_{lang}{suffix}"
+            output_path = output_dir / rel.parent / translated_name
+
             if translator.translate_file(f, output_path, args.dry_run):
                 success += 1
 
