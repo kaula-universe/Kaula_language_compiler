@@ -4,7 +4,7 @@
 // 版本格式:
 //   - version:  v1.0.x (发布版本, x = 提交计数)
 //   - snapshot: YY.M.DD-branch-hash (快照版本)
-//   - codename: sor-oxide (版本代号)
+//   - codename: kaula (版本代号)
 package version
 
 import (

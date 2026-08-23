@@ -27,7 +27,7 @@ Kaula 编译器使用 Go 1.21+ 实现，零外部依赖，将 `.kl` 源文件编
        │
        ▼
 ┌─────────────┐
-│  SOR 分析    │  sor/ - 子所有权释放分析（可选）
+│  SOR 分析    │  sor/ - Sub-structural Ownership 分析（可选）
 │  (可选)      │  → 内存分配策略、所有权验证
 └──────┬──────┘
        │
@@ -89,7 +89,7 @@ compiler/
 │   ├── errors/errors.go         # 错误处理
 │   ├── symbol/symbol.go         # 符号表
 │   ├── stdlib/                  # 标准库集成
-│   ├── sor/                     # SOR 子所有权释放
+│   ├── sor/                     # SOR Sub-structural Ownership
 │   ├── pkgmgr/mirror.go         # 包镜像管理
 │   └── timeout/timeout.go       # 超时与内存控制
 ├── templates/main.c.tmpl        # 代码生成模板
@@ -103,5 +103,5 @@ compiler/
 2. **模块化代码生成**：类型/函数/表达式/语句生成器分离，支持插件扩展
 3. **增量编译**：基于 SHA-256 的缓存验证，跳过未变化的代码生成
 4. **资源安全**：内置内存监控和超时保护，防止编译器资源耗尽
-5. **SOR 所有权分析**：可选的编译期所有权验证，类似 Rust 但更轻量
+5. **SOR Sub-structural Ownership 分析**：可选的编译期所有权验证，类似 Rust 但更轻量
 6. **跨平台**：Go 实现 + C 运行时，支持 Windows/Linux/macOS

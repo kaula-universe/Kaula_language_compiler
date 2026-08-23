@@ -1,6 +1,6 @@
-# SOR 子结构所有权
+# SOR Sub-structural Ownership
 
-SOR（Sub-structural Ownership Release）是 Kaula 独特的编译期内存安全机制，
+SOR（Sub-structural Ownership）是 Kaula 独特的编译期内存安全机制，
 追踪每个资源的**唯一所有权**，在编译期消除数据竞争和悬垂指针，零运行时开销。
 
 > 启用方式：全局 `--sor` 参数，或单函数 `#[sor]` 注解。

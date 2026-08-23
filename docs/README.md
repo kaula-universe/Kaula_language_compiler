@@ -32,7 +32,7 @@
 
 - [增量编译缓存](cache-system.md) - SHA-256 验证、原子写入、自动清理
 - [错误处理](error-handling.md) - 错误类型、源码上下文、修复建议
-- **SOR 子所有权释放](sor-system.md) - 所有权原语、分析流程、内存优化
+- [SOR Sub-structural Ownership](sor-system.md) - 所有权原语、分析流程、内存优化
 - [标准库集成](stdlib-integration.md) - 配置驱动、自动发现、第三方库
 - [核心运行时特性](core-runtime.md) - VO 系统、前缀系统、任务调度
 - [超时与内存控制](timeout-memory.md) - 资源监控、阶段统计、调试输出
@@ -54,7 +54,7 @@
 
 ### 想了解内存管理？
 
-查看 [SOR 子所有权释放](sor-system.md) 和 [核心运行时特性](core-runtime.md)。
+查看 [SOR Sub-structural Ownership](sor-system.md) 和 [核心运行时特性](core-runtime.md)。
 
 KMM V4 是 Kaula 的默认内存分配器，基于 per-thread heap + bump allocation，在基准测试中比 malloc/free 快 **2-20x**：
 
@@ -68,7 +68,7 @@ KMM V4 是 Kaula 的默认内存分配器，基于 per-thread heap + bump alloca
 相关文档：
 - [代码生成器](code-generation.md) - KMM inline 机制、作用域插入策略
 - [裸机开发指南](bare-metal.md) - 内建引导（--boot pvh/custom）、KMM V4 静态池模式（freestanding）
-- [SOR 子所有权释放](sor-system.md) - SOR 与 KMM 集成、内存分配决策
+- [SOR Sub-structural Ownership](sor-system.md) - SOR 与 KMM 集成、内存分配决策
 
 ### 想了解如何扩展编译器？
 
