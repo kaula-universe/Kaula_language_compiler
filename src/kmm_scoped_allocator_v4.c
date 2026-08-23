@@ -1,3 +1,10 @@
+/* 暴露 BSD 扩展（如 macOS 的 MAP_ANON），需在所有 #include 前定义 */
+#ifdef __APPLE__
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#endif
+
 #include "kmm_scoped_allocator_v4.h"
 
 #ifndef KMM_V4_STATIC_POOL
