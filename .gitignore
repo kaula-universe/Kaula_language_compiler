@@ -20,3 +20,6 @@ docs/tutorials/examples/*.exe
 docs/tutorials/examples/cache/
 demo/*.exe
 *.exe
+
+# opencode 配置（本地 AI agent 配置）
+.opencode/
