@@ -103,3 +103,16 @@ kaulafmt -w <file>.kl
 - 格式化输出不得包含 `/* unknown statement */` 或 `/* unknown expression */` 注释
   (表示 kaulafmt 未覆盖的节点,需要修复)。
 - 二次运行 kaulafmt 结果应与首次一致(round-trip 稳定)。
+
+## 9. 更多资源
+
+编写 Kaula 代码前,请先阅读以下教程文档:
+
+- [Getting Started](docs/tutorials/getting-started.md) — 环境搭建与第一个程序
+- [Functions](docs/tutorials/functions.md) — 函数定义与调用
+- [Error and Panic](docs/tutorials/error-and-panic.md) — 错误处理与可捕获 Panic
+- [SOR Ownership](docs/tutorials/sor-ownership.md) — Sub-structural Ownership 内存安全机制
+- [Kaulac 命令参考](docs/tools/kaulac.md) — 编译器完整参数说明
+- [Build Config](docs/build-config.md) — kaula.json 配置参考
+- [Package Management](docs/tools/package-management.md) — 依赖管理
+- [Debugging](docs/tools/debugging.md) — GDB/LLDB 调试指南
