@@ -36,7 +36,7 @@ python toolkit_build.py
 cd compiler && go build -o ../bin/kaulac ./cmd/kaulac/
 ```
 
-依赖：Python 3.8+、Go 1.21+、Clang
+依赖：Python 3.8+、Go 1.21+、LLVM-mingw 或 MSVC（Windows）/ Clang（Linux/macOS）
 
 ### Hello World
 

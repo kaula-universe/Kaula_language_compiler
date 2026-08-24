@@ -25,7 +25,7 @@
 |------|------|------|
 | Python | 3.8+ | 运行构建脚本 |
 | Go | 1.21+ | 编译 kaulac / kaulafmt |
-| Clang | 任意 14+（推荐） | 编译 C 运行时/标准库（可用 gcc 替代） |
+| C 工具链 | LLVM-mingw 或 MSVC（Windows）；Clang/GCC（Linux/macOS） | 编译 C 运行时/标准库 |
 | 归档工具 | Windows: `llvm-lib` 或 MSVC `lib.exe`；其他: `llvm-ar` / `gcc-ar` / `ar` | 打包静态库 |
 
 跨平台行为一致，推荐统一使用 clang 工具链（LLVM 附带的 `llvm-*` 工具会被自动检测）。
