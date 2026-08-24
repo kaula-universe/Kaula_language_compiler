@@ -8,8 +8,7 @@ Kaula 是一门编译到 C 的系统编程语言，支持现代语言特性（�
 确保满足以下依赖：
 
 - **Go** (编译 kaulac 编译器)
-- **Clang** (编译生成的 C 代码)
-- **llvm-lib** (Windows 可选，用于合并 .o 文件)
+- **LLVM-mingw 或 MSVC** (Windows) / **Clang** (Linux/macOS) (编译生成的 C 代码)
 
 ## 第一个程序
 
