@@ -103,6 +103,123 @@ func GetSnapshot() string {
 	return info.Snapshot
 }
 
+// LogoText 是 Kaula 的极简字符画 logo (6 行高, 取自 npm 风格 minimal block)
+// 这是纯文本常量 (无 ANSI), 用于 fallback 或外部直接引用。
+// 启用颜色时, 由 Logo() 函数返回带 24-bit 渐变 ANSI 的版本。
+const LogoText = `
+██╗  ██╗ █████╗ ██╗   ██╗██╗      █████╗
+██║ ██╔╝██╔══██╗██║   ██║██║     ██╔══██╗
+█████╔╝ ███████║██║   ██║██║     ███████║
+██╔═██╗ ██╔══██║██║   ██║██║     ██╔══██║
+██║ ╚██╗██║  ██║╚██████╔╝███████╗██║  ██║
+╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
+`
+
+// colorEnabled 报告是否输出 24-bit 颜色 ANSI 转义。
+//  1. NO_COLOR 环境变量存在且非空 → 关闭
+//  2. stdout 不是 tty (例如管道/重定向) → 关闭 (避免污染日志/文件)
+//  3. TERM=dumb → 关闭
+// 其余场景开启 (现代 Windows Terminal / WezTerm / VSCode terminal / Linux 主流终端均支持 truecolor)
+func colorEnabled() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	if !isTerminal(os.Stdout.Fd()) {
+		return false
+	}
+	return true
+}
+
+// Logo 返回带 24-bit 渐变 ANSI 的 logo 字符串。
+// 渐变方向: 水平 cyan (#00FFFF) → magenta (#FF00FF), 每字符一色。
+// 当 colorEnabled() 为 false 时返回纯 LogoText 文本 (与管道/重定向/NO_COLOR 兼容)。
+func Logo() string {
+	if !colorEnabled() {
+		return LogoText
+	}
+	const (
+		cR0, cG0, cB0 = 0, 255, 255   // cyan
+		cR1, cG1, cB1 = 255, 0, 255   // magenta
+	)
+	// 拆 LogoText 为行, 跳过首尾的空行
+	raw := LogoText
+	lines := []string{}
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\n' {
+			line := raw[start:i]
+			if start == 0 && line == "" {
+				start = i + 1
+				continue
+			}
+			lines = append(lines, line)
+			start = i + 1
+		}
+	}
+	if start < len(raw) {
+		lines = append(lines, raw[start:])
+	}
+	// 计算最大可见宽度 (按 rune 数)
+	width := 0
+	for _, l := range lines {
+		w := 0
+		for range l {
+			w++
+		}
+		if w > width {
+			width = w
+		}
+	}
+	if width == 0 {
+		return LogoText
+	}
+	const reset = "\033[0m"
+	b := make([]byte, 0, len(LogoText)*4)
+	for li, line := range lines {
+		col := 0
+		for _, ch := range line {
+			// 跳过普通空格不染色, 避免色块间隙突兀
+			if ch == ' ' {
+				b = append(b, ' ')
+				col++
+				continue
+			}
+			t := float64(col) / float64(width-1)
+			r := int(float64(cR0) + float64(cR1-cR0)*t)
+			g := int(float64(cG0) + float64(cG1-cG0)*t)
+			bl := int(float64(cB0) + float64(cB1-cB0)*t)
+			fmt.Fprintf(stringBuilder{&b}, "\033[38;2;%d;%d;%dm", r, g, bl)
+			buf := []byte(string(ch))
+			b = append(b, buf...)
+			col++
+		}
+		b = append(b, reset...)
+		if li < len(lines)-1 {
+			b = append(b, '\n')
+		}
+	}
+	return string(b)
+}
+
+// stringBuilder 适配 fmt.Fprintf 写到 []byte
+type stringBuilder struct{ b *[]byte }
+
+func (s stringBuilder) Write(p []byte) (int, error) {
+	*s.b = append(*s.b, p...)
+	return len(p), nil
+}
+
+// Banner 返回 logo + 版本信息的多行字符串。
+// 格式:
+//   <Logo>
+//   kaulac v1.0.42 (26.8.23-master-67ffac3)
+func Banner() string {
+	return Logo() + "\n" + String()
+}
+
 // String 返回人类可读的版本描述。
 // 格式: kaulac v1.0.42 (26.8.23-master-67ffac3)
 func String() string {
