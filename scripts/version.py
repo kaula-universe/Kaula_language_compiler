@@ -91,9 +91,6 @@ def get_commit_count_since_v1_0(cwd: Path = None) -> int:
 
 def get_remote_commit_count(cwd: Path = None) -> int:
     """Get remote commit count to sync with remote."""
-    # Fetch latest remote info
-    run_git(["fetch", "--quiet"], cwd)
-    
     remote = get_branch(cwd)
     remote_ref = run_git(["rev-parse", f"origin/{remote}", "--quiet"], cwd)
     if not remote_ref:
@@ -121,12 +118,13 @@ def get_merged_pr_count(cwd: Path = None) -> int:
 
 
 def get_push_count(cwd: Path = None) -> int:
-    """Count direct pushes (non-merge commits)."""
+    """Count pushed direct commits (non-merge, excluding unpushed)."""
     if cwd is None:
         cwd = Path.cwd()
     
-    # Count non-merge commits (direct pushes)
-    count = run_git(["rev-list", "--count", "--no-merges", "HEAD"], cwd)
+    branch = get_branch(cwd)
+    # 只统计已推送到远程的非 merge 提交
+    count = run_git(["rev-list", "--count", "--no-merges", f"origin/{branch}"], cwd)
     try:
         return int(count)
     except ValueError:
@@ -154,6 +152,9 @@ def generate_release_version(cwd: Path = None) -> tuple:
     Returns: (version_str, local_ahead)"""
     if cwd is None:
         cwd = Path.cwd()
+    
+    # 先 fetch 获取最新远程状态
+    run_git(["fetch", "--quiet"], cwd)
     
     pr_count = get_merged_pr_count(cwd)
     push_count = get_push_count(cwd)
