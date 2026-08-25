@@ -864,7 +864,7 @@ func main() {
 	// 而 --version 未在 flag 包注册，会触发 "flag provided but not defined" 退出。
 	// 项目版本直接从 kaula.json 读取 "version" 字段。
 	if showVersion {
-		fmt.Println(version.String())
+		fmt.Println(version.Banner())
 		if data, rerr := os.ReadFile("kaula.json"); rerr == nil {
 			var projCfg struct {
 				Version string `json:"version"`
@@ -876,8 +876,10 @@ func main() {
 		return
 	}
 
-	// 处理命令行参数（允许仅使用缓存管理命令而不需要输入文件）
+	// 无参数运行时: 先展示 banner(logo + 版本), 再输出用法
 	if len(os.Args) < 2 {
+		fmt.Println(version.Banner())
+		fmt.Println()
 		printUsage(os.Args[0])
 		os.Exit(1)
 	}
