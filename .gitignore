@@ -1,5 +1,6 @@
 # 编译器产物
 compiler/kaulac.exe
+compiler/version.json
 cache/
 !compiler/internal/cache/
 compiler/cache/

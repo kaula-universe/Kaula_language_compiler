@@ -74,7 +74,13 @@ func load() (Info, error) {
 			loadError = nil
 			return
 		}
-		loadError = fmt.Errorf("version.json not found (looked in %d candidate paths)", len(LookupPaths()))
+		// version.json 不存在时返回 dev-local 降级，避免未执行构建脚本时程序崩溃
+		cached = Info{
+			Version:  "dev-local",
+			Snapshot: "dev-local",
+			Codename: "kaula",
+		}
+		loadError = nil
 	})
 	return cached, loadError
 }
