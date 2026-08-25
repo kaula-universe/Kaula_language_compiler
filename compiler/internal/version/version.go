@@ -125,6 +125,7 @@ const LogoText = `
 //  1. NO_COLOR 环境变量存在且非空 → 关闭
 //  2. stdout 不是 tty (例如管道/重定向) → 关闭 (避免污染日志/文件)
 //  3. TERM=dumb → 关闭
+//  4. Windows 终端不支持 VT → 关闭
 // 其余场景开启 (现代 Windows Terminal / WezTerm / VSCode terminal / Linux 主流终端均支持 truecolor)
 func colorEnabled() bool {
 	if os.Getenv("NO_COLOR") != "" {
