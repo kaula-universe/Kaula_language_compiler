@@ -1,4 +1,4 @@
-﻿package codegen
+package codegen
 
 import (
 	"fmt"
@@ -8,10 +8,12 @@ import (
 
 // TypeGenerator 负责类型相关的代码生成
 type TypeGenerator struct {
-	codegen     *CodeGenerator
-	clibTypeMap map[string]string
-	structTypes map[string]bool
-	classTypes  map[string]bool // class 类型名 (指针语义, 与 struct 区分)
+	codegen        *CodeGenerator
+	clibTypeMap    map[string]string
+	structTypes    map[string]bool
+	classTypes     map[string]bool // class 类型名 (指针语义, 与 struct 区分)
+	enumTypes      map[string]bool // 简单枚举类型名 (typedef enum { ... } Name)
+	typeAliasTypes map[string]bool // type alias 类型名 (typedef ... Name)
 
 	// activeTypeMap 当前活跃的类型参数映射（泛型单态化期间设置）。
 	// T -> 具体类型（Kaula 类型名，如 "int"）
@@ -25,9 +27,11 @@ func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 		clibTypeMap: map[string]string{
 			"File": "FILE*",
 		},
-		structTypes:   make(map[string]bool),
-		classTypes:    make(map[string]bool),
-		activeTypeMap: nil,
+		structTypes:    make(map[string]bool),
+		classTypes:     make(map[string]bool),
+		enumTypes:      make(map[string]bool),
+		typeAliasTypes: make(map[string]bool),
+		activeTypeMap:  nil,
 	}
 }
 
@@ -322,6 +326,20 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 	if tg.codegen != nil && tg.codegen.IsClassType(kaulaType) {
 		return kaulaStructTag(kaulaType) + "*"
 	}
+	// 跨文件 import 的公共类型（struct/enum 值语义、class 指针语义）：
+	// 定义在被导入文件生成的 typeCode 中（C 名带 K_ 前缀），本地
+	// structTypes/classTypes 均未注册，此处按 localPubTypes 补映射，
+	// 否则变量声明会把 Kaula 裸名直接吐进 C（unknown type name）。
+	if tg.codegen != nil && tg.codegen.localPubTypes != nil {
+		if info, ok := tg.codegen.localPubTypes[kaulaType]; ok && info != nil {
+			switch info.Kind {
+			case "class", "interface":
+				return kaulaStructTag(kaulaType) + "*"
+			case "struct", "enum", "type":
+				return kaulaStructTag(kaulaType)
+			}
+		}
+	}
 	return kaulaType
 }
 
@@ -376,12 +394,17 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 	}
 	code.WriteString("\n")
 
+	// 构造器与方法体延迟输出（classImplCode）：typeCode 段现位于 forwardDecls
+	// 之前（保证 typedef 先于引用它的函数原型），若方法体留在 typeCode 内，
+	// 其对顶层函数的调用会先于这些函数的原型出现，C 报 "undeclared function"。
+	// 延迟段由装配器置于 forwardDecls 与全局变量之后、普通函数体之前。
+	impl := &tg.codegen.classImplCode
 	for _, constructor := range stmt.Constructors {
-		code.WriteString(tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor))
+		impl.WriteString(tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor))
 	}
 
 	for _, method := range stmt.Methods {
-		code.WriteString(tg.GenerateMethodStatement(stmt.Name, method))
+		impl.WriteString(tg.GenerateMethodStatement(stmt.Name, method))
 	}
 
 	return code.String()
@@ -627,6 +650,7 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 
 	if !hasDataVariants {
 		// 简单枚举（无数据），直接生成 C enum
+		tg.enumTypes[stmt.Name] = true // 登记：用于前置声明跳过检查 (typedef 必须在 func 原型之前)
 		code.WriteString(fmt.Sprintf("typedef enum {\n"))
 		if len(stmt.Variants) == 0 {
 			// C 标准不允许空 enum, 生成占位成员
@@ -644,6 +668,8 @@ func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
 	}
 
 	// 生成 kind 枚举
+	kindEnumName := stmt.Name + "_Kind"
+	tg.enumTypes[kindEnumName] = true // 登记 ADT 枚举的 kind 枚举类型
 	code.WriteString(fmt.Sprintf("typedef enum {\n"))
 	if len(stmt.Variants) == 0 {
 		// C 标准不允许空 enum, 生成占位成员
@@ -952,6 +978,10 @@ func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement
 	if stmt.Generic {
 		return tg.GenerateGenericTypeAliasStatement(stmt)
 	}
+
+	// 登记 type alias 类型：用于函数前置声明跳过检查
+	// （typedef 定义必须在引用该类型的 func 原型之前输出）
+	tg.typeAliasTypes[stmt.Name] = true
 
 	if stmt.IsFuncType {
 		return tg.GenerateFuncTypeAliasStatement(stmt)

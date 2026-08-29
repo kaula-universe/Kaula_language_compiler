@@ -3919,7 +3919,7 @@
     },
     "json_create_string": {
       "args": [
-        "const char*"
+        "const String"
       ],
       "return": "JsonValue*"
     },
@@ -3935,6 +3935,48 @@
       "args": [
         "JsonValue*"
       ]
+    },
+    "json_is_null": {
+      "args": [
+        "JsonValue*"
+      ],
+      "return": "int"
+    },
+    "json_is_bool": {
+      "args": [
+        "JsonValue*"
+      ],
+      "return": "int"
+    },
+    "json_is_number": {
+      "args": [
+        "JsonValue*"
+      ],
+      "return": "int"
+    },
+    "json_is_string": {
+      "args": [
+        "JsonValue*"
+      ],
+      "return": "int"
+    },
+    "json_get_bool": {
+      "args": [
+        "JsonValue*"
+      ],
+      "return": "int"
+    },
+    "json_get_number": {
+      "args": [
+        "JsonValue*"
+      ],
+      "return": "double"
+    },
+    "json_get_string": {
+      "args": [
+        "JsonValue*"
+      ],
+      "return": "String"
     },
     "json_array_append": {
       "args": [
@@ -3958,14 +4000,14 @@
     "json_object_set": {
       "args": [
         "JsonValue*",
-        "const char*",
+        "const String",
         "JsonValue*"
       ]
     },
     "json_object_get": {
       "args": [
         "JsonValue*",
-        "const char*"
+        "const String"
       ],
       "return": "JsonValue*"
     },
@@ -3978,7 +4020,7 @@
     },
     "json_parse": {
       "args": [
-        "const char*"
+        "const String"
       ],
       "return": "JsonValue*"
     },
@@ -3992,12 +4034,12 @@
       "args": [
         "JsonValue*"
       ],
-      "return": "char*"
+      "return": "String"
     },
     "json_to_file": {
       "args": [
         "JsonValue*",
-        "const char*"
+        "const String"
       ],
       "return": "bool"
     }
@@ -7228,6 +7270,346 @@
     "xml_dump": {
       "args": [
         "XmlDoc*"
+      ],
+      "return": "String"
+    }
+  },
+  "std.toml": {
+    "header": "toml/toml.h",
+    "types": {
+      "TomlDocument": {},
+      "TomlTable": {},
+      "TomlValue": {},
+      "TomlType": {}
+    },
+    "toml_parse": {
+      "args": [
+        "String"
+      ],
+      "return": "TomlDocument*"
+    },
+    "toml_parse_file": {
+      "args": [
+        "String"
+      ],
+      "return": "TomlDocument*"
+    },
+    "toml_destroy": {
+      "args": [
+        "TomlDocument*"
+      ]
+    },
+    "toml_get": {
+      "args": [
+        "TomlTable*",
+        "String"
+      ],
+      "return": "TomlValue*"
+    },
+    "toml_get_table": {
+      "args": [
+        "TomlTable*",
+        "String"
+      ],
+      "return": "TomlTable*"
+    },
+    "toml_get_string": {
+      "args": [
+        "TomlTable*",
+        "String"
+      ],
+      "return": "String"
+    },
+    "toml_get_int": {
+      "args": [
+        "TomlTable*",
+        "String"
+      ],
+      "return": "i64"
+    },
+    "toml_get_float": {
+      "args": [
+        "TomlTable*",
+        "String"
+      ],
+      "return": "f64"
+    },
+    "toml_get_bool": {
+      "args": [
+        "TomlTable*",
+        "String"
+      ],
+      "return": "bool_t"
+    },
+    "toml_serialize": {
+      "args": [
+        "TomlDocument*"
+      ],
+      "return": "String"
+    }
+  },
+  "std.xml": {
+    "header": "xml/xml.h",
+    "types": {
+      "XmlDocument": {},
+      "XmlNode": {},
+      "XmlAttribute": {},
+      "XmlNodeType": {}
+    },
+    "xml_create": {
+      "args": [
+        "String",
+        "String"
+      ],
+      "return": "XmlDocument*"
+    },
+    "xml_destroy": {
+      "args": [
+        "XmlDocument*"
+      ]
+    },
+    "xml_create_element": {
+      "args": [
+        "String"
+      ],
+      "return": "XmlNode*"
+    },
+    "xml_destroy_element": {
+      "args": [
+        "XmlNode*"
+      ]
+    },
+    "xml_append_child": {
+      "args": [
+        "XmlNode*",
+        "XmlNode*"
+      ]
+    },
+    "xml_get_first_child": {
+      "args": [
+        "XmlNode*"
+      ],
+      "return": "XmlNode*"
+    },
+    "xml_get_next_sibling": {
+      "args": [
+        "XmlNode*"
+      ],
+      "return": "XmlNode*"
+    },
+    "xml_get_child_count": {
+      "args": [
+        "XmlNode*"
+      ],
+      "return": "size_t"
+    },
+    "xml_set_attribute": {
+      "args": [
+        "XmlNode*",
+        "String",
+        "String"
+      ]
+    },
+    "xml_get_attribute": {
+      "args": [
+        "XmlNode*",
+        "String"
+      ],
+      "return": "String"
+    },
+    "xml_find_element": {
+      "args": [
+        "XmlNode*",
+        "String"
+      ],
+      "return": "XmlNode*"
+    },
+    "xml_find_element_by_attribute": {
+      "args": [
+        "XmlNode*",
+        "String",
+        "String"
+      ],
+      "return": "XmlNode*"
+    },
+    "xml_parse": {
+      "args": [
+        "String"
+      ],
+      "return": "XmlDocument*"
+    },
+    "xml_parse_file": {
+      "args": [
+        "String"
+      ],
+      "return": "XmlDocument*"
+    },
+    "xml_serialize": {
+      "args": [
+        "XmlDocument*"
+      ],
+      "return": "String"
+    },
+    "xml_to_file": {
+      "args": [
+        "XmlDocument*",
+        "String"
+      ],
+      "return": "bool_t"
+    }
+  },
+  "std.hash": {
+    "header": "hash/hash_ext.h",
+    "types": {
+      "SHA1Digest": {},
+      "SHA384Digest": {},
+      "SHA512Digest": {},
+      "CRC64Digest": {},
+      "MD5Digest": {},
+      "SHA1Context": {},
+      "SHA512Context": {}
+    },
+    "sha1_hash": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "SHA1Digest"
+    },
+    "sha1_hex": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "sha384_hash": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "SHA384Digest"
+    },
+    "sha384_hex": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "sha512_hash": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "SHA512Digest"
+    },
+    "sha512_hex": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "crc64_hash": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "CRC64Digest"
+    },
+    "crc64_hex": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "crc64_compute": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "u64"
+    },
+    "hmac_sha512": {
+      "args": [
+        "const void()",
+        "size_t",
+        "const void()",
+        "size_t",
+        "u8*"
+      ]
+    },
+    "hmac_sha512_hex": {
+      "args": [
+        "const void()",
+        "size_t",
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "pbkdf2_sha512": {
+      "args": [
+        "const void()",
+        "size_t",
+        "const void()",
+        "size_t",
+        "int",
+        "u8*",
+        "size_t"
+      ]
+    },
+    "sha1_ctx_create": {
+      "args": [],
+      "return": "SHA1Context*"
+    },
+    "sha1_ctx_update": {
+      "args": [
+        "SHA1Context*",
+        "const void()",
+        "size_t"
+      ]
+    },
+    "sha1_ctx_final": {
+      "args": [
+        "SHA1Context*"
+      ],
+      "return": "SHA1Digest"
+    },
+    "sha1_ctx_destroy": {
+      "args": [
+        "SHA1Context*"
+      ]
+    },
+    "sha512_ctx_create": {
+      "args": [],
+      "return": "SHA512Context*"
+    },
+    "sha512_ctx_update": {
+      "args": [
+        "SHA512Context*",
+        "const void()",
+        "size_t"
+      ]
+    },
+    "sha512_ctx_final": {
+      "args": [
+        "SHA512Context*"
+      ],
+      "return": "SHA512Digest"
+    },
+    "sha512_ctx_destroy": {
+      "args": [
+        "SHA512Context*"
+      ]
+    },
+    "hash_compute": {
+      "args": [
+        "const char*",
+        "const void()",
+        "size_t"
       ],
       "return": "String"
     }

@@ -118,6 +118,14 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 				}
 			}
 		}
+		// KMM 回卷悬垂修复：dst = src 标识符赋值的跨作用域逃逸检测。
+		// 块级 KMM 作用域退出时 scope_pop/offset_restore 回卷 bump 指针，回收块内
+		// 分配的对象；若块内通过普通赋值把对象引用传给外层局部变量或全局，
+		// 会产生「声明还在、内容丢失」的悬垂。在赋值前把源对象提升到幸存段，
+		// 并抑制源变量的块尾 per-object free。
+		if assignCode := sg.generateAssignEscapeStatement(s); assignCode != "" {
+			return assignCode
+		}
 		// 其他表达式语句
 		return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 	case *ast.BlockStatement:
@@ -161,6 +169,12 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	}
 
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
+
+	// KMM 回卷悬垂修复：所有模式下登记 malloc 类初始化的常量分配大小，
+	// 供赋值逃逸 promote 的大小解析使用（SOR 模式另有生成文本匹配路径）
+	if stmt.Value != nil {
+		sg.codegen.RecordAllocSizeFromAST(stmt.Name, stmt.Value)
+	}
 
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
 	if os.Getenv("KAULA_DEBUG_VARDECL") != "" {
@@ -1901,6 +1915,89 @@ func (sg *StatementGenerator) generateYieldStatement(stmt *ast.YieldStatement) s
 	return b.String()
 }
 
+// generateAssignEscapeStatement 处理 dst = src 标识符赋值的跨作用域逃逸
+// （KMM 作用域回卷导致声明丢失的修复）。
+//
+// 背景：块级 KMM 作用域（KMM_V4_SCOPE_START/END、offset_save/restore）退出时
+// 会回卷 bump 指针，回收块内 kmm_v4 分配的对象。yield/return/调用实参都有
+// promote 补救路径，但普通赋值 dst = src 此前没有任何处理——块内分配的对象
+// 经赋值逃逸到外层局部变量或全局后，作用域回卷即产生悬垂：
+// 声明还在、内容被后续分配覆写（静默数据损坏，无任何告警）。
+//
+// 修复：赋值前先把源对象提升到幸存段（kmm_v4_scope_promote_p 系列会改写 src
+// 指针指向幸存副本），再执行普通赋值——两个持有者都指向幸存内存，回卷无害。
+// 同时把 src 登记为 assign-escaped，抑制其块尾 per-object survivor_free
+// （否则会释放幸存副本，新持有者照样悬垂）。
+//
+// 返回生成的语句代码；不构成逃逸时返回 ""（调用方走原路径）。
+func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.ExpressionStatement) string {
+	bin, ok := stmt.Expression.(*ast.BinaryExpression)
+	if !ok || (bin.Operator != "=" && bin.Operator != "ASSIGN") {
+		return ""
+	}
+	dstIdent, okDst := bin.Left.(*ast.Identifier)
+	srcIdent, okSrc := bin.Right.(*ast.Identifier)
+	if !okDst || !okSrc {
+		return ""
+	}
+	if !sg.sorNeedsAssignEscapePromote(srcIdent.Name, dstIdent.Name) {
+		return ""
+	}
+	sizeExpr := ""
+	if sg.isStringTyped(srcIdent.Name) {
+		sizeExpr = "sizeof(String)"
+	} else if size, ok := sg.sorPromoteSize(srcIdent.Name, srcIdent.Name); ok {
+		sizeExpr = size
+	} else {
+		sizeExpr = "sizeof(*" + srcIdent.Name + ")"
+	}
+	var b strings.Builder
+	b.WriteString(sg.emitPromoteForType(srcIdent.Name, sizeExpr, "promote assign-escape", srcIdent.Name))
+	sg.codegen.funcEmitsPromote = true          // 方案 C：函数出口跳过 survivor_rewind
+	sg.codegen.MarkAssignEscaped(srcIdent.Name) // 抑制 src 的块尾 per-object free
+	sg.codegen.PropagateInitSize(dstIdent.Name, srcIdent.Name)
+	b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression))
+	b.WriteString(";\n")
+	return b.String()
+}
+
+// sorNeedsAssignEscapePromote 判断普通赋值 dst = src 是否把 KMM 可回卷对象
+// 传给了更长生命周期的持有者（跨作用域逃逸），需要先提升再赋值。
+//
+// 判定依据：
+//  1. 源是 C 指针或 String 形态的局部持有者；
+//  2. 目标声明作用域严格浅于源，或目标未被记录声明深度（全局等跨函数存活者；
+//     全局符号不走 AddSymbol，故不在 declScopeDepth 表中）；
+//  3. 源对象确实可能位于可回卷区域：SOR 决策为 BumpPool，或声明处登记过
+//     kmm_v4/std_malloc 常量分配大小；所有权已转移（DropNone）的对象豁免，
+//     其回收责任已随 yield/extract 卸载。
+func (sg *StatementGenerator) sorNeedsAssignEscapePromote(srcName, dstName string) bool {
+	if srcName == "" || dstName == "" || srcName == dstName {
+		return false
+	}
+	if !sg.isPointerTyped(srcName) && !sg.isStringTyped(srcName) {
+		return false
+	}
+	if _, recorded := sg.codegen.declScopeDepth[dstName]; recorded {
+		if sg.codegen.GetDeclScopeDepth(dstName) >= sg.codegen.GetDeclScopeDepth(srcName) {
+			return false // 目标与源同层或更内层：目标先于源消亡，无逃逸
+		}
+	}
+	d := sg.codegen.sorAdapter.GetVarDecision(srcName)
+	if d != nil {
+		if d.DropActionID == 0 {
+			return false // 所有权已转移（yield/extract），无需重复提升
+		}
+		if d.AllocKindID == 1 {
+			return true // BumpPool：位于可回卷的 per-thread heap 区域
+		}
+	}
+	if n, ok := sg.codegen.sorInitSizes[srcName]; ok && n > 0 {
+		return true // 声明处登记过 kmm_v4/std_malloc 常量分配大小
+	}
+	return false
+}
+
 // generateVarAttributes 将变量属性转换为 C 声明前缀
 // #[volatile] i32 x → volatile int64_t x
 // #[section(".bss")] → __attribute__((section(".bss")))
@@ -2080,6 +2177,16 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 		if d == nil {
 			continue
 		}
+		// KMM 回卷悬垂修复：已通过普通赋值逃逸的变量，对象已被提升到幸存段，
+		// 所有权由更外层的持有者接管——此处 free 会释放幸存副本导致新持有者
+		// 悬垂，必须跳过。
+		if sg.codegen.IsAssignEscaped(name) {
+			b.WriteString(indent)
+			b.WriteString("/* SOR: skip survivor_free for ")
+			b.WriteString(name)
+			b.WriteString(" (assign-escaped, ownership moved out) */\n")
+			continue
+		}
 		// 核查表缺口 ⑤：统一通过 ShouldSkipSurvivorFree 判定。
 		// 这样 FFI user_data 保持、extern 返回值、DropAction 调整都能在
 		// SORCodeGenAdapter 一处收敛，不再把分配器/所有权判断散落到 stmtgen。
@@ -2143,6 +2250,15 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 			}
 			d := adapter.GetVarDecision(name)
 			if d == nil {
+				continue
+			}
+			// KMM 回卷悬垂修复：assign-escaped 变量同作用域退出点一样跳过
+			// （return 路径的 excludeName 只覆盖返回值本身）
+			if sg.codegen.IsAssignEscaped(name) {
+				b.WriteString(indent)
+				b.WriteString("/* SOR: skip survivor_free on return for ")
+				b.WriteString(name)
+				b.WriteString(" (assign-escaped, ownership moved out) */\n")
 				continue
 			}
 			// 核查表缺口 ⑤：同作用域退出点，统一走 ShouldSkipSurvivorFree 网关

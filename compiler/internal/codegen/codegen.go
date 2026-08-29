@@ -1,4 +1,4 @@
-﻿package codegen
+package codegen
 
 import (
 	"fmt"
@@ -49,6 +49,9 @@ type CodeGenerator struct {
 
 	usedThirdPartyLibs map[string]bool
 	localImportFuncs   map[string]bool
+	// 本地 import 的 pub/export 函数返回类型（函数名 -> Kaula 返回类型），
+	// 供 inferType 对跨文件调用做类型推断（println 格式选择、concat 重载等）
+	localImportReturns map[string]string
 	// 本地 import 的类型定义（跨文件 class/struct 等），用于 C 类型映射与成员访问解析
 	localPubTypes map[string]*sema.LocalPubTypeInfo
 
@@ -56,6 +59,8 @@ type CodeGenerator struct {
 	genericInstantiated   map[string]bool
 	genericFuncCode       strings.Builder // 泛型实例化函数代码
 	genericInstDepth      int             // 当前实例化深度（防止无限递归）
+
+	classImplCode strings.Builder // class 构造器/方法体（延迟到 forwardDecls 与全局变量之后输出）
 
 	genericTypeCache      map[string]string // 泛型类型实例缓存：Box<int> → K_Box_int
 	genericTypeCode       strings.Builder   // 泛型类型实例化代码（typedef 定义）
@@ -92,6 +97,14 @@ type CodeGenerator struct {
 	// 跨作用域 promote 判定需靠 codegen 自己的作用域栈
 	scopeDepth      int
 	declScopeDepth  map[string]int
+
+	// 赋值逃逸登记（KMM 回卷悬垂修复）：通过普通赋值 dst = src 把 src 所指对象
+	// 的引用传给更长生命周期持有者（外层局部/全局）的源变量名集合。
+	// 已逃逸变量：
+	//  1. 在赋值点被 promote 到幸存段（副本长期有效）；
+	//  2. 其块尾 per-object survivor_free 必须抑制——否则会释放幸存副本，
+	//     使新持有者悬垂（声明还在、内容丢失）。
+	assignEscapedVars map[string]bool
 
 	sourceMap  *SourceMap
 	sourceFile string
@@ -415,6 +428,20 @@ func (cg *CodeGenerator) GetDeclScopeDepth(name string) int {
 	return 0
 }
 
+// MarkAssignEscaped 登记通过普通赋值逃逸到更长生命周期持有者的源变量。
+// 已逃逸变量的块尾 per-object survivor_free 必须抑制（对象已 promote，
+// 所有权由新持有者延续，提前 free 会造成新持有者悬垂）。
+func (cg *CodeGenerator) MarkAssignEscaped(name string) {
+	if name != "" {
+		cg.assignEscapedVars[name] = true
+	}
+}
+
+// IsAssignEscaped 查询变量是否已通过普通赋值逃逸
+func (cg *CodeGenerator) IsAssignEscaped(name string) bool {
+	return cg.assignEscapedVars[name]
+}
+
 // IsMallocLikeCall 检查是否为 malloc 类调用（包含 hosted std_malloc，不区分 freestanding）
 // 用于编译期大小登记
 func (cg *CodeGenerator) IsMallocLikeCall(call *ast.CallExpression) bool {
@@ -542,6 +569,22 @@ func (cg *CodeGenerator) SetLocalPubTypes(types map[string]*sema.LocalPubTypeInf
 	}
 }
 
+// SetLocalImportReturnTypes 注册本地 import 的 pub/export 函数返回类型映射。
+// inferType 对跨文件函数调用查 program.FindFunction 必然失败（定义在别的
+// 文件），此处提供 O(1) 回查，保证 println 格式/concat 重载等推断正确。
+func (cg *CodeGenerator) SetLocalImportReturnTypes(m map[string]string) {
+	cg.localImportReturns = m
+	if len(m) > 0 && cg.typeGenerator != nil {
+		// 顺带把跨文件函数名注册为已知符号，便于其他按名查询的路径兜底
+		if cg.localImportFuncs == nil {
+			cg.localImportFuncs = make(map[string]bool)
+		}
+		for name := range m {
+			cg.localImportFuncs[name] = true
+		}
+	}
+}
+
 func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	tm := NewTemplateManager()
 	templatePath := filepath.Join(cfg.TemplatePath, "main.c.tmpl")
@@ -601,6 +644,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		arrayLens:           make(map[string]int),
 		sorInitSizes:        make(map[string]int),
 		declScopeDepth:      make(map[string]int),
+		assignEscapedVars:   make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
 	}
 
@@ -1082,27 +1126,49 @@ static inline String string_concat_float(String s, double v) {
 	forwardDecls.Grow(1024)
 	for _, stmt := range program.Statements {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.Name != "main" {
-			// 参数含 struct/class 类型的函数跳过前置声明
-			// (前置声明在 typedef 之前, 值参数需要完整类型)
-			hasStructParam := false
+			// 泛型函数跳过前置声明：原始签名的类型参数 T 无法映射为合法 C 类型，
+			// 生成原型只会产生 "unknown type name 'T'"；实际调用点经
+			// InstantiateGeneric 单态化为 identity_int 等实例（定义自带原型语义，
+			// 位于 genericFuncCode），无需也不应为此处生成原始签名原型。
+			if fnStmt.Generic || len(fnStmt.TypeParams) > 0 {
+				continue
+			}
+			// 参数/返回值含自定义类型 (struct/class/enum/type alias/跨文件类型) 的函数
+			// 跳过前置声明：这些类型的 typedef 定义在 forwardDecls 之后才输出，
+			// 若先生成原型会导致 C 编译报 "unknown type name"。
+			needsTypeBeforeDecl := false
+			// isUserDefinedType 判断 kaulaType 是否是需要 typedef 在前的自定义类型
+			isUserDefinedType := func(kaulaType string) bool {
+				base := strings.TrimSuffix(strings.TrimPrefix(kaulaType, "*"), "*")
+				tg := cg.typeGenerator
+				if tg != nil {
+					if tg.structTypes[base] || tg.classTypes[base] ||
+						tg.enumTypes[base] || tg.typeAliasTypes[base] {
+						return true
+					}
+				}
+				// 跨文件 import 的公共类型：struct/class/enum/type alias 均在
+				// 另一个 .kl 生成的 typeCode 中定义，若当前文件 forwardDecls 先生成
+				// 就会引用未定义类型，同样需要跳过前置声明。
+				if cg.localPubTypes != nil {
+					if _, ok := cg.localPubTypes[base]; ok {
+						return true
+					}
+				}
+				return false
+			}
 			for _, pType := range fnStmt.ParamTypes {
-				base := strings.TrimSuffix(strings.TrimPrefix(pType, "*"), "*")
-				if cg.typeGenerator != nil &&
-					(cg.typeGenerator.structTypes[base] || cg.typeGenerator.classTypes[base]) {
-					hasStructParam = true
+				if isUserDefinedType(pType) {
+					needsTypeBeforeDecl = true
 					break
 				}
 			}
-			// 返回类型含 struct/class 同样跳过: 返回类型生成的是 K_X* 指针,
-			// typedef struct K_X 在其后才生成, 前置声明会引用未定义类型
-			if !hasStructParam && cg.typeGenerator != nil &&
-				fnStmt.ReturnType != "" && fnStmt.ReturnType != "void" {
-				base := strings.TrimSuffix(strings.TrimPrefix(fnStmt.ReturnType, "*"), "*")
-				if cg.typeGenerator.structTypes[base] || cg.typeGenerator.classTypes[base] {
-					hasStructParam = true
+			if !needsTypeBeforeDecl && fnStmt.ReturnType != "" && fnStmt.ReturnType != "void" {
+				if isUserDefinedType(fnStmt.ReturnType) {
+					needsTypeBeforeDecl = true
 				}
 			}
-			if hasStructParam {
+			if needsTypeBeforeDecl {
 				continue
 			}
 			returnType := tgReturnTypeToC(cg.typeGenerator, fnStmt.ReturnType)
@@ -1161,23 +1227,31 @@ static inline String string_concat_float(String s, double v) {
 			resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
 			resultBuilder.WriteString(allIncludes.String())
 			resultBuilder.WriteString("\n\n")
-resultBuilder.WriteString(cg.genericTypeCode.String())
-			resultBuilder.WriteString(forwardDecls.String())
-			resultBuilder.WriteByte('\n')
-
-			typeOffset = strings.Count(allIncludes.String(), "\n") + 3 + strings.Count(forwardDecls.String(), "\n") + 1
-
+			resultBuilder.WriteString(cg.genericTypeCode.String())
+			// 修复: typedef/struct/enum/type alias (typeCode) 必须在函数前置声明
+			// (forwardDecls) 之前输出，否则当导出函数签名中含有简单枚举/type alias/
+			// 跨文件 struct 等类型时，C 编译器报 "unknown type name"。
 			resultBuilder.WriteString(typeCode.String())
 			resultBuilder.WriteByte('\n')
 
-			globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1
+			typeOffset = strings.Count(allIncludes.String(), "\n") + 3 + strings.Count(cg.genericTypeCode.String(), "\n") + 1
+
+			resultBuilder.WriteString(forwardDecls.String())
+			resultBuilder.WriteByte('\n')
+
+			globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1 + strings.Count(forwardDecls.String(), "\n") + 1
 
 			resultBuilder.WriteString(globalVars.String())
 			resultBuilder.WriteByte('\n')
 			resultBuilder.WriteString(classGlobalVars.String())
 			resultBuilder.WriteByte('\n')
 
-			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
+			// class 构造器/方法体：依赖 forwardDecls（顶层函数原型）与全局变量，
+			// 故置于两者之后、普通函数体之前
+			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1 +
+				strings.Count(cg.classImplCode.String(), "\n") + 1
+			resultBuilder.WriteString(cg.classImplCode.String())
+			resultBuilder.WriteByte('\n')
 			resultBuilder.WriteString(functionCode.String())
 
 			if useFreestanding {
@@ -1194,20 +1268,32 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 		} else {
 			result = template
 			result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
-			result = strings.ReplaceAll(result, "{{forward_decls}}", cg.genericTypeCode.String()+forwardDecls.String())
+			// 修复: 将类型定义 (genericTypeCode + typeCode) 全部放在 forward_decls 之前。
+			// 把 forward_decls 占位符内容置空，类型与前置声明合并输出到 type_code 占位符中，
+			// 从而保证 typedef/enum/struct/type alias 定义先于引用它们的函数原型。
+			result = strings.ReplaceAll(result, "{{forward_decls}}", "")
 			result = strings.ReplaceAll(result, "{{global_vars}}", globalVars.String())
 			typeCodeWithClassGlobals := typeCode.String()
 			if classGlobalVars.Len() > 0 {
 				typeCodeWithClassGlobals += "\n" + classGlobalVars.String()
 			}
-			result = strings.ReplaceAll(result, "{{type_code}}", typeCodeWithClassGlobals)
-			result = strings.ReplaceAll(result, "{{function_code}}", functionCode.String())
+			// 合并顺序: generic 实例化类型 → 本地 typedef → 函数前置声明
+			typeAndForward := cg.genericTypeCode.String() +
+				typeCodeWithClassGlobals + "\n\n" +
+				forwardDecls.String()
+			result = strings.ReplaceAll(result, "{{type_code}}", typeAndForward)
+			// class 构造器/方法体置于函数体区段最前（已在 forwardDecls/全局变量之后）
+			funcAndImpl := cg.classImplCode.String() + "\n" + functionCode.String()
+			result = strings.ReplaceAll(result, "{{function_code}}", funcAndImpl)
 			result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
 			result = strings.ReplaceAll(result, "{{code}}", "")
 
 			idxIncludes := strings.Index(result, allIncludes.String())
-			idxForward := strings.Index(result, forwardDecls.String())
-			idxType := strings.Index(result, typeCode.String())
+			// typeOffset 现在以 cg.genericTypeCode (作为 type_code 最前缀) 定位
+			idxType := strings.Index(result, cg.genericTypeCode.String())
+			if idxType < 0 {
+				idxType = strings.Index(result, typeCode.String())
+			}
 			idxGlobal := strings.Index(result, globalVars.String())
 			idxFunc := strings.Index(result, functionCode.String())
 			idxMain := strings.Index(result, mainCode.String())
@@ -1222,7 +1308,6 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 				mainOffset = funcOffset + strings.Count(functionCode.String(), "\n")
 			}
 			_ = idxIncludes
-			_ = idxForward
 		}
 	} else {
 		var resultBuilder strings.Builder
@@ -1230,16 +1315,18 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 		resultBuilder.WriteString(allIncludes.String())
 		resultBuilder.WriteString("\n")
 		resultBuilder.WriteString(cg.genericTypeCode.String())
+		// 修复: typedef/struct/enum/type alias (typeCode) 必须在函数前置声明
+		// (forwardDecls) 之前输出，避免导出函数签名含简单枚举/type alias/
+		// 跨文件类型时出现 "unknown type name" 编译错误。
+		// 同时 typeCode 仍然在 globalVars 之前 (extern 声明同样需要类型先定义)
+		typeOffset = strings.Count(allIncludes.String(), "\n") + 2 + strings.Count(cg.genericTypeCode.String(), "\n") + 1
+		resultBuilder.WriteString(typeCode.String())
+		resultBuilder.WriteString("\n\n")
+
 		resultBuilder.WriteString(forwardDecls.String())
 		resultBuilder.WriteString("\n")
 
-		// type_code (typedef/struct/enum/type alias) 必须在 global_vars (extern/全局变量) 之前,
-		// 否则 extern 函数原型引用 type 别名/自定义类型时 C 编译失败 (undefined type)
-		typeOffset = strings.Count(allIncludes.String(), "\n") + 2 + strings.Count(forwardDecls.String(), "\n") + 1
-		resultBuilder.WriteString(typeCode.String())
-		resultBuilder.WriteString("\n")
-
-		globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1
+		globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1 + strings.Count(forwardDecls.String(), "\n") + 2
 		resultBuilder.WriteString(globalVars.String())
 		resultBuilder.WriteString("\n")
 
@@ -1247,6 +1334,13 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 		if classGlobalVars.Len() > 0 {
 			resultBuilder.WriteString("\n")
 			resultBuilder.WriteString(classGlobalVars.String())
+		}
+
+		// class 构造器/方法体：依赖 forwardDecls 与全局变量，先于普通函数体输出
+		if cg.classImplCode.Len() > 0 {
+			resultBuilder.WriteString("\n")
+			resultBuilder.WriteString(cg.classImplCode.String())
+			resultBuilder.WriteString("\n")
 		}
 
 		funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
@@ -1292,6 +1386,11 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 	// 版本头注释：编译器版本 (version.json) + 项目版本 (kaula.json "version" 字段)。
 	// 产物溯源用；两者均缺失时也输出生成时间。
 	result = prependVersionBanner(result, cg.config)
+
+	if os.Getenv("KAULAC_DUMP") != "" && cg.sourceFile != "" {
+		base := strings.ReplaceAll(filepath.Base(cg.sourceFile), ".kl", "")
+		os.WriteFile(filepath.Join(os.TempDir(), "klc_"+base+".out.c"), []byte(result), 0644)
+	}
 
 	return result
 }
@@ -1542,11 +1641,29 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	// 设置活跃类型映射，使函数体内的类型参数引用（T、[]T、*T 等）
 	// 在 convertType 时被替换为具体类型。生成后恢复，避免污染其他函数。
 	// 同时递增实例化深度，防止无限递归实例化。
+	// 状态隔离：实例化可能发生在任意外层函数体生成中途（调用点触发），
+	// 此时 kmmScopeDepth/indent 等 per-function 易变状态反映的是外层函数；
+	// 若不归零，generateReturnStatement 会按外层 depth 补发孤立的
+	// kmm_v4_scope_pop()，运行期 KMM 作用域栈下溢直接 abort。
+	savedScopeDepth := cg.kmmScopeDepth
+	savedEmitsPromote := cg.funcEmitsPromote
+	savedHasCheckpoint := cg.funcHasKMMCheckpoint
+	savedIndent := cg.indent
+	cg.kmmScopeDepth = 0
+	cg.funcEmitsPromote = false
+	cg.funcHasKMMCheckpoint = false
+	cg.indent = 0
+
 	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
 	cg.genericInstDepth++
 	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
 	cg.genericInstDepth--
 	cg.typeGenerator.PopActiveTypeMap(oldTypeMap)
+
+	cg.kmmScopeDepth = savedScopeDepth
+	cg.funcEmitsPromote = savedEmitsPromote
+	cg.funcHasKMMCheckpoint = savedHasCheckpoint
+	cg.indent = savedIndent
 
 	// 写入泛型实例化代码缓冲区，稍后插入到 functionCode 之前
 	if code != "" {
@@ -1667,10 +1784,15 @@ if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 
 	// 查找泛型类型定义（类/结构体/枚举），构建类型参数映射和生成器
 	var typeParams []*ast.TypeParameter
+	var fields []*ast.FieldDeclaration
+	needSynthCtor := false
 	var generate func(instName string) string
 
 	if classStmt := cg.program.FindClass(typeName); classStmt != nil && classStmt.Generic {
 		typeParams = classStmt.TypeParams
+		fields = classStmt.Fields
+		// 无显式构造器的泛型类：同样需要合成位置构造器
+		needSynthCtor = len(classStmt.Constructors) == 0
 		generate = func(instName string) string {
 			inst := *classStmt // 浅拷贝：Fields/Methods/Constructors 共享（只读）
 			inst.Name = instName
@@ -1680,6 +1802,10 @@ if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 		}
 	} else if structStmt := cg.program.FindStruct(typeName); structStmt != nil && structStmt.Generic {
 		typeParams = structStmt.TypeParams
+		fields = structStmt.Fields
+		// struct 从不生成用户构造器，一律合成位置构造器，
+		// 使 Box<int>(42) 之类构造调用有定义可链
+		needSynthCtor = true
 		generate = func(instName string) string {
 			inst := *structStmt
 			inst.Name = instName
@@ -1714,18 +1840,74 @@ if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 
 	// 设置活跃类型映射，使字段/方法/构造函数中的类型参数引用被替换为具体类型。
 	// 生成后恢复，避免污染其他类型。同时递增实例化深度，防止无限递归实例化。
+	// 状态隔离同 InstantiateGeneric：实例化可能在外层函数/类型的生成中途触发，
+	// 需归零 per-function 状态（kmmScopeDepth 等）防止孤立 scope_pop 注入。
+	savedScopeDepth := cg.kmmScopeDepth
+	savedEmitsPromote := cg.funcEmitsPromote
+	savedHasCheckpoint := cg.funcHasKMMCheckpoint
+	savedIndent := cg.indent
+	cg.kmmScopeDepth = 0
+	cg.funcEmitsPromote = false
+	cg.funcHasKMMCheckpoint = false
+	cg.indent = 0
+
 	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
 	cg.typeGenerator.structTypes[instName] = true
 	cg.genericTypeInstDepth++
+
 	code := generate(instName)
+
+	// 合成位置构造器 instName_new(fields...)：按字段顺序初始化，
+	// 未提供实参的尾部字段保持零值。必须在 activeTypeMap 窗口内完成
+	// 字段类型的映射。函数体自包含，写入 classImplCode 延迟段。
+	synthCtor := ""
+	if needSynthCtor && len(fields) > 0 {
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("static inline %s* %s_new(", cName, instName))
+		for i, f := range fields {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			ft := cg.typeGenerator.convertType(f.Type, f.Nullable)
+			if ft == "" {
+				ft = "void*"
+			}
+			b.WriteString(fmt.Sprintf("%s %s", ft, f.Name))
+		}
+		b.WriteString(") {\n")
+		b.WriteString(fmt.Sprintf("    %s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
+		b.WriteString("    if (self == NULL) { return NULL; }\n")
+		n := len(typeArgs)
+		if n > len(fields) {
+			n = len(fields)
+		}
+		for i := 0; i < n; i++ {
+			b.WriteString(fmt.Sprintf("    self->%s = %s;\n", fields[i].Name, fields[i].Name))
+		}
+		b.WriteString("    return self;\n")
+		b.WriteString("}\n")
+		synthCtor = b.String()
+	}
+
 	cg.genericTypeInstDepth--
 	cg.typeGenerator.PopActiveTypeMap(oldTypeMap)
+
+	cg.kmmScopeDepth = savedScopeDepth
+	cg.funcEmitsPromote = savedEmitsPromote
+	cg.funcHasKMMCheckpoint = savedHasCheckpoint
+	cg.indent = savedIndent
 
 	// 写入泛型类型实例化代码缓冲区，稍后前置注入到 typeCode 之前
 	if code != "" {
 		cg.genericTypeCode.WriteString(code)
 		if !strings.HasSuffix(code, "\n") {
 			cg.genericTypeCode.WriteByte('\n')
+		}
+	}
+	if synthCtor != "" {
+		cg.classImplCode.WriteString(synthCtor)
+		if !strings.HasSuffix(synthCtor, "\n") {
+			cg.classImplCode.WriteByte('\n')
 		}
 	}
 

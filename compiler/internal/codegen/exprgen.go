@@ -684,9 +684,54 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 
 	// 检查是否是类构造函数调用：ClassName(args) → ClassName_new(args)
 	// 同时处理无参的 ClassName() 情况（如果类有默认构造函数或无参构造）
-	if ident, ok := e.Function.(*ast.Identifier); ok && len(e.TypeArgs) == 0 {
-		if eg.codegen.IsClassType(ident.Name) {
-			ctorFuncName := ident.Name + "_new"
+	// 泛型类/结构体：Box<int>(args) → Box_int_new(args)，先触发类型实例化
+	//（typedef 与构造器体经 InstantiateGenericType 生成，构造器体进入
+	// classImplCode 延迟段），调用点改用 mangled 实例名。
+	if ident, ok := e.Function.(*ast.Identifier); ok {
+		tg := eg.codegen.typeGenerator
+		// 泛型类型定义（struct/class <T>）在实例化前不进 structTypes/classTypes
+		// 注册表，此处直接查 AST 判定
+		isGenericTypeDef := false
+		if prog := eg.codegen.program; prog != nil {
+			if cs := prog.FindClass(ident.Name); cs != nil && cs.Generic {
+				isGenericTypeDef = true
+			}
+			if ss := prog.FindStruct(ident.Name); ss != nil && ss.Generic {
+				isGenericTypeDef = true
+			}
+		}
+		isCtorType := eg.codegen.IsClassType(ident.Name) ||
+			(tg != nil && tg.structTypes[ident.Name]) ||
+			isGenericTypeDef
+		if isCtorType {
+			ctorTypeName := ident.Name
+			if len(e.TypeArgs) > 0 {
+				if _, err := eg.codegen.InstantiateGenericType(ident.Name, e.TypeArgs, e.Pos.Line); err != nil {
+					return "/* generic type ctor error: " + err.Error() + " */ " + ident.Name + "_new()"
+				}
+				ctorTypeName = MangleGenericTypeName(ident.Name, e.TypeArgs)
+			}
+			// 值语义 struct（非 class）：不生成 _new（其返回指针与值语义冲突），
+			// 改为 C 复合字面量按字段位置初始化：(K_X){ .f1 = a1, ... }
+			if eg.codegen.program != nil {
+				ss := eg.codegen.program.FindStruct(ident.Name)
+				isValueStruct := ss != nil && eg.codegen.program.FindClass(ident.Name) == nil
+				if isValueStruct {
+					cName := kaulaStructTag(ctorTypeName)
+					parts := make([]string, 0, len(e.Args))
+					for i, arg := range e.Args {
+						if i >= len(ss.Fields) {
+							break
+						}
+						parts = append(parts, fmt.Sprintf(".%s = %s", ss.Fields[i].Name, eg.GenerateExpression(arg)))
+					}
+					if len(parts) == 0 {
+						return "(" + cName + "){0}"
+					}
+					return "(" + cName + "){ " + strings.Join(parts, ", ") + " }"
+				}
+			}
+			ctorFuncName := ctorTypeName + "_new"
 			if len(e.Args) == 0 {
 				return ctorFuncName + "()"
 			}
@@ -1525,8 +1570,43 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.CallExpression:
 		if ident, ok := e.Function.(*ast.Identifier); ok {
 			funcName := ident.Name
-			// 优先查本地符号表：extern fn 声明以返回类型注册符号，
-			// 本地函数定义同理；查不到再查 stdlib
+			// 用户定义的顶层/类方法函数：program 中直查返回类型。
+			// （此前仅查本地符号表与 stdlib，普通 Kaula 函数调用返回
+			//   string 时推断失败 fallback 到 %d，println 打印出结构体垃圾）
+			if prog := eg.codegen.getProgram(); prog != nil {
+				if fn := prog.FindFunction(funcName); fn != nil && fn.ReturnType != "" {
+					switch fn.ReturnType {
+					case "string", "str":
+						return "s"
+					case "float", "float64", "float32", "f32", "f64", "double", "single":
+						return "f"
+					case "bool":
+						return "d"
+					}
+					t := strings.ToLower(fn.ReturnType)
+					if normalizePtrType(t) == "char*" || t == "cstring" {
+						return "cstr"
+					}
+				}
+			}
+			// 跨文件 import 的 pub/export 函数：定义不在本文件 AST 中，
+			// 从预收集的返回类型映射回查
+			if rt, ok := eg.codegen.localImportReturns[funcName]; ok && rt != "" {
+				switch rt {
+				case "string", "str":
+					return "s"
+				case "float", "float64", "float32", "f32", "f64", "double", "single":
+					return "f"
+				case "bool":
+					return "d"
+				}
+				t := strings.ToLower(rt)
+				if normalizePtrType(t) == "char*" || t == "cstring" {
+					return "cstr"
+				}
+			}
+			// 先查本地函数符号表/extern fn 声明以获得返回类型注解；
+			// 本地函数找不到再查 stdlib
 			if sym := eg.codegen.currentScope.GetSymbol(funcName); sym != nil {
 				switch sym.Type {
 				case "string", "str":
@@ -2855,10 +2935,20 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 						}
 					}
 					bindType := "auto"
+					bindKaulaType := ""
 					if variant != nil && i < len(variant.FieldTypes) {
 						bindType = eg.matchBindingCType(variant, i, enumName, e.Target)
+						// 同步注册到 codegen 符号表：println/inferType 等依赖
+						// 标识符的类型记录决定格式化行为（否则 String 绑定
+						// 会 fallback 到 %d 打印出指针/长度垃圾）
+						if i < len(variant.FieldTypes) {
+							bindKaulaType = variant.FieldTypes[i]
+						}
 					}
 					code.WriteString(fmt.Sprintf("        %s %s = %s;\n", bindType, binding, fieldAccess))
+					if binding != "_" && bindKaulaType != "" {
+						eg.codegen.AddSymbol(binding, bindKaulaType, false, "local", e.Pos.Line, e.Pos.Column)
+					}
 				}
 			}
 
