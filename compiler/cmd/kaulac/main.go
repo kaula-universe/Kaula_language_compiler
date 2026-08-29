@@ -159,10 +159,11 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	}
 	// 本文件依赖的跨文件 pub/export 符号也注册给本地分析器
 	depDir := filepath.Dir(absPath)
+	localPubTypes := collectLocalPubTypes(localProgram, depDir)
 	localAnalyzer.SetLocalImportFuncs(collectLocalPubFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalModuleFuncs(collectLocalAllFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalPubVars(collectLocalPubVars(localProgram, depDir))
-	localAnalyzer.SetLocalPubTypes(collectLocalPubTypes(localProgram, depDir))
+	localAnalyzer.SetLocalPubTypes(localPubTypes)
 	localAnalyzer.SetLibraryMode(true) // 库文件: 跳过 unused-function 检查(函数可能被外部调用)
 	localAnalyzer.SetSOREnabled(s.cfg.SOR)
 	localAnalyzer.Analyze(localProgram)
@@ -174,6 +175,12 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	if s.stdlibConfig != nil {
 		localCG.SetStdlibConfig(s.stdlibConfig)
 	}
+	// 跨文件公共类型同样必须注入本地 codegen：
+	// 1) 前置声明阶段按 localPubTypes 跳过引用这些类型的函数原型
+	//    （typedef 在被导入文件的段中，本文件内不可见）
+	// 2) 变量声明/字面量的 convertType 需要映射 K_ 前缀 C 名
+	localCG.SetLocalPubTypes(localPubTypes)
+	localCG.SetLocalImportReturnTypes(collectLocalPubFuncReturns(localProgram, depDir))
 	localOutput := localCG.Generate(localProgram)
 
 	// 收集本地文件依赖的 std 模块头文件（如 math/math.h、memory/memory.h），
@@ -1102,6 +1109,7 @@ func main() {
 	localAllFuncs := collectLocalAllFuncs(program, inputDir)
 	localPubVars := collectLocalPubVars(program, inputDir)
 	localPubTypes := collectLocalPubTypes(program, inputDir)
+	localImportReturns := collectLocalPubFuncReturns(program, inputDir)
 	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes)
 	stage2Time := time.Since(stage2Start)
 	if verbose { fmt.Printf("[Stage 2] Semantic Analysis completed in %v\n", stage2Time) }
@@ -1186,6 +1194,7 @@ func main() {
 	if len(localPubTypes) > 0 {
 		cg.SetLocalPubTypes(localPubTypes)
 	}
+	cg.SetLocalImportReturnTypes(localImportReturns)
 
 	output := cg.Generate(program)
 	usedModules := cg.GetUsedModules()
@@ -1198,6 +1207,9 @@ func main() {
 	}
 	if localImportCode != "" {
 		output = injectLocalCode(output, localImportCode)
+	}
+	if os.Getenv("KAULAC_DUMP") != "" {
+		os.WriteFile(filepath.Join(os.TempDir(), "klc_final.c"), []byte(output), 0644)
 	}
 	// 本地文件依赖的 std 模块实现也需要参与链接（如库内部使用 std.math/memory）
 	if len(localUsedModules) > 0 {
@@ -2093,8 +2105,61 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 	return pubFuncs
 }
 
-// collectLocalAllFuncs 扫描本地 import 的 .kl 文件，收集全部函数名(含非 pub)
-// 用于导出检查: 调用存在于被 import 模块但非 pub/export 的函数时, 报"未导出"错误
+// collectLocalPubFuncReturns 扫描本地 import 的 .kl 文件，收集 pub/export
+// 函数的返回类型（函数名 -> Kaula 返回类型）。主程序的 AST 不含被导入文件
+// 的 FunctionStatement，codegen 侧 inferType 对此类调用查不到返回类型，
+// 导致 `html + kw_shell_js()` 这类 string 拼接被误判为 int 走 concat_int。
+func collectLocalPubFuncReturns(program *ast.Program, inputDir string) map[string]string {
+	returns := make(map[string]string)
+
+	var visit func(p *ast.Program, dir string)
+	visit = func(p *ast.Program, dir string) {
+		for _, stmt := range p.Statements {
+			imp, ok := stmt.(*ast.ImportStatement)
+			if !ok || !imp.IsLocal {
+				continue
+			}
+			for _, localPath := range localImportFiles(imp) {
+				absPath := localPath
+				if !filepath.IsAbs(absPath) {
+					if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+						absPath = candidate
+					}
+				}
+				data, err := os.ReadFile(absPath)
+				if err != nil {
+					continue
+				}
+				localLex := lexer.NewLexer(string(data))
+				localParser := parser.NewParser(localLex)
+				localParser.SetFile(absPath)
+				localParser.SetSkipMainCheck(true)
+				localParser.EnableLogging(false)
+				localProgram := localParser.Parse()
+				if localParser.HasErrors() {
+					continue
+				}
+				for _, s := range localProgram.Statements {
+					if fn, ok := s.(*ast.FunctionStatement); ok && (fn.IsPublic || fn.IsExported) && fn.ReturnType != "" {
+						returns[fn.Name] = fn.ReturnType
+					}
+					if exp, ok := s.(*ast.ExportStatement); ok && exp.Name != "" {
+						// export <name> 导出的函数：返回类型在相邻定义中，此处跳过，
+						// 由同名 FunctionStatement 分支覆盖
+						_ = exp
+					}
+				}
+				visit(localProgram, filepath.Dir(absPath))
+			}
+		}
+	}
+
+	visit(program, inputDir)
+	return returns
+}
+
+// collectLocalAllFuncs 扫描本地 import 的 .kl 文件, 收集全部函数名(含非 pub)
+// 用于调用检查: 当代码调用了被 import 模块但非 pub/export 的函数时, 给"未导出"错误
 func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool {
 	allFuncs := make(map[string]bool)
 
