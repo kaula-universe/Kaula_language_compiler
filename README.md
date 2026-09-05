@@ -122,11 +122,19 @@ kaulac pkg list
 {
   "dependencies": {
     "webview": "0.12",
-    "clay": "^1.0"
+    "clay": "^1.0",
+    "mylib": {
+      "git": "https://github.com/user/repo.git",
+      "tag": "v1.0.0"
+    }
   },
   "registry": "https://gitee.com/kaula-universe"
 }
 ```
+
+支持两种依赖格式：
+- **版本约束**：简单字符串（如 `"0.12"` 或 `"^1.0"`），从注册表下载
+- **Git 仓库**：对象格式，指定 git URL、标签、分支或 commit
 
 ```bash
 # 拉取依赖

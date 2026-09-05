@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"kaula/internal/config"
 )
 
 // ResolveResult 单个依赖的解析结果
@@ -31,7 +33,7 @@ type PatchConfig struct {
 //
 // 返回解析结果列表（按键排序）与更新后的项目锁。
 // projectDir 用于读写项目 kaula.lock；锁文件不存在则新建。
-func ResolveDependencies(registry string, deps map[string]string, patches map[string]PatchConfig, offline bool, projectDir string) ([]ResolveResult, *ProjectLock, error) {
+func ResolveDependencies(registry string, deps map[string]config.Dependency, patches map[string]PatchConfig, offline bool, projectDir string) ([]ResolveResult, *ProjectLock, error) {
 	results := []ResolveResult{}
 	lock, err := LoadProjectLock(projectDir)
 	if err != nil {
@@ -49,7 +51,7 @@ func ResolveDependencies(registry string, deps map[string]string, patches map[st
 	sort.Strings(names)
 
 	for _, name := range names {
-		constraint := deps[name]
+		dep := deps[name]
 
 		// 0. 本地路径覆盖（patches）：优先级最高
 		if patch, ok := patches[name]; ok {
@@ -101,7 +103,20 @@ func ResolveDependencies(registry string, deps map[string]string, patches map[st
 		if offline {
 			return nil, nil, fmt.Errorf("dependency %s: not in lock/cache and --offline is set", name)
 		}
-		fr, err := Fetch(registry, name, constraint)
+
+		var fr *FetchResult
+		var err error
+
+		// 根据依赖类型选择不同的获取方式
+		if dep.IsGitDependency() {
+			// git 依赖：从指定仓库获取
+			fr, err = FetchGitDependency(name, dep)
+		} else {
+			// 版本依赖：从注册表获取
+			constraint := dep.GetVersion()
+			fr, err = Fetch(registry, name, constraint)
+		}
+
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve dependency %s: %w", name, err)
 		}
@@ -118,7 +133,7 @@ func ResolveDependencies(registry string, deps map[string]string, patches map[st
 
 // FetchDependencies 强制联网解析所有依赖（忽略锁缓存）。
 // 用于 `kaulac pkg fetch` 命令：显式联网拉取最新版本。
-func FetchDependencies(registry string, deps map[string]string, projectDir string) ([]ResolveResult, *ProjectLock, error) {
+func FetchDependencies(registry string, deps map[string]config.Dependency, projectDir string) ([]ResolveResult, *ProjectLock, error) {
 	results := []ResolveResult{}
 	lock, err := LoadProjectLock(projectDir)
 	if err != nil {
@@ -135,8 +150,21 @@ func FetchDependencies(registry string, deps map[string]string, projectDir strin
 	sort.Strings(names)
 
 	for _, name := range names {
-		constraint := deps[name]
-		fr, err := Fetch(registry, name, constraint)
+		dep := deps[name]
+
+		var fr *FetchResult
+		var err error
+
+		// 根据依赖类型选择不同的获取方式
+		if dep.IsGitDependency() {
+			// git 依赖：从指定仓库获取
+			fr, err = FetchGitDependency(name, dep)
+		} else {
+			// 版本依赖：从注册表获取
+			constraint := dep.GetVersion()
+			fr, err = Fetch(registry, name, constraint)
+		}
+
 		if err != nil {
 			return nil, nil, fmt.Errorf("fetch dependency %s: %w", name, err)
 		}
@@ -158,7 +186,7 @@ func FetchDependencies(registry string, deps map[string]string, projectDir strin
 
 // UpdateDependencies 联网更新依赖到满足约束的最新版本。
 // 与 FetchDependencies 的区别：Update 会删除旧版本缓存，强制拉取最新匹配版本。
-func UpdateDependencies(registry string, deps map[string]string, projectDir string) ([]ResolveResult, *ProjectLock, error) {
+func UpdateDependencies(registry string, deps map[string]config.Dependency, projectDir string) ([]ResolveResult, *ProjectLock, error) {
 	results := []ResolveResult{}
 	lock, err := LoadProjectLock(projectDir)
 	if err != nil {
@@ -180,7 +208,7 @@ func UpdateDependencies(registry string, deps map[string]string, projectDir stri
 	sort.Strings(names)
 
 	for _, name := range names {
-		constraint := deps[name]
+		dep := deps[name]
 		oldVer := lock.GetVersion(name)
 
 		// 清除旧版本缓存，强制拉取最新
@@ -192,7 +220,19 @@ func UpdateDependencies(registry string, deps map[string]string, projectDir stri
 			_ = os.RemoveAll(dst)
 		}
 
-		fr, err := Fetch(registry, name, constraint)
+		var fr *FetchResult
+		var err error
+
+		// 根据依赖类型选择不同的获取方式
+		if dep.IsGitDependency() {
+			// git 依赖：从指定仓库获取
+			fr, err = FetchGitDependency(name, dep)
+		} else {
+			// 版本依赖：从注册表获取
+			constraint := dep.GetVersion()
+			fr, err = Fetch(registry, name, constraint)
+		}
+
 		if err != nil {
 			return nil, nil, fmt.Errorf("update dependency %s: %w", name, err)
 		}
