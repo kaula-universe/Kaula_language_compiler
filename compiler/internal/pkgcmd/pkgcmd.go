@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"kaula/internal/config"
 	"kaula/internal/pkgmgr"
 	"kaula/internal/stdlib"
 )
@@ -397,7 +398,7 @@ func inferNameFromURL(url string) string {
 // --- 项目依赖管理（kaula.json dependencies） ---
 
 // LoadProjectDeps 从 kaula.json 读取 dependencies 和 registry
-func LoadProjectDeps(projectDir string) (map[string]string, string, error) {
+func LoadProjectDeps(projectDir string) (map[string]config.Dependency, string, error) {
 	kaulaJSON := filepath.Join(projectDir, "kaula.json")
 	data, err := os.ReadFile(kaulaJSON)
 	if err != nil {
@@ -408,8 +409,8 @@ func LoadProjectDeps(projectDir string) (map[string]string, string, error) {
 	}
 
 	var cfg struct {
-		Dependencies map[string]string `json:"dependencies,omitempty"`
-		Registry     string            `json:"registry,omitempty"`
+		Dependencies map[string]config.Dependency `json:"dependencies,omitempty"`
+		Registry     string                       `json:"registry,omitempty"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, "", fmt.Errorf("parse kaula.json: %w", err)
@@ -486,12 +487,12 @@ func UpdateSingleDep(projectDir, name string) error {
 		return err
 	}
 
-	constraint, ok := deps[name]
+	dep, ok := deps[name]
 	if !ok {
 		return fmt.Errorf("dependency %q not declared in kaula.json", name)
 	}
 
-	singleDeps := map[string]string{name: constraint}
+	singleDeps := map[string]config.Dependency{name: dep}
 	fmt.Printf("[pkg] updating %s from %s...\n", name, registry)
 	results, lock, err := pkgmgr.UpdateDependencies(registry, singleDeps, projectDir)
 	if err != nil {

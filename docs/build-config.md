@@ -123,9 +123,13 @@ kaulac.exe --sor main.kl
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `dependencies` | map | `{}` | 包依赖声明（`{"name": "version"}`） |
+| `dependencies` | map | `{}` | 包依赖声明（支持版本约束或 git 仓库配置） |
 | `registry` | string | `"https://gitee.com/kaula-universe"` | 包注册源 URL |
 | `patches` | map | `{}` | 本地路径覆盖（`{"name": {"path": "..."}}`） |
+
+依赖格式支持两种：
+- **版本约束**：简单字符串（如 `"0.12"` 或 `"^1.0"`），从注册表下载
+- **Git 仓库**：对象格式，指定 git URL、标签、分支或 commit
 
 ### 离线/在线模式
 
@@ -173,7 +177,11 @@ kaulac.exe --sor main.kl
 
   "dependencies": {
     "webview": "0.12",
-    "clay": "^1.0"
+    "clay": "^1.0",
+    "mylib": {
+      "git": "https://github.com/user/repo.git",
+      "tag": "v1.0.0"
+    }
   },
   "registry": "https://gitee.com/kaula-universe",
   "patches": {
@@ -313,7 +321,11 @@ kaulac.exe --sor main.kl              # SOR 模式，默认 O3
 {
   "dependencies": {
     "webview": "0.12",
-    "clay": "^1.0"
+    "clay": "^1.0",
+    "mylib": {
+      "git": "https://github.com/user/repo.git",
+      "tag": "v1.0.0"
+    }
   },
   "registry": "https://gitee.com/kaula-universe",
   "patches": {
