@@ -1,7 +1,354 @@
 #include "encoding.h"
 #include "../memory/memory.h"
 #include "../string/string.h"
+#include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+
+#if STD_PLATFORM_WINDOWS
+    #include <windows.h>
+#endif
+
+// ==================== 字符编码转换 - 全局状态 ====================
+static TextEncoding g_current_encoding = ENCODING_UTF8;
+
+// ==================== 编码名称 ====================
+static const char* s_encoding_names[] = {
+    "Auto",
+    "UTF-8",
+    "UTF-16",
+    "UTF-32",
+    "GBK",
+    "GB2312",
+    "Big5",
+    "Shift-JIS",
+    "EUC-KR",
+    "ISO-8859-1",
+    "Windows-1252",
+};
+
+// ==================== 初始化与清理 ====================
+void enc_init(void) {
+    g_current_encoding = ENCODING_UTF8;
+}
+
+void enc_cleanup(void) {
+    // 无需清理
+}
+
+// ==================== 编码设置 ====================
+void enc_set_encoding(TextEncoding encoding) {
+    if (encoding >= 0 && encoding < 11) {
+        g_current_encoding = encoding;
+    }
+}
+
+TextEncoding enc_get_encoding(void) {
+    return g_current_encoding;
+}
+
+void enc_set_console_encoding(void) {
+#if STD_PLATFORM_WINDOWS
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#else
+    setlocale(LC_ALL, "C.UTF-8");
+#endif
+}
+
+const char* enc_get_encoding_name(TextEncoding encoding) {
+    if (encoding < 0 || encoding >= 11) return "Unknown";
+    return s_encoding_names[encoding];
+}
+
+// ==================== UTF-8 编码解码 ====================
+int enc_utf8_encode(uint32_t codepoint, char* out_buffer) {
+    if (!out_buffer) return 0;
+    
+    if (codepoint < 0x80) {
+        out_buffer[0] = (char)codepoint;
+        return 1;
+    } else if (codepoint < 0x800) {
+        out_buffer[0] = (char)(0xC0 | (codepoint >> 6));
+        out_buffer[1] = (char)(0x80 | (codepoint & 0x3F));
+        return 2;
+    } else if (codepoint < 0x10000) {
+        out_buffer[0] = (char)(0xE0 | (codepoint >> 12));
+        out_buffer[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        out_buffer[2] = (char)(0x80 | (codepoint & 0x3F));
+        return 3;
+    } else if (codepoint < 0x110000) {
+        out_buffer[0] = (char)(0xF0 | (codepoint >> 18));
+        out_buffer[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        out_buffer[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        out_buffer[3] = (char)(0x80 | (codepoint & 0x3F));
+        return 4;
+    }
+    return 0;
+}
+
+int enc_utf8_decode(const char* input, uint32_t* out_codepoint) {
+    if (!input || !out_codepoint) return 0;
+    
+    unsigned char c = (unsigned char)input[0];
+    
+    if (c < 0x80) {
+        *out_codepoint = c;
+        return 1;
+    } else if ((c & 0xE0) == 0xC0) {
+        if ((input[1] & 0xC0) != 0x80) return 0;
+        *out_codepoint = ((uint32_t)(c & 0x1F) << 6) | ((uint32_t)(input[1] & 0x3F));
+        return 2;
+    } else if ((c & 0xF0) == 0xE0) {
+        if ((input[1] & 0xC0) != 0x80 || (input[2] & 0xC0) != 0x80) return 0;
+        *out_codepoint = ((uint32_t)(c & 0x0F) << 12) | 
+                         ((uint32_t)(input[1] & 0x3F) << 6) | 
+                         ((uint32_t)(input[2] & 0x3F));
+        return 3;
+    } else if ((c & 0xF8) == 0xF0) {
+        if ((input[1] & 0xC0) != 0x80 || (input[2] & 0xC0) != 0x80 || 
+            (input[3] & 0xC0) != 0x80) return 0;
+        *out_codepoint = ((uint32_t)(c & 0x07) << 18) | 
+                         ((uint32_t)(input[1] & 0x3F) << 12) | 
+                         ((uint32_t)(input[2] & 0x3F) << 6) | 
+                         ((uint32_t)(input[3] & 0x3F));
+        return 4;
+    }
+    
+    return 0;
+}
+
+// ==================== UTF-8 字符串操作 ====================
+size_t enc_utf8_strlen(const char* str) {
+    if (!str) return 0;
+    
+    size_t count = 0;
+    while (*str) {
+        unsigned char c = (unsigned char)*str;
+        if ((c & 0x80) == 0) {
+            str += 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            str += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            str += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            str += 4;
+        } else {
+            str += 1;
+        }
+        count++;
+    }
+    return count;
+}
+
+size_t enc_utf8_char_count(const char* str) {
+    return enc_utf8_strlen(str);
+}
+
+size_t enc_utf8_byte_length(const char* str, size_t char_index) {
+    if (!str) return 0;
+    
+    size_t idx = 0;
+    while (*str && idx < char_index) {
+        unsigned char c = (unsigned char)*str;
+        if ((c & 0x80) == 0) str += 1;
+        else if ((c & 0xE0) == 0xC0) str += 2;
+        else if ((c & 0xF0) == 0xE0) str += 3;
+        else if ((c & 0xF8) == 0xF0) str += 4;
+        else str += 1;
+        idx++;
+    }
+    
+    if (!*str) return 0;
+    
+    unsigned char c = (unsigned char)*str;
+    if ((c & 0x80) == 0) return 1;
+    else if ((c & 0xE0) == 0xC0) return 2;
+    else if ((c & 0xF0) == 0xE0) return 3;
+    else if ((c & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+char* enc_utf8_substring(const char* str, size_t start, size_t count) {
+    if (!str) return NULL;
+    
+    size_t idx = 0;
+    const char* start_ptr = str;
+    while (*start_ptr && idx < start) {
+        unsigned char c = (unsigned char)*start_ptr;
+        if ((c & 0x80) == 0) start_ptr += 1;
+        else if ((c & 0xE0) == 0xC0) start_ptr += 2;
+        else if ((c & 0xF0) == 0xE0) start_ptr += 3;
+        else if ((c & 0xF8) == 0xF0) start_ptr += 4;
+        else start_ptr += 1;
+        idx++;
+    }
+    
+    if (!*start_ptr) return kmm_v4_strdup("");
+    
+    const char* end_ptr = start_ptr;
+    idx = 0;
+    while (*end_ptr && idx < count) {
+        unsigned char c = (unsigned char)*end_ptr;
+        if ((c & 0x80) == 0) end_ptr += 1;
+        else if ((c & 0xE0) == 0xC0) end_ptr += 2;
+        else if ((c & 0xF0) == 0xE0) end_ptr += 3;
+        else if ((c & 0xF8) == 0xF0) end_ptr += 4;
+        else end_ptr += 1;
+        idx++;
+    }
+    
+    size_t byte_len = end_ptr - start_ptr;
+    char* result = (char*)kmm_v4_malloc(byte_len + 1);
+    if (result) {
+        memcpy(result, start_ptr, byte_len);
+        result[byte_len] = '\0';
+    }
+    return result;
+}
+
+// ==================== UTF-8 验证和检测 ====================
+bool enc_is_utf8(const char* input) {
+    if (!input) return true;
+    
+    while (*input) {
+        unsigned char c = (unsigned char)*input;
+        
+        if ((c & 0x80) == 0) {
+            input += 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            if ((input[1] & 0xC0) != 0x80) return false;
+            input += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            if ((input[1] & 0xC0) != 0x80 || (input[2] & 0xC0) != 0x80) return false;
+            input += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            if ((input[1] & 0xC0) != 0x80 || (input[2] & 0xC0) != 0x80 || 
+                (input[3] & 0xC0) != 0x80) return false;
+            input += 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool enc_detect_encoding(const char* input, TextEncoding* out_encoding) {
+    if (!input || !out_encoding) return false;
+    
+    if (enc_is_utf8(input)) {
+        *out_encoding = ENCODING_UTF8;
+        return true;
+    }
+    
+    const char* p = input;
+    while (*p) {
+        unsigned char c = (unsigned char)*p;
+        if (c > 0x80) {
+            unsigned char next = (unsigned char)p[1];
+            if (c >= 0xA1 && c <= 0xF7 && next && next >= 0xA1) {
+                *out_encoding = ENCODING_GB2312;
+                return true;
+            }
+            if (c >= 0x81 && c <= 0xFE && next) {
+                *out_encoding = ENCODING_GBK;
+                return true;
+            }
+            break;
+        }
+        p++;
+    }
+    
+    *out_encoding = ENCODING_AUTO;
+    return false;
+}
+
+// ==================== 编码转换 ====================
+char* enc_convert_encoding(const char* input, TextEncoding from, TextEncoding to) {
+    if (!input) return NULL;
+    if (from == to) return kmm_v4_strdup(input);
+    
+#if STD_PLATFORM_WINDOWS
+    UINT from_cp, to_cp;
+    
+    switch (from) {
+        case ENCODING_UTF8: from_cp = CP_UTF8; break;
+        case ENCODING_GBK: case ENCODING_GB2312: from_cp = 936; break;
+        case ENCODING_BIG5: from_cp = 950; break;
+        case ENCODING_SHIFT_JIS: from_cp = 932; break;
+        case ENCODING_EUC_KR: from_cp = 949; break;
+        case ENCODING_WINDOWS_1252: from_cp = 1252; break;
+        case ENCODING_ISO_8859_1: from_cp = 28591; break;
+        default: from_cp = CP_UTF8; break;
+    }
+    
+    switch (to) {
+        case ENCODING_UTF8: to_cp = CP_UTF8; break;
+        case ENCODING_GBK: case ENCODING_GB2312: to_cp = 936; break;
+        case ENCODING_BIG5: to_cp = 950; break;
+        case ENCODING_SHIFT_JIS: to_cp = 932; break;
+        case ENCODING_EUC_KR: to_cp = 949; break;
+        case ENCODING_WINDOWS_1252: to_cp = 1252; break;
+        case ENCODING_ISO_8859_1: to_cp = 28591; break;
+        default: to_cp = CP_UTF8; break;
+    }
+    
+    int wide_len = MultiByteToWideChar(from_cp, 0, input, -1, NULL, 0);
+    if (wide_len <= 0) return kmm_v4_strdup(input);
+    
+    wchar_t* wide_str = (wchar_t*)kmm_v4_malloc(sizeof(wchar_t) * wide_len);
+    if (!wide_str) return NULL;
+    
+    MultiByteToWideChar(from_cp, 0, input, -1, wide_str, wide_len);
+    
+    int new_len = WideCharToMultiByte(to_cp, 0, wide_str, -1, NULL, 0, NULL, NULL);
+    char* result = (char*)kmm_v4_malloc(new_len);
+    if (result) {
+        WideCharToMultiByte(to_cp, 0, wide_str, -1, result, new_len, NULL, NULL);
+    }
+    
+    return result;
+#else
+    if (to == ENCODING_UTF8) return kmm_v4_strdup(input);
+    return kmm_v4_strdup(input);
+#endif
+}
+
+char* enc_to_utf8(const char* input, TextEncoding from_encoding) {
+    return enc_convert_encoding(input, from_encoding, ENCODING_UTF8);
+}
+
+char* enc_from_utf8(const char* input, TextEncoding to_encoding) {
+    return enc_convert_encoding(input, ENCODING_UTF8, to_encoding);
+}
+
+char* enc_utf8_normalize(const char* input) {
+    if (!input) return NULL;
+    return kmm_v4_strdup(input);
+}
+
+// ==================== 平台适配 ====================
+void enc_setup_console(void) {
+#if STD_PLATFORM_WINDOWS
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hOut, dwMode);
+        }
+    }
+#else
+    setlocale(LC_ALL, "");
+#endif
+}
+
+void enc_fix_console_output(void) {
+    enc_setup_console();
+}
 
 /* ============================================================
  * Internal helpers
