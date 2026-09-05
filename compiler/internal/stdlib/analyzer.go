@@ -280,7 +280,6 @@ func detectCommonMacros(headerContent string) []string {
 }
 
 // detectIncludeMacros 检测头文件中的 XXX_INCLUDE_YYY 模式宏并自动启用
-// 用于 nuklear 等高度可配置的单头文件库
 func detectIncludeMacros(headerContent string) []string {
 	var defines []string
 	// 使用正则匹配 #ifdef XXX_INCLUDE_YYY 或 #if defined(XXX_INCLUDE_YYY) 模式

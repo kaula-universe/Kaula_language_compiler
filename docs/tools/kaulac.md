@@ -114,12 +114,12 @@ $env:KAULA_HOME = "D:\path\to\kaula"    # PowerShell
 ```bash
 kaulac --build-pkglib all
 kaulac --build-pkglib cjson --force-pkg
-kaulac --analyze-pkg imgui
+kaulac --analyze-pkg <库名>
 kaulac --pkglib D:/mylibs main.kl
 ```
 
 > 注意：`--analyze-pkg` 直接重写配置、不走 `MergeLibrariesInto`，会把旧配置人工补充的
-> 链接库（如 imgui 的 `d3d11/dwmapi/d3dcompiler`）丢掉；配置含人工链接项时建议用
+> 链接库丢掉；配置含人工链接项时建议用
 > `--build-pkglib <name>`（自愈合并保留人工项）。
 
 ## 八、裸机/交叉编译

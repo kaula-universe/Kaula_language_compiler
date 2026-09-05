@@ -327,8 +327,7 @@ kaulac --init
 | **编码** | encoding、crypto、compress、archive |
 | **系统** | system、subprocess、cli、time、datetime、calendar |
 | **类型** | option、traits、base、error |
-| **运行时** | vo、prefix、task、format、logging、testing、i18n |
-| **GUI** | gui（Nuklear 绑定） |
+| **运行时** | vo、prefix、task、format、logging、testing |
 | **Freestanding** | freestanding.base、freestanding.memory、freestanding.string、freestanding.math、freestanding.io（无依赖，弱符号，裸机/托管双环境） |
 
 ---
@@ -339,12 +338,10 @@ kaulac --init
 
 ```kaula
 import stb_image   // C 库
-import imgui       // C++ 库：自动生成 extern "C" 桥接
 
 fn main() {
     void* img = stbi_load("texture.png", &width, &height, &channels, 4)
     stbi_image_free(img)
-    println(kbridge_GetVersion())
 }
 ```
 

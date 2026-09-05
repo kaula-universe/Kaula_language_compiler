@@ -9,6 +9,7 @@ import (
 	"kaula/internal/config"
 	errors "kaula/internal/errors"
 	"kaula/internal/formatter"
+	"kaula/internal/i18n"
 	"kaula/internal/lexer"
 	"kaula/internal/parser"
 	"kaula/internal/pkgcmd"
@@ -357,6 +358,9 @@ var verboseMode = false
 
 func main() {
 	totalStart := time.Now()
+
+	// 初始化本地化系统，检测系统语言
+	i18n.Init()
 
 	// ninja 风格: 默认安静, --verbose 显示完整过程
 	verbose := false
@@ -1072,7 +1076,7 @@ func main() {
 
 	// Stage 1: Lex + Parse（与 stdlib 加载并行）
 	if verbose {
-		fmt.Println("[Stage 1] Lexing + Parsing...")
+		fmt.Println(i18n.T(i18n.MsgStage1))
 	}
 	stage1Start := time.Now()
 
@@ -1091,7 +1095,7 @@ func main() {
 
 	program := p.Parse()
 	stage1Time := time.Since(stage1Start)
-	if verbose { fmt.Printf("[Stage 1] Lex + Parse completed in %v\n", stage1Time) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage1Completed)+"\n", stage1Time) }
 
 	// 保存词法分析和语法分析的错误数量
 	stage1ErrorCount := len(errorCollector.Errors())
@@ -1102,7 +1106,7 @@ func main() {
 	if verboseMode { fmt.Printf("[Parallel] stdlib config loaded in %v\n", parallelTime) }
 
 	// Stage 2: Semantic Analysis (concurrent)
-	if verbose { fmt.Println("[Stage 2] Semantic Analysis...") }
+	if verbose { fmt.Println(i18n.T(i18n.MsgStage2)) }
 	stage2Start := time.Now()
 
 	localPubFuncs := collectLocalPubFuncs(program, inputDir)
@@ -1112,14 +1116,14 @@ func main() {
 	localImportReturns := collectLocalPubFuncReturns(program, inputDir)
 	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes)
 	stage2Time := time.Since(stage2Start)
-	if verbose { fmt.Printf("[Stage 2] Semantic Analysis completed in %v\n", stage2Time) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time) }
 
 	// Stage 2.5: SOR Ownership Analysis (--sor)
 	var sorErrors []sor.SORError
 	var sorResult map[string]interface{}
 	poolCapacity := 0 // KMM V4 池容量（0=使用默认值）
 	if cfg.SOR {
-		fmt.Println("[Stage 2.5] SOR Ownership + Memory Analysis...")
+		fmt.Println(i18n.T(i18n.MsgStage25))
 		sorStart := time.Now()
 		// 运行完整分析流水线：安全检查 + 内存决策 + 逃逸 + 大小估算 + 活跃性 + 跨函数
 		fullResult := sor.AnalyzeFullFromAST(program)
@@ -1129,7 +1133,7 @@ func main() {
 		// 提取静态分析估算的池容量
 		poolCapacity = fullResult.PoolCapacity
 		sorTime := time.Since(sorStart)
-		if verbose { fmt.Printf("[Stage 2.5] SOR Analysis completed in %v\n", sorTime) }
+		if verbose { fmt.Printf(i18n.T(i18n.MsgStage25Completed)+"\n", sorTime) }
 		if os.Getenv("KAULA_SOR_DUMP") != "" {
 			fmt.Println(sor.FormatDecisionsSummary(fullResult.Decisions))
 			fmt.Println(sor.FormatEscapeSummary(fullResult.Escape))
@@ -1173,7 +1177,7 @@ func main() {
 	}
 
 	// Stage 3: Code Gen + C Compile (concurrent)
-	if verbose { fmt.Println("[Stage 3] Code Generation + C Compilation...") }
+	if verbose { fmt.Println(i18n.T(i18n.MsgStage3)) }
 	stage3Start := time.Now()
 
 	codegenStart := time.Now()
@@ -1226,7 +1230,7 @@ func main() {
 	}
 
 	codegenTime := time.Since(codegenStart)
-	if verbose { fmt.Printf("[Stage 3a] Code generation completed in %v\n", codegenTime) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage3aCompleted)+"\n", codegenTime) }
 
 	// 检查所有阶段的诊断信息（错误与警告分开统计）
 	// 统计在此计算, 输出统一放到 Generated Code 之后、Compilation Results 之前
@@ -1292,29 +1296,29 @@ func main() {
 	var compileResult *compileResult_t
 	if errorCount > 0 {
 		compileResult = &compileResult_t{
-			Error: fmt.Errorf("%d frontend error(s), C compilation skipped", errorCount),
+			Error: fmt.Errorf(i18n.T(i18n.MsgFrontendErrorsSkipped), errorCount),
 		}
 	} else {
 		compileResult = concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity, cfg)
 	}
 	stage3Time := time.Since(stage3Start)
-	if verbose { fmt.Printf("[Stage 3] Code Gen + Compilation completed in %v\n", stage3Time) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage3Completed)+"\n", stage3Time) }
 
 	totalTime := time.Since(totalStart)
 
 	if verbose {
-		fmt.Println("\n=== Generated Code ===")
+		fmt.Println("\n" + i18n.T(i18n.MsgGeneratedCode))
 		fmt.Print(strings.TrimRight(output, "\n"))
 		fmt.Println()
 	}
 
 	// 输出所有阶段的诊断信息（错误与警告分开统计）— 放在 Generated Code 之后、Compilation Results 之前
 	if errorCount > 0 || warningCount > 0 {
-		fmt.Printf("\n%s=== Compilation Errors / Warnings ===%s\n", errors.ColorRed, errors.ColorReset)
+		fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgCompilationErrorsWarnings), errors.ColorReset)
 
 		// 输出词法分析和语法分析错误（阶段 1 的错误）
 		if len(stage1Errs) > 0 {
-			fmt.Printf("\n%s[Lexing & Parsing Errors] (%d errors)%s\n", errors.ColorRed, len(stage1Errs), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgLexParseErrors, len(stage1Errs)), errors.ColorReset)
 			for _, err := range stage1Errs {
 				fmt.Print(errors.FormatErrorWithContext(err))
 			}
@@ -1322,7 +1326,7 @@ func main() {
 
 		// 输出语义分析错误（阶段 2 新增的错误）
 		if len(stage2Errs) > 0 {
-			fmt.Printf("\n%s[Semantic Analysis Errors] (%d errors)%s\n", errors.ColorRed, len(stage2Errs), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgSemanticAnalysisErrors, len(stage2Errs)), errors.ColorReset)
 			for _, err := range stage2Errs {
 				fmt.Print(errors.FormatErrorWithContext(err))
 			}
@@ -1330,7 +1334,7 @@ func main() {
 
 		// 输出代码生成错误
 		if cg.HasErrors() {
-			fmt.Printf("\n%s[Code Generation Errors] (%d errors)%s\n", errors.ColorRed, len(cg.Errors()), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgCodegenErrors, len(cg.Errors())), errors.ColorReset)
 			for i, err := range cg.Errors() {
 				fmt.Printf("  %d. %s\n", i+1, err)
 			}
@@ -1338,7 +1342,7 @@ func main() {
 
 		// 输出 SOR 错误
 		if len(sorErrors) > 0 {
-			fmt.Printf("\n%s[SOR Ownership Errors] (%d errors)%s\n", errors.ColorRed, len(sorErrors), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgSorOwnershipErrors, len(sorErrors)), errors.ColorReset)
 			for i, err := range sorErrors {
 				fmt.Printf("  %d. [%s] line %d: %s\n", i+1, err.Kind.String(), err.SourceLine, err.Message)
 				if err.Details != "" {
@@ -1349,7 +1353,7 @@ func main() {
 
 		// 输出警告（黄色高亮）
 		if warningCount > 0 {
-			fmt.Printf("\n%s[Warnings] (%d warnings)%s\n", errors.ColorYellow, warningCount, errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorYellow, i18n.T(i18n.MsgWarningsHeader, warningCount), errors.ColorReset)
 			for _, err := range frontendWarnings {
 				fmt.Print(errors.FormatErrorWithContext(err))
 			}
@@ -1365,39 +1369,37 @@ func main() {
 	}
 	// ninja 风格: 成功时单行紧凑输出; 失败/警告/verbose 时显示完整汇总
 	if verbose || compileResult.Error != nil || warningCount > 0 {
-		fmt.Printf("\n%s=== Compilation Results ===%s\n", titleColor, errors.ColorReset)
+		fmt.Printf("\n%s%s%s\n", titleColor, i18n.T(i18n.MsgCompilationResults), errors.ColorReset)
 	}
 	if compileResult.Error != nil {
 		printSummary(false, warningCount, errorCount)
-		fmt.Printf("Error: %v\n", compileResult.Error)
+		fmt.Printf("%s: %v\n", i18n.T(i18n.MsgError), compileResult.Error)
 		os.Exit(1)
 	}
 	printSummary(true, warningCount, errorCount)
 	if !verbose {
 		// ninja 风格成功输出: 一行内显示产物与耗时
-		fmt.Printf("  产物: %s (%v)\n", compileResult.OutputFile, totalTime.Round(time.Millisecond))
+		fmt.Printf("  %s: %s (%v)\n", i18n.T(i18n.MsgOutput), compileResult.OutputFile, totalTime.Round(time.Millisecond))
 	} else {
-		fmt.Printf("Output: %s\n", compileResult.OutputFile)
+		fmt.Printf("%s: %s\n", i18n.T(i18n.MsgOutput), compileResult.OutputFile)
 	}
 
 	if verbose {
-		fmt.Printf("\n=== Timing Breakdown ===\n")
+		fmt.Printf("\n%s\n", i18n.T(i18n.MsgTimingBreakdown))
 		fmt.Printf("Stage 1 (Lex + Parse):         %v\n", stage1Time)
 		fmt.Printf("Stage 2 (Semantic):            %v\n", stage2Time)
 		fmt.Printf("Stage 3 (Codegen+Compile):    %v\n", stage3Time)
 		fmt.Printf("---------------------------------\n")
-		fmt.Printf("Total End-to-End:              %v\n", totalTime)
+		fmt.Printf(i18n.T(i18n.MsgTotalTime)+"\n", totalTime)
 	}
 }
 
-// printSummary 输出编译汇总行:
-//   状态: 成功, 警告 0, 错误 0
-//   "成功" 绿 / "失败" 红; 警告有则黄、无则绿; 错误有则红、无则绿
+// printSummary 输出编译汇总行
 func printSummary(success bool, warnCount, errCount int) {
-	statusText := "成功"
+	statusText := i18n.T(i18n.MsgSuccess)
 	statusColor := errors.ColorGreen
 	if !success {
-		statusText = "失败"
+		statusText = i18n.T(i18n.MsgFailed)
 		statusColor = errors.ColorRed
 	}
 	warnColor := errors.ColorGreen
@@ -1408,10 +1410,11 @@ func printSummary(success bool, warnCount, errCount int) {
 	if errCount > 0 {
 		errColor = errors.ColorRed
 	}
-	fmt.Printf("状态: %s%s%s, %s警告 %d%s, %s错误 %d%s\n",
+	fmt.Printf("%s: %s%s%s, %s%s%s, %s%s%s\n",
+		i18n.T(i18n.MsgStatus),
 		statusColor, statusText, errors.ColorReset,
-		warnColor, warnCount, errors.ColorReset,
-		errColor, errCount, errors.ColorReset)
+		warnColor, i18n.T(i18n.MsgWarningsCount, warnCount), errors.ColorReset,
+		errColor, i18n.T(i18n.MsgErrorsCount, errCount), errors.ColorReset)
 }
 
 type compileResult_t struct {
@@ -3034,7 +3037,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					}
 				}
 				// 再解析：配置过期时重新分析（生成桥接/新签名），
-				// 并合并旧配置里的人工库列表（如 imgui 的 d3d11/dwmapi/d3dcompiler），
+				// 并合并旧配置里的人工库列表，
 				// 避免重新分析丢掉人工链接项；缺失配置的库由导入阶段的按需分析自动处理。
 				if stdlib.ConfigStale(resolvedLibDir, lib.Name) {
 					fmt.Printf("[Info] Config for %s is stale, re-analyzing...\n", lib.Name)

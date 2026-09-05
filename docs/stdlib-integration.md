@@ -151,15 +151,9 @@ fn := config.GetFunction("std.io", "println")
 
 ```
 pkglib/
-├── stb_image/        # 纯 C：头 + 可选源码
-│   ├── stb_image.h
-│   └── stb_image.c
-├── nuklear/
-│   └── nuklear.h
-└── imgui/            # C++：自动生成 extern "C" 桥接
-    ├── imgui.h
-    ├── imgui.cpp
-    └── imgui_kbridge.h/.cpp   # 自动生成，勿手改
+└── stb_image/        # 纯 C：头 + 可选源码
+    ├── stb_image.h
+    └── stb_image.c
 ```
 
 首次 `import 某库` 时编译器依次自动完成：
@@ -203,18 +197,7 @@ C++ 头文件无法被 Kaula 生成的 C 代码直接引用，编译器自动生
 
 自动分析生成的 `<name>.json` 记录了 `auto_generated: true`。可人工补充
 `libraries`（系统库）、`include_path`、`library_path` 等字段，重分析时
-`MergeLibrariesInto` 会把人工项合并保留：
-
-```json
-{
-  "name": "imgui",
-  "auto_generated": true,
-  "functions": {
-    "kbridge_GetVersion": { "args": [], "return": "const char*" }
-  },
-  "libraries": ["imgui", "c++", "c++abi", "d3d11", "dwmapi", "d3dcompiler"]
-}
-```
+`MergeLibrariesInto` 会把人工项合并保留。
 
 ### 自动发现（实现）
 
@@ -382,7 +365,7 @@ fn main() {
 | `kaulac --pkglib <目录> [文件]` | 编译时优先使用指定目录作为 pkglib（`--skip-auto-pkg` 可关闭自动分析自愈） |
 
 > **注意 `--analyze-pkg` 与 `--build-pkglib` 的区别**：
-> `--analyze-pkg` 直接重写配置，不走 `MergeLibrariesInto`，会把旧配置里人工补充的链接库（如 imgui 的 `d3d11/dwmapi/d3dcompiler`）丢掉；
+> `--analyze-pkg` 直接重写配置，不走 `MergeLibrariesInto`，会把旧配置里人工补充的链接库丢掉；
 > `--build-pkglib` 在过期重分析时走 `MergeLibrariesInto` 保留人工项。
 > 配置含人工链接项时，建议用 `--build-pkglib <库名>` 代替 `--analyze-pkg <库名>`。
 

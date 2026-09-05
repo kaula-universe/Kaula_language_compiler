@@ -46,7 +46,7 @@ type BuildResult struct {
 
 // BuildSource 表示一个待编译的源文件
 type BuildSource struct {
-	RelPath string // 相对库目录的路径（含子目录，如 backends/imgui_impl_dx11.cpp）
+	RelPath string // 相对库目录的路径（含子目录）
 	AbsPath string
 	Kind    string // "c" 或 "c++"
 }
@@ -359,7 +359,7 @@ func ConfigStale(pkgDir, libName string) bool {
 		if h == "" || strings.HasPrefix(h, "<") || filepath.IsAbs(h) {
 			continue
 		}
-		// 配置里的引用形如 "imgui/imgui.h"（相对 pkglib 根）或裸文件名（相对库目录）
+		// 配置里的引用形如 "库名/头文件.h"（相对 pkglib 根）或裸文件名（相对库目录）
 		rel := h
 		if strings.HasPrefix(h, filepath.Base(pkgDir)+"/") {
 			rel = strings.TrimPrefix(h, filepath.Base(pkgDir)+"/")
