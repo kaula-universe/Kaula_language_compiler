@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"kaula/internal/i18n"
 )
 
 // 终端 ANSI 颜色常量（用于终端高亮错误/警告/成功）
@@ -123,28 +125,14 @@ type Error struct {
 
 // String 实现error接口
 func (e *Error) String() string {
-	var errorType string
-	switch e.Type {
-	case ErrorSyntax:
-		errorType = "Syntax Error"
-	case ErrorSemantic:
-		errorType = "Semantic Error"
-	case ErrorTypeError:
-		errorType = "Type Error"
-	case ErrorRuntime:
-		errorType = "Runtime Error"
-	case ErrorWarning:
-		errorType = "Warning"
-	default:
-		errorType = "Unknown Error"
-	}
+	errorType := ErrorTypeToLocalString(e.Type)
 
 	result := fmt.Sprintf("%s at line %d, column %d: %s", errorType, e.Line, e.Column, e.Message)
 	if e.File != "" {
 		result = fmt.Sprintf("%s in %s", result, e.File)
 	}
 	if e.Suggestion != "" {
-		result = fmt.Sprintf("%s\nSuggestion: %s", result, e.Suggestion)
+		result = fmt.Sprintf("%s\n%s: %s", result, i18n.T(i18n.MsgSuggestion), e.Suggestion)
 	}
 	if e.SourceLine != "" {
 		result = fmt.Sprintf("%s\n%s", result, e.SourceContext)
@@ -186,7 +174,7 @@ func (ec *ErrorCollector) SetSource(source string) {
 func (ec *ErrorCollector) AddError(errorType ErrorType, message string, line, column int, code, suggestion string) {
 	err := &Error{
 		Type:       errorType,
-		Message:    message,
+		Message:    i18n.TranslateMessage(message),
 		Line:       line,
 		Column:     column,
 		File:       ec.fileName, // 真实文件名来自 ErrorCollector（main 设置）
@@ -276,9 +264,9 @@ func (ec *ErrorCollector) ReportErrors() {
 	}
 
 	if errorCount > 0 {
-		fmt.Printf("Found %d error(s), %d warning(s):\n", errorCount, warningCount)
+		fmt.Printf("%s:\n", i18n.T(i18n.MsgFoundErrorsAndWarnings, errorCount, warningCount))
 	} else {
-		fmt.Printf("Found %d warning(s):\n", warningCount)
+		fmt.Printf("%s:\n", i18n.T(i18n.MsgFoundWarnings, warningCount))
 	}
 	for i, err := range ec.errors {
 		fmt.Printf("%d. %s\n", i+1, err.String())
@@ -289,10 +277,10 @@ func (ec *ErrorCollector) ReportErrors() {
 func (ec *ErrorCollector) GetErrorSummary() string {
 	errorCount, warningCount := ec.ErrorCount(), ec.WarningCount()
 	if errorCount+warningCount == 0 {
-		return "No errors found"
+		return i18n.T(i18n.MsgNoErrors)
 	}
 
-	summary := fmt.Sprintf("Found %d error(s), %d warning(s):\n", errorCount, warningCount)
+	summary := fmt.Sprintf("%s:\n", i18n.T(i18n.MsgFoundErrorsAndWarnings, errorCount, warningCount))
 	for i, err := range ec.errors {
 		summary += fmt.Sprintf("%d. %s\n", i+1, err.String())
 	}
@@ -337,7 +325,7 @@ func (ec *ErrorCollector) GetErrorsByType(errorType ErrorType) []*Error {
 	return errors
 }
 
-// ErrorTypeToString 将错误类型转换为字符串
+// ErrorTypeToString 将错误类型转换为字符串（英文）
 func ErrorTypeToString(errorType ErrorType) string {
 	switch errorType {
 	case ErrorSyntax:
@@ -355,6 +343,24 @@ func ErrorTypeToString(errorType ErrorType) string {
 	}
 }
 
+// ErrorTypeToLocalString 将错误类型转换为本地化字符串
+func ErrorTypeToLocalString(errorType ErrorType) string {
+	switch errorType {
+	case ErrorSyntax:
+		return i18n.T(i18n.MsgSyntaxError)
+	case ErrorSemantic:
+		return i18n.T(i18n.MsgSemanticError)
+	case ErrorTypeError:
+		return i18n.T(i18n.MsgTypeError)
+	case ErrorRuntime:
+		return i18n.T(i18n.MsgRuntimeError)
+	case ErrorWarning:
+		return i18n.T(i18n.MsgWarning)
+	default:
+		return i18n.T(i18n.MsgUnknownError)
+	}
+}
+
 // FormatErrorPosition 格式化错误位置
 func FormatErrorPosition(file string, line, column int) string {
 	if file != "" {
@@ -366,15 +372,15 @@ func FormatErrorPosition(file string, line, column int) string {
 // GenerateSuggestion 根据错误信息生成建议
 func GenerateSuggestion(message string) string {
 	suggestions := map[string]string{
-		"unterminated string":                     "Make sure to close all string literals with quotes",
-		"unexpected token":                        "Check for missing or extra punctuation",
-		"function name already exists":            "Choose a different name for the function",
-		"prefix name already exists":              "Choose a different name for the prefix",
-		"object statement missing type":           "Add a type for the object",
-		"object statement missing name":           "Add a name for the object",
-		"spend statement missing expression":      "Add an expression to the spend statement",
-		"spend statement missing call statements": "Add call statements to the spend block",
-		"prefix statement missing name":           "Add a name for the prefix",
+		"unterminated string":                     i18n.T(i18n.MsgSuggestionUnterminatedString),
+		"unexpected token":                        i18n.T(i18n.MsgSuggestionUnexpectedToken),
+		"function name already exists":            i18n.T(i18n.MsgSuggestionFuncNameExists),
+		"prefix name already exists":              i18n.T(i18n.MsgSuggestionPrefixNameExists),
+		"object statement missing type":           i18n.T(i18n.MsgSuggestionObjectType),
+		"object statement missing name":           i18n.T(i18n.MsgSuggestionObjectName),
+		"spend statement missing expression":      i18n.T(i18n.MsgSuggestionSpendExpression),
+		"spend statement missing call statements": i18n.T(i18n.MsgSuggestionSpendCall),
+		"prefix statement missing name":           i18n.T(i18n.MsgSuggestionPrefixName),
 	}
 
 	for key, suggestion := range suggestions {
@@ -383,7 +389,7 @@ func GenerateSuggestion(message string) string {
 		}
 	}
 
-	return "Check the syntax and try again"
+	return i18n.T(i18n.MsgSuggestionCheckSyntax)
 }
 
 // ExtractSourceContext 从源码中提取错误上下文
@@ -440,17 +446,17 @@ func FormatErrorWithContext(err *Error) string {
 	var color string
 	switch err.Type {
 	case ErrorSyntax:
-		errorType, color = "Syntax Error", ansiRed
+		errorType, color = i18n.T(i18n.MsgSyntaxError), ansiRed
 	case ErrorSemantic:
-		errorType, color = "Semantic Error", ansiRed
+		errorType, color = i18n.T(i18n.MsgSemanticError), ansiRed
 	case ErrorTypeError:
-		errorType, color = "Type Error", ansiRed
+		errorType, color = i18n.T(i18n.MsgTypeError), ansiRed
 	case ErrorRuntime:
-		errorType, color = "Runtime Error", ansiRed
+		errorType, color = i18n.T(i18n.MsgRuntimeError), ansiRed
 	case ErrorWarning:
-		errorType, color = "Warning", ansiYellow
+		errorType, color = i18n.T(i18n.MsgWarning), ansiYellow
 	default:
-		errorType, color = "Unknown Error", ansiRed
+		errorType, color = i18n.T(i18n.MsgUnknownError), ansiRed
 	}
 
 	// 第一行: 文件名(粗体):行号:列号: 等级词(错误红/警告黄): 类别
@@ -503,7 +509,7 @@ func FormatErrorWithContext(err *Error) string {
 	}
 
 	if err.Suggestion != "" {
-		result.WriteString(fmt.Sprintf("  Suggestion: %s", err.Suggestion))
+		result.WriteString(fmt.Sprintf("  %s: %s", i18n.T(i18n.MsgSuggestion), err.Suggestion))
 		result.WriteString("\n")
 	}
 

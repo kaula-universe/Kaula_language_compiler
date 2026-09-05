@@ -76,7 +76,7 @@ type Config struct {
 	Version string `json:"version,omitempty"`
 
 	// ====== 包依赖 ======
-	// 依赖声明（Cargo 风格）：包名 -> 版本约束（如 "webview": "0.12"）。
+	// 依赖声明（Cargo 风格）：包名 -> 版本约束。
 	// 编译时自动从注册源拉取缺失依赖到 ~/.kaula/pkglib/ 缓存。
 	Dependencies map[string]string `json:"dependencies,omitempty"`
 	// 包注册源（默认 https://gitee.com/kaula-universe；可指向任意 git 仓库根/镜像）。

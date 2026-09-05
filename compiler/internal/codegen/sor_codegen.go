@@ -281,7 +281,7 @@ func (a *SORCodeGenAdapter) IsExternOrigin(varName string) (externFn string, ok 
 
 // ShouldSkipSurvivorFree 判断某 SOR 变量是否应抑制 kmm_v4_survivor_free 的 per-object 回收。
 // 核查表缺口 ⑤（survivor_free 过早回收风险）：为以下场景提供 codegen 侧拦截点：
-//   - FFI / webview 回调把 user_data / 字符串指针长期持有在 C 侧（跨 Kaula 作用域）
+//   - FFI 回调把 user_data / 字符串指针长期持有在 C 侧（跨 Kaula 作用域）
 //   - return promote 后 ownership 已转移，不应在 return 路径再回收
 //   - 将来 sor 层面增加 #[no_kmm_drop] / #[ffi_callback_user_data] / DropAction=Leak
 //     等属性时，在此接入即可，stmtgen 发射点无需二次改动。
