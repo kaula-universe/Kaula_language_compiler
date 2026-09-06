@@ -2680,6 +2680,13 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 		typeName = typePrefix + "[" + arraySize + "]" + elemType
 	} else {
 		// 普通类型
+		// 支持指针前缀写法（如 *Node），与指针后缀写法（Node*）等价
+		pointerPrefix := ""
+		if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			pointerPrefix = "*"
+			p.nextToken()
+		}
+
 		isTypeKeyword := false
 		switch p.curTok.Type {
 		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
@@ -2694,7 +2701,7 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 			return nil
 		}
 
-		typeName = typePrefix + p.curTok.Value
+		typeName = typePrefix + pointerPrefix + p.curTok.Value
 		p.nextToken()
 
 		// 处理指针后缀（如 ListNode* → "ListNode*"）
