@@ -2788,6 +2788,18 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 
+	// 去重：searchPaths 可能包含同一实际目录的多个挂载路径，
+	// 导致同一模块 .c 被重复加入。按 objPath 去重（objPath 基于模块名，与搜索路径无关）。
+	seenObj := make(map[string]bool)
+	var uniqueSources []moduleSource
+	for _, ms := range moduleSources {
+		if !seenObj[ms.objPath] {
+			seenObj[ms.objPath] = true
+			uniqueSources = append(uniqueSources, ms)
+		}
+	}
+	moduleSources = uniqueSources
+
 	// 预编译需要更新的 std 模块
 	rebuildCount := 0
 	for _, ms := range moduleSources {
@@ -2905,23 +2917,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// 注意：必须在 .o 文件前用 -x none 重置语言类型，否则前面的 -x c 会让 clang 把 .o 当作 C 源码
 	// 安装模式下 std/freestanding 模块符号已在 kaula_std.lib / kaula_freestanding.lib 中，
 	// 不再单独链接 .o，否则与静态库中的同名符号产生 LNK2005 重复定义。
-	if len(moduleSources) > 0 && !useInstalledLibraries {
+	// 裸机模式下在此链接 moduleSources（下方 else 分支仅处理非裸机）
+	if len(moduleSources) > 0 && !useInstalledLibraries && cfg != nil && cfg.Freestanding {
 		clangArgs = append(clangArgs, "-x", "none")
 		for _, ms := range moduleSources {
 			clangArgs = append(clangArgs, ms.objPath)
-		}
-	}
-	// 添加 kmm_v4.o/spend_call.o/allocator.o（如果存在）— 裸机模式下跳过（依赖 OS 调用）
-	if !useInstalledLibraries && (cfg == nil || !cfg.Freestanding) {
-		// 无 std 模块源时（如仅使用第三方库）上面的 -x none 未生效，这里补上
-		if len(moduleSources) == 0 {
-			clangArgs = append(clangArgs, "-x", "none")
-		}
-		for _, objName := range runtimeObjs {
-			runtimeObj := filepath.Join(objectCacheDir, objName)
-			if _, err := os.Stat(runtimeObj); err == nil {
-				clangArgs = append(clangArgs, runtimeObj)
-			}
 		}
 	}
 
