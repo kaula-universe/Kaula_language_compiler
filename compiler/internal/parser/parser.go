@@ -61,6 +61,7 @@ type Parser struct {
 	taskStack      []ParseTask
 	skipMainCheck  bool // 跳过 main 函数检查（用于导入目标文件）
 	pendingAttributes []*ast.Attribute // 已解析但尚未应用的属性（#[attr] pub 场景）
+	memberParseFailed bool // 标记当前类/结构体是否有成员解析失败（用于错误恢复）
 }
 
 // NewParser 创建一个新的语法分析器
@@ -1940,9 +1941,16 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 
 				// 先尝试解析为字段声明（name: type;）
 				if p.curTok.Type == lexer.TOKEN_IDENT {
+					p.memberParseFailed = false // 重置标志
 					if field := p.parseFieldDeclarationIterative(); field != nil {
 						p.log("解析完成字段声明：%s", field.String())
 						stmt.Fields = append(stmt.Fields, field)
+						continue
+					}
+					// 字段声明明确失败（已进入 name: 前缀但类型解析失败）：
+					// 不再重试方法/构造函数，直接同步到下一个成员
+					if p.memberParseFailed {
+						p.synchronizeToMember()
 						continue
 					}
 				}
@@ -1971,9 +1979,10 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 					}
 				}
 
-				// 如果都不匹配，跳过 token
-				p.log("跳过 token: %s", lexer.TokenTypeToString(p.curTok.Type))
-				p.nextToken()
+				// 如果都不匹配，明确报错并同步到下一个成员，不再静默吞 token
+				p.error(fmt.Sprintf("unexpected token '%s' in class body, expected field, method or constructor",
+					lexer.TokenTypeToString(p.curTok.Type)))
+				p.synchronizeToMember()
 			} else if p.curTok.Type == lexer.TOKEN_FUNC {
 				// fn 关键字开头的方法: fn Name(params) [ReturnType] { ... }
 				savedCurTok := p.curTok
@@ -1984,8 +1993,9 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				if p.curTok.Type != lexer.TOKEN_IDENT {
 					p.curTok = savedCurTok
 					p.peekTok = savedPeekTok
-					p.log("跳过 token: %s (fn 后不是方法名)", lexer.TokenTypeToString(p.curTok.Type))
-					p.nextToken()
+					p.error(fmt.Sprintf("expected method name after 'fn', got %s",
+						lexer.TokenTypeToString(p.curTok.Type)))
+					p.synchronizeToMember()
 					continue
 				}
 
@@ -2006,8 +2016,9 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				if p.curTok.Type != lexer.TOKEN_LPAREN {
 					p.curTok = savedCurTok
 					p.peekTok = savedPeekTok
-					p.log("跳过 token: %s (方法名后不是 ()", lexer.TokenTypeToString(p.curTok.Type))
-					p.nextToken()
+					p.error(fmt.Sprintf("expected '(' after method name '%s', got %s",
+						method.Name, lexer.TokenTypeToString(p.curTok.Type)))
+					p.synchronizeToMember()
 					continue
 				}
 				p.nextToken() // 跳过 (
@@ -2134,11 +2145,12 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 					stmt.Methods = append(stmt.Methods, method)
 					p.log("解析完成 fn 接口方法声明（无体）：%s", method.String())
 				} else {
-					// 不是 fn 方法声明：恢复
+					// 不是 fn 方法声明：恢复并报错同步
 					p.curTok = savedCurTok
 					p.peekTok = savedPeekTok
-					p.log("跳过 token: %s (fn 声明后无 { 或 ;)", lexer.TokenTypeToString(p.curTok.Type))
-					p.nextToken()
+					p.error(fmt.Sprintf("expected '{' or ';' after method declaration, got %s",
+						lexer.TokenTypeToString(p.curTok.Type)))
+					p.synchronizeToMember()
 				}
 			} else if p.curTok.Type == lexer.TOKEN_CONSTRUCTOR {
 				// constructor 关键字开头的构造函数
@@ -2376,8 +2388,12 @@ func (p *Parser) parseStructStatementIterative() *ast.StructStatement {
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			p.memberParseFailed = false // 重置标志
 			if field := p.parseFieldDeclarationIterative(); field != nil {
 				stmt.Fields = append(stmt.Fields, field)
+			} else if p.memberParseFailed {
+				// 字段声明明确失败（已进入 name: 前缀但类型解析失败）：同步到下一个成员
+				p.synchronizeToMember()
 			} else if p.curTok.Type == lexer.TOKEN_SEMICOLON {
 				p.nextToken()
 			} else {
@@ -2672,8 +2688,12 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 			isElemType = true
 		}
 		if !isElemType {
+			failedTok := p.curTok
+			p.error(fmt.Sprintf("field '%s' type declaration failed: expected type name after '[%s]', got '%s'",
+				fieldName, arraySize, failedTok.Value))
 			p.curTok = savedCurTok
 			p.peekTok = savedPeekTok
+			p.memberParseFailed = true
 			return nil
 		}
 		p.nextToken()
@@ -2696,8 +2716,12 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 		}
 
 		if !isTypeKeyword {
+			failedTok := p.curTok
+			p.error(fmt.Sprintf("field '%s' type declaration failed: expected type name, got '%s'",
+				fieldName, failedTok.Value))
 			p.curTok = savedCurTok
 			p.peekTok = savedPeekTok
+			p.memberParseFailed = true
 			return nil
 		}
 
@@ -4231,6 +4255,62 @@ func (p *Parser) error(message string) {
 		Highlight:     errors.BuildHighlight(p.lexer.GetSource(), p.curTok.Line, p.curTok.Column, 0, p.file, errors.ErrorSyntax, message),
 	}
 	p.errorCollector.AddErrorInstance(err)
+}
+
+// synchronize 通用错误恢复：跳过 token 直到到达语句边界。
+// 同步点包括：分号、当前块的右大括号、以及语句级关键字
+//（fn/class/struct/enum/import/const/return/if/while/for/else 等）。
+// 用于函数体等场景快速恢复解析，避免级联错误。
+func (p *Parser) synchronize() {
+	depth := 0
+	for p.curTok.Type != lexer.TOKEN_EOF {
+		if depth == 0 {
+			switch p.curTok.Type {
+			case lexer.TOKEN_SEMICOLON:
+				p.nextToken() // 消费分号
+				return
+			case lexer.TOKEN_RBRACE:
+				return // 到达当前块结束，不消费 RBRACE
+			case lexer.TOKEN_FUNC, lexer.TOKEN_CLASS, lexer.TOKEN_STRUCT,
+				lexer.TOKEN_ENUM, lexer.TOKEN_IMPORT, lexer.TOKEN_CONST,
+				lexer.TOKEN_RETURN, lexer.TOKEN_IF, lexer.TOKEN_WHILE,
+				lexer.TOKEN_FOR, lexer.TOKEN_ELSE, lexer.TOKEN_TYPE,
+				lexer.TOKEN_EXTERN, lexer.TOKEN_PUB:
+				return // 到达下一条语句开始
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_LBRACE {
+			depth++
+		} else if p.curTok.Type == lexer.TOKEN_RBRACE {
+			if depth > 0 {
+				depth--
+			}
+		}
+		p.nextToken()
+	}
+}
+
+// synchronizeToMember 类/结构体成员级错误恢复：跳过当前无效 token，
+// 同步到下一个可能的成员声明起点（标识符、类型关键字、fn/constructor/pub 等），
+// 或类/结构体结束的右大括号。避免只跳一个 token 导致的级联报错。
+func (p *Parser) synchronizeToMember() {
+	// 先跳过导致失败的当前 token
+	p.nextToken()
+	for p.curTok.Type != lexer.TOKEN_EOF && p.curTok.Type != lexer.TOKEN_RBRACE {
+		switch p.curTok.Type {
+		case lexer.TOKEN_SEMICOLON:
+			p.nextToken() // 消费分号，到达下一条成员
+			return
+		case lexer.TOKEN_IDENT, lexer.TOKEN_FUNC, lexer.TOKEN_CONSTRUCTOR,
+			lexer.TOKEN_PUB, lexer.TOKEN_STATIC, lexer.TOKEN_EXTERN,
+			lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+			lexer.TOKEN_TYPE_VOID:
+			return // 到达下一个可能的成员声明起点
+		}
+		p.nextToken()
+	}
+	// 到达 RBRACE 或 EOF：直接返回，不消费 RBRACE（外层循环负责）
 }
 
 // SetFile 设置文件名
