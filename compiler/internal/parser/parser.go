@@ -5240,7 +5240,11 @@ func (p *Parser) parseMatchPattern() *ast.MatchPattern {
 	case lexer.TOKEN_LITERAL_INT:
 		value := p.curTok.Value
 		p.nextToken()
-		intVal, _ := strconv.ParseInt(value, 10, 64)
+		intVal, intErr := strconv.ParseInt(value, 10, 64)
+		if intErr != nil {
+			p.error(fmt.Sprintf("整数溢出: 字面量 '%s' 超出 int64 范围 (match pattern)", value))
+			intVal = 0
+		}
 		return &ast.MatchPattern{
 			Kind:     ast.PatternInteger,
 			IntValue: intVal,
