@@ -54,6 +54,17 @@ func kaulaStructTag(name string) string {
 	return "K_" + name
 }
 
+// rewriteStructDefType 在结构体定义内部重写类型引用：
+// 把 K_Name 替换为 struct K_Name，因为 typedef 名在结构体定义内部还不可用
+// （自引用或前向引用场景）。已有的 struct K_ 保持不变。
+func rewriteStructDefType(cType string) string {
+	const placeholder = "\x00__STRUCT_K__"
+	cType = strings.ReplaceAll(cType, "struct K_", placeholder)
+	cType = strings.ReplaceAll(cType, "K_", "struct K_")
+	cType = strings.ReplaceAll(cType, placeholder, "struct K_")
+	return cType
+}
+
 var globalTypeMap = map[string]string{
 	"i8":         "int8_t",
 	"i16":        "int16_t",
@@ -374,6 +385,9 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
+		// 在结构体定义内部，class 类型的 typedef 名（K_Name）可能还未完成定义，
+		// 自引用/前向引用必须使用 struct K_Name 形式，否则 C 报 "unknown type name"。
+		fieldType = rewriteStructDefType(fieldType)
 		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
 	}
 	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
@@ -567,12 +581,8 @@ func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) stri
 	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	for _, field := range stmt.Fields {
 		fieldType := tg.convertType(field.Type, field.Nullable)
-		// 自引用指针字段(如 Expr* a): struct 定义内 typedef 尚未生效,
-		// 必须用 struct 前缀 (struct K_Expr*), 否则 C 编译报
-		// "must use 'struct' tag to refer to type"
-		if field.Type == stmt.Name+"*" || field.Type == stmt.Name+" *" {
-			fieldType = "struct " + kaulaStructTag(stmt.Name) + "*"
-		}
+		// 结构体定义内部：typedef 名尚未生效，自引用/前向引用必须用 struct K_Name
+		fieldType = rewriteStructDefType(fieldType)
 		// 位域: fieldName: type : width → type fieldName : width;
 		bitSuffix := ""
 		if field.BitWidth > 0 {
