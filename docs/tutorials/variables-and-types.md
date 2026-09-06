@@ -101,6 +101,24 @@ println("x = ", x)
 println("name = ", name, ", score = ", score)
 ```
 
+## 类型转换：`as<T>()`
+
+Kaula 的整数类型系统严格，不同整数类型之间不会隐式转换。使用 `as<T>(expr)` 进行显式类型转换：
+
+```kaula
+int x = 42
+u64 y = as<u64>(x)      # int -> u64
+i32 z = as<i32>(x)       # int -> i32
+f64 f = as<f64>(x)       # int -> f64
+
+u8 b = 255
+int big = as<int>(b)     # u8 -> int
+```
+
+支持的转换方向包括：各宽度整数之间（i8/i16/i32/i64/u8/u16/u32/u64/int）、整数与浮点（f32/f64）之间。转换在编译期生成对应的 C 强制类型转换，零运行时开销。
+
+> 注意：Kaula 不支持隐式整数提升，`int + u8`、`int < size_t` 等操作必须先通过 `as<T>()` 统一类型。
+
 ## 完整示例
 
 参见 [examples/variables.kl](examples/variables.kl)。
