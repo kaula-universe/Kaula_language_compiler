@@ -129,13 +129,13 @@ const char* system_get_os_version() {
             ZeroMemory(&info, sizeof(OSVERSIONINFOEXW));
             info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEXW);
             if (pRtlGetVersion(&info) == 0) {
-                sprintf(version, "%lu.%lu.%lu", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
+                snprintf(version, sizeof(version), "%lu.%lu.%lu", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
                 return version;
             }
         }
     }
     // 回退方案：返回通用 Windows 版本
-    sprintf(version, "Windows NT 10.0");
+    snprintf(version, sizeof(version), "Windows NT 10.0");
     return version;
 #else
     static char os_version[256];
@@ -640,7 +640,7 @@ char** system_directory_list(const char* path, size_t* count) {
 #ifdef _WIN32
     WIN32_FIND_DATA data;
     char search_path[1024];
-    sprintf(search_path, "%s\\*", path);
+    snprintf(search_path, sizeof(search_path), "%s\\*", path);
     HANDLE hFind = FindFirstFile(search_path, &data);
     if (hFind == INVALID_HANDLE_VALUE) return NULL;
     size_t file_count = 0;

@@ -5,6 +5,7 @@ import (
 	"kaula/internal/ast"
 	"kaula/internal/comptime"
 	"kaula/internal/stdlib"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -441,29 +442,58 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 
 	// 常量折叠：如果左右都是整数常量，直接在编译期计算
 	if isIntegerLiteral(left) && isIntegerLiteral(right) {
-		leftVal, _ := strconv.ParseInt(left, 10, 64)
-		rightVal, _ := strconv.ParseInt(right, 10, 64)
+		leftVal, errL := strconv.ParseInt(left, 10, 64)
+		rightVal, errR := strconv.ParseInt(right, 10, 64)
+		if errL != nil || errR != nil {
+			goto skip_constant_fold // 解析失败（如溢出），回退运行时计算
+		}
 
 		var result int64
 		var hasResult bool
 
+		// 溢出检测：溢出时回退运行时（C 整数溢出为 UB）
+		addOverflow := func(a, b int64) bool {
+			if b > 0 && a > math.MaxInt64-b {
+				return true
+			}
+			if b < 0 && a < math.MinInt64-b {
+				return true
+			}
+			return false
+		}
+		mulOverflow := func(a, b int64) bool {
+			if a == 0 || b == 0 {
+				return false
+			}
+			if a == math.MinInt64 || b == math.MinInt64 {
+				return true
+			}
+			return a*b/b != a
+		}
+
 		switch e.Operator {
 		case "PLUS":
-			result = leftVal + rightVal
-			hasResult = true
+			if !addOverflow(leftVal, rightVal) {
+				result = leftVal + rightVal
+				hasResult = true
+			}
 		case "MINUS":
-			result = leftVal - rightVal
-			hasResult = true
+			if !addOverflow(leftVal, -rightVal) {
+				result = leftVal - rightVal
+				hasResult = true
+			}
 		case "MULTIPLY":
-			result = leftVal * rightVal
-			hasResult = true
+			if !mulOverflow(leftVal, rightVal) {
+				result = leftVal * rightVal
+				hasResult = true
+			}
 		case "DIVIDE":
-			if rightVal != 0 {
+			if rightVal != 0 && !(leftVal == math.MinInt64 && rightVal == -1) {
 				result = leftVal / rightVal
 				hasResult = true
 			}
 		case "MOD":
-			if rightVal != 0 {
+			if rightVal != 0 && !(leftVal == math.MinInt64 && rightVal == -1) {
 				result = leftVal % rightVal
 				hasResult = true
 			}
@@ -516,11 +546,16 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 			}
 			hasResult = true
 		case "LSHIFT", "<<":
-			result = leftVal << uint(rightVal)
-			hasResult = true
+			// 位移量必须在 [0,63]，否则为 UB，回退运行时
+			if rightVal >= 0 && rightVal < 64 {
+				result = leftVal << uint(rightVal)
+				hasResult = true
+			}
 		case "RSHIFT", ">>":
-			result = leftVal >> uint(rightVal)
-			hasResult = true
+			if rightVal >= 0 && rightVal < 64 {
+				result = leftVal >> uint(rightVal)
+				hasResult = true
+			}
 		case "XOR", "^", "BITWISE_XOR", "CARET":
 			result = leftVal ^ rightVal
 			hasResult = true
@@ -530,6 +565,7 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 			return strconv.FormatInt(result, 10)
 		}
 	}
+skip_constant_fold:
 
 	// 生成正常的二元表达式（直接字符串拼接，避免 fmt.Sprintf 开销）
 	switch e.Operator {
@@ -746,7 +782,9 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	// 通用泛型适配：如果存在类型参数，则触发实例化
 	if len(e.TypeArgs) > 0 {
 		// 触发泛型实例化（实例化代码写入 genericFuncCode 缓冲区，最终前置注入）
-		_, _ = eg.codegen.InstantiateGeneric(funcName, e.TypeArgs, e.Pos.Line)
+		if _, instErr := eg.codegen.InstantiateGeneric(funcName, e.TypeArgs, e.Pos.Line); instErr != nil {
+			eg.codegen.error(fmt.Sprintf("泛型实例化失败: %v", instErr))
+		}
 		// 无论首次实例化还是已缓存，调用点都使用 mangled 名称
 		funcName = MangleGenericName(funcName, e.TypeArgs)
 	}
