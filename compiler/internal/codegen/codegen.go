@@ -613,9 +613,12 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 			stdlibPath = "stdlib.json" // 保底: 让 LoadStdlibConfig 报真实错误
 		}
 	}
-	// 静默加载 stdlib 配置（ninja 风格: 成功路径不打印）
+	// 加载 stdlib 配置（失败时警告并置 nil，后续代码均有 nil 检查）
 	stdlibConfig, err := stdlib.LoadStdlibConfig(stdlibPath)
-	_ = err
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] 加载 stdlib 配置失败 (%s): %v; 标准库函数签名将不可用\n", stdlibPath, err)
+		stdlibConfig = nil
+	}
 
 	treeManager := core.NewTreeManager()
 	prefixManager := core.NewPrefixManager()

@@ -230,48 +230,68 @@ i64 time_from_datetime(DateTime dt) {
 
 char* time_format_string(i64 timestamp, const char* format) {
     DateTime dt = time_to_datetime(timestamp);
-    char* buffer = (char*)kmm_v4_malloc(128);
+    const size_t buf_size = 128;
+    char* buffer = (char*)kmm_v4_malloc(buf_size);
     if (!buffer) return NULL;
 
     char* p = buffer;
+    size_t remaining = buf_size;
     const char* fmt = format ? format : "%Y-%m-%d %H:%M:%S";
 
-    while (*fmt) {
+    while (*fmt && remaining > 1) {
         if (*fmt == '%' && fmt[1]) {
             char spec = fmt[1];
+            int written = 0;
             switch (spec) {
                 case 'Y':
-                    p += sprintf(p, "%04d", dt.year);
+                    written = snprintf(p, remaining, "%04d", dt.year);
                     break;
                 case 'm':
-                    p += sprintf(p, "%02d", dt.month);
+                    written = snprintf(p, remaining, "%02d", dt.month);
                     break;
                 case 'd':
-                    p += sprintf(p, "%02d", dt.day);
+                    written = snprintf(p, remaining, "%02d", dt.day);
                     break;
                 case 'H':
-                    p += sprintf(p, "%02d", dt.hour);
+                    written = snprintf(p, remaining, "%02d", dt.hour);
                     break;
                 case 'M':
-                    p += sprintf(p, "%02d", dt.minute);
+                    written = snprintf(p, remaining, "%02d", dt.minute);
                     break;
                 case 'S':
-                    p += sprintf(p, "%02d", dt.second);
+                    written = snprintf(p, remaining, "%02d", dt.second);
                     break;
                 case 'f':
-                    p += sprintf(p, "%03d", dt.millisecond);
+                    written = snprintf(p, remaining, "%03d", dt.millisecond);
                     break;
                 default:
-                    *p++ = *fmt;
-                    *p++ = spec;
-                    break;
+                    // 未知格式符：原样输出 % 和字符
+                    if (remaining >= 3) {
+                        *p++ = *fmt;
+                        *p++ = spec;
+                        *p = '\0';
+                        remaining -= 2;
+                    } else {
+                        remaining = 0;
+                    }
+                    fmt += 2;
+                    continue;
             }
+            if (written < 0 || (size_t)written >= remaining) {
+                // 输出被截断或出错，停止
+                p[remaining - 1] = '\0';
+                remaining = 0;
+                break;
+            }
+            p += written;
+            remaining -= (size_t)written;
             fmt += 2;
         } else {
             *p++ = *fmt++;
+            remaining--;
         }
     }
-    *p = '\0';
+    if (remaining > 0) *p = '\0';
     return buffer;
 }
 

@@ -2680,6 +2680,13 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 		typeName = typePrefix + "[" + arraySize + "]" + elemType
 	} else {
 		// 普通类型
+		// 支持指针前缀写法（如 *Node），与指针后缀写法（Node*）等价
+		pointerPrefix := ""
+		if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			pointerPrefix = "*"
+			p.nextToken()
+		}
+
 		isTypeKeyword := false
 		switch p.curTok.Type {
 		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
@@ -2694,7 +2701,7 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 			return nil
 		}
 
-		typeName = typePrefix + p.curTok.Value
+		typeName = typePrefix + pointerPrefix + p.curTok.Value
 		p.nextToken()
 
 		// 处理指针后缀（如 ListNode* → "ListNode*"）
@@ -5240,7 +5247,11 @@ func (p *Parser) parseMatchPattern() *ast.MatchPattern {
 	case lexer.TOKEN_LITERAL_INT:
 		value := p.curTok.Value
 		p.nextToken()
-		intVal, _ := strconv.ParseInt(value, 10, 64)
+		intVal, intErr := strconv.ParseInt(value, 10, 64)
+		if intErr != nil {
+			p.error(fmt.Sprintf("整数溢出: 字面量 '%s' 超出 int64 范围 (match pattern)", value))
+			intVal = 0
+		}
 		return &ast.MatchPattern{
 			Kind:     ast.PatternInteger,
 			IntValue: intVal,

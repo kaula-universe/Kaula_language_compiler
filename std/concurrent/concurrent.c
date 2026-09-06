@@ -916,24 +916,49 @@ Future* future_all(Future** futures, size_t count) {
     return output->future;
 }
 
+typedef struct AnyTaskArg {
+    Future** futures;
+    size_t count;
+    Promise* output;
+    Mutex mutex;
+    bool_t done;
+    volatile size_t next_idx; // 原子分配 worker 索引
+} AnyTaskArg;
+
+static void* any_worker(void* arg) {
+    AnyTaskArg* ata = (AnyTaskArg*)arg;
+    // 原子获取本 worker 对应的 future 索引
+    mutex_lock(ata->mutex);
+    size_t idx = ata->next_idx++;
+    mutex_unlock(ata->mutex);
+
+    if (idx >= ata->count) return NULL;
+
+    // 只等待自己对应的 future
+    void* result = future_get(ata->futures[idx]);
+
+    // 第一个完成的 worker 胜出，设置结果
+    mutex_lock(ata->mutex);
+    if (!ata->done) {
+        ata->done = true;
+        promise_set_result(ata->output, result);
+    }
+    mutex_unlock(ata->mutex);
+    return NULL;
+}
+
 Future* future_any(Future** futures, size_t count) {
     if (!futures || count == 0) return NULL;
     Promise* output = promise_create();
-    typedef struct { Future** futures; size_t count; Promise* output; Mutex mutex; bool_t done; } AnyArg;
-    AnyArg* aa = (AnyArg*)kmm_v4_calloc(1, sizeof(AnyArg));
-    aa->futures = futures;
-    aa->count = count;
-    aa->output = output;
-    aa->mutex = mutex_create();
-    typedef struct { AnyArg* aa; size_t idx; } WorkerArg;
-    WorkerArg* args = (WorkerArg*)kmm_v4_malloc(count * sizeof(WorkerArg));
+    AnyTaskArg* ata = (AnyTaskArg*)kmm_v4_calloc(1, sizeof(AnyTaskArg));
+    ata->futures = futures;
+    ata->count = count;
+    ata->output = output;
+    ata->mutex = mutex_create();
+    ata->done = false;
+    ata->next_idx = 0;
     for (size_t i = 0; i < count; i++) {
-        args[i].aa = aa;
-        args[i].idx = i;
-        typedef void* (*Func)(void*);
-        typedef struct { WorkerArg* arg; } Closure;
-        Closure* c = (Closure*)kmm_v4_malloc(sizeof(Closure)); c->arg = &args[i];
-        thread_detach(thread_create((Func)future_map_worker, c));
+        thread_detach(thread_create(any_worker, ata));
     }
     return output->future;
 }
