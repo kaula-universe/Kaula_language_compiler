@@ -215,11 +215,6 @@ func (tg *TypeGenerator) tryInstantiateGenericType(baseName, argsStr string) (st
 }
 
 func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
-	// c:: 命名空间：外部 C 类型，直接去掉前缀返回原始 C 类型名
-	if strings.HasPrefix(kaulaType, "c::") {
-		return strings.TrimPrefix(kaulaType, "c::")
-	}
-
 	// void(T...)R 签名记法优先处理（必须保留原始大小写，参数/返回类型可能含用户定义类型）
 	if cType, ok := tg.parseVoidSignatureType(kaulaType); ok {
 		return cType
@@ -968,15 +963,24 @@ func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
 }
 
 // mapAdoptUnderlyingToC 将套用类型的底层类型表达式映射为 C 类型。
-// c:: 前缀的外部 C 类型直接去掉前缀；Kaula 类型走 MapKaulaTypeToC。
+// 编译器自动推断：
+//   - Kaula 固定宽度类型（i8-i64/u8-u64/f32/f64/bool/char/byte/sbyte/void/string/object）→ 走 Kaula 类型映射
+//   - 其他（int、size_t、FILE* 等）→ 直接透传为 C 类型，保留 C 原生语义
 func (tg *TypeGenerator) mapAdoptUnderlyingToC(underlying string) string {
 	t := strings.TrimSpace(underlying)
-	if strings.HasPrefix(t, "c::") {
-		// 外部 C 类型：去掉 c:: 前缀，原样作为 C 类型名
-		return strings.TrimPrefix(t, "c::")
+	// 去掉指针前缀，判断基础类型
+	base := strings.TrimPrefix(t, "*")
+	base = strings.TrimSuffix(base, "*")
+	base = strings.TrimSpace(base)
+	// Kaula 固定宽度类型和明确的 Kaula 类型走映射
+	switch base {
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+		"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+		"f32", "f64", "float", "double", "bool", "char", "byte", "sbyte", "void", "string", "object":
+		return tg.MapKaulaTypeToC(t)
 	}
-	// Kaula 类型：走正常类型映射
-	return tg.MapKaulaTypeToC(t)
+	// 其他类型直接透传为 C 类型（保留 C 原生语义，如 C 的 int 是 32 位）
+	return t
 }
 
 func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement) string {

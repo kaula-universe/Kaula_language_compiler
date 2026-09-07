@@ -3669,10 +3669,9 @@ func isNumericType(typeName string) bool {
 		typeName == "u8" || typeName == "f64" || typeName == "f32"
 }
 
-// isCScalarType 检查 c:: 命名空间类型是否为 C 标量整数类型
+// isCScalarType 检查外部 C 类型名是否为已知标量整数类型
 func isCScalarType(cType string) bool {
-	// 去掉 c:: 前缀
-	t := strings.TrimPrefix(cType, "c::")
+	t := strings.TrimSpace(cType)
 	// 去掉 const 前缀
 	t = strings.TrimPrefix(t, "const ")
 	t = strings.TrimSpace(t)
@@ -3693,20 +3692,22 @@ func isCScalarType(cType string) bool {
 }
 
 // isScalarAdoptUnderlying 检查套用类型的底层类型表达式是否为标量
+// 编译器自动推断：Kaula 数值类型 → 标量；指针 → 非标量；外部 C 类型查已知标量列表
 func isScalarAdoptUnderlying(underlying string) bool {
 	if underlying == "" {
 		return false
 	}
-	// c:: 外部 C 类型
-	if strings.HasPrefix(underlying, "c::") {
-		return isCScalarType(underlying)
-	}
+	t := strings.TrimSpace(underlying)
 	// 指针不是标量
-	if strings.HasPrefix(underlying, "*") || strings.HasSuffix(underlying, "*") {
+	if strings.HasPrefix(t, "*") || strings.HasSuffix(t, "*") {
 		return false
 	}
 	// Kaula 数值类型
-	return isNumericType(underlying)
+	if isNumericType(t) {
+		return true
+	}
+	// 外部 C 类型：查已知标量列表（编译器无法推断未知 C 类型，保守拒绝）
+	return isCScalarType(t)
 }
 
 // isStringLikeType 检查类型是否为字符串类型 (string/cstr/char*)

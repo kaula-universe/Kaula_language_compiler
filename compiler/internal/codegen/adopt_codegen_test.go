@@ -21,22 +21,22 @@ func TestAdoptTypeGeneration(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "c:: 外部类型 size_t",
-			stmt: &ast.TypeAliasStatement{Name: "Size", IsAdopt: true, AdoptUnderlying: "c::size_t", UnderlyingType: "c::size_t"},
+			name: "外部 C 类型 size_t（编译器自动推断透传）",
+			stmt: &ast.TypeAliasStatement{Name: "Size", IsAdopt: true, AdoptUnderlying: "size_t", UnderlyingType: "size_t"},
 			expected: "typedef size_t Size;",
 		},
 		{
-			name: "c:: 外部类型 int",
-			stmt: &ast.TypeAliasStatement{Name: "CInt", IsAdopt: true, AdoptUnderlying: "c::int", UnderlyingType: "c::int"},
+			name: "外部 C 类型 int",
+			stmt: &ast.TypeAliasStatement{Name: "CInt", IsAdopt: true, AdoptUnderlying: "int", UnderlyingType: "int"},
 			expected: "typedef int CInt;",
 		},
 		{
-			name: "c:: 外部指针类型 FILE*",
-			stmt: &ast.TypeAliasStatement{Name: "FileHandle", IsAdopt: true, AdoptUnderlying: "c::FILE*", UnderlyingType: "c::FILE*"},
+			name: "外部 C 指针类型 FILE*",
+			stmt: &ast.TypeAliasStatement{Name: "FileHandle", IsAdopt: true, AdoptUnderlying: "FILE*", UnderlyingType: "FILE*"},
 			expected: "typedef FILE* FileHandle;",
 		},
 		{
-			name: "Kaula 数值类型 i64",
+			name: "Kaula 数值类型 i64（走 Kaula 类型映射）",
 			stmt: &ast.TypeAliasStatement{Name: "Count", IsAdopt: true, AdoptUnderlying: "i64", UnderlyingType: "i64"},
 			expected: "typedef int64_t Count;",
 		},
