@@ -130,6 +130,16 @@ func (p *Program) FindEnum(name string) *EnumStatement {
 	return nil
 }
 
+// FindTypeAlias 查找类型别名声明（type Name = ...）
+func (p *Program) FindTypeAlias(name string) *TypeAliasStatement {
+	for _, stmt := range p.Statements {
+		if ta, ok := stmt.(*TypeAliasStatement); ok && ta.Name == name {
+			return ta
+		}
+	}
+	return nil
+}
+
 // Traverse 遍历所有节点
 func (p *Program) Traverse(visitor func(Node)) {
 	visitor(p)
