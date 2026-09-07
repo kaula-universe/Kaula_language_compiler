@@ -66,53 +66,35 @@ func rewriteStructDefType(cType string) string {
 }
 
 var globalTypeMap = map[string]string{
-	"i8":         "int8_t",
-	"i16":        "int16_t",
-	"i32":        "int32_t",
-	"i64":        "int64_t",
-	"int8":       "int8_t",
-	"int16":      "int16_t",
-	"int32":      "int32_t",
-	"int64":      "int64_t",
-	"int":        "int64_t",
-	"integer":    "int64_t",
-	"long":       "int64_t",
-	"long_long":  "long long",
-	"short":      "int16_t",
-	"u8":         "uint8_t",
-	"u16":        "uint16_t",
-	"u32":        "uint32_t",
-	"u64":        "uint64_t",
-	"uint8":      "uint8_t",
-	"uint16":     "uint16_t",
-	"uint32":     "uint32_t",
-	"uint64":     "uint64_t",
-	"uint":       "uint64_t",
-	"uchar":      "unsigned char",
-	"ushort":     "uint16_t",
-	"ulong":      "uint64_t",
-	"ulong_long": "unsigned long long",
-	"float":      "float",
-	"f32":        "float",
-	"single":     "float",
-	"double":     "double",
-	"f64":        "double",
-	"real":       "double",
-	"bool":       "bool",
-	"boolean":    "bool",
-	"char":       "char",
-	"byte":       "uint8_t",
-	"sbyte":      "int8_t",
-	"void":       "void",
-	"string":     "String",
-	"cstring":    "const char*",
-	"cint":       "int",
-	"str":        "String",
-	"intptr":     "intptr_t",
-	"uintptr":    "uintptr_t",
-	"size":       "size_t",
-	"ssize":      "ssize_t",
-	"object":     "Object*",
+	"i8":    "int8_t",
+	"i16":   "int16_t",
+	"i32":   "int32_t",
+	"i64":   "int64_t",
+	"int8":  "int8_t",
+	"int16": "int16_t",
+	"int32": "int32_t",
+	"int64": "int64_t",
+	"int":   "int64_t",
+	"u8":    "uint8_t",
+	"u16":   "uint16_t",
+	"u32":   "uint32_t",
+	"u64":   "uint64_t",
+	"uint8": "uint8_t",
+	"uint16": "uint16_t",
+	"uint32": "uint32_t",
+	"uint64": "uint64_t",
+	"uint":  "uint64_t",
+	"float": "float",
+	"f32":   "float",
+	"double": "double",
+	"f64":   "double",
+	"bool":  "bool",
+	"char":  "char",
+	"byte":  "uint8_t",
+	"sbyte": "int8_t",
+	"void":  "void",
+	"string": "String",
+	"object": "Object*",
 }
 
 // splitTopLevelCommas 在顶层（不计嵌套括号/尖括号/方括号）按逗号分割字符串。
@@ -980,6 +962,27 @@ func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
 	return 0, false
 }
 
+// mapAdoptUnderlyingToC 将套用类型的底层类型表达式映射为 C 类型。
+// 编译器自动推断：
+//   - Kaula 固定宽度类型（i8-i64/u8-u64/f32/f64/bool/char/byte/sbyte/void/string/object）→ 走 Kaula 类型映射
+//   - 其他（int、size_t、FILE* 等）→ 直接透传为 C 类型，保留 C 原生语义
+func (tg *TypeGenerator) mapAdoptUnderlyingToC(underlying string) string {
+	t := strings.TrimSpace(underlying)
+	// 去掉指针前缀，判断基础类型
+	base := strings.TrimPrefix(t, "*")
+	base = strings.TrimSuffix(base, "*")
+	base = strings.TrimSpace(base)
+	// Kaula 固定宽度类型和明确的 Kaula 类型走映射
+	switch base {
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+		"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+		"f32", "f64", "float", "double", "bool", "char", "byte", "sbyte", "void", "string", "object":
+		return tg.MapKaulaTypeToC(t)
+	}
+	// 其他类型直接透传为 C 类型（保留 C 原生语义，如 C 的 int 是 32 位）
+	return t
+}
+
 func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
 	if stmt == nil {
 		return ""
@@ -995,6 +998,18 @@ func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement
 
 	if stmt.IsFuncType {
 		return tg.GenerateFuncTypeAliasStatement(stmt)
+	}
+
+	// 套用类型（adopt）：底层类型表达式映射到 C 类型，生成 typedef，零成本
+	// 底层类型可以是 c::size_t（外部 C 类型）或 i64（Kaula 数值类型）
+	// C 侧 typedef <CType> <Name>; Kaula 侧 Name 是独立强类型
+	if stmt.IsAdopt {
+		underlying := strings.TrimSpace(stmt.AdoptUnderlying)
+		if underlying == "" {
+			underlying = strings.TrimSpace(stmt.UnderlyingType)
+		}
+		cType := tg.mapAdoptUnderlyingToC(underlying)
+		return fmt.Sprintf("// Adopt type: %s = adopt %s\ntypedef %s %s;\n\n", stmt.Name, underlying, cType, stmt.Name)
 	}
 
 	cType := tg.convertTypeAliasToCType(stmt.UnderlyingType)
