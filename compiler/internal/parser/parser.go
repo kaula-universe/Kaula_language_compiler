@@ -2458,12 +2458,12 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 	// 解析 '=' 或直接解析函数类型
 	if p.curTok.Type == lexer.TOKEN_ASSIGN {
 		p.nextToken()
-		// 套用类型: type Name = adopt CType
+		// 套用类型: type Name = adopt <底层类型表达式>
 		if p.curTok.Type == lexer.TOKEN_ADOPT {
 			p.nextToken()
 			stmt.IsAdopt = true
-			stmt.AdoptCType = p.parseTypeString()
-			stmt.UnderlyingType = stmt.AdoptCType
+			stmt.AdoptUnderlying = p.parseTypeString()
+			stmt.UnderlyingType = stmt.AdoptUnderlying
 		} else {
 			// 解析底层类型
 			stmt.UnderlyingType = p.parseTypeString()
@@ -2587,6 +2587,16 @@ func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 			}
 			typeStr.WriteString(p.curTok.Value)
 			p.nextToken()
+			// 支持 c::size_t 命名空间语法：ident 后紧跟 :: 时继续拼接
+			if p.curTok.Type == lexer.TOKEN_DOUBLE_COLON {
+				typeStr.WriteString("::")
+				p.nextToken()
+				if p.curTok.Type == lexer.TOKEN_IDENT || p.curTok.Type == lexer.TOKEN_TYPE_INT ||
+					p.curTok.Type == lexer.TOKEN_TYPE_VOID || p.curTok.Type == lexer.TOKEN_TYPE_CHAR {
+					typeStr.WriteString(p.curTok.Value)
+					p.nextToken()
+				}
+			}
 		case lexer.TOKEN_MULTIPLY:
 			typeStr.WriteString("*")
 			p.nextToken()
@@ -3276,6 +3286,13 @@ func (p *Parser) precedence(tokenType lexer.TokenType) int {
 // parsePrimaryExpressionIterative 迭代解析基本表达式
 func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 	switch p.curTok.Type {
+	case lexer.TOKEN_ADOPT:
+		// adopt(x) 内置转换运算符：当作函数调用解析
+		if p.peekTok.Type == lexer.TOKEN_LPAREN {
+			return p.parseIdentifierIterative()
+		}
+		p.error("adopt 后应跟 (表达式)")
+		return nil
 	case lexer.TOKEN_IDENT:
 		// 类型构造符语法：cstring("...") / str("...") 等价于 as<cstring>("...")
 		if (p.curTok.Value == "cstring" || p.curTok.Value == "str") && p.peekTok.Type == lexer.TOKEN_LPAREN {

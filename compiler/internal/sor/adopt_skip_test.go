@@ -17,7 +17,7 @@ func TestAdoptTypeSkippedFromSOR(t *testing.T) {
 			&ast.TypeAliasStatement{
 				Name:       "FileHandle",
 				IsAdopt:    true,
-				AdoptCType: "FILE*",
+				AdoptUnderlying: "FILE*",
 			},
 			// 普通类型变量（应被 SOR 追踪）
 			&ast.VariableDeclaration{
@@ -63,7 +63,7 @@ func TestCollectAdoptTypes(t *testing.T) {
 			&ast.TypeAliasStatement{
 				Name:       "Size",
 				IsAdopt:    true,
-				AdoptCType: "size_t",
+				AdoptUnderlying: "size_t",
 			},
 			&ast.TypeAliasStatement{
 				Name:           "MyInt",
@@ -73,7 +73,7 @@ func TestCollectAdoptTypes(t *testing.T) {
 			&ast.TypeAliasStatement{
 				Name:       "Handle",
 				IsAdopt:    true,
-				AdoptCType: "void*",
+				AdoptUnderlying: "void*",
 			},
 		},
 	}
