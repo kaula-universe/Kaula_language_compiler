@@ -2230,6 +2230,20 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 			if strings.HasSuffix(typeStr, "*") || strings.HasPrefix(typeStr, "*") {
 				isPtr = true
 			}
+			// 类型别名可能包裹指针（type P = *Node）：符号类型记录的是别名 PNode，
+			// 需解析别名底层类型，若底层是指针则同样按 -> 访问。
+			if !isPtr {
+				if ta := eg.codegen.program.FindTypeAlias(typeStr); ta != nil {
+					ut := ta.UnderlyingType
+					if ta.IsAdopt && ta.AdoptUnderlying != "" {
+						ut = ta.AdoptUnderlying
+					}
+					ut = strings.TrimSpace(ut)
+					if strings.HasPrefix(ut, "*") || strings.HasSuffix(ut, "*") {
+						isPtr = true
+					}
+				}
+			}
 			// 类类型变量始终按指针传递和存储（K_ClassName*），
 			// 即使符号表中类型名未显式带 *，也视为指针访问。
 			if !isPtr && eg.codegen.IsClassType(typeStr) {
