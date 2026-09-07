@@ -1,9 +1,17 @@
 package errors
 
 import (
+	"kaula/internal/i18n"
+	"os"
 	"strings"
 	"testing"
 )
+
+// TestMain 强制使用英文 locale，避免测试环境中文系统导致标签断言失败
+func TestMain(m *testing.M) {
+	i18n.SetLocale("en")
+	os.Exit(m.Run())
+}
 
 func TestBuildHighlightAutoExtends(t *testing.T) {
 	src := "fn main() void {\n    foo(\n}"
