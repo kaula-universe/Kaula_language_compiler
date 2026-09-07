@@ -1,0 +1,28 @@
+// ctypes.kl — C 兼容类型的套用类型声明
+//
+// 所有与 C ABI 交互的平台相关类型统一通过 adopt 声明，
+// 运行时零成本（C 侧即底层类型），编译期强类型隔离。
+//
+// 标量整数类型标记 #[transparent]：编译器验证底层为标量，
+// 允许比较和算术运算；句柄/指针类型保持不透明，禁止比较。
+//
+// adopt 后直接写类型名，编译器自动推断：
+//   - Kaula 已知类型（i64、*u8 等）→ 走 Kaula 类型映射
+//   - 外部 C 类型（size_t、FILE* 等）→ 直接透传到 C
+
+// 平台相关整数类型（#[transparent]：可比较可运算）
+#[transparent]
+type Size = adopt size_t       // 无符号整数，sizeof 的返回类型
+#[transparent]
+type SSize = adopt ssize_t     // 有符号整数，read/write 返回类型
+#[transparent]
+type IntPtr = adopt intptr_t   // 能容纳指针的有符号整数
+#[transparent]
+type UIntPtr = adopt uintptr_t // 能容纳指针的无符号整数
+
+// C 原生 int（32 位，与 Kaula 默认 int64 区分）
+#[transparent]
+type CInt = adopt int
+
+// C 字符串（const char*）—— 不透明句柄，禁止直接比较
+type CStr = adopt const char*

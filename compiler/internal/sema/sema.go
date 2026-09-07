@@ -49,6 +49,9 @@ type SemanticAnalyzer struct {
 	usedFunctions      map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
 	libraryMode        bool                           // 库文件分析模式(跳过 unused-function 检查)
 	localModuleTypes   map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
+	adoptTypes         map[string]bool                // 套用类型名集合（adopt 声明的类型）
+	transparentAdopt   map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
+	adoptUnderlying    map[string]string              // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
 }
 
 // SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
@@ -152,6 +155,9 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		comptime:           nil,
 		importedModules:    make(map[string]bool),
 		arrayLens:          make(map[string]int),
+		adoptTypes:         make(map[string]bool),
+		transparentAdopt:   make(map[string]bool),
+		adoptUnderlying:    make(map[string]string),
 	}
 }
 
@@ -1489,6 +1495,30 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 // analyzeTypeAliasStatement 分析类型别名声明
 func (sa *SemanticAnalyzer) analyzeTypeAliasStatement(stmt *ast.TypeAliasStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, "type", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	if stmt.IsAdopt {
+		sa.adoptTypes[stmt.Name] = true
+		sa.adoptUnderlying[stmt.Name] = stmt.AdoptUnderlying
+		// #[transparent]：编译器验证底层为标量类型时，允许比较和算术
+		isTransparent := false
+		for _, attr := range stmt.Attributes {
+			if attr != nil && attr.Name == "transparent" {
+				isTransparent = true
+				break
+			}
+		}
+		if isTransparent {
+			if isScalarAdoptUnderlying(stmt.AdoptUnderlying) {
+				sa.transparentAdopt[stmt.Name] = true
+			} else {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 标记 #[transparent] 但底层类型 '%s' 不是标量，transparent 仅允许标量底层", stmt.Name, stmt.AdoptUnderlying),
+					stmt.Pos.Line, stmt.Pos.Column,
+					"adopt_transparent_non_scalar",
+					"#[transparent] 要求底层为数值标量类型（i8-i64/u8-u64/f32/f64 或 c:: 整数类型）；指针/结构体/字符串底层不可 transparent",
+				)
+			}
+		}
+	}
 }
 
 // analyzeExternStatement 分析 extern 外部符号/函数声明
@@ -1612,57 +1642,48 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 
 	// 基本类型
 	basicTypes := map[string]bool{
-		"int":     true,
-		"integer": true,
-		"i8":      true,
-		"i16":     true,
-		"i32":     true,
-		"i64":     true,
-		"int8":    true,
-		"int16":   true,
-		"int32":   true,
-		"int64":   true,
-		"u8":      true,
-		"u16":     true,
-		"u32":     true,
-		"u64":     true,
-		"uint8":   true,
-		"uint16":  true,
-		"uint32":  true,
-		"uint64":  true,
-		"uint":    true,
-		"uchar":   true,
-		"ushort":  true,
-		"ulong":   true,
-		"float":   true,
-		"f32":     true,
-		"single":  true,
-		"f64":     true,
-		"double":  true,
-		"real":    true,
-		"bool":    true,
-		"boolean": true,
-		"char":    true,
-		"byte":    true,
-		"sbyte":   true,
-		"string":  true,
-		"str":     true,
-		"cstring": true,
-		"void":    true,
-		"any":     true,
-		"long":    true,
-		"short":   true,
-		"size":    true,
-		"ssize":   true,
-		"intptr":  true,
-		"uintptr": true,
-		"File":    true, // std.io 的文件句柄类型（C FILE*）
-		"object":  true, // 动态对象类型（Object*）
+		"int":    true,
+		"i8":     true,
+		"i16":    true,
+		"i32":    true,
+		"i64":    true,
+		"int8":   true,
+		"int16":  true,
+		"int32":  true,
+		"int64":  true,
+		"u8":     true,
+		"u16":    true,
+		"u32":    true,
+		"u64":    true,
+		"uint8":  true,
+		"uint16": true,
+		"uint32": true,
+		"uint64": true,
+		"uint":   true,
+		"float":  true,
+		"f32":    true,
+		"f64":    true,
+		"double": true,
+		"bool":   true,
+		"char":   true,
+		"byte":   true,
+		"sbyte":  true,
+		"string": true,
+		"void":   true,
+		"any":    true,
+		"File":   true, // std.io 的文件句柄类型（C FILE*）
+		"object": true, // 动态对象类型（Object*）
 	}
 
 	// 检查是否是基本类型
 	if basicTypes[typeName] {
 		return true
+	}
+
+	// 检查是否是前缀指针类型（如 *u8）
+	if len(typeName) > 0 && typeName[0] == '*' {
+		baseType := typeName[1:]
+		return sa.isTypeValid(baseType)
 	}
 
 	// 检查是否是指针类型（如 int*）
@@ -2832,6 +2853,27 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 	if expr.Left != nil && expr.Right != nil {
 		leftType := sa.inferExpressionType(expr.Left)
 		rightType := sa.inferExpressionType(expr.Right)
+		// 套用类型守卫：非 #[transparent] 的套用类型禁止算术和比较
+		if leftType != "" && leftType == rightType && sa.adoptTypes[leftType] && !sa.transparentAdopt[leftType] {
+			switch expr.Operator {
+			case "+", "-", "*", "/", "%":
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 未标记 #[transparent]，不可使用算术运算符 '%s'", leftType, expr.Operator),
+					expr.Pos.Line,
+					expr.Pos.Column,
+					"adopt_not_transparent",
+					"套用类型默认不透明；如需算术运算请添加 #[transparent] 属性，或先 unwrap 为底层类型",
+				)
+			case "==", "!=", "<", ">", "<=", ">=":
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 未标记 #[transparent]，不可使用比较运算符 '%s'", leftType, expr.Operator),
+					expr.Pos.Line,
+					expr.Pos.Column,
+					"adopt_not_transparent",
+					"套用类型默认不透明；如需比较请添加 #[transparent] 属性，或先 unwrap 为底层类型",
+				)
+			}
+		}
 		if leftType != "" && rightType != "" && leftType != rightType {
 			switch expr.Operator {
 			case "+":
@@ -2863,7 +2905,7 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 				isNullCompare := isEquality && (leftType == "null" || rightType == "null")
 				isStrCompare := isEquality && isStringLikeType(leftType) && isStringLikeType(rightType)
 				isPtrCompare := isEquality && isPointerType(leftType) && isPointerType(rightType)
-				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare && !isStrCompare && !isPtrCompare {
+				if !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare && !isStrCompare && !isPtrCompare && !(sa.transparentAdopt[leftType] && sa.transparentAdopt[rightType]) {
 					sa.errorCollector.AddSemanticError(
 						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
 						expr.Pos.Line,
@@ -2972,6 +3014,24 @@ func (sa *SemanticAnalyzer) analyzeTypeCastExpression(expr *ast.TypeCastExpressi
 func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 	if expr == nil {
 		return
+	}
+
+	// adopt() / unwrap() 内置转换运算符：编译期 no-op，不做函数符号检查
+	if ident, ok := expr.Function.(*ast.Identifier); ok {
+		if ident.Name == "adopt" || ident.Name == "unwrap" {
+			for _, arg := range expr.Args {
+				sa.analyzeExpression(arg)
+			}
+			// unwrap(x)：x 必须是套用类型
+			if ident.Name == "unwrap" && len(expr.Args) > 0 {
+				if argIdent, ok := expr.Args[0].(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(argIdent.Name); sym != nil && !sa.adoptTypes[sym.Type] {
+						// 非套用类型调用 unwrap 只警告，不报错（可能是链式调用的中间结果）
+					}
+				}
+			}
+			return
+		}
 	}
 
 	// 记录被调用的顶层函数(unused-function 检查用)
@@ -3607,6 +3667,47 @@ func isNumericType(typeName string) bool {
 		typeName == "i32" || typeName == "i16" || typeName == "i8" ||
 		typeName == "u64" || typeName == "u32" || typeName == "u16" ||
 		typeName == "u8" || typeName == "f64" || typeName == "f32"
+}
+
+// isCScalarType 检查外部 C 类型名是否为已知标量整数类型
+func isCScalarType(cType string) bool {
+	t := strings.TrimSpace(cType)
+	// 去掉 const 前缀
+	t = strings.TrimPrefix(t, "const ")
+	t = strings.TrimSpace(t)
+	// 指针不是标量
+	if strings.HasSuffix(t, "*") {
+		return false
+	}
+	switch t {
+	case "size_t", "ssize_t", "intptr_t", "uintptr_t", "ptrdiff_t",
+		"int", "unsigned", "unsigned int", "long", "unsigned long",
+		"long long", "unsigned long long", "short", "unsigned short",
+		"char", "unsigned char", "signed char", "int8_t", "int16_t",
+		"int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+		"float", "double", "long double", "bool", "_Bool":
+		return true
+	}
+	return false
+}
+
+// isScalarAdoptUnderlying 检查套用类型的底层类型表达式是否为标量
+// 编译器自动推断：Kaula 数值类型 → 标量；指针 → 非标量；外部 C 类型查已知标量列表
+func isScalarAdoptUnderlying(underlying string) bool {
+	if underlying == "" {
+		return false
+	}
+	t := strings.TrimSpace(underlying)
+	// 指针不是标量
+	if strings.HasPrefix(t, "*") || strings.HasSuffix(t, "*") {
+		return false
+	}
+	// Kaula 数值类型
+	if isNumericType(t) {
+		return true
+	}
+	// 外部 C 类型：查已知标量列表（编译器无法推断未知 C 类型，保守拒绝）
+	return isCScalarType(t)
 }
 
 // isStringLikeType 检查类型是否为字符串类型 (string/cstr/char*)

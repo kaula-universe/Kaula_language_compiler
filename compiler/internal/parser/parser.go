@@ -2423,6 +2423,11 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 		Pos: pos,
 	}
 
+	// 解析属性注解（如 #[transparent] 等）
+	if attrs := p.parseAttributes(); attrs != nil {
+		stmt.Attributes = attrs
+	}
+
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -2453,8 +2458,16 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 	// 解析 '=' 或直接解析函数类型
 	if p.curTok.Type == lexer.TOKEN_ASSIGN {
 		p.nextToken()
-		// 解析底层类型
-		stmt.UnderlyingType = p.parseTypeString()
+		// 套用类型: type Name = adopt <底层类型表达式>
+		if p.curTok.Type == lexer.TOKEN_ADOPT {
+			p.nextToken()
+			stmt.IsAdopt = true
+			stmt.AdoptUnderlying = p.parseTypeString()
+			stmt.UnderlyingType = stmt.AdoptUnderlying
+		} else {
+			// 解析底层类型
+			stmt.UnderlyingType = p.parseTypeString()
+		}
 	} else if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == "func" {
 		// 函数类型: type Name func(params) returnType
 		stmt.IsFuncType = true
@@ -3263,6 +3276,13 @@ func (p *Parser) precedence(tokenType lexer.TokenType) int {
 // parsePrimaryExpressionIterative 迭代解析基本表达式
 func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 	switch p.curTok.Type {
+	case lexer.TOKEN_ADOPT:
+		// adopt(x) 内置转换运算符：当作函数调用解析
+		if p.peekTok.Type == lexer.TOKEN_LPAREN {
+			return p.parseIdentifierIterative()
+		}
+		p.error("adopt 后应跟 (表达式)")
+		return nil
 	case lexer.TOKEN_IDENT:
 		// 类型构造符语法：cstring("...") / str("...") 等价于 as<cstring>("...")
 		if (p.curTok.Value == "cstring" || p.curTok.Value == "str") && p.peekTok.Type == lexer.TOKEN_LPAREN {

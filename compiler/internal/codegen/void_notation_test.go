@@ -26,8 +26,8 @@ func TestVoidNotationMapping(t *testing.T) {
 		{"void(void())void", "void (*)(void*)"},
 		// 函数指针: void* (*)(void*)
 		{"void(void())void()", "void* (*)(void*)"},
-		// 比较函数: int (*)(const void*, const void*) — cint 映射为 C 的 int
-		{"void(const void(), const void())cint", "int (*)(const void*, const void*)"},
+		// 比较函数: int32_t (*)(const void*, const void*) — i32 映射为 int32_t
+		{"void(const void(), const void())i32", "int32_t (*)(const void*, const void*)"},
 	}
 
 	for _, tt := range tests {
