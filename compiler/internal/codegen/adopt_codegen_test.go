@@ -21,19 +21,24 @@ func TestAdoptTypeGeneration(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "值套用 size_t",
-			stmt: &ast.TypeAliasStatement{Name: "Size", IsAdopt: true, AdoptCType: "size_t", UnderlyingType: "size_t"},
+			name: "c:: 外部类型 size_t",
+			stmt: &ast.TypeAliasStatement{Name: "Size", IsAdopt: true, AdoptUnderlying: "c::size_t", UnderlyingType: "c::size_t"},
 			expected: "typedef size_t Size;",
 		},
 		{
-			name: "值套用 int",
-			stmt: &ast.TypeAliasStatement{Name: "CInt", IsAdopt: true, AdoptCType: "int", UnderlyingType: "int"},
+			name: "c:: 外部类型 int",
+			stmt: &ast.TypeAliasStatement{Name: "CInt", IsAdopt: true, AdoptUnderlying: "c::int", UnderlyingType: "c::int"},
 			expected: "typedef int CInt;",
 		},
 		{
-			name: "句柄套用 FILE*",
-			stmt: &ast.TypeAliasStatement{Name: "FileHandle", IsAdopt: true, AdoptCType: "FILE*", UnderlyingType: "FILE*"},
+			name: "c:: 外部指针类型 FILE*",
+			stmt: &ast.TypeAliasStatement{Name: "FileHandle", IsAdopt: true, AdoptUnderlying: "c::FILE*", UnderlyingType: "c::FILE*"},
 			expected: "typedef FILE* FileHandle;",
+		},
+		{
+			name: "Kaula 数值类型 i64",
+			stmt: &ast.TypeAliasStatement{Name: "Count", IsAdopt: true, AdoptUnderlying: "i64", UnderlyingType: "i64"},
+			expected: "typedef int64_t Count;",
 		},
 	}
 
@@ -48,5 +53,29 @@ func TestAdoptTypeGeneration(t *testing.T) {
 				t.Errorf("类型 %s 未注册到 typeAliasTypes", tt.stmt.Name)
 			}
 		})
+	}
+}
+
+func TestAdoptUnwrapNoOp(t *testing.T) {
+	cg := &CodeGenerator{pluginManager: NewPluginManager()}
+	eg := NewExpressionGenerator(cg)
+	// adopt(42) 应直接输出 42（no-op，用整数字面量避免 symbolTable 依赖）
+	adoptCall := &ast.CallExpression{
+		Function: &ast.Identifier{Name: "adopt"},
+		Args:     []ast.Expression{&ast.IntegerLiteral{Value: 42}},
+	}
+	got := eg.generateCallExpression(adoptCall)
+	if got != "42" {
+		t.Errorf("adopt(42) 期望 '42', 实际 %q", got)
+	}
+
+	// unwrap(42) 应直接输出 42（no-op）
+	unwrapCall := &ast.CallExpression{
+		Function: &ast.Identifier{Name: "unwrap"},
+		Args:     []ast.Expression{&ast.IntegerLiteral{Value: 42}},
+	}
+	got = eg.generateCallExpression(unwrapCall)
+	if got != "42" {
+		t.Errorf("unwrap(42) 期望 '42', 实际 %q", got)
 	}
 }

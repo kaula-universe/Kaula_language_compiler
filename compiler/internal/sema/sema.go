@@ -51,6 +51,7 @@ type SemanticAnalyzer struct {
 	localModuleTypes   map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
 	adoptTypes         map[string]bool                // 套用类型名集合（adopt 声明的类型）
 	transparentAdopt   map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
+	adoptUnderlying    map[string]string              // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
 }
 
 // SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
@@ -156,6 +157,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		arrayLens:          make(map[string]int),
 		adoptTypes:         make(map[string]bool),
 		transparentAdopt:   make(map[string]bool),
+		adoptUnderlying:    make(map[string]string),
 	}
 }
 
@@ -1495,11 +1497,25 @@ func (sa *SemanticAnalyzer) analyzeTypeAliasStatement(stmt *ast.TypeAliasStateme
 	sa.symbolTable.AddSymbol(stmt.Name, "type", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 	if stmt.IsAdopt {
 		sa.adoptTypes[stmt.Name] = true
-		// #[transparent]：编译器可确认底层为标量类型时，允许比较和算术
+		sa.adoptUnderlying[stmt.Name] = stmt.AdoptUnderlying
+		// #[transparent]：编译器验证底层为标量类型时，允许比较和算术
+		isTransparent := false
 		for _, attr := range stmt.Attributes {
 			if attr != nil && attr.Name == "transparent" {
-				sa.transparentAdopt[stmt.Name] = true
+				isTransparent = true
 				break
+			}
+		}
+		if isTransparent {
+			if isScalarAdoptUnderlying(stmt.AdoptUnderlying) {
+				sa.transparentAdopt[stmt.Name] = true
+			} else {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 标记 #[transparent] 但底层类型 '%s' 不是标量，transparent 仅允许标量底层", stmt.Name, stmt.AdoptUnderlying),
+					stmt.Pos.Line, stmt.Pos.Column,
+					"adopt_transparent_non_scalar",
+					"#[transparent] 要求底层为数值标量类型（i8-i64/u8-u64/f32/f64 或 c:: 整数类型）；指针/结构体/字符串底层不可 transparent",
+				)
 			}
 		}
 	}
@@ -3000,6 +3016,24 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		return
 	}
 
+	// adopt() / unwrap() 内置转换运算符：编译期 no-op，不做函数符号检查
+	if ident, ok := expr.Function.(*ast.Identifier); ok {
+		if ident.Name == "adopt" || ident.Name == "unwrap" {
+			for _, arg := range expr.Args {
+				sa.analyzeExpression(arg)
+			}
+			// unwrap(x)：x 必须是套用类型
+			if ident.Name == "unwrap" && len(expr.Args) > 0 {
+				if argIdent, ok := expr.Args[0].(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(argIdent.Name); sym != nil && !sa.adoptTypes[sym.Type] {
+						// 非套用类型调用 unwrap 只警告，不报错（可能是链式调用的中间结果）
+					}
+				}
+			}
+			return
+		}
+	}
+
 	// 记录被调用的顶层函数(unused-function 检查用)
 	if ident, ok := expr.Function.(*ast.Identifier); ok && sa.usedFunctions != nil {
 		sa.usedFunctions[ident.Name] = true
@@ -3633,6 +3667,46 @@ func isNumericType(typeName string) bool {
 		typeName == "i32" || typeName == "i16" || typeName == "i8" ||
 		typeName == "u64" || typeName == "u32" || typeName == "u16" ||
 		typeName == "u8" || typeName == "f64" || typeName == "f32"
+}
+
+// isCScalarType 检查 c:: 命名空间类型是否为 C 标量整数类型
+func isCScalarType(cType string) bool {
+	// 去掉 c:: 前缀
+	t := strings.TrimPrefix(cType, "c::")
+	// 去掉 const 前缀
+	t = strings.TrimPrefix(t, "const ")
+	t = strings.TrimSpace(t)
+	// 指针不是标量
+	if strings.HasSuffix(t, "*") {
+		return false
+	}
+	switch t {
+	case "size_t", "ssize_t", "intptr_t", "uintptr_t", "ptrdiff_t",
+		"int", "unsigned", "unsigned int", "long", "unsigned long",
+		"long long", "unsigned long long", "short", "unsigned short",
+		"char", "unsigned char", "signed char", "int8_t", "int16_t",
+		"int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+		"float", "double", "long double", "bool", "_Bool":
+		return true
+	}
+	return false
+}
+
+// isScalarAdoptUnderlying 检查套用类型的底层类型表达式是否为标量
+func isScalarAdoptUnderlying(underlying string) bool {
+	if underlying == "" {
+		return false
+	}
+	// c:: 外部 C 类型
+	if strings.HasPrefix(underlying, "c::") {
+		return isCScalarType(underlying)
+	}
+	// 指针不是标量
+	if strings.HasPrefix(underlying, "*") || strings.HasSuffix(underlying, "*") {
+		return false
+	}
+	// Kaula 数值类型
+	return isNumericType(underlying)
 }
 
 // isStringLikeType 检查类型是否为字符串类型 (string/cstr/char*)

@@ -215,6 +215,11 @@ func (tg *TypeGenerator) tryInstantiateGenericType(baseName, argsStr string) (st
 }
 
 func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
+	// c:: 命名空间：外部 C 类型，直接去掉前缀返回原始 C 类型名
+	if strings.HasPrefix(kaulaType, "c::") {
+		return strings.TrimPrefix(kaulaType, "c::")
+	}
+
 	// void(T...)R 签名记法优先处理（必须保留原始大小写，参数/返回类型可能含用户定义类型）
 	if cType, ok := tg.parseVoidSignatureType(kaulaType); ok {
 		return cType
@@ -962,6 +967,18 @@ func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
 	return 0, false
 }
 
+// mapAdoptUnderlyingToC 将套用类型的底层类型表达式映射为 C 类型。
+// c:: 前缀的外部 C 类型直接去掉前缀；Kaula 类型走 MapKaulaTypeToC。
+func (tg *TypeGenerator) mapAdoptUnderlyingToC(underlying string) string {
+	t := strings.TrimSpace(underlying)
+	if strings.HasPrefix(t, "c::") {
+		// 外部 C 类型：去掉 c:: 前缀，原样作为 C 类型名
+		return strings.TrimPrefix(t, "c::")
+	}
+	// Kaula 类型：走正常类型映射
+	return tg.MapKaulaTypeToC(t)
+}
+
 func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
 	if stmt == nil {
 		return ""
@@ -979,17 +996,16 @@ func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement
 		return tg.GenerateFuncTypeAliasStatement(stmt)
 	}
 
-	// 套用类型（adopt）：直接用原始 C 类型生成 typedef，零成本
-	// 套用类型（adopt）：右侧为原始 C 类型语法，原样透传生成 typedef，零成本
+	// 套用类型（adopt）：底层类型表达式映射到 C 类型，生成 typedef，零成本
+	// 底层类型可以是 c::size_t（外部 C 类型）或 i64（Kaula 数值类型）
 	// C 侧 typedef <CType> <Name>; Kaula 侧 Name 是独立强类型
-	// 注意：adopt 右侧必须使用 C 类型语法（如 int、size_t、FILE*、const char*），
-	// 不经过 Kaula 类型映射，以保留 C 原生类型语义（如 C 的 int 是 32 位）
 	if stmt.IsAdopt {
-		cType := strings.TrimSpace(stmt.AdoptCType)
-		if cType == "" {
-			cType = strings.TrimSpace(stmt.UnderlyingType)
+		underlying := strings.TrimSpace(stmt.AdoptUnderlying)
+		if underlying == "" {
+			underlying = strings.TrimSpace(stmt.UnderlyingType)
 		}
-		return fmt.Sprintf("// Adopt type: %s = adopt %s\ntypedef %s %s;\n\n", stmt.Name, cType, cType, stmt.Name)
+		cType := tg.mapAdoptUnderlyingToC(underlying)
+		return fmt.Sprintf("// Adopt type: %s = adopt %s\ntypedef %s %s;\n\n", stmt.Name, underlying, cType, stmt.Name)
 	}
 
 	cType := tg.convertTypeAliasToCType(stmt.UnderlyingType)

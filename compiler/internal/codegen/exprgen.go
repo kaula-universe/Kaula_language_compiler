@@ -690,6 +690,14 @@ func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression)
 
 // generateCallExpression 生成函数调用表达式代码（支持泛型调用）
 func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) string {
+	// adopt() / unwrap() 内置转换运算符：编译期 no-op，直接输出参数
+	if ident, ok := e.Function.(*ast.Identifier); ok && (ident.Name == "adopt" || ident.Name == "unwrap") {
+		if len(e.Args) > 0 {
+			return eg.GenerateExpression(e.Args[0])
+		}
+		return "/* adopt/unwrap: no argument */"
+	}
+
 	// 检查是否是方法调用，如 obj.method() 或 module.function()
 	if memberAccess, ok := e.Function.(*ast.MemberAccessExpression); ok {
 		return eg.generateMethodCall(memberAccess, e.Args)

@@ -1851,8 +1851,8 @@ type TypeAliasStatement struct {
 	IsFuncType     bool             // 是否是函数类型
 	FuncReturnType string           // 函数返回类型（仅用于函数类型）
 	FuncParams     []*TypeFuncParam // 函数参数列表（仅用于函数类型）
-	IsAdopt        bool             // 是否是套用类型（adopt C 类型）
-	AdoptCType     string           // adopt 的原始 C 类型（仅 IsAdopt 时有效）
+	IsAdopt        bool             // 是否是套用类型（adopt 底层类型）
+	AdoptUnderlying string          // adopt 的底层类型表达式（如 "c::size_t"、"i64"），仅 IsAdopt 时有效
 	Attributes     []*Attribute     // 属性注解（#[transparent] 等）
 	Pos            Position
 }
