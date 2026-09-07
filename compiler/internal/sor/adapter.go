@@ -90,13 +90,27 @@ func extractStmtsFromAST(program *ast.Program) []Stmt {
 	// 预扫描 extern 函数声明（opaque C 函数）：名字 -> 返回类型。
 	// 其返回值对 SOR 不透明，需作为外部逃逸来源追踪。
 	externFns := collectExternFuncs(program)
+	// 预扫描套用类型（adopt）：套用类型不进入 SOR 借用/所有权系统，
+	// 其变量不注册为 SORObject，避免 C 侧不透明句柄被误纳入生命周期管理。
+	adoptTypes := collectAdoptTypes(program)
 	caller := "" // 修复 #25：追踪当前所在函数名（跨函数转移定位）
 	for _, s := range program.Statements {
 		if s != nil {
-			extractStatement(s, &stmts, &caller, externFns)
+			extractStatement(s, &stmts, &caller, externFns, adoptTypes)
 		}
 	}
 	return stmts
+}
+
+// collectAdoptTypes 收集程序中所有套用类型名（type X = adopt ...）
+func collectAdoptTypes(program *ast.Program) map[string]bool {
+	adoptTypes := make(map[string]bool)
+	for _, s := range program.Statements {
+		if ta, ok := s.(*ast.TypeAliasStatement); ok && ta != nil && ta.IsAdopt && ta.Name != "" {
+			adoptTypes[ta.Name] = true
+		}
+	}
+	return adoptTypes
 }
 
 // collectExternFuncs 收集程序中所有 extern 函数声明（名字 -> 返回类型）
@@ -127,7 +141,7 @@ func externCallName(expr ast.Expression, externFns map[string]string) string {
 	return ""
 }
 
-func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns map[string]string) {
+func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns map[string]string, adoptTypes map[string]bool) {
 	if s == nil {
 		return
 	}
@@ -139,6 +153,11 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 
 	case *ast.VariableDeclaration:
 		if stmt == nil {
+			return
+		}
+		// 套用类型（adopt）不进入 SOR 借用/所有权系统：
+		// C 侧不透明句柄的生命周期不受 Kaula 管理，强行纳入会导致误报。
+		if stmt.Type != "" && adoptTypes[stmt.Type] {
 			return
 		}
 		isComposite := false
@@ -219,13 +238,13 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 		// 插入分支入口标记
 		*stmts = append(*stmts, BranchEnterStmt(stmt.Pos.Line, "if (...)"))
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts, caller, externFns)
+			extractStatement(bodyStmt, stmts, caller, externFns, adoptTypes)
 		}
 		if len(stmt.Else) > 0 {
 			// 插入 else 标记
 			*stmts = append(*stmts, BranchElseStmt(stmt.Pos.Line, "else"))
 			for _, elseStmt := range stmt.Else {
-				extractStatement(elseStmt, stmts, caller, externFns)
+				extractStatement(elseStmt, stmts, caller, externFns, adoptTypes)
 			}
 		}
 		// 插入分支出口标记
@@ -238,7 +257,7 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 		// 插入循环入口标记（迭代次数未知，传 0）
 		*stmts = append(*stmts, LoopEnterStmt(stmt.Pos.Line, "while (...)", 0))
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts, caller, externFns)
+			extractStatement(bodyStmt, stmts, caller, externFns, adoptTypes)
 		}
 		// 插入循环出口标记
 		*stmts = append(*stmts, LoopExitStmt(stmt.Pos.Line, "endwhile"))
@@ -248,14 +267,14 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 			return
 		}
 		if stmt.Init != nil {
-			extractStatement(stmt.Init, stmts, caller, externFns)
+			extractStatement(stmt.Init, stmts, caller, externFns, adoptTypes)
 		}
 		// 尝试静态推断迭代次数
 		iterCount := estimateForLoopIterCount(stmt)
 		// 插入循环入口标记
 		*stmts = append(*stmts, LoopEnterStmt(stmt.Pos.Line, "for (...)", iterCount))
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts, caller, externFns)
+			extractStatement(bodyStmt, stmts, caller, externFns, adoptTypes)
 		}
 		// 插入循环出口标记
 		*stmts = append(*stmts, LoopExitStmt(stmt.Pos.Line, "endfor"))
@@ -270,7 +289,7 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 			*caller = stmt.Name
 		}
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts, caller, externFns)
+			extractStatement(bodyStmt, stmts, caller, externFns, adoptTypes)
 		}
 		*caller = savedCaller
 
@@ -279,7 +298,7 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 			return
 		}
 		for _, bodyStmt := range stmt.Body {
-			extractStatement(bodyStmt, stmts, caller, externFns)
+			extractStatement(bodyStmt, stmts, caller, externFns, adoptTypes)
 		}
 
 	default:

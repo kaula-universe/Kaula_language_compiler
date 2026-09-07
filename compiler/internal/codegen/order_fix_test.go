@@ -35,7 +35,7 @@ func TestTypedefBeforeForwardDecl(t *testing.T) {
 	src := `
 enum EvKind { Click, Input, Change, Submit, Tick, Other }
 
-type PlatformFn = void(cstring)void
+type PlatformFn = void(*u8)void
 
 struct ParsedEvent {
     kid: i64
@@ -52,7 +52,7 @@ export fn kw_json_parse_event(i64 json) ParsedEvent {
     return result
 }
 
-export fn bridge_register(cstring show_fn) {
+export fn bridge_register(*u8 show_fn) {
     return
 }
 
