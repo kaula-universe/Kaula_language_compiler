@@ -2587,16 +2587,6 @@ func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 			}
 			typeStr.WriteString(p.curTok.Value)
 			p.nextToken()
-			// 支持 c::size_t 命名空间语法：ident 后紧跟 :: 时继续拼接
-			if p.curTok.Type == lexer.TOKEN_DOUBLE_COLON {
-				typeStr.WriteString("::")
-				p.nextToken()
-				if p.curTok.Type == lexer.TOKEN_IDENT || p.curTok.Type == lexer.TOKEN_TYPE_INT ||
-					p.curTok.Type == lexer.TOKEN_TYPE_VOID || p.curTok.Type == lexer.TOKEN_TYPE_CHAR {
-					typeStr.WriteString(p.curTok.Value)
-					p.nextToken()
-				}
-			}
 		case lexer.TOKEN_MULTIPLY:
 			typeStr.WriteString("*")
 			p.nextToken()
