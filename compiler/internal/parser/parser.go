@@ -2423,6 +2423,11 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 		Pos: pos,
 	}
 
+	// 解析属性注解（如 #[transparent] 等）
+	if attrs := p.parseAttributes(); attrs != nil {
+		stmt.Attributes = attrs
+	}
+
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -2453,8 +2458,16 @@ func (p *Parser) parseTypeStatementIterative() *ast.TypeAliasStatement {
 	// 解析 '=' 或直接解析函数类型
 	if p.curTok.Type == lexer.TOKEN_ASSIGN {
 		p.nextToken()
-		// 解析底层类型
-		stmt.UnderlyingType = p.parseTypeString()
+		// 套用类型: type Name = adopt CType
+		if p.curTok.Type == lexer.TOKEN_ADOPT {
+			p.nextToken()
+			stmt.IsAdopt = true
+			stmt.AdoptCType = p.parseTypeString()
+			stmt.UnderlyingType = stmt.AdoptCType
+		} else {
+			// 解析底层类型
+			stmt.UnderlyingType = p.parseTypeString()
+		}
 	} else if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == "func" {
 		// 函数类型: type Name func(params) returnType
 		stmt.IsFuncType = true

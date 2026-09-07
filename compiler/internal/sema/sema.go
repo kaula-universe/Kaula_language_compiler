@@ -49,6 +49,8 @@ type SemanticAnalyzer struct {
 	usedFunctions      map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
 	libraryMode        bool                           // 库文件分析模式(跳过 unused-function 检查)
 	localModuleTypes   map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
+	adoptTypes         map[string]bool                // 套用类型名集合（adopt 声明的类型）
+	transparentAdopt   map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
 }
 
 // SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
@@ -152,6 +154,8 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		comptime:           nil,
 		importedModules:    make(map[string]bool),
 		arrayLens:          make(map[string]int),
+		adoptTypes:         make(map[string]bool),
+		transparentAdopt:   make(map[string]bool),
 	}
 }
 
@@ -1489,6 +1493,16 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 // analyzeTypeAliasStatement 分析类型别名声明
 func (sa *SemanticAnalyzer) analyzeTypeAliasStatement(stmt *ast.TypeAliasStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, "type", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	if stmt.IsAdopt {
+		sa.adoptTypes[stmt.Name] = true
+		// #[transparent]：编译器可确认底层为标量类型时，允许比较和算术
+		for _, attr := range stmt.Attributes {
+			if attr != nil && attr.Name == "transparent" {
+				sa.transparentAdopt[stmt.Name] = true
+				break
+			}
+		}
+	}
 }
 
 // analyzeExternStatement 分析 extern 外部符号/函数声明
@@ -1612,57 +1626,48 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 
 	// 基本类型
 	basicTypes := map[string]bool{
-		"int":     true,
-		"integer": true,
-		"i8":      true,
-		"i16":     true,
-		"i32":     true,
-		"i64":     true,
-		"int8":    true,
-		"int16":   true,
-		"int32":   true,
-		"int64":   true,
-		"u8":      true,
-		"u16":     true,
-		"u32":     true,
-		"u64":     true,
-		"uint8":   true,
-		"uint16":  true,
-		"uint32":  true,
-		"uint64":  true,
-		"uint":    true,
-		"uchar":   true,
-		"ushort":  true,
-		"ulong":   true,
-		"float":   true,
-		"f32":     true,
-		"single":  true,
-		"f64":     true,
-		"double":  true,
-		"real":    true,
-		"bool":    true,
-		"boolean": true,
-		"char":    true,
-		"byte":    true,
-		"sbyte":   true,
-		"string":  true,
-		"str":     true,
-		"cstring": true,
-		"void":    true,
-		"any":     true,
-		"long":    true,
-		"short":   true,
-		"size":    true,
-		"ssize":   true,
-		"intptr":  true,
-		"uintptr": true,
-		"File":    true, // std.io 的文件句柄类型（C FILE*）
-		"object":  true, // 动态对象类型（Object*）
+		"int":    true,
+		"i8":     true,
+		"i16":    true,
+		"i32":    true,
+		"i64":    true,
+		"int8":   true,
+		"int16":  true,
+		"int32":  true,
+		"int64":  true,
+		"u8":     true,
+		"u16":    true,
+		"u32":    true,
+		"u64":    true,
+		"uint8":  true,
+		"uint16": true,
+		"uint32": true,
+		"uint64": true,
+		"uint":   true,
+		"float":  true,
+		"f32":    true,
+		"f64":    true,
+		"double": true,
+		"bool":   true,
+		"char":   true,
+		"byte":   true,
+		"sbyte":  true,
+		"string": true,
+		"void":   true,
+		"any":    true,
+		"File":   true, // std.io 的文件句柄类型（C FILE*）
+		"object": true, // 动态对象类型（Object*）
 	}
 
 	// 检查是否是基本类型
 	if basicTypes[typeName] {
 		return true
+	}
+
+	// 检查是否是前缀指针类型（如 *u8）
+	if len(typeName) > 0 && typeName[0] == '*' {
+		baseType := typeName[1:]
+		return sa.isTypeValid(baseType)
 	}
 
 	// 检查是否是指针类型（如 int*）
@@ -2832,6 +2837,27 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 	if expr.Left != nil && expr.Right != nil {
 		leftType := sa.inferExpressionType(expr.Left)
 		rightType := sa.inferExpressionType(expr.Right)
+		// 套用类型守卫：非 #[transparent] 的套用类型禁止算术和比较
+		if leftType != "" && leftType == rightType && sa.adoptTypes[leftType] && !sa.transparentAdopt[leftType] {
+			switch expr.Operator {
+			case "+", "-", "*", "/", "%":
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 未标记 #[transparent]，不可使用算术运算符 '%s'", leftType, expr.Operator),
+					expr.Pos.Line,
+					expr.Pos.Column,
+					"adopt_not_transparent",
+					"套用类型默认不透明；如需算术运算请添加 #[transparent] 属性，或先 unwrap 为底层类型",
+				)
+			case "==", "!=", "<", ">", "<=", ">=":
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 未标记 #[transparent]，不可使用比较运算符 '%s'", leftType, expr.Operator),
+					expr.Pos.Line,
+					expr.Pos.Column,
+					"adopt_not_transparent",
+					"套用类型默认不透明；如需比较请添加 #[transparent] 属性，或先 unwrap 为底层类型",
+				)
+			}
+		}
 		if leftType != "" && rightType != "" && leftType != rightType {
 			switch expr.Operator {
 			case "+":
@@ -2863,7 +2889,7 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 				isNullCompare := isEquality && (leftType == "null" || rightType == "null")
 				isStrCompare := isEquality && isStringLikeType(leftType) && isStringLikeType(rightType)
 				isPtrCompare := isEquality && isPointerType(leftType) && isPointerType(rightType)
-				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare && !isStrCompare && !isPtrCompare {
+				if !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare && !isStrCompare && !isPtrCompare && !(sa.transparentAdopt[leftType] && sa.transparentAdopt[rightType]) {
 					sa.errorCollector.AddSemanticError(
 						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
 						expr.Pos.Line,
