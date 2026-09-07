@@ -1455,6 +1455,8 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 					"布尔值只能用于布尔变量、布尔参数或比较表达式",
 				)
 			}
+			// 套用类型显式转换边界：禁止隐式 adopt/unwrap
+			sa.checkAdoptConversion(declType, stmt.Value, stmt.Pos, "变量初始化")
 		}
 	}
 
@@ -2187,6 +2189,10 @@ func inferElementType(typeStr string) string {
 func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
+		// 套用类型显式转换边界：返回值跨边界需 adopt/unwrap
+		if sa.currentFunction != nil && sa.currentFunction.ReturnType != "" {
+			sa.checkAdoptConversion(sa.currentFunction.ReturnType, stmt.Value, stmt.Pos, "函数返回")
+		}
 		// 空指针安全: 可空值从非可空返回类型的函数返回
 		if id, ok := stmt.Value.(*ast.Identifier); ok {
 			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked {
@@ -2853,6 +2859,10 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 	if expr.Left != nil && expr.Right != nil {
 		leftType := sa.inferExpressionType(expr.Left)
 		rightType := sa.inferExpressionType(expr.Right)
+		// 赋值运算：套用类型显式转换边界
+		if isAssignmentOperator(expr.Operator) && leftType != "" {
+			sa.checkAdoptConversion(leftType, expr.Right, expr.Pos, "赋值")
+		}
 		// 套用类型守卫：非 #[transparent] 的套用类型禁止算术和比较
 		if leftType != "" && leftType == rightType && sa.adoptTypes[leftType] && !sa.transparentAdopt[leftType] {
 			switch expr.Operator {
@@ -3059,6 +3069,10 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 	}
 	for i, arg := range expr.Args {
 		sa.analyzeExpression(arg)
+		// 套用类型显式转换边界：实参类型必须与形参匹配，跨边界需 adopt/unwrap
+		if pt := sa.paramTypeAt(expr, i); pt != "" {
+			sa.checkAdoptConversion(pt, arg, arg.GetPosition(), "函数实参传递")
+		}
 		// 空指针安全: 可空实参未判空即传给非可空形参
 		if id, ok := arg.(*ast.Identifier); ok {
 			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked {
@@ -3443,6 +3457,10 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		}
 		leftType := sa.inferExpressionType(e.Left)
 		rightType := sa.inferExpressionType(e.Right)
+		// 两个相同的 #[transparent] 套用类型做算术，结果保持该套用类型身份
+		if leftType != "" && leftType == rightType && sa.transparentAdopt[leftType] {
+			return leftType
+		}
 		if leftType != "" && rightType != "" {
 			if isFloatType(leftType) || isFloatType(rightType) {
 				return "f64"
@@ -3498,6 +3516,21 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	case *ast.CallExpression:
 		funcExpr := e.Function
 		if ident, ok := funcExpr.(*ast.Identifier); ok {
+			// unwrap(x)：返回套用类型 x 的底层类型
+			if ident.Name == "unwrap" && len(e.Args) > 0 {
+				if argIdent, ok := e.Args[0].(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(argIdent.Name); sym != nil {
+						if underlying, ok := sa.adoptUnderlying[sym.Type]; ok {
+							return underlying
+						}
+					}
+				}
+				return sa.inferExpressionType(e.Args[0])
+			}
+			// adopt(x)：独立推导时取参数类型（目标套用类型由赋值上下文校验）
+			if ident.Name == "adopt" && len(e.Args) > 0 {
+				return sa.inferExpressionType(e.Args[0])
+			}
 			if retType, ok := sa.funcReturnTypes[ident.Name]; ok && retType != "" {
 				return retType
 			}
@@ -3708,6 +3741,90 @@ func isScalarAdoptUnderlying(underlying string) bool {
 	}
 	// 外部 C 类型：查已知标量列表（编译器无法推断未知 C 类型，保守拒绝）
 	return isCScalarType(t)
+}
+
+// isAdoptBuiltinCall 判断表达式是否为 adopt(...) 内置转换调用，返回调用节点
+func isAdoptBuiltinCall(expr ast.Expression) (*ast.CallExpression, bool) {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok {
+		return nil, false
+	}
+	ident, ok := call.Function.(*ast.Identifier)
+	if !ok || ident.Name != "adopt" {
+		return nil, false
+	}
+	return call, true
+}
+
+// isUnwrapBuiltinCall 判断表达式是否为 unwrap(...) 内置转换调用，返回调用节点
+func isUnwrapBuiltinCall(expr ast.Expression) (*ast.CallExpression, bool) {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok {
+		return nil, false
+	}
+	ident, ok := call.Function.(*ast.Identifier)
+	if !ok || ident.Name != "unwrap" {
+		return nil, false
+	}
+	return call, true
+}
+
+// checkAdoptConversion 套用类型显式转换边界检查。
+// 禁止套用类型与其底层类型之间的隐式转换：进入套用类型必须 adopt()，
+// 离开套用类型必须 unwrap()，同类型直接传递放行。
+// targetType: 赋值/传参/返回位置的目标声明类型；value: 源表达式；context: 场景中文描述（用于报错文案）
+func (sa *SemanticAnalyzer) checkAdoptConversion(targetType string, value ast.Expression, pos ast.Position, context string) {
+	if value == nil || targetType == "" {
+		return
+	}
+	// 去掉可空标记后再比较类型身份
+	target := strings.TrimSuffix(targetType, "?")
+	targetIsAdopt := sa.adoptTypes[target]
+
+	// 显式 adopt() 包装：只允许构造套用类型
+	if _, ok := isAdoptBuiltinCall(value); ok {
+		if !targetIsAdopt {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("adopt() 只能用于构造套用类型，但%s的目标类型 '%s' 不是套用类型", context, target),
+				pos.Line, pos.Column, "adopt_implicit",
+				"移除多余的 adopt()，或将目标声明为对应的套用类型",
+			)
+		}
+		return
+	}
+	// 显式 unwrap() 解包：结果即底层类型，一律放行
+	if _, ok := isUnwrapBuiltinCall(value); ok {
+		return
+	}
+
+	srcType := sa.inferExpressionType(value)
+	srcIsAdopt := srcType != "" && sa.adoptTypes[srcType]
+
+	// 目标是套用类型：源必须是同一套用类型（或无法推导时保守放行）
+	if targetIsAdopt {
+		if srcType == "" || srcType == target {
+			return
+		}
+		// null 可赋给底层为指针的不透明句柄类型
+		if srcType == "null" {
+			return
+		}
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("套用类型 '%s' 不能从 '%s' 隐式构造，必须使用 adopt() 显式包装", target, srcType),
+			pos.Line, pos.Column, "adopt_implicit",
+			fmt.Sprintf("改写为 adopt(...) 后再用于%s，跨越套用类型边界必须显式", context),
+		)
+		return
+	}
+
+	// 源是套用类型、目标不是同一套用类型：必须先 unwrap()
+	if srcIsAdopt && srcType != target {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("套用类型 '%s' 不能隐式转换为 '%s'，必须使用 unwrap() 显式解包", srcType, target),
+			pos.Line, pos.Column, "adopt_implicit",
+			fmt.Sprintf("先用 unwrap(...) 取得底层值，再用于%s", context),
+		)
+	}
 }
 
 // isStringLikeType 检查类型是否为字符串类型 (string/cstr/char*)
