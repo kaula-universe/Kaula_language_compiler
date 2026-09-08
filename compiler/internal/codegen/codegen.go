@@ -106,6 +106,16 @@ type CodeGenerator struct {
 	//     使新持有者悬垂（声明还在、内容丢失）。
 	assignEscapedVars map[string]bool
 
+	// 结构化所有权基础层扩展（从 SOR 下移的5项能力）：
+	// externFuncNames: 程序中声明的 extern 函数名集合，用于追踪变量来源
+	// externOriginVars: 初始值来自 extern 函数返回的变量集合（promote 时需警告）
+	// promotedVars: 已被 promote 的变量集合（reaching definition，防止重复 promote）
+	// earlyFreedVars: 已被 early free 的变量集合（防止 return/块尾重复释放）
+	externFuncNames  map[string]bool
+	externOriginVars map[string]bool
+	promotedVars     map[string]bool
+	earlyFreedVars   map[string]bool
+
 	sourceMap  *SourceMap
 	sourceFile string
 
@@ -447,6 +457,110 @@ func (cg *CodeGenerator) IsAssignEscaped(name string) bool {
 	return cg.assignEscapedVars[name]
 }
 
+// === 结构化所有权基础层扩展（从 SOR 下移的能力）===
+
+// IsExternFunc 查询函数名是否为 extern 声明的函数
+func (cg *CodeGenerator) IsExternFunc(name string) bool {
+	return cg.externFuncNames[name]
+}
+
+// RecordExternOriginFromAST 追踪变量初始化是否来自 extern 函数返回
+// 用于 return promote 时警告：extern 指针对 SOR 不透明，promote 语义可能不正确
+func (cg *CodeGenerator) RecordExternOriginFromAST(name string, expr ast.Expression) {
+	if name == "" || expr == nil {
+		return
+	}
+	var call *ast.CallExpression
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		call = e
+	case *ast.TypeCastExpression:
+		if c, ok := e.Expression.(*ast.CallExpression); ok {
+			call = c
+		}
+	}
+	if call == nil || call.Function == nil {
+		return
+	}
+	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
+		if cg.IsExternFunc(fnIdent.Name) {
+			cg.externOriginVars[name] = true
+		}
+	}
+}
+
+// IsExternOrigin 查询变量是否来自 extern 函数返回
+func (cg *CodeGenerator) IsExternOrigin(name string) bool {
+	return cg.externOriginVars[name]
+}
+
+// MarkPromoted 标记变量已被 promote（reaching definition，防止重复 promote）
+func (cg *CodeGenerator) MarkPromoted(name string) {
+	if name != "" {
+		cg.promotedVars[name] = true
+	}
+}
+
+// IsPromoted 查询变量是否已被 promote
+func (cg *CodeGenerator) IsPromoted(name string) bool {
+	return cg.promotedVars[name]
+}
+
+// MarkEarlyFreed 标记变量已被 early free（防止 return/块尾重复释放）
+func (cg *CodeGenerator) MarkEarlyFreed(name string) {
+	if name != "" {
+		cg.earlyFreedVars[name] = true
+	}
+}
+
+// IsEarlyFreed 查询变量是否已被 early free
+func (cg *CodeGenerator) IsEarlyFreed(name string) bool {
+	return cg.earlyFreedVars[name]
+}
+
+// === 条件分支路径敏感（从 SOR 下移的能力⑤）===
+
+// SnapshotPromotedVars 快照当前已 promote 变量集合，用于条件分支的路径敏感分析。
+// 在生成 if/else 分支前调用，生成后用 RestorePromotedVars 恢复。
+func (cg *CodeGenerator) SnapshotPromotedVars() map[string]bool {
+	snapshot := make(map[string]bool, len(cg.promotedVars))
+	for k, v := range cg.promotedVars {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+// RestorePromotedVars 恢复已 promote 变量集合到快照状态。
+func (cg *CodeGenerator) RestorePromotedVars(snapshot map[string]bool) {
+	cg.promotedVars = make(map[string]bool, len(snapshot))
+	for k, v := range snapshot {
+		cg.promotedVars[k] = v
+	}
+}
+
+// MergePromotedFromBranches 合并两个分支的 promote 状态。
+// 只有在两个分支中都被 promote 的变量，才在合并点标记为已 promote（路径敏感交集）。
+// 只在一个分支中 promote 的变量，保守地不标记（因为另一个分支可能没 promote）。
+func (cg *CodeGenerator) MergePromotedFromBranches(thenPromoted, elsePromoted map[string]bool) {
+	for name := range thenPromoted {
+		if elsePromoted[name] {
+			cg.promotedVars[name] = true
+		}
+	}
+}
+
+// DiffPromotedVars 计算当前 promotedVars 与快照的差异（新增的已 promote 变量）。
+// 用于记录单个分支中新 promote 的变量。
+func (cg *CodeGenerator) DiffPromotedVars(snapshot map[string]bool) map[string]bool {
+	diff := make(map[string]bool)
+	for name := range cg.promotedVars {
+		if !snapshot[name] {
+			diff[name] = true
+		}
+	}
+	return diff
+}
+
 // IsMallocLikeCall 检查是否为 malloc 类调用（包含 hosted std_malloc，不区分 freestanding）
 // 用于编译期大小登记
 func (cg *CodeGenerator) IsMallocLikeCall(call *ast.CallExpression) bool {
@@ -653,6 +767,10 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		sorInitSizes:        make(map[string]int),
 		declScopeDepth:      make(map[string]int),
 		assignEscapedVars:   make(map[string]bool),
+		externFuncNames:     make(map[string]bool),
+		externOriginVars:    make(map[string]bool),
+		promotedVars:        make(map[string]bool),
+		earlyFreedVars:      make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
 	}
 
@@ -895,6 +1013,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		} else if externStmt, ok := stmt.(*ast.ExternStatement); ok {
 			if externStmt == nil {
 				continue
+			}
+			// 结构化所有权基础层：登记 extern 函数名，用于追踪变量来源
+			if externStmt.IsFunction {
+				cg.externFuncNames[externStmt.Name] = true
 			}
 			var code string
 			if externStmt.IsFunction {
