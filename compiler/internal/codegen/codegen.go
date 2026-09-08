@@ -147,6 +147,11 @@ type CodeGenerator struct {
 	nestedFuncPrototypes  strings.Builder
 	inFunctionBody        bool
 
+	// userFuncNames: 本文件全部用户自定义 fn 的名字集合（含函数体内嵌套 fn）。
+	// 这些符号在 C 侧统一加 K_ 前缀，彻底避开 C 保留字（int/double/...）与 C 库符号冲突。
+	// main 是 C 入口、extern/stdlib/第三方函数不在此集合，均保持原名。
+	userFuncNames map[string]bool
+
 	// 任务②：深提升回调（kmm_v4_scope_promote_p_deep）的合成与去重
 	// deepPromoteCBEmitted: kaula 类型名 -> true（已经合成过，避免重复）
 	// deepPromoteCBCode: 合成的 static C 函数体（文件作用域，在 typedef 之后、函数代码之前输出）
@@ -668,6 +673,15 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.objectDeclCode.Reset()
 	cg.preludeInitCode.Reset()
 
+	// 收集本文件全部用户自定义 fn（含函数体内嵌套 fn），用于统一 K_ 函数前缀。
+	// main、extern fn（ExternStatement）、stdlib/第三方 C 函数都不在其中，保持原名。
+	cg.userFuncNames = make(map[string]bool)
+	program.Traverse(func(n ast.Node) {
+		if fn, ok := n.(*ast.FunctionStatement); ok && fn.Name != "" {
+			cg.userFuncNames[fn.Name] = true
+		}
+	})
+
 	type rawEntry struct {
 		section string
 		relLine int
@@ -1182,7 +1196,7 @@ static inline String string_concat_float(String s, double v) {
 			}
 			forwardDecls.WriteString(returnType)
 			forwardDecls.WriteByte(' ')
-			forwardDecls.WriteString(fnStmt.Name)
+			forwardDecls.WriteString(cg.UserFuncCName(fnStmt.Name))
 			forwardDecls.WriteByte('(')
 			for i, pType := range fnStmt.ParamTypes {
 				if i > 0 {
@@ -2044,6 +2058,41 @@ func (cg *CodeGenerator) IsClassType(name string) bool {
 		return true
 	}
 	return false
+}
+
+// isUserKaulaFunc 判断 name 是否是本仓库用户自定义的 Kaula 函数
+// （本文件 fn，含嵌套 fn；或跨文件 import 的本仓库函数）。
+// extern fn、stdlib/第三方 C 函数、内置运算符均返回 false。
+func (cg *CodeGenerator) isUserKaulaFunc(name string) bool {
+	if name == "" || name == "main" {
+		return false
+	}
+	if cg.userFuncNames != nil && cg.userFuncNames[name] {
+		return true
+	}
+	if cg.localImportFuncs != nil && cg.localImportFuncs[name] {
+		return true
+	}
+	return false
+}
+
+// UserFuncCName 返回 Kaula 用户函数在 C 侧的符号名：
+//   - 用户自定义 fn 统一加 K_ 前缀，避开 C 保留字（int/double/...）与 C 库符号；
+//   - 非用户定义的 max/min/abs 重定向到 kaula 运行时实现（kaula_max 等），避开 C 宏；
+//   - main、extern、stdlib/第三方 C 函数保持原名。
+//
+// 函数定义、前置声明、嵌套原型、调用点必须统一经此函数命名，保证定义与引用一致。
+func (cg *CodeGenerator) UserFuncCName(name string) string {
+	if name == "" || name == "main" {
+		return name
+	}
+	if cg.isUserKaulaFunc(name) {
+		return "K_" + name
+	}
+	if name == "max" || name == "min" || name == "abs" {
+		return "kaula_" + name
+	}
+	return name
 }
 
 // GetGenericCachedCode 获取缓存的泛型代码

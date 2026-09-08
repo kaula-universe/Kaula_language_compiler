@@ -378,6 +378,15 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		return enumName + "_Kind_" + e.Name
 	}
 
+	// 用户自定义函数名作为值引用（回调/函数指针实参，如 start(server, handler)）：
+	// 与函数定义一致使用 K_ 前缀。若同名局部变量/参数遮蔽了函数名，则按变量原样输出。
+	if eg.codegen.isUserKaulaFunc(e.Name) {
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil && sym.Type != "function" {
+			return e.Name
+		}
+		return eg.codegen.UserFuncCName(e.Name)
+	}
+
 	return e.Name
 }
 
@@ -797,10 +806,10 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		funcName = MangleGenericName(funcName, e.TypeArgs)
 	}
 
-	// 避免与C标准库宏冲突（如 max, min）
-	if funcName == "max" || funcName == "min" || funcName == "abs" {
-		funcName = "kaula_" + funcName
-	}
+	// 用户自定义函数在 C 侧统一加 K_ 前缀（避开 C 保留字 int/double 等与 C 库符号）。
+	// 语义查询（捕获参数、stdlib 签名、println 判断）仍用原始 Kaula 名 funcName，
+	// 只有最终拼 C 输出时才用 cFuncName，避免查询表失配。
+	cFuncName := eg.codegen.UserFuncCName(funcName)
 
 	// 追踪第三方库的使用
 	if eg.codegen.stdlibConfig != nil {
@@ -824,16 +833,16 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		// 无参数调用
 		capArgs := eg.codegen.captureArgsFor(funcName)
 		if capArgs != "" {
-			return funcName + "(" + capArgs + ")"
+			return cFuncName + "(" + capArgs + ")"
 		}
-		return funcName + "()"
+		return cFuncName + "()"
 	} else {
 		// 尝试查找 stdlib 函数签名以生成类型正确的参数
 		var sig *stdlib.Function
 		if eg.codegen.stdlibConfig != nil {
 			sig = eg.codegen.stdlibConfig.GetAnyFunctionSignature(funcName)
 		}
-		code := funcName + "(" + eg.generateStdlibArgs(e.Args, sig)
+		code := cFuncName + "(" + eg.generateStdlibArgs(e.Args, sig)
 		if capArgs := eg.codegen.captureArgsFor(funcName); capArgs != "" {
 			code += ", " + capArgs
 		}
