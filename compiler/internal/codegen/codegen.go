@@ -1206,9 +1206,14 @@ static inline String string_concat_float(String s, double v) {
 				if cType == "" {
 					cType = "void*"
 				}
-				forwardDecls.WriteString(cType)
-				forwardDecls.WriteByte(' ')
-				forwardDecls.WriteString(fnStmt.Params[i])
+				// 函数指针类型参数：R (*)(args) name → R (*name)(args)
+				if strings.Contains(cType, "(*)") {
+					forwardDecls.WriteString(formatCVarDecl(cType, fnStmt.Params[i]))
+				} else {
+					forwardDecls.WriteString(cType)
+					forwardDecls.WriteByte(' ')
+					forwardDecls.WriteString(fnStmt.Params[i])
+				}
 			}
 			forwardDecls.WriteString(");\n")
 		}
