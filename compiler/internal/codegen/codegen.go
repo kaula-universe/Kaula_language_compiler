@@ -1549,6 +1549,30 @@ func (cg *CodeGenerator) GetSymbolType(name string) string {
 	return ""
 }
 
+// GetVarDeclaredScopeDepth 查找变量声明所在的作用域深度（结构化所有权基础层）。
+// 从当前作用域向上遍历，找到第一个 HasLocalSymbol(name) 的作用域，返回其 depth。
+// 未找到返回 -1（全局/外部符号）。这是纯词法分析，不依赖 SOR 数据流。
+func (cg *CodeGenerator) GetVarDeclaredScopeDepth(name string) int {
+	if name == "" {
+		return -1
+	}
+	for scope := cg.currentScope; scope != nil; scope = scope.GetParent() {
+		if scope.HasLocalSymbol(name) {
+			return scope.GetScopeDepth()
+		}
+	}
+	return -1
+}
+
+// IsVarDeclaredInCurrentScope 判断变量是否在当前词法作用域声明（结构化所有权基础层）。
+// 用于 return promote 判定：只有当前块声明的指针变量返回时才需要 promote。
+func (cg *CodeGenerator) IsVarDeclaredInCurrentScope(name string) bool {
+	if name == "" || cg.currentScope == nil {
+		return false
+	}
+	return cg.currentScope.HasLocalSymbol(name)
+}
+
 // recordAllocSizeHint 从初始化表达式登记编译期可知的堆分配常量大小（修复 #25）
 // 匹配 kmm_v4_alloc_auto(<常量>) 模式（std_malloc 已在表达式生成阶段重写为它）
 func (cg *CodeGenerator) recordAllocSizeHint(varName, initValue string) {
