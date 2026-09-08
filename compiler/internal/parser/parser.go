@@ -1326,6 +1326,24 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 				typeOrName := ""
 				typeName := ""
 
+				// void(T...)R 函数指针类型参数：交由 parseTypeStringForDecl 完整解析，
+				// 否则手动单 token 解析会把 void 当参数名、( 当成分隔符导致级联错误。
+				if p.curTok.Type == lexer.TOKEN_TYPE_VOID && p.peekTok.Type == lexer.TOKEN_LPAREN {
+					paramType := p.parseTypeStringForDecl()
+					if p.curTok.Type == lexer.TOKEN_IDENT {
+						stmt.Params = append(stmt.Params, p.curTok.Value)
+						stmt.ParamTypes = append(stmt.ParamTypes, paramType)
+						p.nextToken()
+					} else {
+						stmt.Params = append(stmt.Params, "")
+						stmt.ParamTypes = append(stmt.ParamTypes, paramType)
+					}
+					if p.curTok.Type == lexer.TOKEN_COMMA {
+						p.nextToken()
+					}
+					continue
+				}
+
 				// 处理指针前缀 (*Type)
 				if p.curTok.Type == lexer.TOKEN_MULTIPLY {
 					p.nextToken()
@@ -2581,9 +2599,18 @@ func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 					typeStr.WriteString(")")
 					p.nextToken()
 				}
-				// 返回类型：仅 greedyReturn=true 且 ) 后跟类型起始 token 时吃 → 函数指针；否则数据指针
-				if greedyReturn && p.isIdentOrTypeToken(p.curTok.Type) {
-					typeStr.WriteString(p.parseTypeString())
+				// 返回类型：
+				// - greedyReturn=true（独立类型位置：type 别名/返回类型/泛型实参）：用 parseTypeString 吃完整类型
+				// - greedyReturn=false（声明上下文：变量/字段/参数）：仅当 ) 后是类型关键字
+				//   （不可能是变量名）时才吃，且只吃一个类型关键字 token（避免 parseTypeString 贪婪吃掉后面的变量名），
+				//   使 void(int,int)int f 解析为函数指针类型+变量名 f；普通 IDENT 仍不吃（无法区分返回类型与变量名，需用 type 别名）
+				if p.isIdentOrTypeToken(p.curTok.Type) && (greedyReturn || p.isTypeToken(p.curTok.Type)) {
+					if greedyReturn {
+						typeStr.WriteString(p.parseTypeString())
+					} else {
+						typeStr.WriteString(p.curTok.Value)
+						p.nextToken()
+					}
 				}
 				return typeStr.String()
 			}

@@ -248,11 +248,16 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	return builder.String()
 }
 
-// formatCVarDecl 生成 C 变量声明字符串，处理固定大小数组类型
+// formatCVarDecl 生成 C 变量声明字符串，处理固定大小数组类型和函数指针类型
 // 例如 [128]u8 → C 类型 "uint8_t[128]" → 声明 "uint8_t dst[128]"
 // 指针数组 [2]int* → C 类型 "int64_t*[2]" → 声明 "int64_t* dst[2]"
-// 此函数为包级函数，供 SOR 和非 SOR 路径共用，确保数组后缀搬运一致。
+// 函数指针 void(int,int)int → C 类型 "int64_t (*)(int64_t,int64_t)" → 声明 "int64_t (*f)(int64_t,int64_t)"
+// 此函数为包级函数，供 SOR 和非 SOR 路径共用，确保数组后缀与函数指针声明符搬运一致。
 func formatCVarDecl(cType, varName string) string {
+	// 函数指针类型：R (*)(args) → R (*varName)(args)
+	if idx := strings.Index(cType, "(*)"); idx >= 0 {
+		return cType[:idx] + "(*" + varName + ")" + cType[idx+3:]
+	}
 	openBracket := strings.Index(cType, "[")
 	if openBracket > 0 && strings.HasSuffix(cType, "]") {
 		baseType := cType[:openBracket]

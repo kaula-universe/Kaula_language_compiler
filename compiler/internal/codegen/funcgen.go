@@ -320,9 +320,14 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 					paramType = ctype
 				}
 			}
-			proto.WriteString(paramType)
-			proto.WriteByte(' ')
-			proto.WriteString(param)
+			// 函数指针类型参数：R (*)(args) name → R (*name)(args)
+			if strings.Contains(paramType, "(*)") {
+				proto.WriteString(formatCVarDecl(paramType, param))
+			} else {
+				proto.WriteString(paramType)
+				proto.WriteByte(' ')
+				proto.WriteString(param)
+			}
 		}
 		for i := range captures {
 			if i > 0 || len(stmt.Params) > 0 {
@@ -390,6 +395,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}
 
 	// 设置当前函数返回类型供 return 语句生成使用
+	// 嵌套函数生成会覆盖此值，必须保存外层值并在结束时恢复，
+	// 否则外层函数的 return 语句会误判为 void 生成空 return。
+	prevReturnType := fg.codegen.currentFunctionReturnType
 	fg.codegen.currentFunctionReturnType = stmt.ReturnType
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
@@ -406,7 +414,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
 			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
 		}
-		builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
+		// 函数指针类型参数：R (*)(args) name → R (*name)(args)（C 语法要求参数名在 (*) 中间）
+		if strings.Contains(paramType, "(*)") {
+			builder.WriteString(formatCVarDecl(paramType, param))
+		} else {
+			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
+		}
 		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
 	// 嵌套函数：追加捕获参数（按引用：指针）
@@ -532,7 +545,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	fg.codegen.pendingNestedFuncs = nil
 
 	fg.codegen.ExitScope()
-	fg.codegen.currentFunctionReturnType = ""
+	fg.codegen.currentFunctionReturnType = prevReturnType
 	return builder.String()
 }
 
