@@ -308,7 +308,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		var proto strings.Builder
 		proto.WriteString(fg.mapReturnType(stmt.ReturnType))
 		proto.WriteByte(' ')
-		proto.WriteString(stmt.Name)
+		proto.WriteString(fg.codegen.UserFuncCName(stmt.Name))
 		proto.WriteByte('(')
 		for i, param := range stmt.Params {
 			if i > 0 {
@@ -380,10 +380,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteString("KAULA_EXPORT ")
 	}
 
-	safeName := stmt.Name
-	if safeName == "max" || safeName == "min" || safeName == "abs" {
-		safeName = "kaula_" + safeName
-	}
+	// 用户函数统一 K_ 前缀（避开 C 保留字/库符号）；main、extern、内置保持原名。
+	// max/min/abs 若为用户定义则 K_max，否则重定向 kaula_max，均由 UserFuncCName 统一处理。
+	safeName := fg.codegen.UserFuncCName(stmt.Name)
 
 	if stmt.IsGeneric() {
 		fg.codegen.ExitScope()
@@ -541,7 +540,7 @@ func (fg *FunctionGenerator) generatePrefixFunction(stmt *ast.FunctionStatement)
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Prefix function: AST generation for cross-file reuse\n")
-	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
+	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
 
 	if len(stmt.Params) > 0 {
 		code.WriteString("(int64_t arg) {\n")
@@ -580,7 +579,7 @@ func (fg *FunctionGenerator) generateTreeFunction(stmt *ast.FunctionStatement) s
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Tree function: AST generation with root validation\n")
-	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
+	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
 
 	if len(stmt.Params) > 0 {
 		code.WriteString("(int64_t arg) {\n")
@@ -615,7 +614,7 @@ func (fg *FunctionGenerator) generateRootTreeFunction(stmt *ast.FunctionStatemen
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Root tree function: defines global tree structure\n")
-	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
+	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
 
 	if len(stmt.Params) > 0 {
 		code.WriteString("(int64_t arg) {\n")
@@ -942,10 +941,9 @@ func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) st
 		builder.WriteByte(' ')
 	}
 
-	safeName := stmt.Name
-	if safeName == "max" || safeName == "min" || safeName == "abs" {
-		safeName = "kaula_" + safeName
-	}
+	// 用户函数统一 K_ 前缀（避开 C 保留字/库符号）；main、extern、内置保持原名。
+	// max/min/abs 若为用户定义则 K_max，否则重定向 kaula_max，均由 UserFuncCName 统一处理。
+	safeName := fg.codegen.UserFuncCName(stmt.Name)
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
