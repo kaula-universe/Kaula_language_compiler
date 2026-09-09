@@ -174,8 +174,8 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	// 供赋值逃逸 promote 的大小解析使用（SOR 模式另有生成文本匹配路径）
 	if stmt.Value != nil {
 		sg.codegen.RecordAllocSizeFromAST(stmt.Name, stmt.Value)
-		// 结构化所有权基础层：追踪变量是否来自 extern 函数返回
-		sg.codegen.RecordExternOriginFromAST(stmt.Name, stmt.Value)
+		// 多分配器 origin 追踪：识别变量初始化的分配函数（kmm/libc/extern/unknown）
+		sg.codegen.RecordVarOriginFromAST(stmt.Name, stmt.Value)
 	}
 
 	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
@@ -2005,6 +2005,12 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 			freed[name] = true
 			continue
 		}
+		// 多分配器 origin 追踪：extern 来源不释放，libc 用 free，kmm 用 survivor_free
+		origin := sg.codegen.GetVarOrigin(name)
+		if origin == OriginExtern {
+			freed[name] = true
+			continue
+		}
 		// String 类型：释放 ptr 字段（只对 Nullable 的 String 释放）
 		if sg.isStringTyped(name) {
 			if sym := sg.codegen.GetSymbol(name); sym != nil && sym.Nullable {
@@ -2016,11 +2022,18 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 				b.WriteString(".ptr); } /* structural: early free (liveness, String) */\n")
 				sg.codegen.MarkEarlyFreed(name)
 			}
+		} else if origin == OriginLibcMalloc {
+			b.WriteString(indent)
+			b.WriteString("free(")
+			b.WriteString(name)
+			b.WriteString("); /* structural: early free (liveness, libc_malloc) */\n")
+			sg.codegen.MarkEarlyFreed(name)
 		} else {
+			// kmm 或 unknown 来源：用 survivor_free（对非 KMM 指针是安全 no-op）
 			b.WriteString(indent)
 			b.WriteString("kmm_v4_survivor_free(")
 			b.WriteString(name)
-			b.WriteString("); /* structural: early free (liveness) */\n")
+			b.WriteString("); /* structural: early free (liveness, kmm) */\n")
 			sg.codegen.MarkEarlyFreed(name)
 		}
 		freed[name] = true
@@ -2607,10 +2620,31 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 				b.WriteString(".ptr); } /* structural: String payload reclaim */\n")
 			}
 		} else {
-			b.WriteString(indent)
-			b.WriteString("kmm_v4_survivor_free(")
-			b.WriteString(name)
-			b.WriteString("); /* structural: per-object reclaim */\n")
+			// 多分配器 origin 追踪：按来源选择释放函数
+			origin := sg.codegen.GetVarOrigin(name)
+			switch origin {
+			case OriginKmm:
+				b.WriteString(indent)
+				b.WriteString("kmm_v4_survivor_free(")
+				b.WriteString(name)
+				b.WriteString("); /* structural: per-object reclaim (kmm) */\n")
+			case OriginLibcMalloc:
+				b.WriteString(indent)
+				b.WriteString("free(")
+				b.WriteString(name)
+				b.WriteString("); /* structural: per-object reclaim (libc_malloc) */\n")
+			case OriginExtern:
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip free for ")
+				b.WriteString(name)
+				b.WriteString(" (extern-origin, ownership opaque) */\n")
+			default:
+				// unknown 来源：保守用 survivor_free（对非 KMM 指针是安全 no-op）
+				b.WriteString(indent)
+				b.WriteString("kmm_v4_survivor_free(")
+				b.WriteString(name)
+				b.WriteString("); /* structural: per-object reclaim (unknown origin, safe no-op) */\n")
+			}
 		}
 	}
 	return b.String()
@@ -2691,10 +2725,31 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 					}
 				}
 			}
-			b.WriteString(indent)
-			b.WriteString("kmm_v4_survivor_free(")
-			b.WriteString(name)
-			b.WriteString("); /* structural: reclaim on return */\n")
+			// 多分配器 origin 追踪：按来源选择释放函数
+			origin := sg.codegen.GetVarOrigin(name)
+			switch origin {
+			case OriginKmm:
+				b.WriteString(indent)
+				b.WriteString("kmm_v4_survivor_free(")
+				b.WriteString(name)
+				b.WriteString("); /* structural: reclaim on return (kmm) */\n")
+			case OriginLibcMalloc:
+				b.WriteString(indent)
+				b.WriteString("free(")
+				b.WriteString(name)
+				b.WriteString("); /* structural: reclaim on return (libc_malloc) */\n")
+			case OriginExtern:
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip free on return for ")
+				b.WriteString(name)
+				b.WriteString(" (extern-origin, ownership opaque) */\n")
+			default:
+				// unknown 来源：保守用 survivor_free（对非 KMM 指针是安全 no-op）
+				b.WriteString(indent)
+				b.WriteString("kmm_v4_survivor_free(")
+				b.WriteString(name)
+				b.WriteString("); /* structural: reclaim on return (unknown origin) */\n")
+			}
 		}
 	}
 	return b.String()

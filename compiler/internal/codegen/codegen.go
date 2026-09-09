@@ -106,14 +106,16 @@ type CodeGenerator struct {
 	//     使新持有者悬垂（声明还在、内容丢失）。
 	assignEscapedVars map[string]bool
 
-	// 结构化所有权基础层扩展（从 SOR 下移的5项能力）：
-	// externFuncNames: 程序中声明的 extern 函数名集合，用于追踪变量来源
-	// externOriginVars: 初始值来自 extern 函数返回的变量集合（promote 时需警告）
-	// promotedVars: 已被 promote 的变量集合（reaching definition，防止重复 promote）
-	// earlyFreedVars: 已被 early free 的变量集合（防止 return/块尾重复释放）
-	// exportedFuncNames: export 函数名集合（FFI 边界，保持原名不加 K_ 前缀）
+	// 结构化所有权基础层扩展（从 SOR 下移的能力 + 多分配器 origin 追踪）：
+	// externFuncNames: 程序中声明的 extern 函数名集合
+	// externOriginVars: 初始值来自 extern 函数返回的变量集合（向后兼容）
+	// varOrigins: 变量的分配器来源（kmm/libc_malloc/extern/unknown），用于按来源释放
+	// promotedVars: 已被 promote 的变量集合
+	// earlyFreedVars: 已被 early free 的变量集合
+	// exportedFuncNames: export 函数名集合
 	externFuncNames   map[string]bool
 	externOriginVars  map[string]bool
+	varOrigins        map[string]string
 	promotedVars      map[string]bool
 	earlyFreedVars    map[string]bool
 	exportedFuncNames map[string]bool
@@ -466,6 +468,31 @@ func (cg *CodeGenerator) IsExternFunc(name string) bool {
 	return cg.externFuncNames[name]
 }
 
+// 变量分配器来源常量（多分配器 origin 追踪）
+// 用于编译期确定每个指针变量该用哪个释放函数，零运行时开销
+const (
+	OriginKmm        = "kmm"         // KMM 分配（kmm_v4_alloc_auto 等），用 survivor_free
+	OriginLibcMalloc = "libc_malloc" // libc 分配（malloc/calloc/realloc），用 free
+	OriginExtern     = "extern"      // extern 函数返回，不释放（所有权不透明）
+	OriginUnknown    = "unknown"     // 未知来源，保守不释放
+)
+
+// kmmAllocFuncs KMM 分配函数名集合
+var kmmAllocFuncs = map[string]bool{
+	"kmm_v4_alloc_auto": true,
+	"kmm_v4_alloc":      true,
+	"kmm_v4_malloc":     true,
+	"kmm_v4_calloc":     true,
+	"kmm_v4_bump":       true,
+}
+
+// libcAllocFuncs libc 分配函数名集合
+var libcAllocFuncs = map[string]bool{
+	"malloc":  true,
+	"calloc":  true,
+	"realloc": true,
+}
+
 // RecordExternOriginFromAST 追踪变量初始化是否来自 extern 函数返回
 // 用于 return promote 时警告：extern 指针对 SOR 不透明，promote 语义可能不正确
 func (cg *CodeGenerator) RecordExternOriginFromAST(name string, expr ast.Expression) {
@@ -487,13 +514,86 @@ func (cg *CodeGenerator) RecordExternOriginFromAST(name string, expr ast.Express
 	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
 		if cg.IsExternFunc(fnIdent.Name) {
 			cg.externOriginVars[name] = true
+			cg.varOrigins[name] = OriginExtern
+		}
+	}
+}
+
+// RecordVarOriginFromAST 多分配器 origin 追踪：识别变量初始化的分配函数
+// 识别顺序：KMM 分配函数 > libc 分配函数 > extern 函数 > 未知
+// freestanding 模式下 std_malloc 被重写为 kmm_v4_alloc_auto，会被识别为 KMM
+func (cg *CodeGenerator) RecordVarOriginFromAST(name string, expr ast.Expression) {
+	if name == "" || expr == nil {
+		return
+	}
+	var call *ast.CallExpression
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		call = e
+	case *ast.TypeCastExpression:
+		if c, ok := e.Expression.(*ast.CallExpression); ok {
+			call = c
+		}
+	}
+	if call == nil || call.Function == nil {
+		return
+	}
+	fnName := ""
+	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
+		fnName = fnIdent.Name
+	} else if member, ok := call.Function.(*ast.MemberExpression); ok {
+		// std.malloc 形式
+		fnName = member.Member
+	}
+	if fnName == "" {
+		return
+	}
+	// KMM 分配函数
+	if kmmAllocFuncs[fnName] {
+		cg.varOrigins[name] = OriginKmm
+		return
+	}
+	// libc 分配函数（std_malloc 在 hosted 模式下是系统 malloc）
+	if libcAllocFuncs[fnName] || fnName == "std_malloc" {
+		// freestanding 模式下 std_malloc 被重写为 kmm_v4_alloc_auto
+		// 这里保守标记为 libc_malloc，表达式生成阶段的重写不影响 origin 判断
+		// 实际释放时，如果代码中是 kmm_v4_alloc_auto，会被 KMM scope 管理
+		cg.varOrigins[name] = OriginLibcMalloc
+		return
+	}
+	// extern 函数返回
+	if cg.IsExternFunc(fnName) {
+		cg.externOriginVars[name] = true
+		cg.varOrigins[name] = OriginExtern
+		return
+	}
+}
+
+// GetVarOrigin 查询变量的分配器来源
+func (cg *CodeGenerator) GetVarOrigin(name string) string {
+	if origin, ok := cg.varOrigins[name]; ok {
+		return origin
+	}
+	// 向后兼容：externOriginVars 中有记录的视为 extern
+	if cg.externOriginVars[name] {
+		return OriginExtern
+	}
+	return OriginUnknown
+}
+
+// SetVarOrigin 手动设置变量来源（用于赋值传播等场景）
+func (cg *CodeGenerator) SetVarOrigin(name, origin string) {
+	if name != "" && origin != "" {
+		cg.varOrigins[name] = origin
+		if origin == OriginExtern {
+			cg.externOriginVars[name] = true
 		}
 	}
 }
 
 // IsExternOrigin 查询变量是否来自 extern 函数返回
 func (cg *CodeGenerator) IsExternOrigin(name string) bool {
-	return cg.externOriginVars[name]
+	return cg.externOriginVars[name] || cg.varOrigins[name] == OriginExtern
 }
 
 // MarkPromoted 标记变量已被 promote（reaching definition，防止重复 promote）
@@ -771,6 +871,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		assignEscapedVars:   make(map[string]bool),
 		externFuncNames:     make(map[string]bool),
 		externOriginVars:    make(map[string]bool),
+		varOrigins:          make(map[string]string),
 		promotedVars:        make(map[string]bool),
 		earlyFreedVars:      make(map[string]bool),
 		exportedFuncNames:   make(map[string]bool),
