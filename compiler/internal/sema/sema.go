@@ -1884,8 +1884,6 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 		sa.analyzeExpression(stmt.Condition)
 		// 条件类型检查: 只允许布尔表达式 (bool 变量/true/false 或比较/逻辑运算)
 		sa.validateCondition(stmt.Condition)
-		// 空指针安全：检测 if x != null 模式，标记 x 为已检查
-		sa.markNullCheckedInCondition(stmt.Condition)
 	}
 	// 空体警告 (clang -Wempty-body)
 	if len(stmt.Body) == 0 {
@@ -1895,10 +1893,22 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 			"如果条件不需要处理, 请删除整个 if 语句",
 		)
 	}
+
+	// ===== 路径敏感空安全 =====
+	// 1. 快照当前 NullChecked 状态
+	snap := sa.snapshotNullChecked()
+	// 2. 从条件中提取 then/else 分支应标记的变量
+	thenChecked, elseChecked := sa.extractNullConditions(stmt.Condition)
+	// 3. 应用 then 标记，分析 then 体，记录 then 结束时的状态
+	sa.applyNullChecked(thenChecked)
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
-	// 退出 if body 后，null checked 标记不再有效（简化实现：不清除，因为 else 分支可能也需要）
+	thenState := sa.collectNullChecked()
+	// 4. 恢复快照，应用 else 标记，分析 else 体，记录 else 结束时的状态
+	sa.restoreNullChecked(snap)
+	hasElse := len(stmt.Else) > 0
+	sa.applyNullChecked(elseChecked)
 	for _, elseStmt := range stmt.Else {
 		// else-if 嵌套: 作为链的一部分, 跳过独立检测
 		if nested, ok := elseStmt.(*ast.IfStatement); ok {
@@ -1909,6 +1919,19 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 			continue
 		}
 		sa.analyzeStatement(elseStmt)
+	}
+	elseState := sa.collectNullChecked()
+	// 5. 恢复快照，合并：有 else 时取 then∩else（两个分支都标记才保留）；
+	//    无 else 时直接恢复快照（then 中的标记不保留，因为 else 路径可能不执行）
+	sa.restoreNullChecked(snap)
+	if hasElse {
+		for name := range thenState {
+			if elseState[name] {
+				if sym := sa.symbolTable.GetSymbol(name); sym != nil && sym.Nullable {
+					sym.NullChecked = true
+				}
+			}
+		}
 	}
 }
 
@@ -2000,6 +2023,141 @@ func (sa *SemanticAnalyzer) markNullCheckedInCondition(cond ast.Expression) {
 	}
 }
 
+// ===== 路径敏感空安全（Path-Sensitive Null Safety）=====
+// 核心思想：if/while 条件中的 null 检查只在对应分支内有效，
+// 分支结束后需要恢复状态；if-else 后取两个分支的交集。
+
+// nullCheckSnapshot 保存一组 Nullable 符号的 NullChecked 状态
+type nullCheckSnapshot map[string]bool
+
+// snapshotNullChecked 遍历所有作用域，保存所有 Nullable 符号的 NullChecked 状态
+func (sa *SemanticAnalyzer) snapshotNullChecked() nullCheckSnapshot {
+	snap := make(nullCheckSnapshot)
+	st := sa.symbolTable
+	for st != nil {
+		for name, sym := range st.GetAllSymbols() {
+			if sym.Nullable {
+				snap[name] = sym.NullChecked
+			}
+		}
+		st = st.GetParent()
+	}
+	return snap
+}
+
+// restoreNullChecked 恢复 NullChecked 状态到快照
+func (sa *SemanticAnalyzer) restoreNullChecked(snap nullCheckSnapshot) {
+	st := sa.symbolTable
+	for st != nil {
+		for name, sym := range st.GetAllSymbols() {
+			if sym.Nullable {
+				if val, ok := snap[name]; ok {
+					sym.NullChecked = val
+				} else {
+					sym.NullChecked = false
+				}
+			}
+		}
+		st = st.GetParent()
+	}
+}
+
+// extractNullConditions 从 if/while 条件中提取 null 检查信息。
+// 返回 thenChecked（条件为真时应标记为已检查的变量名）和
+// elseChecked（条件为假时应标记为已检查的变量名）。
+// 支持：x != null、x == null、&&、||、!、括号嵌套。
+func (sa *SemanticAnalyzer) extractNullConditions(cond ast.Expression) (thenChecked, elseChecked []string) {
+	if cond == nil {
+		return nil, nil
+	}
+	switch e := cond.(type) {
+	case *ast.BinaryExpression:
+		// x != null 或 null != x → then 中 x 已检查
+		if e.Operator == "!=" {
+			if ident, ok := e.Left.(*ast.Identifier); ok {
+				if right, ok := e.Right.(*ast.Identifier); ok && (right.Name == "null" || right.Name == "NULL") {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return []string{ident.Name}, nil
+					}
+				}
+			}
+			if left, ok := e.Left.(*ast.Identifier); ok && (left.Name == "null" || left.Name == "NULL") {
+				if ident, ok := e.Right.(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return []string{ident.Name}, nil
+					}
+				}
+			}
+		}
+		// x == null 或 null == x → else 中 x 已检查
+		if e.Operator == "==" {
+			if ident, ok := e.Left.(*ast.Identifier); ok {
+				if right, ok := e.Right.(*ast.Identifier); ok && (right.Name == "null" || right.Name == "NULL") {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return nil, []string{ident.Name}
+					}
+				}
+			}
+			if left, ok := e.Left.(*ast.Identifier); ok && (left.Name == "null" || left.Name == "NULL") {
+				if ident, ok := e.Right.(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return nil, []string{ident.Name}
+					}
+				}
+			}
+		}
+		// &&：两个条件都为真时进入 then，then 标记是两个的并集；
+		// else 中至少一个为假，无法确定单个，保守不标记
+		if e.Operator == "&&" {
+			then1, _ := sa.extractNullConditions(e.Left)
+			then2, _ := sa.extractNullConditions(e.Right)
+			then := append(append([]string{}, then1...), then2...)
+			return then, nil
+		}
+		// ||：至少一个为真时进入 then，无法确定单个，保守不标记；
+		// else 中两个都为假，else 标记是两个的并集
+		if e.Operator == "||" {
+			_, else1 := sa.extractNullConditions(e.Left)
+			_, else2 := sa.extractNullConditions(e.Right)
+			elseChecked := append(append([]string{}, else1...), else2...)
+			return nil, elseChecked
+		}
+	case *ast.UnaryExpression:
+		// !cond：取反 then 和 else
+		if e.Operator == "!" {
+			then, elseChecked := sa.extractNullConditions(e.Right)
+			return elseChecked, then
+		}
+	case *ast.ParenExpression:
+		return sa.extractNullConditions(e.Inner)
+	}
+	return nil, nil
+}
+
+// applyNullChecked 标记一组 Nullable 变量为已检查
+func (sa *SemanticAnalyzer) applyNullChecked(names []string) {
+	for _, name := range names {
+		if sym := sa.symbolTable.GetSymbol(name); sym != nil && sym.Nullable {
+			sym.NullChecked = true
+		}
+	}
+}
+
+// collectNullChecked 收集当前所有 NullChecked 的 Nullable 变量名集合
+func (sa *SemanticAnalyzer) collectNullChecked() map[string]bool {
+	result := make(map[string]bool)
+	st := sa.symbolTable
+	for st != nil {
+		for name, sym := range st.GetAllSymbols() {
+			if sym.Nullable && sym.NullChecked {
+				result[name] = true
+			}
+		}
+		st = st.GetParent()
+	}
+	return result
+}
+
 // analyzeWhileStatement 分析 while 语句
 func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	if stmt.Condition != nil {
@@ -2015,9 +2173,15 @@ func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 			"如果循环体不需要处理, 请删除整个 while 语句",
 		)
 	}
+	// 路径敏感空安全：循环条件判空在循环体内有效，循环后不保留
+	// （循环可能不执行，所以循环体内的标记不应带到循环后）
+	snap := sa.snapshotNullChecked()
+	thenChecked, _ := sa.extractNullConditions(stmt.Condition)
+	sa.applyNullChecked(thenChecked)
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.restoreNullChecked(snap)
 }
 
 // validateCondition 校验 if/while 条件的合法性。
@@ -2158,9 +2322,12 @@ func (sa *SemanticAnalyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
 			}
 		}
 	}
+	// 路径敏感空安全：for-in 循环体可能不执行，循环体内的标记不应带到循环后
+	snap := sa.snapshotNullChecked()
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.restoreNullChecked(snap)
 }
 
 // isRangeCallExpr 判断表达式是否为 range(...) 调用
