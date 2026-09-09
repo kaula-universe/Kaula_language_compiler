@@ -99,7 +99,13 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 			}
 			// 修复 #25：跨函数参数所有权提升（* 类型形参 = ModeOwned，消费调用方指针）
 			if callee, ok := callExpr.Function.(*ast.Identifier); ok && callee.Name != "" {
-				if promotes := sg.sorCallArgPromotes(callee.Name, callExpr.Args); len(promotes) > 0 {
+				// SOR 模式传参 promote（精确，依赖 SOR 决策）
+				promotes := sg.sorCallArgPromotes(callee.Name, callExpr.Args)
+				// 基础层传参逃逸 promote（缺口3：extern 函数调用的指针实参，保守 promote）
+				if len(promotes) == 0 {
+					promotes = sg.structuralCallArgPromotes(callee.Name, callExpr.Args)
+				}
+				if len(promotes) > 0 {
 					var pb strings.Builder
 					for _, argName := range promotes {
 						sizeExpr := ""
@@ -2993,6 +2999,42 @@ func (sg *StatementGenerator) needsReturnPromote(name string) bool {
 		return false
 	}
 	return true
+}
+
+// structuralCallArgPromotes 基础层传参逃逸分析（不依赖 SOR）。
+// 缺口3：悬垂指针/use-after-free。
+// 对于 extern 函数调用中的指针/String 实参，如果实参是当前作用域声明的局部变量，
+// 保守认为 extern 函数可能存储指针（长期持有），调用方作用域 pop 后会悬垂。
+// 在调用前自动 promote 到 survivor 段，保证被调方长期持有的安全。
+// 对于当前文件定义的函数，可通过函数体分析判断是否存储指针（暂不实现，保守不 promote）。
+func (sg *StatementGenerator) structuralCallArgPromotes(funcName string, args []ast.Expression) []string {
+	if funcName == "" {
+		return nil
+	}
+	// 仅对 extern 函数做保守 promote（当前文件定义的函数可分析，暂不处理）
+	if !sg.codegen.IsExternFunc(funcName) {
+		return nil
+	}
+	var promotes []string
+	for _, arg := range args {
+		id, ok := arg.(*ast.Identifier)
+		if !ok {
+			continue
+		}
+		// 必须是当前作用域声明的局部变量（参数和全局不需要 promote）
+		if !sg.codegen.IsVarDeclaredInCurrentScope(id.Name) {
+			continue
+		}
+		// 已通过赋值逃逸或已 promote 的变量不重复 promote
+		if sg.codegen.IsAssignEscaped(id.Name) || sg.codegen.IsPromoted(id.Name) {
+			continue
+		}
+		// 指针类型或 String 类型需要 promote
+		if sg.isPointerTyped(id.Name) || sg.isStringTyped(id.Name) {
+			promotes = append(promotes, id.Name)
+		}
+	}
+	return promotes
 }
 
 // sorCallArgPromotes 收集调用前需要提升的实参（修复 #25）
