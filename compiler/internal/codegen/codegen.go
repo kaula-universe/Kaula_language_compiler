@@ -111,10 +111,12 @@ type CodeGenerator struct {
 	// externOriginVars: 初始值来自 extern 函数返回的变量集合（promote 时需警告）
 	// promotedVars: 已被 promote 的变量集合（reaching definition，防止重复 promote）
 	// earlyFreedVars: 已被 early free 的变量集合（防止 return/块尾重复释放）
-	externFuncNames  map[string]bool
-	externOriginVars map[string]bool
-	promotedVars     map[string]bool
-	earlyFreedVars   map[string]bool
+	// exportedFuncNames: export 函数名集合（FFI 边界，保持原名不加 K_ 前缀）
+	externFuncNames   map[string]bool
+	externOriginVars  map[string]bool
+	promotedVars      map[string]bool
+	earlyFreedVars    map[string]bool
+	exportedFuncNames map[string]bool
 
 	sourceMap  *SourceMap
 	sourceFile string
@@ -771,6 +773,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		externOriginVars:    make(map[string]bool),
 		promotedVars:        make(map[string]bool),
 		earlyFreedVars:      make(map[string]bool),
+		exportedFuncNames:   make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
 	}
 
@@ -794,9 +797,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	// 收集本文件全部用户自定义 fn（含函数体内嵌套 fn），用于统一 K_ 函数前缀。
 	// main、extern fn（ExternStatement）、stdlib/第三方 C 函数都不在其中，保持原名。
 	cg.userFuncNames = make(map[string]bool)
+	// 收集 export 函数名（FFI 边界，保持原名不加 K_ 前缀）
+	cg.exportedFuncNames = make(map[string]bool)
 	program.Traverse(func(n ast.Node) {
 		if fn, ok := n.(*ast.FunctionStatement); ok && fn.Name != "" {
 			cg.userFuncNames[fn.Name] = true
+			if fn.IsExported {
+				cg.exportedFuncNames[fn.Name] = true
+			}
 		}
 	})
 
@@ -2235,6 +2243,10 @@ func (cg *CodeGenerator) isUserKaulaFunc(name string) bool {
 // 函数定义、前置声明、嵌套原型、调用点必须统一经此函数命名，保证定义与引用一致。
 func (cg *CodeGenerator) UserFuncCName(name string) string {
 	if name == "" || name == "main" {
+		return name
+	}
+	// export 函数保持原名（FFI 边界，外部 C 代码直接用原名调用）
+	if cg.exportedFuncNames != nil && cg.exportedFuncNames[name] {
 		return name
 	}
 	if cg.isUserKaulaFunc(name) {

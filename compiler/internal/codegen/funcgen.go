@@ -387,7 +387,13 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 	// 用户函数统一 K_ 前缀（避开 C 保留字/库符号）；main、extern、内置保持原名。
 	// max/min/abs 若为用户定义则 K_max，否则重定向 kaula_max，均由 UserFuncCName 统一处理。
-	safeName := fg.codegen.UserFuncCName(stmt.Name)
+	// export 函数保持原名（FFI 友好，外部 C 代码直接用原名调用）。
+	var safeName string
+	if stmt.IsExported {
+		safeName = stmt.Name
+	} else {
+		safeName = fg.codegen.UserFuncCName(stmt.Name)
+	}
 
 	if stmt.IsGeneric() {
 		fg.codegen.ExitScope()
@@ -945,7 +951,13 @@ func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) st
 
 	// 用户函数统一 K_ 前缀（避开 C 保留字/库符号）；main、extern、内置保持原名。
 	// max/min/abs 若为用户定义则 K_max，否则重定向 kaula_max，均由 UserFuncCName 统一处理。
-	safeName := fg.codegen.UserFuncCName(stmt.Name)
+	// export 函数保持原名（FFI 友好，外部 C 代码直接用原名调用）。
+	var safeName string
+	if stmt.IsExported {
+		safeName = stmt.Name
+	} else {
+		safeName = fg.codegen.UserFuncCName(stmt.Name)
+	}
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
