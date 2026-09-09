@@ -484,6 +484,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}()
 
 	shouldUseKMM := !stmt.NoKMM && !stmt.Inline
+	// 静态分析：在函数体生成前运行全部6个pass
+	analysisResult := fg.codegen.RunStaticAnalysis(stmt.Name, stmt.Body, stmt.Params, stmt.ParamTypes)
 	if shouldUseKMM {
 		// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 		// 跨函数分析：结合函数签名判断是否需要 KMM
@@ -499,6 +501,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		fg.codegen.indent++
 		prevInFuncBody := fg.codegen.inFunctionBody
 		fg.codegen.inFunctionBody = true
+		// 注入静态分析警告
+		bodyBuilder.WriteString(fg.codegen.ReportAnalysisWarnings(stmt.Name, analysisResult))
 		// 结构化所有权基础层：使用带 liveness 的语句生成，实现提前释放（能力③）
 		bodyBuilder.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(stmt.Body, nil))
 		// 方案 A：per-object survivor 回收（在 KMM_V4_SCOPE_END 前发射）
@@ -540,6 +544,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 } else {
 		prevInFuncBody := fg.codegen.inFunctionBody
 		fg.codegen.inFunctionBody = true
+		// 注入静态分析警告
+		builder.WriteString(fg.codegen.ReportAnalysisWarnings(stmt.Name, analysisResult))
 		// 结构化所有权基础层：使用带 liveness 的语句生成
 		builder.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(stmt.Body, nil))
 		fg.codegen.inFunctionBody = prevInFuncBody
