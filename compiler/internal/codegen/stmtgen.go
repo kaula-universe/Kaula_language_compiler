@@ -816,9 +816,17 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_if_scope_start);\n"
 	} else if useKMM {
+		// 缺口6优化：作用域级 survivor checkpoint/rewind
+		// 块入口 checkpoint，块出口 rewind（如果块内没有 promote）
+		// 提前回收块内大对象，减少内存峰值
+		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __if_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		// 只有块内没有新增 promote 时才 rewind（promote 的对象需要长期持有）
+		if len(thenPromoted) == 0 {
+			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__if_surv_cp); /* survivor: scope reclaim */\n"
+		}
 	} else {
 		code += bodyCode.String()
 	}
@@ -873,9 +881,14 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 			code += elseCode.String()
 			code += sg.codegen.indentString() + "kmm_v4_offset_restore(_else_scope_start);\n"
 		} else if useKMMElse {
+			// 缺口6优化：作用域级 survivor checkpoint/rewind
+			code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __else_surv_cp = kmm_v4_survivor_checkpoint();\n"
 			code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 			code += elseCode.String()
 			code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+			if len(elsePromoted) == 0 {
+				code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__else_surv_cp); /* survivor: scope reclaim */\n"
+			}
 		} else {
 			code += elseCode.String()
 		}
@@ -898,6 +911,9 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("while_body")
+
+	// 缺口6优化：快照 promotedVars，用于判断循环体内是否有 promote
+	whilePromotedSnapshot := sg.codegen.SnapshotPromotedVars()
 
 	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
 	// 相邻 scope 合并优化：如果循环体包含 KMM 池分配调用，使用 offset_save/restore 代替 scope_push/pop
@@ -931,15 +947,23 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
 
+	// 缺口6优化：计算循环体内新增 promote 的变量
+	whilePromoted := sg.codegen.DiffPromotedVars(whilePromotedSnapshot)
+
 	if useOffset {
 		// offset_save/restore 路径：轻量级，无 scope 栈操作
 		code += sg.codegen.indentString() + "size_t _loop_scope_start = kmm_v4_offset_save();\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_loop_scope_start);\n"
 	} else if useKMM {
+		// 缺口6优化：作用域级 survivor checkpoint/rewind
+		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		if len(whilePromoted) == 0 {
+			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__while_surv_cp); /* survivor: scope reclaim */\n"
+		}
 	} else {
 		code += bodyCode.String()
 	}
