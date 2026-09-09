@@ -205,6 +205,29 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		}
 	}
 
+	// 基础层智能分配（从 SOR 下移的能力④+⑧）：
+	// 指针类型变量用 kmm_v4_alloc_auto 分配（BumpPool），非指针用栈分配。
+	// 数组类型（含指针数组）走栈声明，不做 alloc_auto。
+	// 有初始值时直接用初始值初始化（尊重用户意图，避免先分配再覆盖导致泄漏）。
+	isArray := strings.Contains(cType, "[") && strings.HasSuffix(cType, "]")
+	isPointer := strings.HasSuffix(cType, "*")
+	if isPointer && !isArray && !stmt.IsStatic && !stmt.IsExported {
+		baseType := strings.TrimRight(cType, "*")
+		var initValue string
+		if stmt.Value != nil {
+			initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		}
+		if initValue != "" {
+			// 有初始值：直接用初始值初始化，不调用 alloc_auto
+			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
+			return fmt.Sprintf("%s = %s;\n", formatCVarDecl(cType, stmt.Name), initValue)
+		}
+		// 无初始值：用 kmm_v4_alloc_auto 分配
+		sg.codegen.recordAllocSizeHint(stmt.Name, "sizeof("+baseType+")")
+		return fmt.Sprintf("%s = (%s)kmm_v4_alloc_auto(sizeof(%s)); /* structural: BumpPool alloc */\n",
+			formatCVarDecl(cType, stmt.Name), cType, baseType)
+	}
+
 	// 生成属性前缀（#[volatile], #[section("...")], #[aligned(N)] 等）
 	attrPrefix := generateVarAttributes(stmt.Attributes)
 
@@ -2540,7 +2563,15 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 		if sg.codegen.IsEarlyFreed(name) {
 			continue
 		}
-		// SOR 优化层：已通过赋值逃逸的变量跳过（所有权已移到外层）
+		// 基础层：extern 来源变量跳过（不是 KMM 分配的，survivor_free 会触发 unowned-pointer abort）
+		if sg.codegen.IsExternOrigin(name) {
+			b.WriteString(indent)
+			b.WriteString("/* structural: skip survivor_free for ")
+			b.WriteString(name)
+			b.WriteString(" (extern-origin, not KMM-owned) */\n")
+			continue
+		}
+		// 基础层：已通过赋值逃逸的变量跳过（所有权已移到外层）
 		if sg.codegen.IsAssignEscaped(name) {
 			b.WriteString(indent)
 			b.WriteString("/* structural: skip survivor_free for ")
@@ -2624,11 +2655,19 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 			if sg.codegen.IsEarlyFreed(name) {
 				continue
 			}
+			// 基础层：extern 来源变量跳过（不是 KMM 分配的）
+			if sg.codegen.IsExternOrigin(name) {
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip survivor_free on return for ")
+				b.WriteString(name)
+				b.WriteString(" (extern-origin, not KMM-owned) */\n")
+				continue
+			}
 			// 基础层：必须是指针类型
 			if !sg.isPointerTyped(name) {
 				continue
 			}
-			// SOR 优化层：assign-escaped 跳过
+			// 基础层：assign-escaped 跳过（所有权已移交）
 			if sg.codegen.IsAssignEscaped(name) {
 				b.WriteString(indent)
 				b.WriteString("/* structural: skip survivor_free on return for ")
