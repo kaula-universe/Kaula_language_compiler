@@ -92,6 +92,11 @@ type CodeGenerator struct {
 	// needsStringConcat: 代码中使用了字符串拼接("a" + x), 注入内联 string 运行时
 	needsStringConcat bool
 
+	// 缺口4：整数溢出检查开关（debug 模式默认启用，release 模式禁用）
+	// 启用时 +、-、* 运算用 kaula_add/sub/mul_i64/u64 内联函数包装，
+	// 使用 __builtin_*_overflow 零开销检查，溢出时 abort。
+	enableOverflowCheck bool
+
 	// 修复 #25：符号声明时的 codegen 作用域栈深度（函数体=1，if/while/block=2+）
 	// SOR 分析器不把 if/while 块计为作用域（scopeID 恒为 0），
 	// 跨作用域 promote 判定需靠 codegen 自己的作用域栈
@@ -876,6 +881,9 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		earlyFreedVars:      make(map[string]bool),
 		exportedFuncNames:   make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
+		// 缺口4：整数溢出检查。debug 模式默认启用（零开销 __builtin_*_overflow），
+		// release 模式禁用（wrapping 行为，与 C 一致，零开销）。
+		enableOverflowCheck: !cfg.Release,
 	}
 
 	cg.typeGenerator = NewTypeGenerator(cg)

@@ -583,8 +583,22 @@ skip_constant_fold:
 	case "PLUS", "+":
 		return eg.generatePlusOperation(e.Left, e.Right)
 	case "MINUS", "-":
+		// 缺口4：整数溢出检查（debug 模式默认启用）
+		if eg.codegen.enableOverflowCheck && eg.isIntegerExpr(e.Left) && eg.isIntegerExpr(e.Right) {
+			if eg.isUnsignedIntegerExpr(e.Left) || eg.isUnsignedIntegerExpr(e.Right) {
+				return "kaula_sub_u64((uint64_t)(" + left + "), (uint64_t)(" + right + "))"
+			}
+			return "kaula_sub_i64((int64_t)(" + left + "), (int64_t)(" + right + "))"
+		}
 		return wrapIfNeeded(left, "-", "left") + " - " + wrapIfNeeded(right, "-", "right")
 	case "MULTIPLY", "*":
+		// 缺口4：整数溢出检查（debug 模式默认启用）
+		if eg.codegen.enableOverflowCheck && eg.isIntegerExpr(e.Left) && eg.isIntegerExpr(e.Right) {
+			if eg.isUnsignedIntegerExpr(e.Left) || eg.isUnsignedIntegerExpr(e.Right) {
+				return "kaula_mul_u64((uint64_t)(" + left + "), (uint64_t)(" + right + "))"
+			}
+			return "kaula_mul_i64((int64_t)(" + left + "), (int64_t)(" + right + "))"
+		}
 		return wrapIfNeeded(left, "*", "left") + " * " + wrapIfNeeded(right, "*", "right")
 	case "DIVIDE", "/":
 		return wrapIfNeeded(left, "/", "left") + " / " + wrapIfNeeded(right, "/", "right")
@@ -694,6 +708,13 @@ func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression)
 	}
 
 	// 原始整数加法
+	// 缺口4：整数溢出检查（debug 模式默认启用，零开销 __builtin_add_overflow）
+	if eg.codegen.enableOverflowCheck {
+		if eg.isUnsignedIntegerExpr(left) || eg.isUnsignedIntegerExpr(right) {
+			return "kaula_add_u64((uint64_t)(" + leftStr + "), (uint64_t)(" + rightStr + "))"
+		}
+		return "kaula_add_i64((int64_t)(" + leftStr + "), (int64_t)(" + rightStr + "))"
+	}
 	return leftStr + " + " + rightStr
 }
 
@@ -2060,6 +2081,78 @@ func (eg *ExpressionGenerator) isObjectTyped(expr ast.Expression) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// isIntegerExpr 判断表达式是否为整数类型（用于溢出检查）。
+// 整数类型：int、i8/i16/i32/i64、u8/u16/u32/u64、整数字面量、布尔值。
+func (eg *ExpressionGenerator) isIntegerExpr(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral, *ast.BooleanLiteral:
+		return true
+	case *ast.Identifier:
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil {
+			return isIntegerTypeName(sym.Type)
+		}
+		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
+			return isIntegerTypeName(sym.Type)
+		}
+	case *ast.BinaryExpression:
+		// 算术运算结果为整数（如果操作数都是整数）
+		if e.Operator == "PLUS" || e.Operator == "+" || e.Operator == "MINUS" || e.Operator == "-" ||
+			e.Operator == "MULTIPLY" || e.Operator == "*" || e.Operator == "DIVIDE" || e.Operator == "/" ||
+			e.Operator == "MOD" || e.Operator == "%" {
+			return eg.isIntegerExpr(e.Left) && eg.isIntegerExpr(e.Right)
+		}
+		// 比较/逻辑运算结果为布尔值（整数）
+		return true
+	case *ast.CallExpression:
+		// 函数调用保守认为可能是整数
+		return true
+	}
+	return false
+}
+
+// isUnsignedIntegerExpr 判断表达式是否为无符号整数类型（用于选择 u64 版本溢出检查）。
+func (eg *ExpressionGenerator) isUnsignedIntegerExpr(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil {
+			return isUnsignedTypeName(sym.Type)
+		}
+		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
+			return isUnsignedTypeName(sym.Type)
+		}
+	case *ast.BinaryExpression:
+		// 算术运算：如果任一操作数是无符号，结果为无符号
+		if e.Operator == "PLUS" || e.Operator == "+" || e.Operator == "MINUS" || e.Operator == "-" ||
+			e.Operator == "MULTIPLY" || e.Operator == "*" {
+			return eg.isUnsignedIntegerExpr(e.Left) || eg.isUnsignedIntegerExpr(e.Right)
+		}
+	}
+	return false
+}
+
+// isIntegerTypeName 判断类型名是否为整数类型
+func isIntegerTypeName(typeName string) bool {
+	switch typeName {
+	case "int", "int8", "int16", "int32", "int64",
+		"i8", "i16", "i32", "i64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"u8", "u16", "u32", "u64",
+		"bool", "char":
+		return true
+	}
+	return false
+}
+
+// isUnsignedTypeName 判断类型名是否为无符号整数类型
+func isUnsignedTypeName(typeName string) bool {
+	switch typeName {
+	case "uint", "uint8", "uint16", "uint32", "uint64",
+		"u8", "u16", "u32", "u64":
+		return true
 	}
 	return false
 }
