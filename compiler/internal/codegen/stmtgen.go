@@ -2292,14 +2292,76 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	if !ok || (bin.Operator != "=" && bin.Operator != "ASSIGN") {
 		return ""
 	}
-	dstIdent, okDst := bin.Left.(*ast.Identifier)
 	srcIdent, okSrc := bin.Right.(*ast.Identifier)
-	if !okDst || !okSrc {
+	if !okSrc {
 		return ""
 	}
-	if !sg.needsAssignEscapePromote(srcIdent.Name, dstIdent.Name) {
+	// 源必须是指针/String 类型的局部变量
+	if !sg.isPointerTyped(srcIdent.Name) && !sg.isStringTyped(srcIdent.Name) {
 		return ""
 	}
+	if !sg.codegen.IsVarDeclaredInCurrentScope(srcIdent.Name) {
+		return ""
+	}
+	// 已逃逸或已 promote 的变量不重复处理
+	if sg.codegen.IsAssignEscaped(srcIdent.Name) || sg.codegen.IsPromoted(srcIdent.Name) {
+		return ""
+	}
+
+	// 判断目标类型，决定是否需要 promote
+	needsPromote := false
+	dstName := ""
+
+	switch dst := bin.Left.(type) {
+	case *ast.Identifier:
+		// 普通变量赋值：使用现有的跨作用域判断
+		dstName = dst.Name
+		needsPromote = sg.needsAssignEscapePromote(srcIdent.Name, dst.Name)
+	case *ast.MemberAccessExpression:
+		// 存入结构体字段：obj.field = ptr
+		// 目标对象（obj）的生命周期通常比源更长（外层变量/全局/参数），保守 promote
+		// 如果 obj 是当前作用域声明的局部变量且与源同层，可能不需要 promote，但保守处理
+		dstName = "struct_field"
+		needsPromote = true
+		// 例外：如果 obj 是当前作用域声明的局部变量（与源同层或更内层），且不是指针类型，可能不需要 promote
+		if objIdent, ok := dst.Object.(*ast.Identifier); ok {
+			if sg.codegen.IsVarDeclaredInCurrentScope(objIdent.Name) {
+				// obj 是当前作用域局部变量，检查其声明深度
+				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
+					if dstDepth, dstOk := sg.codegen.declScopeDepth[objIdent.Name]; dstOk {
+						if dstDepth >= srcDepth {
+							// obj 与源同层或更内层，结构体生命周期不超过源，不需要 promote
+							needsPromote = false
+						}
+					}
+				}
+			}
+		}
+	case *ast.IndexExpression:
+		// 存入数组元素：arr[i] = ptr
+		// 目标数组（arr）的生命周期通常比源更长，保守 promote
+		dstName = "array_element"
+		needsPromote = true
+		// 例外：如果 arr 是当前作用域声明的局部变量且与源同层或更内层，可能不需要 promote
+		if arrIdent, ok := dst.Object.(*ast.Identifier); ok {
+			if sg.codegen.IsVarDeclaredInCurrentScope(arrIdent.Name) {
+				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
+					if dstDepth, dstOk := sg.codegen.declScopeDepth[arrIdent.Name]; dstOk {
+						if dstDepth >= srcDepth {
+							needsPromote = false
+						}
+					}
+				}
+			}
+		}
+	default:
+		return ""
+	}
+
+	if !needsPromote {
+		return ""
+	}
+
 	sizeExpr := ""
 	if sg.isStringTyped(srcIdent.Name) {
 		sizeExpr = "sizeof(String)"
@@ -2309,11 +2371,13 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		sizeExpr = "sizeof(*" + srcIdent.Name + ")"
 	}
 	var b strings.Builder
-	b.WriteString(sg.emitPromoteForType(srcIdent.Name, sizeExpr, "promote assign-escape", srcIdent.Name))
+	b.WriteString(sg.emitPromoteForType(srcIdent.Name, sizeExpr, "promote assign-escape into "+dstName, srcIdent.Name))
 	sg.codegen.funcEmitsPromote = true          // 方案 C：函数出口跳过 survivor_rewind
 	sg.codegen.MarkAssignEscaped(srcIdent.Name) // 抑制 src 的块尾 per-object free
 	sg.codegen.MarkPromoted(srcIdent.Name)       // reaching definition：防止 return 时重复 promote
-	sg.codegen.PropagateInitSize(dstIdent.Name, srcIdent.Name)
+	if dstName != "" && dstName != "struct_field" && dstName != "array_element" {
+		sg.codegen.PropagateInitSize(dstName, srcIdent.Name)
+	}
 	b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression))
 	b.WriteString(";\n")
 	return b.String()
