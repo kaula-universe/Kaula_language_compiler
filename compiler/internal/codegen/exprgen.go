@@ -712,7 +712,15 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		return eg.generateMethodCall(memberAccess, e.Args)
 	}
 
-	funcName := eg.GenerateExpression(e.Function)
+	// 函数名：直接从 AST 提取 Kaula 名（语义查询用，如 captureArgsFor / stdlib 签名 / 泛型实例化），
+	// C 侧符号名在最终输出时通过 UserFuncCName 转换。此前用 GenerateExpression 会对用户函数返回
+	// K_ 前缀名，导致 nestedFuncCaptures 等以 Kaula 名为 key 的表查询失配，嵌套函数调用缺捕获实参。
+	funcName := ""
+	if ident, ok := e.Function.(*ast.Identifier); ok {
+		funcName = ident.Name
+	} else {
+		funcName = eg.GenerateExpression(e.Function)
+	}
 
 	// std_malloc 与 kmm_v4 系列是两个完全不同的分配器，禁止混用：
 	// - hosted 模式（默认）：std_malloc 保留为系统 malloc 包装（std_malloc/std_free 符号，

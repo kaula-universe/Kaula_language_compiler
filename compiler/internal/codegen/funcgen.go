@@ -3,6 +3,7 @@
 import (
 	"fmt"
 	"kaula/internal/ast"
+	"sort"
 	"strings"
 )
 
@@ -301,7 +302,26 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 	// 嵌套函数：在参数注册之后检测捕获的外层局部变量
 	// （main/prefix/tree/asm 均不会有外层函数作用域，捕获集为空）
-	captures := fg.codegen.detectCaptures(stmt)
+	// 先收集函数体内的嵌套函数名，用于 detectCaptures 区分函数调用与变量引用
+	nestedFuncNames := collectNestedFuncNames(stmt.Body)
+	directCaptures, directCalls := fg.codegen.detectCaptures(stmt, nestedFuncNames)
+	// 预注册函数体内的其他嵌套函数：确保调用点在定义语句之前时
+	// 也能找到捕获信息（生成调用实参）。预注册包含传递闭包。
+	fg.codegen.preRegisterNestedFuncs(stmt.Body)
+	// 当前函数的捕获传递闭包：若当前函数调用了体内嵌套函数 B，
+	// 则当前函数也需要捕获 B 所需的外层变量，以便在调用 B 时转发捕获指针。
+	captures := make([]string, len(directCaptures))
+	copy(captures, directCaptures)
+	for _, called := range directCalls {
+		if info, ok := fg.codegen.nestedFuncCaptures[called]; ok {
+			for _, cap := range info.Captures {
+				if !containsStr(captures, cap) {
+					captures = append(captures, cap)
+				}
+			}
+		}
+	}
+	sort.Strings(captures)
 	if fg.codegen.inFunctionBody {
 		// 嵌套函数提升为文件级后，调用点（所在外层函数体）先于其定义出现，
 		// 必须在文件头部追加原型声明（forward declaration），否则 clang 报隐式声明错误
