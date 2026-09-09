@@ -331,8 +331,12 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
 				paramType = stmt.ParamTypes[i]
 			}
+			isNullable := false
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
 			sa.checkVariableShadow(param, stmt.Pos.Line, stmt.Pos.Column)
-			sa.symbolTable.AddSymbol(param, paramType, false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+			sa.symbolTable.AddSymbol(param, paramType, isNullable, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 		}
 	}
 
@@ -1921,10 +1925,27 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 		sa.analyzeStatement(elseStmt)
 	}
 	elseState := sa.collectNullChecked()
-	// 5. 恢复快照，合并：有 else 时取 then∩else（两个分支都标记才保留）；
-	//    无 else 时直接恢复快照（then 中的标记不保留，因为 else 路径可能不执行）
+	// 5. 恢复快照，合并状态
+	//    - 提前返回优化：如果 then 分支以 return 结束，则 if 后的代码一定在 else 路径上，
+	//      无 else 时应用 else 标记，有 else 时直接用 elseState
+	//    - 否则：有 else 时取 then∩else（两个分支都标记才保留）；
+	//      无 else 时直接恢复快照（then 中的标记不保留，因为 else 路径可能不执行）
 	sa.restoreNullChecked(snap)
-	if hasElse {
+	thenReturns := endsWithReturn(stmt.Body)
+	if thenReturns {
+		// then 分支以 return 结束，if 后一定在 else 路径上
+		if hasElse {
+			// 直接用 else 分支结束时的状态
+			for name := range elseState {
+				if sym := sa.symbolTable.GetSymbol(name); sym != nil && sym.Nullable {
+					sym.NullChecked = true
+				}
+			}
+		} else {
+			// 无 else 时应用条件的 else 标记（如 x == null 的 else 中 x 非空）
+			sa.applyNullChecked(elseChecked)
+		}
+	} else if hasElse {
 		for name := range thenState {
 			if elseState[name] {
 				if sym := sa.symbolTable.GetSymbol(name); sym != nil && sym.Nullable {
@@ -3022,6 +3043,17 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		sa.analyzeExpression(expr.Left)
 	}
 	sa.analyzeExpression(expr.Right)
+	// 赋值后空安全状态更新：如果左侧是可空变量，且右侧一定非空（字面量/非可空变量/已检查可空变量），
+	// 则标记左侧为已检查。仅处理直接赋值 '='，复合赋值 (+=, -= 等) 后值可能仍为空。
+	if expr.Operator == "=" {
+		if leftId, ok := expr.Left.(*ast.Identifier); ok {
+			if leftSym := sa.symbolTable.GetSymbol(leftId.Name); leftSym != nil && leftSym.Nullable {
+				if sa.isNonNullExpression(expr.Right) {
+					leftSym.NullChecked = true
+				}
+			}
+		}
+	}
 	// 类型检查
 	if expr.Left != nil && expr.Right != nil {
 		leftType := sa.inferExpressionType(expr.Left)
@@ -3464,6 +3496,58 @@ func (sa *SemanticAnalyzer) checkNullableDereference(expr ast.Expression, line, 
 	if symbol.Nullable && !symbol.NullChecked {
 		sa.error(fmt.Sprintf("nullable variable '%s' may be null, add null check before access (e.g., if %s != null { ... })", ident.Name, ident.Name), line, column)
 	}
+}
+
+// endsWithReturn 判断语句块是否以 return 结束（所有路径都返回）。
+// 用于提前返回优化：if then 分支以 return 结束时，if 后的代码一定在 else 路径上。
+// 支持：直接 return、if-else 两个分支都 return、嵌套 if-else。
+func endsWithReturn(stmts []ast.Statement) bool {
+	if len(stmts) == 0 {
+		return false
+	}
+	last := stmts[len(stmts)-1]
+	switch s := last.(type) {
+	case *ast.ReturnStatement:
+		return true
+	case *ast.IfStatement:
+		// if 语句：then 分支以 return 结束，且有 else 分支且 else 也以 return 结束
+		thenReturns := endsWithReturn(s.Body)
+		if !thenReturns {
+			return false
+		}
+		if len(s.Else) == 0 {
+			return false // 无 else，可能 fall through
+		}
+		// else 分支可能是多条语句或嵌套 if
+		elseReturns := endsWithReturn(s.Else)
+		return elseReturns
+	}
+	return false
+}
+
+// isNonNullExpression 判断表达式是否一定非空（用于赋值后自动标记 NullChecked）。
+// 非空的情况：字面量（整数/浮点/布尔/字符串）、非可空变量、已检查的可空变量。
+// 保守情况：函数调用、成员访问、索引表达式、二元运算等，可能返回空，不标记。
+func (sa *SemanticAnalyzer) isNonNullExpression(expr ast.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.BooleanLiteral, *ast.StringLiteral:
+		return true
+	case *ast.Identifier:
+		sym := sa.symbolTable.GetSymbol(e.Name)
+		if sym == nil {
+			return false
+		}
+		if !sym.Nullable {
+			return true // 非可空变量一定非空
+		}
+		return sym.NullChecked // 可空但已检查
+	case *ast.ParenExpression:
+		return sa.isNonNullExpression(e.Inner)
+	}
+	return false
 }
 
 // paramTypeAt 返回被调用函数第 i 个参数的类型; 顶层函数用 ParamTypes, 类方法用 Params[i].Type。
