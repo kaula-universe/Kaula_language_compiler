@@ -47,6 +47,11 @@ type CodeGenerator struct {
 	expressionGenerator *ExpressionGenerator
 	statementGenerator  *StatementGenerator
 
+	// 当前正在生成的函数的静态分析结果（含别名组），
+	// 供 liveness 提前释放/返回回收路径做别名感知，防止
+	// 别名变量的 use-after-free 与 double-free
+	currentFuncAnalysis *StaticAnalysisResult
+
 	usedThirdPartyLibs map[string]bool
 	localImportFuncs   map[string]bool
 	// 本地 import 的 pub/export 函数返回类型（函数名 -> Kaula 返回类型），
