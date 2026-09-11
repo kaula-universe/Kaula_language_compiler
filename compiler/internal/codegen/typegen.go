@@ -1076,6 +1076,24 @@ func (tg *TypeGenerator) convertTypeAliasToCType(kaulaType string) string {
 		return tg.MapKaulaTypeToC(cType)
 	}
 
+	// 用户自定义命名类型（struct/class/enum/跨文件类型，含指针/数组包裹）：
+	// 必须经主映射器补 K_ 前缀（class 为指针），否则 type P = Point 会向 C 吐出
+	// 不存在的裸名 Point（实际类型是 K_Point）。内置数值类型走下方既有逻辑保持不变。
+	base := strings.TrimPrefix(cType, "const ")
+	base = strings.Trim(base, "*")
+	if strings.HasPrefix(base, "[]") {
+		base = base[2:]
+	}
+	if lb := strings.Index(base, "["); lb >= 0 {
+		base = base[:lb]
+	}
+	base = strings.TrimSpace(base)
+	if _, baseIsBuiltin := globalTypeMap[strings.ToLower(base)]; base != "" && !baseIsBuiltin && base != "string" {
+		if mapped := tg.MapKaulaTypeToC(kaulaType); mapped != "" && mapped != kaulaType {
+			return mapped
+		}
+	}
+
 	cType = strings.ReplaceAll(cType, "*void", "void*")
 	cType = strings.ReplaceAll(cType, "*int", "int*")
 	cType = strings.ReplaceAll(cType, "*float", "float*")

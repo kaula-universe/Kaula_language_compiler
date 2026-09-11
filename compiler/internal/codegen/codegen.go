@@ -106,6 +106,20 @@ type CodeGenerator struct {
 	//     使新持有者悬垂（声明还在、内容丢失）。
 	assignEscapedVars map[string]bool
 
+	// 结构化所有权基础层扩展（从 SOR 下移的能力 + 多分配器 origin 追踪）：
+	// externFuncNames: 程序中声明的 extern 函数名集合
+	// externOriginVars: 初始值来自 extern 函数返回的变量集合（向后兼容）
+	// varOrigins: 变量的分配器来源（kmm/libc_malloc/extern/unknown），用于按来源释放
+	// promotedVars: 已被 promote 的变量集合
+	// earlyFreedVars: 已被 early free 的变量集合
+	// exportedFuncNames: export 函数名集合
+	externFuncNames   map[string]bool
+	externOriginVars  map[string]bool
+	varOrigins        map[string]string
+	promotedVars      map[string]bool
+	earlyFreedVars    map[string]bool
+	exportedFuncNames map[string]bool
+
 	sourceMap  *SourceMap
 	sourceFile string
 
@@ -146,6 +160,11 @@ type CodeGenerator struct {
 	pendingNestedFuncs    []string
 	nestedFuncPrototypes  strings.Builder
 	inFunctionBody        bool
+
+	// userFuncNames: 本文件全部用户自定义 fn 的名字集合（含函数体内嵌套 fn）。
+	// 这些符号在 C 侧统一加 K_ 前缀，彻底避开 C 保留字（int/double/...）与 C 库符号冲突。
+	// main 是 C 入口、extern/stdlib/第三方函数不在此集合，均保持原名。
+	userFuncNames map[string]bool
 
 	// 任务②：深提升回调（kmm_v4_scope_promote_p_deep）的合成与去重
 	// deepPromoteCBEmitted: kaula 类型名 -> true（已经合成过，避免重复）
@@ -442,6 +461,208 @@ func (cg *CodeGenerator) IsAssignEscaped(name string) bool {
 	return cg.assignEscapedVars[name]
 }
 
+// === 结构化所有权基础层扩展（从 SOR 下移的能力）===
+
+// IsExternFunc 查询函数名是否为 extern 声明的函数
+func (cg *CodeGenerator) IsExternFunc(name string) bool {
+	return cg.externFuncNames[name]
+}
+
+// 变量分配器来源常量（多分配器 origin 追踪）
+// 用于编译期确定每个指针变量该用哪个释放函数，零运行时开销
+const (
+	OriginKmm        = "kmm"         // KMM 分配（kmm_v4_alloc_auto 等），用 survivor_free
+	OriginLibcMalloc = "libc_malloc" // libc 分配（malloc/calloc/realloc），用 free
+	OriginExtern     = "extern"      // extern 函数返回，不释放（所有权不透明）
+	OriginUnknown    = "unknown"     // 未知来源，保守不释放
+)
+
+// kmmAllocFuncs KMM 分配函数名集合
+var kmmAllocFuncs = map[string]bool{
+	"kmm_v4_alloc_auto": true,
+	"kmm_v4_alloc":      true,
+	"kmm_v4_malloc":     true,
+	"kmm_v4_calloc":     true,
+	"kmm_v4_bump":       true,
+}
+
+// libcAllocFuncs libc 分配函数名集合
+var libcAllocFuncs = map[string]bool{
+	"malloc":  true,
+	"calloc":  true,
+	"realloc": true,
+}
+
+// RecordExternOriginFromAST 追踪变量初始化是否来自 extern 函数返回
+// 用于 return promote 时警告：extern 指针对 SOR 不透明，promote 语义可能不正确
+func (cg *CodeGenerator) RecordExternOriginFromAST(name string, expr ast.Expression) {
+	if name == "" || expr == nil {
+		return
+	}
+	var call *ast.CallExpression
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		call = e
+	case *ast.TypeCastExpression:
+		if c, ok := e.Expression.(*ast.CallExpression); ok {
+			call = c
+		}
+	}
+	if call == nil || call.Function == nil {
+		return
+	}
+	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
+		if cg.IsExternFunc(fnIdent.Name) {
+			cg.externOriginVars[name] = true
+			cg.varOrigins[name] = OriginExtern
+		}
+	}
+}
+
+// RecordVarOriginFromAST 多分配器 origin 追踪：识别变量初始化的分配函数
+// 识别顺序：KMM 分配函数 > libc 分配函数 > extern 函数 > 未知
+// freestanding 模式下 std_malloc 被重写为 kmm_v4_alloc_auto，会被识别为 KMM
+func (cg *CodeGenerator) RecordVarOriginFromAST(name string, expr ast.Expression) {
+	if name == "" || expr == nil {
+		return
+	}
+	var call *ast.CallExpression
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		call = e
+	case *ast.TypeCastExpression:
+		if c, ok := e.Expression.(*ast.CallExpression); ok {
+			call = c
+		}
+	}
+	if call == nil || call.Function == nil {
+		return
+	}
+	fnName := ""
+	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
+		fnName = fnIdent.Name
+	} else if member, ok := call.Function.(*ast.MemberExpression); ok {
+		// std.malloc 形式
+		fnName = member.Member
+	}
+	if fnName == "" {
+		return
+	}
+	// KMM 分配函数
+	if kmmAllocFuncs[fnName] {
+		cg.varOrigins[name] = OriginKmm
+		return
+	}
+	// libc 分配函数（std_malloc 在 hosted 模式下是系统 malloc）
+	if libcAllocFuncs[fnName] || fnName == "std_malloc" {
+		// freestanding 模式下 std_malloc 被重写为 kmm_v4_alloc_auto
+		// 这里保守标记为 libc_malloc，表达式生成阶段的重写不影响 origin 判断
+		// 实际释放时，如果代码中是 kmm_v4_alloc_auto，会被 KMM scope 管理
+		cg.varOrigins[name] = OriginLibcMalloc
+		return
+	}
+	// extern 函数返回
+	if cg.IsExternFunc(fnName) {
+		cg.externOriginVars[name] = true
+		cg.varOrigins[name] = OriginExtern
+		return
+	}
+}
+
+// GetVarOrigin 查询变量的分配器来源
+func (cg *CodeGenerator) GetVarOrigin(name string) string {
+	if origin, ok := cg.varOrigins[name]; ok {
+		return origin
+	}
+	// 向后兼容：externOriginVars 中有记录的视为 extern
+	if cg.externOriginVars[name] {
+		return OriginExtern
+	}
+	return OriginUnknown
+}
+
+// SetVarOrigin 手动设置变量来源（用于赋值传播等场景）
+func (cg *CodeGenerator) SetVarOrigin(name, origin string) {
+	if name != "" && origin != "" {
+		cg.varOrigins[name] = origin
+		if origin == OriginExtern {
+			cg.externOriginVars[name] = true
+		}
+	}
+}
+
+// IsExternOrigin 查询变量是否来自 extern 函数返回
+func (cg *CodeGenerator) IsExternOrigin(name string) bool {
+	return cg.externOriginVars[name] || cg.varOrigins[name] == OriginExtern
+}
+
+// MarkPromoted 标记变量已被 promote（reaching definition，防止重复 promote）
+func (cg *CodeGenerator) MarkPromoted(name string) {
+	if name != "" {
+		cg.promotedVars[name] = true
+	}
+}
+
+// IsPromoted 查询变量是否已被 promote
+func (cg *CodeGenerator) IsPromoted(name string) bool {
+	return cg.promotedVars[name]
+}
+
+// MarkEarlyFreed 标记变量已被 early free（防止 return/块尾重复释放）
+func (cg *CodeGenerator) MarkEarlyFreed(name string) {
+	if name != "" {
+		cg.earlyFreedVars[name] = true
+	}
+}
+
+// IsEarlyFreed 查询变量是否已被 early free
+func (cg *CodeGenerator) IsEarlyFreed(name string) bool {
+	return cg.earlyFreedVars[name]
+}
+
+// === 条件分支路径敏感（从 SOR 下移的能力⑤）===
+
+// SnapshotPromotedVars 快照当前已 promote 变量集合，用于条件分支的路径敏感分析。
+// 在生成 if/else 分支前调用，生成后用 RestorePromotedVars 恢复。
+func (cg *CodeGenerator) SnapshotPromotedVars() map[string]bool {
+	snapshot := make(map[string]bool, len(cg.promotedVars))
+	for k, v := range cg.promotedVars {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+// RestorePromotedVars 恢复已 promote 变量集合到快照状态。
+func (cg *CodeGenerator) RestorePromotedVars(snapshot map[string]bool) {
+	cg.promotedVars = make(map[string]bool, len(snapshot))
+	for k, v := range snapshot {
+		cg.promotedVars[k] = v
+	}
+}
+
+// MergePromotedFromBranches 合并两个分支的 promote 状态。
+// 只有在两个分支中都被 promote 的变量，才在合并点标记为已 promote（路径敏感交集）。
+// 只在一个分支中 promote 的变量，保守地不标记（因为另一个分支可能没 promote）。
+func (cg *CodeGenerator) MergePromotedFromBranches(thenPromoted, elsePromoted map[string]bool) {
+	for name := range thenPromoted {
+		if elsePromoted[name] {
+			cg.promotedVars[name] = true
+		}
+	}
+}
+
+// DiffPromotedVars 计算当前 promotedVars 与快照的差异（新增的已 promote 变量）。
+// 用于记录单个分支中新 promote 的变量。
+func (cg *CodeGenerator) DiffPromotedVars(snapshot map[string]bool) map[string]bool {
+	diff := make(map[string]bool)
+	for name := range cg.promotedVars {
+		if !snapshot[name] {
+			diff[name] = true
+		}
+	}
+	return diff
+}
+
 // IsMallocLikeCall 检查是否为 malloc 类调用（包含 hosted std_malloc，不区分 freestanding）
 // 用于编译期大小登记
 func (cg *CodeGenerator) IsMallocLikeCall(call *ast.CallExpression) bool {
@@ -648,6 +869,12 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		sorInitSizes:        make(map[string]int),
 		declScopeDepth:      make(map[string]int),
 		assignEscapedVars:   make(map[string]bool),
+		externFuncNames:     make(map[string]bool),
+		externOriginVars:    make(map[string]bool),
+		varOrigins:          make(map[string]string),
+		promotedVars:        make(map[string]bool),
+		earlyFreedVars:      make(map[string]bool),
+		exportedFuncNames:   make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
 	}
 
@@ -667,6 +894,20 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.lambdaDefinitions = nil
 	cg.objectDeclCode.Reset()
 	cg.preludeInitCode.Reset()
+
+	// 收集本文件全部用户自定义 fn（含函数体内嵌套 fn），用于统一 K_ 函数前缀。
+	// main、extern fn（ExternStatement）、stdlib/第三方 C 函数都不在其中，保持原名。
+	cg.userFuncNames = make(map[string]bool)
+	// 收集 export 函数名（FFI 边界，保持原名不加 K_ 前缀）
+	cg.exportedFuncNames = make(map[string]bool)
+	program.Traverse(func(n ast.Node) {
+		if fn, ok := n.(*ast.FunctionStatement); ok && fn.Name != "" {
+			cg.userFuncNames[fn.Name] = true
+			if fn.IsExported {
+				cg.exportedFuncNames[fn.Name] = true
+			}
+		}
+	})
 
 	type rawEntry struct {
 		section string
@@ -881,6 +1122,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		} else if externStmt, ok := stmt.(*ast.ExternStatement); ok {
 			if externStmt == nil {
 				continue
+			}
+			// 结构化所有权基础层：登记 extern 函数名，用于追踪变量来源
+			if externStmt.IsFunction {
+				cg.externFuncNames[externStmt.Name] = true
 			}
 			var code string
 			if externStmt.IsFunction {
@@ -1182,7 +1427,7 @@ static inline String string_concat_float(String s, double v) {
 			}
 			forwardDecls.WriteString(returnType)
 			forwardDecls.WriteByte(' ')
-			forwardDecls.WriteString(fnStmt.Name)
+			forwardDecls.WriteString(cg.UserFuncCName(fnStmt.Name))
 			forwardDecls.WriteByte('(')
 			for i, pType := range fnStmt.ParamTypes {
 				if i > 0 {
@@ -1192,9 +1437,14 @@ static inline String string_concat_float(String s, double v) {
 				if cType == "" {
 					cType = "void*"
 				}
-				forwardDecls.WriteString(cType)
-				forwardDecls.WriteByte(' ')
-				forwardDecls.WriteString(fnStmt.Params[i])
+				// 函数指针类型参数：R (*)(args) name → R (*name)(args)
+				if strings.Contains(cType, "(*)") {
+					forwardDecls.WriteString(formatCVarDecl(cType, fnStmt.Params[i]))
+				} else {
+					forwardDecls.WriteString(cType)
+					forwardDecls.WriteByte(' ')
+					forwardDecls.WriteString(fnStmt.Params[i])
+				}
 			}
 			forwardDecls.WriteString(");\n")
 		}
@@ -1528,6 +1778,30 @@ func (cg *CodeGenerator) GetSymbolType(name string) string {
 		return s.Type
 	}
 	return ""
+}
+
+// GetVarDeclaredScopeDepth 查找变量声明所在的作用域深度（结构化所有权基础层）。
+// 从当前作用域向上遍历，找到第一个 HasLocalSymbol(name) 的作用域，返回其 depth。
+// 未找到返回 -1（全局/外部符号）。这是纯词法分析，不依赖 SOR 数据流。
+func (cg *CodeGenerator) GetVarDeclaredScopeDepth(name string) int {
+	if name == "" {
+		return -1
+	}
+	for scope := cg.currentScope; scope != nil; scope = scope.GetParent() {
+		if scope.HasLocalSymbol(name) {
+			return scope.GetScopeDepth()
+		}
+	}
+	return -1
+}
+
+// IsVarDeclaredInCurrentScope 判断变量是否在当前词法作用域声明（结构化所有权基础层）。
+// 用于 return promote 判定：只有当前块声明的指针变量返回时才需要 promote。
+func (cg *CodeGenerator) IsVarDeclaredInCurrentScope(name string) bool {
+	if name == "" || cg.currentScope == nil {
+		return false
+	}
+	return cg.currentScope.HasLocalSymbol(name)
 }
 
 // recordAllocSizeHint 从初始化表达式登记编译期可知的堆分配常量大小（修复 #25）
@@ -2044,6 +2318,45 @@ func (cg *CodeGenerator) IsClassType(name string) bool {
 		return true
 	}
 	return false
+}
+
+// isUserKaulaFunc 判断 name 是否是本仓库用户自定义的 Kaula 函数
+// （本文件 fn，含嵌套 fn；或跨文件 import 的本仓库函数）。
+// extern fn、stdlib/第三方 C 函数、内置运算符均返回 false。
+func (cg *CodeGenerator) isUserKaulaFunc(name string) bool {
+	if name == "" || name == "main" {
+		return false
+	}
+	if cg.userFuncNames != nil && cg.userFuncNames[name] {
+		return true
+	}
+	if cg.localImportFuncs != nil && cg.localImportFuncs[name] {
+		return true
+	}
+	return false
+}
+
+// UserFuncCName 返回 Kaula 用户函数在 C 侧的符号名：
+//   - 用户自定义 fn 统一加 K_ 前缀，避开 C 保留字（int/double/...）与 C 库符号；
+//   - 非用户定义的 max/min/abs 重定向到 kaula 运行时实现（kaula_max 等），避开 C 宏；
+//   - main、extern、stdlib/第三方 C 函数保持原名。
+//
+// 函数定义、前置声明、嵌套原型、调用点必须统一经此函数命名，保证定义与引用一致。
+func (cg *CodeGenerator) UserFuncCName(name string) string {
+	if name == "" || name == "main" {
+		return name
+	}
+	// export 函数保持原名（FFI 边界，外部 C 代码直接用原名调用）
+	if cg.exportedFuncNames != nil && cg.exportedFuncNames[name] {
+		return name
+	}
+	if cg.isUserKaulaFunc(name) {
+		return "K_" + name
+	}
+	if name == "max" || name == "min" || name == "abs" {
+		return "kaula_" + name
+	}
+	return name
 }
 
 // GetGenericCachedCode 获取缓存的泛型代码

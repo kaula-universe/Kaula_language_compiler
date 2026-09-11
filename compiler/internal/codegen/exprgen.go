@@ -378,6 +378,15 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		return enumName + "_Kind_" + e.Name
 	}
 
+	// 用户自定义函数名作为值引用（回调/函数指针实参，如 start(server, handler)）：
+	// 与函数定义一致使用 K_ 前缀。若同名局部变量/参数遮蔽了函数名，则按变量原样输出。
+	if eg.codegen.isUserKaulaFunc(e.Name) {
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil && sym.Type != "function" {
+			return e.Name
+		}
+		return eg.codegen.UserFuncCName(e.Name)
+	}
+
 	return e.Name
 }
 
@@ -703,7 +712,15 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		return eg.generateMethodCall(memberAccess, e.Args)
 	}
 
-	funcName := eg.GenerateExpression(e.Function)
+	// 函数名：直接从 AST 提取 Kaula 名（语义查询用，如 captureArgsFor / stdlib 签名 / 泛型实例化），
+	// C 侧符号名在最终输出时通过 UserFuncCName 转换。此前用 GenerateExpression 会对用户函数返回
+	// K_ 前缀名，导致 nestedFuncCaptures 等以 Kaula 名为 key 的表查询失配，嵌套函数调用缺捕获实参。
+	funcName := ""
+	if ident, ok := e.Function.(*ast.Identifier); ok {
+		funcName = ident.Name
+	} else {
+		funcName = eg.GenerateExpression(e.Function)
+	}
 
 	// std_malloc 与 kmm_v4 系列是两个完全不同的分配器，禁止混用：
 	// - hosted 模式（默认）：std_malloc 保留为系统 malloc 包装（std_malloc/std_free 符号，
@@ -797,10 +814,10 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		funcName = MangleGenericName(funcName, e.TypeArgs)
 	}
 
-	// 避免与C标准库宏冲突（如 max, min）
-	if funcName == "max" || funcName == "min" || funcName == "abs" {
-		funcName = "kaula_" + funcName
-	}
+	// 用户自定义函数在 C 侧统一加 K_ 前缀（避开 C 保留字 int/double 等与 C 库符号）。
+	// 语义查询（捕获参数、stdlib 签名、println 判断）仍用原始 Kaula 名 funcName，
+	// 只有最终拼 C 输出时才用 cFuncName，避免查询表失配。
+	cFuncName := eg.codegen.UserFuncCName(funcName)
 
 	// 追踪第三方库的使用
 	if eg.codegen.stdlibConfig != nil {
@@ -824,16 +841,16 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		// 无参数调用
 		capArgs := eg.codegen.captureArgsFor(funcName)
 		if capArgs != "" {
-			return funcName + "(" + capArgs + ")"
+			return cFuncName + "(" + capArgs + ")"
 		}
-		return funcName + "()"
+		return cFuncName + "()"
 	} else {
 		// 尝试查找 stdlib 函数签名以生成类型正确的参数
 		var sig *stdlib.Function
 		if eg.codegen.stdlibConfig != nil {
 			sig = eg.codegen.stdlibConfig.GetAnyFunctionSignature(funcName)
 		}
-		code := funcName + "(" + eg.generateStdlibArgs(e.Args, sig)
+		code := cFuncName + "(" + eg.generateStdlibArgs(e.Args, sig)
 		if capArgs := eg.codegen.captureArgsFor(funcName); capArgs != "" {
 			code += ", " + capArgs
 		}
@@ -2229,6 +2246,20 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 			typeStr := sym.Type
 			if strings.HasSuffix(typeStr, "*") || strings.HasPrefix(typeStr, "*") {
 				isPtr = true
+			}
+			// 类型别名可能包裹指针（type P = *Node）：符号类型记录的是别名 PNode，
+			// 需解析别名底层类型，若底层是指针则同样按 -> 访问。
+			if !isPtr {
+				if ta := eg.codegen.program.FindTypeAlias(typeStr); ta != nil {
+					ut := ta.UnderlyingType
+					if ta.IsAdopt && ta.AdoptUnderlying != "" {
+						ut = ta.AdoptUnderlying
+					}
+					ut = strings.TrimSpace(ut)
+					if strings.HasPrefix(ut, "*") || strings.HasSuffix(ut, "*") {
+						isPtr = true
+					}
+				}
 			}
 			// 类类型变量始终按指针传递和存储（K_ClassName*），
 			// 即使符号表中类型名未显式带 *，也视为指针访问。

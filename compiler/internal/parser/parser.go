@@ -1279,7 +1279,9 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	}
 
 	p.nextToken()
-	if p.curTok.Type == lexer.TOKEN_IDENT {
+	// 函数名允许是普通标识符，也允许与类型关键字同名（int/double/float/bool/char/string/void），
+	// 否则 fn double(...) 会因 token 类型不是 IDENT 而整体错位、级联报出一串语法错误
+	if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
 		stmt.Name = p.curTok.Value
 		p.nextToken()
 	}
@@ -1323,6 +1325,24 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 			if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_MULTIPLY {
 				typeOrName := ""
 				typeName := ""
+
+				// void(T...)R 函数指针类型参数：交由 parseTypeStringForDecl 完整解析，
+				// 否则手动单 token 解析会把 void 当参数名、( 当成分隔符导致级联错误。
+				if p.curTok.Type == lexer.TOKEN_TYPE_VOID && p.peekTok.Type == lexer.TOKEN_LPAREN {
+					paramType := p.parseTypeStringForDecl()
+					if p.curTok.Type == lexer.TOKEN_IDENT {
+						stmt.Params = append(stmt.Params, p.curTok.Value)
+						stmt.ParamTypes = append(stmt.ParamTypes, paramType)
+						p.nextToken()
+					} else {
+						stmt.Params = append(stmt.Params, "")
+						stmt.ParamTypes = append(stmt.ParamTypes, paramType)
+					}
+					if p.curTok.Type == lexer.TOKEN_COMMA {
+						p.nextToken()
+					}
+					continue
+				}
 
 				// 处理指针前缀 (*Type)
 				if p.curTok.Type == lexer.TOKEN_MULTIPLY {
@@ -2579,9 +2599,18 @@ func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 					typeStr.WriteString(")")
 					p.nextToken()
 				}
-				// 返回类型：仅 greedyReturn=true 且 ) 后跟类型起始 token 时吃 → 函数指针；否则数据指针
-				if greedyReturn && p.isIdentOrTypeToken(p.curTok.Type) {
-					typeStr.WriteString(p.parseTypeString())
+				// 返回类型：
+				// - greedyReturn=true（独立类型位置：type 别名/返回类型/泛型实参）：用 parseTypeString 吃完整类型
+				// - greedyReturn=false（声明上下文：变量/字段/参数）：仅当 ) 后是类型关键字
+				//   （不可能是变量名）时才吃，且只吃一个类型关键字 token（避免 parseTypeString 贪婪吃掉后面的变量名），
+				//   使 void(int,int)int f 解析为函数指针类型+变量名 f；普通 IDENT 仍不吃（无法区分返回类型与变量名，需用 type 别名）
+				if p.isIdentOrTypeToken(p.curTok.Type) && (greedyReturn || p.isTypeToken(p.curTok.Type)) {
+					if greedyReturn {
+						typeStr.WriteString(p.parseTypeString())
+					} else {
+						typeStr.WriteString(p.curTok.Value)
+						p.nextToken()
+					}
 				}
 				return typeStr.String()
 			}
@@ -3282,6 +3311,16 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			return p.parseIdentifierIterative()
 		}
 		p.error("adopt 后应跟 (表达式)")
+		return nil
+	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+		lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+		lexer.TOKEN_TYPE_VOID:
+		// 与类型关键字同名的函数调用（如 fn double(...) 定义后用 double(1) 调用）：
+		// 仅当后跟 ( 时按标识符调用解析，避免与类型位置上的关键字混淆
+		if p.peekTok.Type == lexer.TOKEN_LPAREN {
+			return p.parseIdentifierIterative()
+		}
+		p.error(fmt.Sprintf("意外的类型关键字 %q", p.curTok.Value))
 		return nil
 	case lexer.TOKEN_IDENT:
 		// 类型构造符语法：cstring("...") / str("...") 等价于 as<cstring>("...")
