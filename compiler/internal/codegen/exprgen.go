@@ -381,8 +381,52 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 	return e.Name
 }
 
+// compoundAssignToBinaryOp 将复合赋值运算符映射为对应的二元运算符
+// 返回空字符串表示不是复合赋值
+func compoundAssignToBinaryOp(op string) string {
+	switch op {
+	case "+=", "PLUS_ASSIGN":
+		return "+"
+	case "-=", "MINUS_ASSIGN":
+		return "-"
+	case "*=", "MULTIPLY_ASSIGN":
+		return "*"
+	case "/=", "DIVIDE_ASSIGN":
+		return "/"
+	case "%=", "MOD_ASSIGN":
+		return "%"
+	case "&=", "BITAND_ASSIGN":
+		return "&"
+	case "|=", "BITOR_ASSIGN":
+		return "|"
+	case "^=", "XOR_ASSIGN":
+		return "^"
+	case "<<=", "LSHIFT_ASSIGN":
+		return "<<"
+	case ">>=", "RSHIFT_ASSIGN":
+		return ">>"
+	}
+	return ""
+}
+
 // generateBinaryExpression 生成二元表达式代码
 func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression) string {
+	// 复合赋值转换：a += b → a = a + b
+	if op := compoundAssignToBinaryOp(e.Operator); op != "" {
+		converted := &ast.BinaryExpression{
+			Left:     e.Left,
+			Operator: "=",
+			Right: &ast.BinaryExpression{
+				Left:     e.Left,
+				Operator: op,
+				Right:    e.Right,
+				Pos:      e.Pos,
+			},
+			Pos: e.Pos,
+		}
+		return eg.generateBinaryExpression(converted)
+	}
+
 	// 特殊处理变量声明，如 int x = 10
 	if ident, ok := e.Left.(*ast.Identifier); ok {
 		if ident.Name == "int" || ident.Name == "i64" || ident.Name == "f64" ||
