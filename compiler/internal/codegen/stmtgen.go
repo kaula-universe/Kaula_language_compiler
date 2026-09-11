@@ -2017,7 +2017,19 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 	var b strings.Builder
 	indent := sg.codegen.indentString()
 	for name, idx := range lastUse {
-		if idx != stmtIndex {
+		// 别名感知：同一分配的多个别名变量必须整体延迟到组内所有成员
+		// 的最后使用点才能释放，否则先死的别名会触发对仍在使用的内存的
+		// use-after-free；且整组只通过代表释放一次，防止 double-free。
+		group := sg.codegen.GetVarAliasGroup(name)
+		effIdx := idx
+		if len(group) >= 2 {
+			for _, member := range group {
+				if mi, ok := lastUse[member]; ok && mi > effIdx {
+					effIdx = mi
+				}
+			}
+		}
+		if effIdx != stmtIndex {
 			continue
 		}
 		if freed[name] {
@@ -2029,6 +2041,19 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 		// 始终存活的变量不提前释放（如循环条件中使用的变量）
 		if alwaysLive != nil && alwaysLive[name] {
 			continue
+		}
+		if len(group) >= 2 {
+			rep := sg.selectAliasGroupRepresentative(group)
+			if rep != name {
+				freed[name] = true
+				// 代表已逃逸/promote/extern 来源时，整组所有权已移出或不透明，
+				// 标记成员以抑制 return/scope 回收路径的重复释放
+				if sg.codegen.IsAssignEscaped(rep) || sg.codegen.IsPromoted(rep) ||
+					sg.codegen.GetVarOrigin(rep) == OriginExtern {
+					sg.codegen.MarkEarlyFreed(name)
+				}
+				continue
+			}
 		}
 		// 已逃逸或已 promote 的变量不提前释放（所有权已转移）
 		if sg.codegen.IsAssignEscaped(name) || sg.codegen.IsPromoted(name) {
@@ -2066,9 +2091,36 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 			b.WriteString("); /* structural: early free (liveness, kmm) */\n")
 			sg.codegen.MarkEarlyFreed(name)
 		}
+		// 代表释放后标记全组成员，防止 return/scope 回收路径重复释放别名
+		if len(group) >= 2 {
+			for _, member := range group {
+				if member != name {
+					sg.codegen.MarkEarlyFreed(member)
+					freed[member] = true
+				}
+			}
+		}
 		freed[name] = true
 	}
 	return b.String()
+}
+
+// selectAliasGroupRepresentative 为别名组选择释放代表：
+// 优先选择具有分配来源（kmm/libc_malloc）的成员，保证释放函数与分配方式匹配；
+// 无分配来源成员或多候选时按名称排序取第一个，确保生成代码确定性。
+func (sg *StatementGenerator) selectAliasGroupRepresentative(group []string) string {
+	members := make([]string, len(group))
+	copy(members, group)
+	sort.Strings(members)
+	rep := members[0]
+	for _, m := range members {
+		origin := sg.codegen.GetVarOrigin(m)
+		if origin == OriginKmm || origin == OriginLibcMalloc {
+			rep = m
+			break
+		}
+	}
+	return rep
 }
 
 // generateStmtsWithLiveness 生成语句序列，并在每个变量最后一次使用后插入提前释放。
@@ -2670,6 +2722,25 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 		if sg.codegen.IsEarlyFreed(name) {
 			continue
 		}
+		// 别名组去重：同一分配的多个别名只通过代表释放一次，
+		// 非代表成员跳过；代表被释放时已标记全组，防止跨路径重复释放
+		if group := sg.codegen.GetVarAliasGroup(name); len(group) >= 2 {
+			rep := sg.selectAliasGroupRepresentative(group)
+			if rep != name {
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip survivor_free for ")
+				b.WriteString(name)
+				b.WriteString(" (alias of ")
+				b.WriteString(rep)
+				b.WriteString(", freed once via representative) */\n")
+				continue
+			}
+			for _, member := range group {
+				if member != name {
+					sg.codegen.MarkEarlyFreed(member)
+				}
+			}
+		}
 		// 基础层：extern 来源变量跳过（不是 KMM 分配的，survivor_free 会触发 unowned-pointer abort）
 		if sg.codegen.IsExternOrigin(name) {
 			b.WriteString(indent)
@@ -2782,6 +2853,25 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 			// 已被 early free 的变量跳过（防止重复释放）
 			if sg.codegen.IsEarlyFreed(name) {
 				continue
+			}
+			// 别名组去重：同一分配的多个别名只通过代表释放一次，
+			// 非代表成员跳过；代表被释放时已标记全组，防止跨路径重复释放
+			if group := sg.codegen.GetVarAliasGroup(name); len(group) >= 2 {
+				rep := sg.selectAliasGroupRepresentative(group)
+				if rep != name {
+					b.WriteString(indent)
+					b.WriteString("/* structural: skip survivor_free on return for ")
+					b.WriteString(name)
+					b.WriteString(" (alias of ")
+					b.WriteString(rep)
+					b.WriteString(", freed once via representative) */\n")
+					continue
+				}
+				for _, member := range group {
+					if member != name {
+						sg.codegen.MarkEarlyFreed(member)
+					}
+				}
 			}
 			// 基础层：extern 来源变量跳过（不是 KMM 分配的）
 			if sg.codegen.IsExternOrigin(name) {
