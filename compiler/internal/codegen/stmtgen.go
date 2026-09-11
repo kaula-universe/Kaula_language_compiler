@@ -2714,6 +2714,14 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 	var b strings.Builder
 	indent := sg.codegen.indentString()
 	for _, name := range names {
+		// F8 修复：函数参数是借用指针，所有权属于调用方，不应在函数内释放
+		if sym := symbols[name]; sym != nil && sym.Scope == "parameter" {
+			b.WriteString(indent)
+			b.WriteString("/* structural: skip survivor_free for ")
+			b.WriteString(name)
+			b.WriteString(" (parameter, borrowed from caller) */\n")
+			continue
+		}
 		// 基础层：必须是 C 指针类型或 String 类型（kmm_v4_alloc_auto 返回指针，String 含 ptr 字段）
 		if !sg.isPointerTyped(name) && !sg.isStringTyped(name) {
 			continue
@@ -2848,6 +2856,14 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 			}
 			seen[name] = true
 			if name == excludeName {
+				continue
+			}
+			// F8 修复：函数参数是借用指针，所有权属于调用方，不应在 return 时释放
+			if sym := symbols[name]; sym != nil && sym.Scope == "parameter" {
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip survivor_free on return for ")
+				b.WriteString(name)
+				b.WriteString(" (parameter, borrowed from caller) */\n")
 				continue
 			}
 			// 已被 early free 的变量跳过（防止重复释放）

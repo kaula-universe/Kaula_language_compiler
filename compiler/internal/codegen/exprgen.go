@@ -1821,17 +1821,26 @@ func isFloatTypeToken(t string) bool {
 // 找不到类/字段时返回空串。
 // 支持 self.field、类变量.field 以及嵌套成员链 (a.b.c, a/b 均为类类型)。
 func (eg *ExpressionGenerator) memberFieldKaulaType(e *ast.MemberAccessExpression) string {
-	className := eg.memberObjectClassName(e.Object)
-	if className == "" {
+	typeName := eg.memberObjectClassName(e.Object)
+	if typeName == "" {
 		return ""
 	}
-	classStmt := eg.codegen.findClassStmt(className)
-	if classStmt == nil {
-		return ""
+	// 先查 class 字段
+	if classStmt := eg.codegen.findClassStmt(typeName); classStmt != nil {
+		for _, f := range classStmt.Fields {
+			if f != nil && f.Name == e.Member {
+				return f.Type
+			}
+		}
 	}
-	for _, f := range classStmt.Fields {
-		if f != nil && f.Name == e.Member {
-			return f.Type
+	// 再查 struct 字段（F7 修复：println(a.owner) 等成员访问类型推断）
+	if prog := eg.codegen.getProgram(); prog != nil {
+		if structStmt := prog.FindStruct(typeName); structStmt != nil {
+			for _, f := range structStmt.Fields {
+				if f != nil && f.Name == e.Member {
+					return f.Type
+				}
+			}
 		}
 	}
 	return ""
@@ -1901,6 +1910,16 @@ func (eg *ExpressionGenerator) stdlibMemberFunctionSig(e *ast.MemberAccessExpres
 // memberObjectClassName 推断成员访问对象表达式的类名。
 // 找不到已定义的类时返回空串。
 func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string {
+	// 辅助函数：检查类型名是 class 还是 struct，是则返回
+	isKnownType := func(name string) string {
+		if eg.codegen.findClassStmt(name) != nil {
+			return name
+		}
+		if prog := eg.codegen.getProgram(); prog != nil && prog.FindStruct(name) != nil {
+			return name
+		}
+		return ""
+	}
 	switch e := obj.(type) {
 	case *ast.Identifier:
 		if e.Name == "self" {
@@ -1909,24 +1928,24 @@ func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string 
 			}
 			if sym := eg.codegen.currentScope.GetSymbol("self"); sym != nil {
 				name := strings.TrimSuffix(sym.Type, "*")
-				if eg.codegen.findClassStmt(name) != nil {
-					return name
+				if t := isKnownType(name); t != "" {
+					return t
 				}
 			}
 			return ""
 		}
 		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
 			name := strings.TrimSuffix(sym.Type, "*")
-			if eg.codegen.findClassStmt(name) != nil {
-				return name
+			if t := isKnownType(name); t != "" {
+				return t
 			}
 		}
 	case *ast.MemberAccessExpression:
 		fieldType := eg.memberFieldKaulaType(e)
 		if fieldType != "" {
 			name := strings.TrimSuffix(fieldType, "*")
-			if eg.codegen.findClassStmt(name) != nil {
-				return name
+			if t := isKnownType(name); t != "" {
+				return t
 			}
 		}
 	}

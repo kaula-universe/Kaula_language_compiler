@@ -1070,7 +1070,7 @@ func main() {
 	parallelWg.Add(1)
 	go func() {
 		defer parallelWg.Done()
-		stdlibPath = findStdlib()
+		stdlibPath = findStdlib(cfg.StdlibPath)
 		stdlibConfig, _ = stdlib.LoadStdlibConfigWithPkglib(stdlibPath, cfg.PkglibPath)
 	}()
 
@@ -2342,7 +2342,16 @@ func (s *semaResult_t) HasErrors() bool {
 	return s.ErrorCollector.HasErrors()
 }
 
-func findStdlib() string {
+func findStdlib(overridePath string) string {
+	// 0. F3 修复：优先使用 --stdlib 命令行参数指定的路径
+	if overridePath != "" {
+		if _, err := os.Stat(overridePath); err == nil {
+			return overridePath
+		}
+		// 如果指定的路径不存在，打印警告但继续 fallback
+		fmt.Fprintf(os.Stderr, "[WARN] --stdlib 指定的路径不存在: %s，回退到自动查找\n", overridePath)
+	}
+
 	// 1. KAULA_HOME 环境变量
 	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
 		p := filepath.Join(envHome, "compiler", "stdlib.json")
@@ -2490,6 +2499,14 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	clangPath, err := exec.LookPath("clang")
 	if err != nil {
 		return fmt.Errorf("clang not found in PATH")
+	}
+
+	// ccache 集成：如果 ccache 可用，用它包装 clang 以缓存编译结果（大幅提升重复编译速度）
+	compilerCmd := clangPath
+	compilerPrefix := []string{}
+	if ccachePath, err := exec.LookPath("ccache"); err == nil {
+		compilerCmd = ccachePath
+		compilerPrefix = []string{clangPath}
 	}
 
 	// 查找 kaula.h 所在的目录（优先级：KAULA_HOME > 可执行文件路径 > 相对路径）
@@ -2831,7 +2848,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				compileCmd := exec.Command(clangPath, "-c", optLevel, cPath, "-o", objPath)
+				compileCmd := exec.Command(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...)
 				if runtime.GOOS == "windows" {
 					compileCmd.Args = append(compileCmd.Args, "-mstack-probe-size=2147483647")
 				}
@@ -2893,7 +2910,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 			}
 			if needsRebuild {
-				rsCmd := exec.Command(clangPath, "-c", optLevel, rsSrc, "-o", rsObj)
+				rsCmd := exec.Command(compilerCmd, append(compilerPrefix, "-c", optLevel, rsSrc, "-o", rsObj)...)
 				if runtime.GOOS == "windows" {
 					rsCmd.Args = append(rsCmd.Args, "-mstack-probe-size=2147483647")
 				}
@@ -3156,7 +3173,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		// elf 格式：clang 默认行为，无需额外参数
 	}
 
-	cmd := exec.Command(clangPath, clangArgs...)
+	// ccache 集成：使用 ccache 包装 clang（如果可用）
+	mainArgs := append(compilerPrefix, clangArgs...)
+	cmd := exec.Command(compilerCmd, mainArgs...)
 
 	// 通过 stdin pipe 将 C 代码传递给 clang（内存编译，避免磁盘 I/O）
 	cSource := cCodeInMemory
