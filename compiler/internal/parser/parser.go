@@ -1365,6 +1365,11 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 						typeName = typeOrName + "*"
 						typeOrName = ""
 						p.nextToken()
+					} else if p.curTok.Type == lexer.TOKEN_QUESTION {
+						// 检查后面是否跟着 ? (Type? 可空类型)
+						typeName = typeOrName + "?"
+						typeOrName = ""
+						p.nextToken()
 					}
 				}
 
@@ -1374,14 +1379,17 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 					if paramType == "" {
 						paramType = typeOrName
 					}
+					isNullable := strings.HasSuffix(paramType, "?")
 					stmt.Params = append(stmt.Params, p.curTok.Value)
 					stmt.ParamTypes = append(stmt.ParamTypes, paramType)
-					p.log("解析参数：%s (类型：%s)", p.curTok.Value, paramType)
+					stmt.ParamNullables = append(stmt.ParamNullables, isNullable)
+					p.log("解析参数：%s (类型：%s, 可空：%v)", p.curTok.Value, paramType, isNullable)
 					p.nextToken()
 				} else if typeOrName != "" {
 					// typeOrName 就是名称（无类型）
 					stmt.Params = append(stmt.Params, typeOrName)
 					stmt.ParamTypes = append(stmt.ParamTypes, "")
+					stmt.ParamNullables = append(stmt.ParamNullables, false)
 					p.log("解析参数：%s (无类型)", typeOrName)
 				}
 			}

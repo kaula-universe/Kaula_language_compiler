@@ -719,6 +719,7 @@ type FunctionStatement struct {
 	TypeParams  []*TypeParameter // 泛型类型参数
 	Params      []string         // 参数名称列表
 	ParamTypes  []string         // 参数类型列表
+	ParamNullables []bool        // 参数可空标记列表（与 ParamTypes 下标对应）
 	Body        []Statement
 	AsmBody     string // asm 函数的原始函数体内容
 	ReturnType  string
