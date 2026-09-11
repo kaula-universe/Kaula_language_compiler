@@ -205,10 +205,15 @@ func DefaultConfig() *Config {
 }
 
 // ResolveOptLevel 根据编译模式确定优化级别
-// 优先级: --opt 手动指定 > --sor > --release > 默认 O2
+// 优先级: --opt 手动指定 > --sor > --release > --debug(O1) > 默认 O2
 func (cfg *Config) ResolveOptLevel(optOverride string) string {
 	level := "-O2"
 
+	// debug 模式默认 O1：减少 clang 优化时间，提升编译速度（TDD 红绿循环更流畅）
+	// release/sor 模式仍使用 O3
+	if cfg.Debug {
+		level = "-O1"
+	}
 	if cfg.SOR {
 		level = "-O3"
 	}

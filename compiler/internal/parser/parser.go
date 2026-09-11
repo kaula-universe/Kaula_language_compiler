@@ -2685,6 +2685,31 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 		return nil
 	}
 
+	// F4 修复：检测 C 风格字段语法 "type name;"（如 "i64 id;"），
+	// Kaula 使用 "name: type" 语法。当第一个 token 是类型关键字且第二个是 IDENT 时，
+	// 明确报错提示，避免静默跳过导致后续解析混乱（pub fn 导出神秘失效等）。
+	isTypeKeyword := false
+	switch p.curTok.Value {
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+		"int", "int8", "int16", "int32", "int64",
+		"f32", "f64", "float", "float32", "float64", "double",
+		"bool", "char", "string", "str", "void", "byte":
+		isTypeKeyword = true
+	}
+	if isTypeKeyword && p.peekTok.Type == lexer.TOKEN_IDENT {
+		p.error(fmt.Sprintf(
+			"C-style field syntax '%s %s' is not allowed; Kaula uses 'name: type' syntax, e.g. '%s: %s'",
+			p.curTok.Value, p.peekTok.Value, p.peekTok.Value, p.curTok.Value))
+		p.memberParseFailed = true
+		// 跳过 type name; 三个 token 以恢复
+		p.nextToken() // type
+		p.nextToken() // name
+		if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+			p.nextToken()
+		}
+		return nil
+	}
+
 	savedCurTok := p.curTok
 	savedPeekTok := p.peekTok
 
