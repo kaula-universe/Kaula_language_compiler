@@ -494,6 +494,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	shouldUseKMM := !stmt.NoKMM && !stmt.Inline
 	// 静态分析：在函数体生成前运行全部6个pass
 	analysisResult := fg.codegen.RunStaticAnalysis(stmt.Name, stmt.Body, stmt.Params, stmt.ParamTypes)
+	// 将分析结果暴露给语句生成器（liveness 提前释放/回收路径的别名感知）
+	prevFuncAnalysis := fg.codegen.currentFuncAnalysis
+	fg.codegen.currentFuncAnalysis = analysisResult
+	defer func() {
+		fg.codegen.currentFuncAnalysis = prevFuncAnalysis
+	}()
 	if shouldUseKMM {
 		// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 		// 跨函数分析：结合函数签名判断是否需要 KMM
@@ -773,6 +779,15 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 
 	// main 始终返回 int，设置返回类型供 return 语句生成使用
 	fg.codegen.currentFunctionReturnType = "int"
+
+	// 静态分析：与普通函数路径保持一致，暴露别名组给回收路径，
+	// 防止 main 中别名变量被重复释放（double-free）
+	mainAnalysis := fg.codegen.RunStaticAnalysis(stmt.Name, stmt.Body, stmt.Params, stmt.ParamTypes)
+	prevFuncAnalysis := fg.codegen.currentFuncAnalysis
+	fg.codegen.currentFuncAnalysis = mainAnalysis
+	defer func() {
+		fg.codegen.currentFuncAnalysis = prevFuncAnalysis
+	}()
 
 	funcName := "main"
 	if fg.codegen.config != nil && fg.codegen.config.Freestanding {

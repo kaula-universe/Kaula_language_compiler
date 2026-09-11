@@ -375,6 +375,22 @@ func (r *StaticAnalysisResult) GetAliasGroup(varName string) []string {
 	return []string{varName}
 }
 
+// GetVarAliasGroup 返回当前函数中变量所在的多成员别名组。
+// 无分析结果、变量不在任何组、或组内只有单个成员时返回 nil
+// （调用方按独立变量处理）。用于释放路径的别名感知：
+// 同一分配的多个别名必须整体延迟到最后使用点、且只释放一次。
+func (cg *CodeGenerator) GetVarAliasGroup(varName string) []string {
+	if cg.currentFuncAnalysis == nil {
+		return nil
+	}
+	for _, group := range cg.currentFuncAnalysis.AliasGroups {
+		if len(group) >= 2 && containsStr(group, varName) {
+			return group
+		}
+	}
+	return nil
+}
+
 // ============================================================================
 // Pass 4: 结构体字段 origin 追踪
 // ============================================================================
