@@ -3313,6 +3313,22 @@ func printUsage(exe string) {
 	fmt.Printf("  kaulac pkg fetch                   强制联网拉取所有项目依赖\n")
 	fmt.Printf("  kaulac pkg update [name]           更新依赖到最新版本（全部或指定包）\n")
 	fmt.Printf("  kaulac pkg lock                    显示 kaula.lock 锁状态\n")
+
+	// F2 修复：补充语言语法文档，特别是 pub/export 的区别
+	fmt.Printf("\n语言语法 (Language Syntax):\n")
+	fmt.Printf("  变量声明: <type> <name> = <value>          例: i64 x = 42\n")
+	fmt.Printf("  函数声明: fn <name>(<params>) <ret> { }    例: fn add(a: i64, b: i64) i64\n")
+	fmt.Printf("  结构体:   struct <name> { <field>: <type> } 例: struct Point { x: f64, y: f64 }\n")
+	fmt.Printf("  类:       class <name> { ... }\n")
+	fmt.Printf("  导入:     import <module>                  例: import std.io\n")
+	fmt.Printf("\n可见性修饰符 (Visibility):\n")
+	fmt.Printf("  pub     模块级可见性：跨文件/跨模块可调用（Kaula 内部可见性）\n")
+	fmt.Printf("          用法: pub fn name() { ... } / pub struct Name { ... }\n")
+	fmt.Printf("  export  C 级 FFI 导出：生成可被 C 代码直接调用的符号\n")
+	fmt.Printf("          用法: export fn name() { ... }（自动包含 pub 语义）\n")
+	fmt.Printf("          也支持裸名转发: export <name>（导出已声明或导入的符号）\n")
+	fmt.Printf("  区别:   pub 仅控制 Kaula 模块间可见性；export 额外生成 C ABI 导出符号\n")
+	fmt.Printf("          跨文件调用 Kaula 函数用 pub；需要 C 互操作时用 export\n")
 }
 
 // ensureLibrary 按需确保库：force 为 true 或归档缺失/源码更新时重建，

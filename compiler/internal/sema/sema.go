@@ -356,14 +356,15 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 		}
 	}
 
-	// 检查 SOR 函数是否使用了 SOR 原语
-	// 全局 SOR 模式下所有函数都必须使用 SOR 原语，或单独标注 #[sor] 的函数也必须使用
-	if sa.isFunctionSOR() {
+	// F10 修复：SOR 原语检查改为仅对显式 #[sor] 注解的函数发出警告
+	// 全局 --sor 模式下普通函数不强制要求使用原语，SOR 分析器自动处理
+	// 显式 #[sor] 注解的函数如果未使用原语，仅警告（提示用户可能忘记）
+	if stmt.SOREnabled && !sa.sorGlobalEnabled {
 		if !sa.hasSORPrimitives(stmt.Body) {
-			sa.errorCollector.AddSemanticError(
-				fmt.Sprintf("函数 '%s' 在 SOR 模式下未使用任何 SOR 原语 (yield/release/extract)", stmt.Name),
+			sa.errorCollector.AddWarning(
+				fmt.Sprintf("函数 '%s' 标注了 #[sor] 但未使用 SOR 原语 (yield/release/extract)", stmt.Name),
 				stmt.Pos.Line, stmt.Pos.Column, "",
-				"在函数体内使用 yield/release/extract 原语，或使用 --no-sor 禁用 SOR 模式")
+				"#[sor] 注解会启用所有权分析，原语是可选的；如不需要可移除注解")
 		}
 	}
 
