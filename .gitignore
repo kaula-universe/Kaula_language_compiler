@@ -1,5 +1,6 @@
 # 编译器产物
 compiler/kaulac.exe
+compiler/version.json
 cache/
 !compiler/internal/cache/
 compiler/cache/
@@ -23,3 +24,7 @@ demo/*.exe
 
 # opencode 配置（本地 AI agent 配置）
 .opencode/
+
+# 日志和临时输出
+*.log
+*.txt

@@ -22,8 +22,8 @@
 // 字符串处理
 #include "string/string.h"
 
-// 国际化和多语言支持
-#include "i18n/i18n.h"
+// 字符编码转换
+#include "encoding/encoding.h"
 
 // 格式化库
 #include "format/format.h"
@@ -46,9 +46,6 @@
 
 // Web服务
 #include "web/web.h"
-
-// GUI
-#include "gui/gui.h"
 
 // 错误处理
 #include "error/error.h"

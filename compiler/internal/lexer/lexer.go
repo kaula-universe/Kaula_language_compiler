@@ -61,6 +61,7 @@ const (
 	TOKEN_EXTERN
 	TOKEN_STATIC
 	TOKEN_CONST
+	TOKEN_ADOPT
 	// 类型关键字
 	TOKEN_TYPE_INT
 	TOKEN_TYPE_FLOAT
@@ -559,6 +560,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_MATCH
 	case "extern":
 		tokenType = TOKEN_EXTERN
+	case "adopt":
+		tokenType = TOKEN_ADOPT
 	case "static":
 		tokenType = TOKEN_STATIC
 	case "const":

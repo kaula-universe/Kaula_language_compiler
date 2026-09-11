@@ -20,8 +20,8 @@ extern _estack: u64
 
 ```kaula
 extern fn printf(fmt: *u8, ...) -> i32
-extern fn memset(dst: *u8, c: i32, n: usize) -> *u8
-extern fn malloc(size: usize) -> void()
+extern fn memset(dst: *u8, c: i32, n: Size) -> *u8
+extern fn malloc(size: Size) -> void()
 extern fn free(ptr: void()) void
 ```
 
@@ -49,8 +49,8 @@ Kaula 不允许出现裸 `void*`，所有 FFI 边界上的类型擦除指针必�
 | `*void()` | `void**` | 指向透明指针的指针 |
 | `void(void())void` | `void (*)(void*)` | 接受透明指针参数的回调函数 |
 | `void(void())void()` | `void* (*)(void*)` | 接受并返回透明指针的回调函数 |
-| `void(const void(), const void())cint` | `int (*)(const void*, const void*)` | 比较函数（`cint` = C 的 `int`） |
-| `void(void(), size_t)void` | `void (*)(void*, size_t)` | 接受指针+大小的回调函数 |
+| `void(const void(), const void())CInt` | `int (*)(const void*, const void*)` | 比较函数（`CInt` = 套用 C 的 `int`） |
+| `void(void(), Size)void` | `void (*)(void*, size_t)` | 接受指针+大小的回调函数 |
 | `void(const GraphNode*, i64, void())void` | `void (*)(const GraphNode*, int64_t, void*)` | 混合普通类型与透明指针的回调 |
 
 ### 快速记忆法
@@ -61,7 +61,7 @@ Kaula 不允许出现裸 `void*`，所有 FFI 边界上的类型擦除指针必�
 C:    int  (*)(const void*, const void*)
        │       ╰─── 参数列表 ──────╯
        ╰── 返回
-Kaula: void(const void(), const void())cint
+Kaula: void(const void(), const void())CInt
        ╰固定前缀╯  ╰── 参数列表 ──────╯  ╰返回
 ```
 
@@ -69,19 +69,32 @@ Kaula: void(const void(), const void())cint
 
 ### 为什么禁裸强转 / 裸 `void*`
 
-1. **可读性**：看一眼 `void(void(), size_t)void` 就知道这是回调；`void*` 无法区分是数据指针、函数指针还是其他。
+1. **可读性**：看一眼 `void(void(), Size)void` 就知道这是回调；`void*` 无法区分是数据指针、函数指针还是其他。
 2. **类型安全**：使用 `cast<T>()` 或 `transmute<T>()` 显式转换时，编译器能识别来源与目标类型；裸 `void*` 强制转换（如 `(int)ptr`）无法追踪。
-3. **跨平台**：`cint` 明确表示 C 的 `int`（32 位），与 Kaula 默认的 `int`（`int64_t`）区分开，避免 ABI 不匹配。
+3. **跨平台**：`CInt` 明确表示 C 的 `int`（32 位），与 Kaula 默认的 `int`（`int64_t`）区分开，避免 ABI 不匹配。
 
-## `cint` 类型
+## 套用类型（adopt）：C 兼容类型的统一入口
 
-Kaula 的基本类型 `int` 固定为 64 位 (`int64_t`)。而 C 的 `int` 在大多数平台上是 32 位。**FFI 签名中凡涉及 C 的 `int` 返回/参数（例如比较函数、`qsort`、`printf` 返回值等）必须写成 `cint`**，编译器会将其映射为 C 的原生 `int`。
+Kaula 不再内置 C 兼容裸类型（如 `cint`、`size`、`cstring`）。所有与 C ABI 交互的平台相关类型通过 `adopt` 声明为套用类型：
+
+```kaula
+type Size = adopt size_t       // C 的 size_t，平台相关宽度
+type CInt = adopt int          // C 的 int，32 位
+type CStr = adopt const char*  // C 字符串
+```
+
+套用类型的核心特性：
+- **零成本**：C 侧即 `typedef size_t Size;`，无包装、无转换、无间接层
+- **类型安全**：`Size` 与 `int`、`CInt` 互不隐式转换，即使底层宽度相同
+- **adopt 右侧使用原始 C 类型语法**，不经过 Kaula 类型映射，以保留 C 原生语义
+
+Kaula 的基本类型 `int` 固定为 64 位 (`int64_t`)。而 C 的 `int` 在大多数平台上是 32 位。**FFI 签名中凡涉及 C 的 `int` 返回/参数必须写成 `CInt`**（套用类型），编译器会将其映射为 C 的原生 `int`。
 
 | Kaula | C | 说明 |
 |-------|---|------|
 | `int` | `int64_t` | Kaula 默认整数 |
 | `i32` | `int32_t` | 固定 32 位，ABI 可能与 C `int` 不同 |
-| `cint` | `int` | C 语言原生 int，跨平台 FFI 必须用它 |
+| `CInt` | `int` | 套用 C 语言原生 int，跨平台 FFI 必须用它 |
 
 ## 比较函数与 `qsort` 示例
 
@@ -95,10 +108,10 @@ void qsort(void *base, size_t nmemb, size_t size,
 在 Kaula 中写成：
 
 ```kaula
-extern fn qsort(void() base, size_t nmemb, size_t size,
-                void(const void(), const void())cint compar) void
+extern fn qsort(void() base, Size nmemb, Size size,
+                void(const void(), const void())CInt compar) void
 
-fn cmp_int(const void() a, const void() b) cint {
+fn cmp_int(const void() a, const void() b) CInt {
     i32 x = *(i32*)a
     i32 y = *(i32*)b
     if x < y { return -1 }
