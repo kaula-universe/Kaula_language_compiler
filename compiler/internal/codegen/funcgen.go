@@ -336,7 +336,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			}
 			paramType := "int64_t"
 			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-				if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false); ctype != "" {
+				isNullable := false
+				if i < len(stmt.ParamNullables) {
+					isNullable = stmt.ParamNullables[i]
+				}
+				if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable); ctype != "" {
 					paramType = ctype
 				}
 			}
@@ -437,8 +441,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		}
 		// 获取参数类型
 		paramType := "int64_t" // 默认类型
+		isNullable := false
 		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
+			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable)
 		}
 		// 函数指针类型参数：R (*)(args) name → R (*name)(args)（C 语法要求参数名在 (*) 中间）
 		if strings.Contains(paramType, "(*)") {
@@ -446,7 +454,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		} else {
 			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
 		}
-		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], isNullable, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
 	// 嵌套函数：追加捕获参数（按引用：指针）
 	for i, capName := range captures {
@@ -995,7 +1003,11 @@ func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) st
 		}
 		paramType := "int64_t"
 		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
+			isNullable := false
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
+			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable)
 		}
 		builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
 	}

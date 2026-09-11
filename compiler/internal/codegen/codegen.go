@@ -1433,7 +1433,11 @@ static inline String string_concat_float(String s, double v) {
 				if i > 0 {
 					forwardDecls.WriteString(", ")
 				}
-				cType := cg.typeGenerator.convertType(pType, false)
+				isNullable := false
+				if i < len(fnStmt.ParamNullables) {
+					isNullable = fnStmt.ParamNullables[i]
+				}
+				cType := cg.typeGenerator.convertType(pType, isNullable)
 				if cType == "" {
 					cType = "void*"
 				}
@@ -1990,6 +1994,10 @@ func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatemen
 
 	// 复制参数名
 	copy(instFunc.Params, fnStmt.Params)
+
+	// 复制参数可空标记
+	instFunc.ParamNullables = make([]bool, len(fnStmt.ParamNullables))
+	copy(instFunc.ParamNullables, fnStmt.ParamNullables)
 
 	// 映射参数类型
 	instFunc.ParamTypes = make([]string, len(fnStmt.ParamTypes))
