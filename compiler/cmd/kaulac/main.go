@@ -2682,6 +2682,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	clangArgs := []string{"-x", "c", "-", "-o", outputFile, optLevel}
+	// 编译速度优化：使用管道而非临时文件，减少 I/O 开销
+	clangArgs = append(clangArgs, "-pipe")
 	// 调试符号：--debug 启用 DWARF 生成
 	if cfg != nil && cfg.Debug {
 		clangArgs = append(clangArgs, "-g")
@@ -2692,15 +2694,18 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	clangArgs = append(clangArgs, "-I", workDir)
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 	clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-	// Windows (MSVC ABI)：强制使用 lld 而非 MSVC link.exe。
-	// llvm-ar 产出的静态库归档含 COMDAT 节，MSVC link.exe 会报 LNK1143；
-	// lld 与 clang/llvm-ar 同源，对 LLVM 产出的 COFF 归档完全兼容。
+	// 链接器优化：Windows 强制 lld（MSVC ABI 兼容性）；Linux/macOS 优先 lld（更快），不可用时回退默认
 	if runtime.GOOS == "windows" {
 		clangArgs = append(clangArgs, "-fuse-ld=lld")
 		// Windows 目标下 clang 对栈帧 >4KB 的函数默认生成 __chkstk 调用，
 		// 而本编译器不链接 CRT，导致 ld.lld 报 undefined symbol: __chkstk。
 		// 把探测阈值设到极大值即可避免（程序为单线程、栈充足，安全）。
 		clangArgs = append(clangArgs, "-mstack-probe-size=2147483647")
+	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		// 检测 lld 是否可用，可用则使用（比默认 ld 快 2-5 倍）
+		if _, err := exec.LookPath("ld.lld"); err == nil {
+			clangArgs = append(clangArgs, "-fuse-ld=lld")
+		}
 	}
 	if poolCapacity > 0 {
 		clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
