@@ -5,6 +5,7 @@ import (
 	"kaula/internal/ast"
 	"kaula/internal/comptime"
 	"kaula/internal/stdlib"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -377,6 +378,15 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		return enumName + "_Kind_" + e.Name
 	}
 
+	// 用户自定义函数名作为值引用（回调/函数指针实参，如 start(server, handler)）：
+	// 与函数定义一致使用 K_ 前缀。若同名局部变量/参数遮蔽了函数名，则按变量原样输出。
+	if eg.codegen.isUserKaulaFunc(e.Name) {
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil && sym.Type != "function" {
+			return e.Name
+		}
+		return eg.codegen.UserFuncCName(e.Name)
+	}
+
 	return e.Name
 }
 
@@ -441,29 +451,58 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 
 	// 常量折叠：如果左右都是整数常量，直接在编译期计算
 	if isIntegerLiteral(left) && isIntegerLiteral(right) {
-		leftVal, _ := strconv.ParseInt(left, 10, 64)
-		rightVal, _ := strconv.ParseInt(right, 10, 64)
+		leftVal, errL := strconv.ParseInt(left, 10, 64)
+		rightVal, errR := strconv.ParseInt(right, 10, 64)
+		if errL != nil || errR != nil {
+			goto skip_constant_fold // 解析失败（如溢出），回退运行时计算
+		}
 
 		var result int64
 		var hasResult bool
 
+		// 溢出检测：溢出时回退运行时（C 整数溢出为 UB）
+		addOverflow := func(a, b int64) bool {
+			if b > 0 && a > math.MaxInt64-b {
+				return true
+			}
+			if b < 0 && a < math.MinInt64-b {
+				return true
+			}
+			return false
+		}
+		mulOverflow := func(a, b int64) bool {
+			if a == 0 || b == 0 {
+				return false
+			}
+			if a == math.MinInt64 || b == math.MinInt64 {
+				return true
+			}
+			return a*b/b != a
+		}
+
 		switch e.Operator {
 		case "PLUS":
-			result = leftVal + rightVal
-			hasResult = true
+			if !addOverflow(leftVal, rightVal) {
+				result = leftVal + rightVal
+				hasResult = true
+			}
 		case "MINUS":
-			result = leftVal - rightVal
-			hasResult = true
+			if !addOverflow(leftVal, -rightVal) {
+				result = leftVal - rightVal
+				hasResult = true
+			}
 		case "MULTIPLY":
-			result = leftVal * rightVal
-			hasResult = true
+			if !mulOverflow(leftVal, rightVal) {
+				result = leftVal * rightVal
+				hasResult = true
+			}
 		case "DIVIDE":
-			if rightVal != 0 {
+			if rightVal != 0 && !(leftVal == math.MinInt64 && rightVal == -1) {
 				result = leftVal / rightVal
 				hasResult = true
 			}
 		case "MOD":
-			if rightVal != 0 {
+			if rightVal != 0 && !(leftVal == math.MinInt64 && rightVal == -1) {
 				result = leftVal % rightVal
 				hasResult = true
 			}
@@ -516,11 +555,16 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 			}
 			hasResult = true
 		case "LSHIFT", "<<":
-			result = leftVal << uint(rightVal)
-			hasResult = true
+			// 位移量必须在 [0,63]，否则为 UB，回退运行时
+			if rightVal >= 0 && rightVal < 64 {
+				result = leftVal << uint(rightVal)
+				hasResult = true
+			}
 		case "RSHIFT", ">>":
-			result = leftVal >> uint(rightVal)
-			hasResult = true
+			if rightVal >= 0 && rightVal < 64 {
+				result = leftVal >> uint(rightVal)
+				hasResult = true
+			}
 		case "XOR", "^", "BITWISE_XOR", "CARET":
 			result = leftVal ^ rightVal
 			hasResult = true
@@ -530,6 +574,7 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 			return strconv.FormatInt(result, 10)
 		}
 	}
+skip_constant_fold:
 
 	// 生成正常的二元表达式（直接字符串拼接，避免 fmt.Sprintf 开销）
 	switch e.Operator {
@@ -538,8 +583,22 @@ func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression)
 	case "PLUS", "+":
 		return eg.generatePlusOperation(e.Left, e.Right)
 	case "MINUS", "-":
+		// 缺口4：整数溢出检查（debug 模式默认启用）
+		if eg.codegen.enableOverflowCheck && eg.isIntegerExpr(e.Left) && eg.isIntegerExpr(e.Right) {
+			if eg.isUnsignedIntegerExpr(e.Left) || eg.isUnsignedIntegerExpr(e.Right) {
+				return "kaula_sub_u64((uint64_t)(" + left + "), (uint64_t)(" + right + "))"
+			}
+			return "kaula_sub_i64((int64_t)(" + left + "), (int64_t)(" + right + "))"
+		}
 		return wrapIfNeeded(left, "-", "left") + " - " + wrapIfNeeded(right, "-", "right")
 	case "MULTIPLY", "*":
+		// 缺口4：整数溢出检查（debug 模式默认启用）
+		if eg.codegen.enableOverflowCheck && eg.isIntegerExpr(e.Left) && eg.isIntegerExpr(e.Right) {
+			if eg.isUnsignedIntegerExpr(e.Left) || eg.isUnsignedIntegerExpr(e.Right) {
+				return "kaula_mul_u64((uint64_t)(" + left + "), (uint64_t)(" + right + "))"
+			}
+			return "kaula_mul_i64((int64_t)(" + left + "), (int64_t)(" + right + "))"
+		}
 		return wrapIfNeeded(left, "*", "left") + " * " + wrapIfNeeded(right, "*", "right")
 	case "DIVIDE", "/":
 		return wrapIfNeeded(left, "/", "left") + " / " + wrapIfNeeded(right, "/", "right")
@@ -649,17 +708,40 @@ func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression)
 	}
 
 	// 原始整数加法
+	// 缺口4：整数溢出检查（debug 模式默认启用，零开销 __builtin_add_overflow）
+	if eg.codegen.enableOverflowCheck {
+		if eg.isUnsignedIntegerExpr(left) || eg.isUnsignedIntegerExpr(right) {
+			return "kaula_add_u64((uint64_t)(" + leftStr + "), (uint64_t)(" + rightStr + "))"
+		}
+		return "kaula_add_i64((int64_t)(" + leftStr + "), (int64_t)(" + rightStr + "))"
+	}
 	return leftStr + " + " + rightStr
 }
 
 // generateCallExpression 生成函数调用表达式代码（支持泛型调用）
 func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) string {
+	// adopt() / unwrap() 内置转换运算符：编译期 no-op，直接输出参数
+	if ident, ok := e.Function.(*ast.Identifier); ok && (ident.Name == "adopt" || ident.Name == "unwrap") {
+		if len(e.Args) > 0 {
+			return eg.GenerateExpression(e.Args[0])
+		}
+		return "/* adopt/unwrap: no argument */"
+	}
+
 	// 检查是否是方法调用，如 obj.method() 或 module.function()
 	if memberAccess, ok := e.Function.(*ast.MemberAccessExpression); ok {
 		return eg.generateMethodCall(memberAccess, e.Args)
 	}
 
-	funcName := eg.GenerateExpression(e.Function)
+	// 函数名：直接从 AST 提取 Kaula 名（语义查询用，如 captureArgsFor / stdlib 签名 / 泛型实例化），
+	// C 侧符号名在最终输出时通过 UserFuncCName 转换。此前用 GenerateExpression 会对用户函数返回
+	// K_ 前缀名，导致 nestedFuncCaptures 等以 Kaula 名为 key 的表查询失配，嵌套函数调用缺捕获实参。
+	funcName := ""
+	if ident, ok := e.Function.(*ast.Identifier); ok {
+		funcName = ident.Name
+	} else {
+		funcName = eg.GenerateExpression(e.Function)
+	}
 
 	// std_malloc 与 kmm_v4 系列是两个完全不同的分配器，禁止混用：
 	// - hosted 模式（默认）：std_malloc 保留为系统 malloc 包装（std_malloc/std_free 符号，
@@ -684,9 +766,54 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 
 	// 检查是否是类构造函数调用：ClassName(args) → ClassName_new(args)
 	// 同时处理无参的 ClassName() 情况（如果类有默认构造函数或无参构造）
-	if ident, ok := e.Function.(*ast.Identifier); ok && len(e.TypeArgs) == 0 {
-		if eg.codegen.IsClassType(ident.Name) {
-			ctorFuncName := ident.Name + "_new"
+	// 泛型类/结构体：Box<int>(args) → Box_int_new(args)，先触发类型实例化
+	//（typedef 与构造器体经 InstantiateGenericType 生成，构造器体进入
+	// classImplCode 延迟段），调用点改用 mangled 实例名。
+	if ident, ok := e.Function.(*ast.Identifier); ok {
+		tg := eg.codegen.typeGenerator
+		// 泛型类型定义（struct/class <T>）在实例化前不进 structTypes/classTypes
+		// 注册表，此处直接查 AST 判定
+		isGenericTypeDef := false
+		if prog := eg.codegen.program; prog != nil {
+			if cs := prog.FindClass(ident.Name); cs != nil && cs.Generic {
+				isGenericTypeDef = true
+			}
+			if ss := prog.FindStruct(ident.Name); ss != nil && ss.Generic {
+				isGenericTypeDef = true
+			}
+		}
+		isCtorType := eg.codegen.IsClassType(ident.Name) ||
+			(tg != nil && tg.structTypes[ident.Name]) ||
+			isGenericTypeDef
+		if isCtorType {
+			ctorTypeName := ident.Name
+			if len(e.TypeArgs) > 0 {
+				if _, err := eg.codegen.InstantiateGenericType(ident.Name, e.TypeArgs, e.Pos.Line); err != nil {
+					return "/* generic type ctor error: " + err.Error() + " */ " + ident.Name + "_new()"
+				}
+				ctorTypeName = MangleGenericTypeName(ident.Name, e.TypeArgs)
+			}
+			// 值语义 struct（非 class）：不生成 _new（其返回指针与值语义冲突），
+			// 改为 C 复合字面量按字段位置初始化：(K_X){ .f1 = a1, ... }
+			if eg.codegen.program != nil {
+				ss := eg.codegen.program.FindStruct(ident.Name)
+				isValueStruct := ss != nil && eg.codegen.program.FindClass(ident.Name) == nil
+				if isValueStruct {
+					cName := kaulaStructTag(ctorTypeName)
+					parts := make([]string, 0, len(e.Args))
+					for i, arg := range e.Args {
+						if i >= len(ss.Fields) {
+							break
+						}
+						parts = append(parts, fmt.Sprintf(".%s = %s", ss.Fields[i].Name, eg.GenerateExpression(arg)))
+					}
+					if len(parts) == 0 {
+						return "(" + cName + "){0}"
+					}
+					return "(" + cName + "){ " + strings.Join(parts, ", ") + " }"
+				}
+			}
+			ctorFuncName := ctorTypeName + "_new"
 			if len(e.Args) == 0 {
 				return ctorFuncName + "()"
 			}
@@ -701,15 +828,17 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	// 通用泛型适配：如果存在类型参数，则触发实例化
 	if len(e.TypeArgs) > 0 {
 		// 触发泛型实例化（实例化代码写入 genericFuncCode 缓冲区，最终前置注入）
-		_, _ = eg.codegen.InstantiateGeneric(funcName, e.TypeArgs, e.Pos.Line)
+		if _, instErr := eg.codegen.InstantiateGeneric(funcName, e.TypeArgs, e.Pos.Line); instErr != nil {
+			eg.codegen.error(fmt.Sprintf("泛型实例化失败: %v", instErr))
+		}
 		// 无论首次实例化还是已缓存，调用点都使用 mangled 名称
 		funcName = MangleGenericName(funcName, e.TypeArgs)
 	}
 
-	// 避免与C标准库宏冲突（如 max, min）
-	if funcName == "max" || funcName == "min" || funcName == "abs" {
-		funcName = "kaula_" + funcName
-	}
+	// 用户自定义函数在 C 侧统一加 K_ 前缀（避开 C 保留字 int/double 等与 C 库符号）。
+	// 语义查询（捕获参数、stdlib 签名、println 判断）仍用原始 Kaula 名 funcName，
+	// 只有最终拼 C 输出时才用 cFuncName，避免查询表失配。
+	cFuncName := eg.codegen.UserFuncCName(funcName)
 
 	// 追踪第三方库的使用
 	if eg.codegen.stdlibConfig != nil {
@@ -733,16 +862,16 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		// 无参数调用
 		capArgs := eg.codegen.captureArgsFor(funcName)
 		if capArgs != "" {
-			return funcName + "(" + capArgs + ")"
+			return cFuncName + "(" + capArgs + ")"
 		}
-		return funcName + "()"
+		return cFuncName + "()"
 	} else {
 		// 尝试查找 stdlib 函数签名以生成类型正确的参数
 		var sig *stdlib.Function
 		if eg.codegen.stdlibConfig != nil {
 			sig = eg.codegen.stdlibConfig.GetAnyFunctionSignature(funcName)
 		}
-		code := funcName + "(" + eg.generateStdlibArgs(e.Args, sig)
+		code := cFuncName + "(" + eg.generateStdlibArgs(e.Args, sig)
 		if capArgs := eg.codegen.captureArgsFor(funcName); capArgs != "" {
 			code += ", " + capArgs
 		}
@@ -1525,8 +1654,43 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.CallExpression:
 		if ident, ok := e.Function.(*ast.Identifier); ok {
 			funcName := ident.Name
-			// 优先查本地符号表：extern fn 声明以返回类型注册符号，
-			// 本地函数定义同理；查不到再查 stdlib
+			// 用户定义的顶层/类方法函数：program 中直查返回类型。
+			// （此前仅查本地符号表与 stdlib，普通 Kaula 函数调用返回
+			//   string 时推断失败 fallback 到 %d，println 打印出结构体垃圾）
+			if prog := eg.codegen.getProgram(); prog != nil {
+				if fn := prog.FindFunction(funcName); fn != nil && fn.ReturnType != "" {
+					switch fn.ReturnType {
+					case "string", "str":
+						return "s"
+					case "float", "float64", "float32", "f32", "f64", "double", "single":
+						return "f"
+					case "bool":
+						return "d"
+					}
+					t := strings.ToLower(fn.ReturnType)
+					if normalizePtrType(t) == "char*" || t == "cstring" {
+						return "cstr"
+					}
+				}
+			}
+			// 跨文件 import 的 pub/export 函数：定义不在本文件 AST 中，
+			// 从预收集的返回类型映射回查
+			if rt, ok := eg.codegen.localImportReturns[funcName]; ok && rt != "" {
+				switch rt {
+				case "string", "str":
+					return "s"
+				case "float", "float64", "float32", "f32", "f64", "double", "single":
+					return "f"
+				case "bool":
+					return "d"
+				}
+				t := strings.ToLower(rt)
+				if normalizePtrType(t) == "char*" || t == "cstring" {
+					return "cstr"
+				}
+			}
+			// 先查本地函数符号表/extern fn 声明以获得返回类型注解；
+			// 本地函数找不到再查 stdlib
 			if sym := eg.codegen.currentScope.GetSymbol(funcName); sym != nil {
 				switch sym.Type {
 				case "string", "str":
@@ -1657,17 +1821,26 @@ func isFloatTypeToken(t string) bool {
 // 找不到类/字段时返回空串。
 // 支持 self.field、类变量.field 以及嵌套成员链 (a.b.c, a/b 均为类类型)。
 func (eg *ExpressionGenerator) memberFieldKaulaType(e *ast.MemberAccessExpression) string {
-	className := eg.memberObjectClassName(e.Object)
-	if className == "" {
+	typeName := eg.memberObjectClassName(e.Object)
+	if typeName == "" {
 		return ""
 	}
-	classStmt := eg.codegen.findClassStmt(className)
-	if classStmt == nil {
-		return ""
+	// 先查 class 字段
+	if classStmt := eg.codegen.findClassStmt(typeName); classStmt != nil {
+		for _, f := range classStmt.Fields {
+			if f != nil && f.Name == e.Member {
+				return f.Type
+			}
+		}
 	}
-	for _, f := range classStmt.Fields {
-		if f != nil && f.Name == e.Member {
-			return f.Type
+	// 再查 struct 字段（F7 修复：println(a.owner) 等成员访问类型推断）
+	if prog := eg.codegen.getProgram(); prog != nil {
+		if structStmt := prog.FindStruct(typeName); structStmt != nil {
+			for _, f := range structStmt.Fields {
+				if f != nil && f.Name == e.Member {
+					return f.Type
+				}
+			}
 		}
 	}
 	return ""
@@ -1737,6 +1910,16 @@ func (eg *ExpressionGenerator) stdlibMemberFunctionSig(e *ast.MemberAccessExpres
 // memberObjectClassName 推断成员访问对象表达式的类名。
 // 找不到已定义的类时返回空串。
 func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string {
+	// 辅助函数：检查类型名是 class 还是 struct，是则返回
+	isKnownType := func(name string) string {
+		if eg.codegen.findClassStmt(name) != nil {
+			return name
+		}
+		if prog := eg.codegen.getProgram(); prog != nil && prog.FindStruct(name) != nil {
+			return name
+		}
+		return ""
+	}
 	switch e := obj.(type) {
 	case *ast.Identifier:
 		if e.Name == "self" {
@@ -1745,24 +1928,24 @@ func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string 
 			}
 			if sym := eg.codegen.currentScope.GetSymbol("self"); sym != nil {
 				name := strings.TrimSuffix(sym.Type, "*")
-				if eg.codegen.findClassStmt(name) != nil {
-					return name
+				if t := isKnownType(name); t != "" {
+					return t
 				}
 			}
 			return ""
 		}
 		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
 			name := strings.TrimSuffix(sym.Type, "*")
-			if eg.codegen.findClassStmt(name) != nil {
-				return name
+			if t := isKnownType(name); t != "" {
+				return t
 			}
 		}
 	case *ast.MemberAccessExpression:
 		fieldType := eg.memberFieldKaulaType(e)
 		if fieldType != "" {
 			name := strings.TrimSuffix(fieldType, "*")
-			if eg.codegen.findClassStmt(name) != nil {
-				return name
+			if t := isKnownType(name); t != "" {
+				return t
 			}
 		}
 	}
@@ -1917,6 +2100,78 @@ func (eg *ExpressionGenerator) isObjectTyped(expr ast.Expression) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// isIntegerExpr 判断表达式是否为整数类型（用于溢出检查）。
+// 整数类型：int、i8/i16/i32/i64、u8/u16/u32/u64、整数字面量、布尔值。
+func (eg *ExpressionGenerator) isIntegerExpr(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral, *ast.BooleanLiteral:
+		return true
+	case *ast.Identifier:
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil {
+			return isIntegerTypeName(sym.Type)
+		}
+		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
+			return isIntegerTypeName(sym.Type)
+		}
+	case *ast.BinaryExpression:
+		// 算术运算结果为整数（如果操作数都是整数）
+		if e.Operator == "PLUS" || e.Operator == "+" || e.Operator == "MINUS" || e.Operator == "-" ||
+			e.Operator == "MULTIPLY" || e.Operator == "*" || e.Operator == "DIVIDE" || e.Operator == "/" ||
+			e.Operator == "MOD" || e.Operator == "%" {
+			return eg.isIntegerExpr(e.Left) && eg.isIntegerExpr(e.Right)
+		}
+		// 比较/逻辑运算结果为布尔值（整数）
+		return true
+	case *ast.CallExpression:
+		// 函数调用保守认为可能是整数
+		return true
+	}
+	return false
+}
+
+// isUnsignedIntegerExpr 判断表达式是否为无符号整数类型（用于选择 u64 版本溢出检查）。
+func (eg *ExpressionGenerator) isUnsignedIntegerExpr(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		if sym := eg.codegen.GetSymbol(e.Name); sym != nil {
+			return isUnsignedTypeName(sym.Type)
+		}
+		if sym := eg.codegen.currentScope.GetSymbol(e.Name); sym != nil {
+			return isUnsignedTypeName(sym.Type)
+		}
+	case *ast.BinaryExpression:
+		// 算术运算：如果任一操作数是无符号，结果为无符号
+		if e.Operator == "PLUS" || e.Operator == "+" || e.Operator == "MINUS" || e.Operator == "-" ||
+			e.Operator == "MULTIPLY" || e.Operator == "*" {
+			return eg.isUnsignedIntegerExpr(e.Left) || eg.isUnsignedIntegerExpr(e.Right)
+		}
+	}
+	return false
+}
+
+// isIntegerTypeName 判断类型名是否为整数类型
+func isIntegerTypeName(typeName string) bool {
+	switch typeName {
+	case "int", "int8", "int16", "int32", "int64",
+		"i8", "i16", "i32", "i64",
+		"uint", "uint8", "uint16", "uint32", "uint64",
+		"u8", "u16", "u32", "u64",
+		"bool", "char":
+		return true
+	}
+	return false
+}
+
+// isUnsignedTypeName 判断类型名是否为无符号整数类型
+func isUnsignedTypeName(typeName string) bool {
+	switch typeName {
+	case "uint", "uint8", "uint16", "uint32", "uint64",
+		"u8", "u16", "u32", "u64":
+		return true
 	}
 	return false
 }
@@ -2103,6 +2358,20 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 			typeStr := sym.Type
 			if strings.HasSuffix(typeStr, "*") || strings.HasPrefix(typeStr, "*") {
 				isPtr = true
+			}
+			// 类型别名可能包裹指针（type P = *Node）：符号类型记录的是别名 PNode，
+			// 需解析别名底层类型，若底层是指针则同样按 -> 访问。
+			if !isPtr {
+				if ta := eg.codegen.program.FindTypeAlias(typeStr); ta != nil {
+					ut := ta.UnderlyingType
+					if ta.IsAdopt && ta.AdoptUnderlying != "" {
+						ut = ta.AdoptUnderlying
+					}
+					ut = strings.TrimSpace(ut)
+					if strings.HasPrefix(ut, "*") || strings.HasSuffix(ut, "*") {
+						isPtr = true
+					}
+				}
 			}
 			// 类类型变量始终按指针传递和存储（K_ClassName*），
 			// 即使符号表中类型名未显式带 *，也视为指针访问。
@@ -2855,10 +3124,20 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 						}
 					}
 					bindType := "auto"
+					bindKaulaType := ""
 					if variant != nil && i < len(variant.FieldTypes) {
 						bindType = eg.matchBindingCType(variant, i, enumName, e.Target)
+						// 同步注册到 codegen 符号表：println/inferType 等依赖
+						// 标识符的类型记录决定格式化行为（否则 String 绑定
+						// 会 fallback 到 %d 打印出指针/长度垃圾）
+						if i < len(variant.FieldTypes) {
+							bindKaulaType = variant.FieldTypes[i]
+						}
 					}
 					code.WriteString(fmt.Sprintf("        %s %s = %s;\n", bindType, binding, fieldAccess))
+					if binding != "_" && bindKaulaType != "" {
+						eg.codegen.AddSymbol(binding, bindKaulaType, false, "local", e.Pos.Line, e.Pos.Column)
+					}
 				}
 			}
 

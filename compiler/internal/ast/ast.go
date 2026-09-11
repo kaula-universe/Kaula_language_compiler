@@ -130,6 +130,16 @@ func (p *Program) FindEnum(name string) *EnumStatement {
 	return nil
 }
 
+// FindTypeAlias 查找类型别名声明（type Name = ...）
+func (p *Program) FindTypeAlias(name string) *TypeAliasStatement {
+	for _, stmt := range p.Statements {
+		if ta, ok := stmt.(*TypeAliasStatement); ok && ta.Name == name {
+			return ta
+		}
+	}
+	return nil
+}
+
 // Traverse 遍历所有节点
 func (p *Program) Traverse(visitor func(Node)) {
 	visitor(p)
@@ -709,6 +719,7 @@ type FunctionStatement struct {
 	TypeParams  []*TypeParameter // 泛型类型参数
 	Params      []string         // 参数名称列表
 	ParamTypes  []string         // 参数类型列表
+	ParamNullables []bool        // 参数可空标记列表（与 ParamTypes 下标对应）
 	Body        []Statement
 	AsmBody     string // asm 函数的原始函数体内容
 	ReturnType  string
@@ -1851,6 +1862,9 @@ type TypeAliasStatement struct {
 	IsFuncType     bool             // 是否是函数类型
 	FuncReturnType string           // 函数返回类型（仅用于函数类型）
 	FuncParams     []*TypeFuncParam // 函数参数列表（仅用于函数类型）
+	IsAdopt        bool             // 是否是套用类型（adopt 底层类型）
+	AdoptUnderlying string          // adopt 的底层类型表达式（如 "c::size_t"、"i64"），仅 IsAdopt 时有效
+	Attributes     []*Attribute     // 属性注解（#[transparent] 等）
 	Pos            Position
 }
 

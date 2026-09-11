@@ -49,6 +49,9 @@ type SemanticAnalyzer struct {
 	usedFunctions      map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
 	libraryMode        bool                           // 库文件分析模式(跳过 unused-function 检查)
 	localModuleTypes   map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
+	adoptTypes         map[string]bool                // 套用类型名集合（adopt 声明的类型）
+	transparentAdopt   map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
+	adoptUnderlying    map[string]string              // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
 }
 
 // SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
@@ -152,6 +155,9 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		comptime:           nil,
 		importedModules:    make(map[string]bool),
 		arrayLens:          make(map[string]int),
+		adoptTypes:         make(map[string]bool),
+		transparentAdopt:   make(map[string]bool),
+		adoptUnderlying:    make(map[string]string),
 	}
 }
 
@@ -325,8 +331,12 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
 				paramType = stmt.ParamTypes[i]
 			}
+			isNullable := false
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
 			sa.checkVariableShadow(param, stmt.Pos.Line, stmt.Pos.Column)
-			sa.symbolTable.AddSymbol(param, paramType, false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+			sa.symbolTable.AddSymbol(param, paramType, isNullable, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 		}
 	}
 
@@ -346,14 +356,15 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 		}
 	}
 
-	// 检查 SOR 函数是否使用了 SOR 原语
-	// 全局 SOR 模式下所有函数都必须使用 SOR 原语，或单独标注 #[sor] 的函数也必须使用
-	if sa.isFunctionSOR() {
+	// F10 修复：SOR 原语检查改为仅对显式 #[sor] 注解的函数发出警告
+	// 全局 --sor 模式下普通函数不强制要求使用原语，SOR 分析器自动处理
+	// 显式 #[sor] 注解的函数如果未使用原语，仅警告（提示用户可能忘记）
+	if stmt.SOREnabled && !sa.sorGlobalEnabled {
 		if !sa.hasSORPrimitives(stmt.Body) {
-			sa.errorCollector.AddSemanticError(
-				fmt.Sprintf("函数 '%s' 在 SOR 模式下未使用任何 SOR 原语 (yield/release/extract)", stmt.Name),
+			sa.errorCollector.AddWarning(
+				fmt.Sprintf("函数 '%s' 标注了 #[sor] 但未使用 SOR 原语 (yield/release/extract)", stmt.Name),
 				stmt.Pos.Line, stmt.Pos.Column, "",
-				"在函数体内使用 yield/release/extract 原语，或使用 --no-sor 禁用 SOR 模式")
+				"#[sor] 注解会启用所有权分析，原语是可选的；如不需要可移除注解")
 		}
 	}
 
@@ -1449,6 +1460,8 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 					"布尔值只能用于布尔变量、布尔参数或比较表达式",
 				)
 			}
+			// 套用类型显式转换边界：禁止隐式 adopt/unwrap
+			sa.checkAdoptConversion(declType, stmt.Value, stmt.Pos, "变量初始化")
 		}
 	}
 
@@ -1489,6 +1502,30 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 // analyzeTypeAliasStatement 分析类型别名声明
 func (sa *SemanticAnalyzer) analyzeTypeAliasStatement(stmt *ast.TypeAliasStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, "type", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	if stmt.IsAdopt {
+		sa.adoptTypes[stmt.Name] = true
+		sa.adoptUnderlying[stmt.Name] = stmt.AdoptUnderlying
+		// #[transparent]：编译器验证底层为标量类型时，允许比较和算术
+		isTransparent := false
+		for _, attr := range stmt.Attributes {
+			if attr != nil && attr.Name == "transparent" {
+				isTransparent = true
+				break
+			}
+		}
+		if isTransparent {
+			if isScalarAdoptUnderlying(stmt.AdoptUnderlying) {
+				sa.transparentAdopt[stmt.Name] = true
+			} else {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 标记 #[transparent] 但底层类型 '%s' 不是标量，transparent 仅允许标量底层", stmt.Name, stmt.AdoptUnderlying),
+					stmt.Pos.Line, stmt.Pos.Column,
+					"adopt_transparent_non_scalar",
+					"#[transparent] 要求底层为数值标量类型（i8-i64/u8-u64/f32/f64 或 c:: 整数类型）；指针/结构体/字符串底层不可 transparent",
+				)
+			}
+		}
+	}
 }
 
 // analyzeExternStatement 分析 extern 外部符号/函数声明
@@ -1612,57 +1649,48 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 
 	// 基本类型
 	basicTypes := map[string]bool{
-		"int":     true,
-		"integer": true,
-		"i8":      true,
-		"i16":     true,
-		"i32":     true,
-		"i64":     true,
-		"int8":    true,
-		"int16":   true,
-		"int32":   true,
-		"int64":   true,
-		"u8":      true,
-		"u16":     true,
-		"u32":     true,
-		"u64":     true,
-		"uint8":   true,
-		"uint16":  true,
-		"uint32":  true,
-		"uint64":  true,
-		"uint":    true,
-		"uchar":   true,
-		"ushort":  true,
-		"ulong":   true,
-		"float":   true,
-		"f32":     true,
-		"single":  true,
-		"f64":     true,
-		"double":  true,
-		"real":    true,
-		"bool":    true,
-		"boolean": true,
-		"char":    true,
-		"byte":    true,
-		"sbyte":   true,
-		"string":  true,
-		"str":     true,
-		"cstring": true,
-		"void":    true,
-		"any":     true,
-		"long":    true,
-		"short":   true,
-		"size":    true,
-		"ssize":   true,
-		"intptr":  true,
-		"uintptr": true,
-		"File":    true, // std.io 的文件句柄类型（C FILE*）
-		"object":  true, // 动态对象类型（Object*）
+		"int":    true,
+		"i8":     true,
+		"i16":    true,
+		"i32":    true,
+		"i64":    true,
+		"int8":   true,
+		"int16":  true,
+		"int32":  true,
+		"int64":  true,
+		"u8":     true,
+		"u16":    true,
+		"u32":    true,
+		"u64":    true,
+		"uint8":  true,
+		"uint16": true,
+		"uint32": true,
+		"uint64": true,
+		"uint":   true,
+		"float":  true,
+		"f32":    true,
+		"f64":    true,
+		"double": true,
+		"bool":   true,
+		"char":   true,
+		"byte":   true,
+		"sbyte":  true,
+		"string": true,
+		"void":   true,
+		"any":    true,
+		"File":   true, // std.io 的文件句柄类型（C FILE*）
+		"object": true, // 动态对象类型（Object*）
 	}
 
 	// 检查是否是基本类型
 	if basicTypes[typeName] {
 		return true
+	}
+
+	// 检查是否是前缀指针类型（如 *u8）
+	if len(typeName) > 0 && typeName[0] == '*' {
+		baseType := typeName[1:]
+		return sa.isTypeValid(baseType)
 	}
 
 	// 检查是否是指针类型（如 int*）
@@ -1861,8 +1889,6 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 		sa.analyzeExpression(stmt.Condition)
 		// 条件类型检查: 只允许布尔表达式 (bool 变量/true/false 或比较/逻辑运算)
 		sa.validateCondition(stmt.Condition)
-		// 空指针安全：检测 if x != null 模式，标记 x 为已检查
-		sa.markNullCheckedInCondition(stmt.Condition)
 	}
 	// 空体警告 (clang -Wempty-body)
 	if len(stmt.Body) == 0 {
@@ -1872,10 +1898,22 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 			"如果条件不需要处理, 请删除整个 if 语句",
 		)
 	}
+
+	// ===== 路径敏感空安全 =====
+	// 1. 快照当前 NullChecked 状态
+	snap := sa.snapshotNullChecked()
+	// 2. 从条件中提取 then/else 分支应标记的变量
+	thenChecked, elseChecked := sa.extractNullConditions(stmt.Condition)
+	// 3. 应用 then 标记，分析 then 体，记录 then 结束时的状态
+	sa.applyNullChecked(thenChecked)
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
-	// 退出 if body 后，null checked 标记不再有效（简化实现：不清除，因为 else 分支可能也需要）
+	thenState := sa.collectNullChecked()
+	// 4. 恢复快照，应用 else 标记，分析 else 体，记录 else 结束时的状态
+	sa.restoreNullChecked(snap)
+	hasElse := len(stmt.Else) > 0
+	sa.applyNullChecked(elseChecked)
 	for _, elseStmt := range stmt.Else {
 		// else-if 嵌套: 作为链的一部分, 跳过独立检测
 		if nested, ok := elseStmt.(*ast.IfStatement); ok {
@@ -1886,6 +1924,36 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 			continue
 		}
 		sa.analyzeStatement(elseStmt)
+	}
+	elseState := sa.collectNullChecked()
+	// 5. 恢复快照，合并状态
+	//    - 提前返回优化：如果 then 分支以 return 结束，则 if 后的代码一定在 else 路径上，
+	//      无 else 时应用 else 标记，有 else 时直接用 elseState
+	//    - 否则：有 else 时取 then∩else（两个分支都标记才保留）；
+	//      无 else 时直接恢复快照（then 中的标记不保留，因为 else 路径可能不执行）
+	sa.restoreNullChecked(snap)
+	thenReturns := endsWithReturn(stmt.Body)
+	if thenReturns {
+		// then 分支以 return 结束，if 后一定在 else 路径上
+		if hasElse {
+			// 直接用 else 分支结束时的状态
+			for name := range elseState {
+				if sym := sa.symbolTable.GetSymbol(name); sym != nil && sym.Nullable {
+					sym.NullChecked = true
+				}
+			}
+		} else {
+			// 无 else 时应用条件的 else 标记（如 x == null 的 else 中 x 非空）
+			sa.applyNullChecked(elseChecked)
+		}
+	} else if hasElse {
+		for name := range thenState {
+			if elseState[name] {
+				if sym := sa.symbolTable.GetSymbol(name); sym != nil && sym.Nullable {
+					sym.NullChecked = true
+				}
+			}
+		}
 	}
 }
 
@@ -1977,6 +2045,141 @@ func (sa *SemanticAnalyzer) markNullCheckedInCondition(cond ast.Expression) {
 	}
 }
 
+// ===== 路径敏感空安全（Path-Sensitive Null Safety）=====
+// 核心思想：if/while 条件中的 null 检查只在对应分支内有效，
+// 分支结束后需要恢复状态；if-else 后取两个分支的交集。
+
+// nullCheckSnapshot 保存一组 Nullable 符号的 NullChecked 状态
+type nullCheckSnapshot map[string]bool
+
+// snapshotNullChecked 遍历所有作用域，保存所有 Nullable 符号的 NullChecked 状态
+func (sa *SemanticAnalyzer) snapshotNullChecked() nullCheckSnapshot {
+	snap := make(nullCheckSnapshot)
+	st := sa.symbolTable
+	for st != nil {
+		for name, sym := range st.GetAllSymbols() {
+			if sym.Nullable {
+				snap[name] = sym.NullChecked
+			}
+		}
+		st = st.GetParent()
+	}
+	return snap
+}
+
+// restoreNullChecked 恢复 NullChecked 状态到快照
+func (sa *SemanticAnalyzer) restoreNullChecked(snap nullCheckSnapshot) {
+	st := sa.symbolTable
+	for st != nil {
+		for name, sym := range st.GetAllSymbols() {
+			if sym.Nullable {
+				if val, ok := snap[name]; ok {
+					sym.NullChecked = val
+				} else {
+					sym.NullChecked = false
+				}
+			}
+		}
+		st = st.GetParent()
+	}
+}
+
+// extractNullConditions 从 if/while 条件中提取 null 检查信息。
+// 返回 thenChecked（条件为真时应标记为已检查的变量名）和
+// elseChecked（条件为假时应标记为已检查的变量名）。
+// 支持：x != null、x == null、&&、||、!、括号嵌套。
+func (sa *SemanticAnalyzer) extractNullConditions(cond ast.Expression) (thenChecked, elseChecked []string) {
+	if cond == nil {
+		return nil, nil
+	}
+	switch e := cond.(type) {
+	case *ast.BinaryExpression:
+		// x != null 或 null != x → then 中 x 已检查
+		if e.Operator == "!=" {
+			if ident, ok := e.Left.(*ast.Identifier); ok {
+				if right, ok := e.Right.(*ast.Identifier); ok && (right.Name == "null" || right.Name == "NULL") {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return []string{ident.Name}, nil
+					}
+				}
+			}
+			if left, ok := e.Left.(*ast.Identifier); ok && (left.Name == "null" || left.Name == "NULL") {
+				if ident, ok := e.Right.(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return []string{ident.Name}, nil
+					}
+				}
+			}
+		}
+		// x == null 或 null == x → else 中 x 已检查
+		if e.Operator == "==" {
+			if ident, ok := e.Left.(*ast.Identifier); ok {
+				if right, ok := e.Right.(*ast.Identifier); ok && (right.Name == "null" || right.Name == "NULL") {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return nil, []string{ident.Name}
+					}
+				}
+			}
+			if left, ok := e.Left.(*ast.Identifier); ok && (left.Name == "null" || left.Name == "NULL") {
+				if ident, ok := e.Right.(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(ident.Name); sym != nil && sym.Nullable {
+						return nil, []string{ident.Name}
+					}
+				}
+			}
+		}
+		// &&：两个条件都为真时进入 then，then 标记是两个的并集；
+		// else 中至少一个为假，无法确定单个，保守不标记
+		if e.Operator == "&&" {
+			then1, _ := sa.extractNullConditions(e.Left)
+			then2, _ := sa.extractNullConditions(e.Right)
+			then := append(append([]string{}, then1...), then2...)
+			return then, nil
+		}
+		// ||：至少一个为真时进入 then，无法确定单个，保守不标记；
+		// else 中两个都为假，else 标记是两个的并集
+		if e.Operator == "||" {
+			_, else1 := sa.extractNullConditions(e.Left)
+			_, else2 := sa.extractNullConditions(e.Right)
+			elseChecked := append(append([]string{}, else1...), else2...)
+			return nil, elseChecked
+		}
+	case *ast.UnaryExpression:
+		// !cond：取反 then 和 else
+		if e.Operator == "!" {
+			then, elseChecked := sa.extractNullConditions(e.Right)
+			return elseChecked, then
+		}
+	case *ast.ParenExpression:
+		return sa.extractNullConditions(e.Inner)
+	}
+	return nil, nil
+}
+
+// applyNullChecked 标记一组 Nullable 变量为已检查
+func (sa *SemanticAnalyzer) applyNullChecked(names []string) {
+	for _, name := range names {
+		if sym := sa.symbolTable.GetSymbol(name); sym != nil && sym.Nullable {
+			sym.NullChecked = true
+		}
+	}
+}
+
+// collectNullChecked 收集当前所有 NullChecked 的 Nullable 变量名集合
+func (sa *SemanticAnalyzer) collectNullChecked() map[string]bool {
+	result := make(map[string]bool)
+	st := sa.symbolTable
+	for st != nil {
+		for name, sym := range st.GetAllSymbols() {
+			if sym.Nullable && sym.NullChecked {
+				result[name] = true
+			}
+		}
+		st = st.GetParent()
+	}
+	return result
+}
+
 // analyzeWhileStatement 分析 while 语句
 func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	if stmt.Condition != nil {
@@ -1992,9 +2195,15 @@ func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 			"如果循环体不需要处理, 请删除整个 while 语句",
 		)
 	}
+	// 路径敏感空安全：循环条件判空在循环体内有效，循环后不保留
+	// （循环可能不执行，所以循环体内的标记不应带到循环后）
+	snap := sa.snapshotNullChecked()
+	thenChecked, _ := sa.extractNullConditions(stmt.Condition)
+	sa.applyNullChecked(thenChecked)
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.restoreNullChecked(snap)
 }
 
 // validateCondition 校验 if/while 条件的合法性。
@@ -2135,9 +2344,12 @@ func (sa *SemanticAnalyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
 			}
 		}
 	}
+	// 路径敏感空安全：for-in 循环体可能不执行，循环体内的标记不应带到循环后
+	snap := sa.snapshotNullChecked()
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.restoreNullChecked(snap)
 }
 
 // isRangeCallExpr 判断表达式是否为 range(...) 调用
@@ -2166,6 +2378,10 @@ func inferElementType(typeStr string) string {
 func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 	if stmt.Value != nil {
 		sa.analyzeExpression(stmt.Value)
+		// 套用类型显式转换边界：返回值跨边界需 adopt/unwrap
+		if sa.currentFunction != nil && sa.currentFunction.ReturnType != "" {
+			sa.checkAdoptConversion(sa.currentFunction.ReturnType, stmt.Value, stmt.Pos, "函数返回")
+		}
 		// 空指针安全: 可空值从非可空返回类型的函数返回
 		if id, ok := stmt.Value.(*ast.Identifier); ok {
 			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked {
@@ -2828,10 +3044,46 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		sa.analyzeExpression(expr.Left)
 	}
 	sa.analyzeExpression(expr.Right)
+	// 赋值后空安全状态更新：如果左侧是可空变量，且右侧一定非空（字面量/非可空变量/已检查可空变量），
+	// 则标记左侧为已检查。仅处理直接赋值 '='，复合赋值 (+=, -= 等) 后值可能仍为空。
+	if expr.Operator == "=" {
+		if leftId, ok := expr.Left.(*ast.Identifier); ok {
+			if leftSym := sa.symbolTable.GetSymbol(leftId.Name); leftSym != nil && leftSym.Nullable {
+				if sa.isNonNullExpression(expr.Right) {
+					leftSym.NullChecked = true
+				}
+			}
+		}
+	}
 	// 类型检查
 	if expr.Left != nil && expr.Right != nil {
 		leftType := sa.inferExpressionType(expr.Left)
 		rightType := sa.inferExpressionType(expr.Right)
+		// 赋值运算：套用类型显式转换边界
+		if isAssignmentOperator(expr.Operator) && leftType != "" {
+			sa.checkAdoptConversion(leftType, expr.Right, expr.Pos, "赋值")
+		}
+		// 套用类型守卫：非 #[transparent] 的套用类型禁止算术和比较
+		if leftType != "" && leftType == rightType && sa.adoptTypes[leftType] && !sa.transparentAdopt[leftType] {
+			switch expr.Operator {
+			case "+", "-", "*", "/", "%":
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 未标记 #[transparent]，不可使用算术运算符 '%s'", leftType, expr.Operator),
+					expr.Pos.Line,
+					expr.Pos.Column,
+					"adopt_not_transparent",
+					"套用类型默认不透明；如需算术运算请添加 #[transparent] 属性，或先 unwrap 为底层类型",
+				)
+			case "==", "!=", "<", ">", "<=", ">=":
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("套用类型 '%s' 未标记 #[transparent]，不可使用比较运算符 '%s'", leftType, expr.Operator),
+					expr.Pos.Line,
+					expr.Pos.Column,
+					"adopt_not_transparent",
+					"套用类型默认不透明；如需比较请添加 #[transparent] 属性，或先 unwrap 为底层类型",
+				)
+			}
+		}
 		if leftType != "" && rightType != "" && leftType != rightType {
 			switch expr.Operator {
 			case "+":
@@ -2863,7 +3115,7 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 				isNullCompare := isEquality && (leftType == "null" || rightType == "null")
 				isStrCompare := isEquality && isStringLikeType(leftType) && isStringLikeType(rightType)
 				isPtrCompare := isEquality && isPointerType(leftType) && isPointerType(rightType)
-				if leftType != rightType && !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare && !isStrCompare && !isPtrCompare {
+				if !(isNumericType(leftType) && isNumericType(rightType)) && !isNullCompare && !isStrCompare && !isPtrCompare && !(sa.transparentAdopt[leftType] && sa.transparentAdopt[rightType]) {
 					sa.errorCollector.AddSemanticError(
 						fmt.Sprintf("比较运算符 '%s' 不能用于类型 '%s' 和 '%s'", expr.Operator, leftType, rightType),
 						expr.Pos.Line,
@@ -2974,6 +3226,24 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		return
 	}
 
+	// adopt() / unwrap() 内置转换运算符：编译期 no-op，不做函数符号检查
+	if ident, ok := expr.Function.(*ast.Identifier); ok {
+		if ident.Name == "adopt" || ident.Name == "unwrap" {
+			for _, arg := range expr.Args {
+				sa.analyzeExpression(arg)
+			}
+			// unwrap(x)：x 必须是套用类型
+			if ident.Name == "unwrap" && len(expr.Args) > 0 {
+				if argIdent, ok := expr.Args[0].(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(argIdent.Name); sym != nil && !sa.adoptTypes[sym.Type] {
+						// 非套用类型调用 unwrap 只警告，不报错（可能是链式调用的中间结果）
+					}
+				}
+			}
+			return
+		}
+	}
+
 	// 记录被调用的顶层函数(unused-function 检查用)
 	if ident, ok := expr.Function.(*ast.Identifier); ok && sa.usedFunctions != nil {
 		sa.usedFunctions[ident.Name] = true
@@ -2999,6 +3269,10 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 	}
 	for i, arg := range expr.Args {
 		sa.analyzeExpression(arg)
+		// 套用类型显式转换边界：实参类型必须与形参匹配，跨边界需 adopt/unwrap
+		if pt := sa.paramTypeAt(expr, i); pt != "" {
+			sa.checkAdoptConversion(pt, arg, arg.GetPosition(), "函数实参传递")
+		}
 		// 空指针安全: 可空实参未判空即传给非可空形参
 		if id, ok := arg.(*ast.Identifier); ok {
 			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked {
@@ -3225,6 +3499,58 @@ func (sa *SemanticAnalyzer) checkNullableDereference(expr ast.Expression, line, 
 	}
 }
 
+// endsWithReturn 判断语句块是否以 return 结束（所有路径都返回）。
+// 用于提前返回优化：if then 分支以 return 结束时，if 后的代码一定在 else 路径上。
+// 支持：直接 return、if-else 两个分支都 return、嵌套 if-else。
+func endsWithReturn(stmts []ast.Statement) bool {
+	if len(stmts) == 0 {
+		return false
+	}
+	last := stmts[len(stmts)-1]
+	switch s := last.(type) {
+	case *ast.ReturnStatement:
+		return true
+	case *ast.IfStatement:
+		// if 语句：then 分支以 return 结束，且有 else 分支且 else 也以 return 结束
+		thenReturns := endsWithReturn(s.Body)
+		if !thenReturns {
+			return false
+		}
+		if len(s.Else) == 0 {
+			return false // 无 else，可能 fall through
+		}
+		// else 分支可能是多条语句或嵌套 if
+		elseReturns := endsWithReturn(s.Else)
+		return elseReturns
+	}
+	return false
+}
+
+// isNonNullExpression 判断表达式是否一定非空（用于赋值后自动标记 NullChecked）。
+// 非空的情况：字面量（整数/浮点/布尔/字符串）、非可空变量、已检查的可空变量。
+// 保守情况：函数调用、成员访问、索引表达式、二元运算等，可能返回空，不标记。
+func (sa *SemanticAnalyzer) isNonNullExpression(expr ast.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.BooleanLiteral, *ast.StringLiteral:
+		return true
+	case *ast.Identifier:
+		sym := sa.symbolTable.GetSymbol(e.Name)
+		if sym == nil {
+			return false
+		}
+		if !sym.Nullable {
+			return true // 非可空变量一定非空
+		}
+		return sym.NullChecked // 可空但已检查
+	case *ast.ParenExpression:
+		return sa.isNonNullExpression(e.Inner)
+	}
+	return false
+}
+
 // paramTypeAt 返回被调用函数第 i 个参数的类型; 顶层函数用 ParamTypes, 类方法用 Params[i].Type。
 // 查不到返回 ""(跳过检查)。
 func (sa *SemanticAnalyzer) paramTypeAt(expr *ast.CallExpression, i int) string {
@@ -3383,6 +3709,10 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		}
 		leftType := sa.inferExpressionType(e.Left)
 		rightType := sa.inferExpressionType(e.Right)
+		// 两个相同的 #[transparent] 套用类型做算术，结果保持该套用类型身份
+		if leftType != "" && leftType == rightType && sa.transparentAdopt[leftType] {
+			return leftType
+		}
 		if leftType != "" && rightType != "" {
 			if isFloatType(leftType) || isFloatType(rightType) {
 				return "f64"
@@ -3438,6 +3768,21 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	case *ast.CallExpression:
 		funcExpr := e.Function
 		if ident, ok := funcExpr.(*ast.Identifier); ok {
+			// unwrap(x)：返回套用类型 x 的底层类型
+			if ident.Name == "unwrap" && len(e.Args) > 0 {
+				if argIdent, ok := e.Args[0].(*ast.Identifier); ok {
+					if sym := sa.symbolTable.GetSymbol(argIdent.Name); sym != nil {
+						if underlying, ok := sa.adoptUnderlying[sym.Type]; ok {
+							return underlying
+						}
+					}
+				}
+				return sa.inferExpressionType(e.Args[0])
+			}
+			// adopt(x)：独立推导时取参数类型（目标套用类型由赋值上下文校验）
+			if ident.Name == "adopt" && len(e.Args) > 0 {
+				return sa.inferExpressionType(e.Args[0])
+			}
 			if retType, ok := sa.funcReturnTypes[ident.Name]; ok && retType != "" {
 				return retType
 			}
@@ -3607,6 +3952,131 @@ func isNumericType(typeName string) bool {
 		typeName == "i32" || typeName == "i16" || typeName == "i8" ||
 		typeName == "u64" || typeName == "u32" || typeName == "u16" ||
 		typeName == "u8" || typeName == "f64" || typeName == "f32"
+}
+
+// isCScalarType 检查外部 C 类型名是否为已知标量整数类型
+func isCScalarType(cType string) bool {
+	t := strings.TrimSpace(cType)
+	// 去掉 const 前缀
+	t = strings.TrimPrefix(t, "const ")
+	t = strings.TrimSpace(t)
+	// 指针不是标量
+	if strings.HasSuffix(t, "*") {
+		return false
+	}
+	switch t {
+	case "size_t", "ssize_t", "intptr_t", "uintptr_t", "ptrdiff_t",
+		"int", "unsigned", "unsigned int", "long", "unsigned long",
+		"long long", "unsigned long long", "short", "unsigned short",
+		"char", "unsigned char", "signed char", "int8_t", "int16_t",
+		"int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+		"float", "double", "long double", "bool", "_Bool":
+		return true
+	}
+	return false
+}
+
+// isScalarAdoptUnderlying 检查套用类型的底层类型表达式是否为标量
+// 编译器自动推断：Kaula 数值类型 → 标量；指针 → 非标量；外部 C 类型查已知标量列表
+func isScalarAdoptUnderlying(underlying string) bool {
+	if underlying == "" {
+		return false
+	}
+	t := strings.TrimSpace(underlying)
+	// 指针不是标量
+	if strings.HasPrefix(t, "*") || strings.HasSuffix(t, "*") {
+		return false
+	}
+	// Kaula 数值类型
+	if isNumericType(t) {
+		return true
+	}
+	// 外部 C 类型：查已知标量列表（编译器无法推断未知 C 类型，保守拒绝）
+	return isCScalarType(t)
+}
+
+// isAdoptBuiltinCall 判断表达式是否为 adopt(...) 内置转换调用，返回调用节点
+func isAdoptBuiltinCall(expr ast.Expression) (*ast.CallExpression, bool) {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok {
+		return nil, false
+	}
+	ident, ok := call.Function.(*ast.Identifier)
+	if !ok || ident.Name != "adopt" {
+		return nil, false
+	}
+	return call, true
+}
+
+// isUnwrapBuiltinCall 判断表达式是否为 unwrap(...) 内置转换调用，返回调用节点
+func isUnwrapBuiltinCall(expr ast.Expression) (*ast.CallExpression, bool) {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok {
+		return nil, false
+	}
+	ident, ok := call.Function.(*ast.Identifier)
+	if !ok || ident.Name != "unwrap" {
+		return nil, false
+	}
+	return call, true
+}
+
+// checkAdoptConversion 套用类型显式转换边界检查。
+// 禁止套用类型与其底层类型之间的隐式转换：进入套用类型必须 adopt()，
+// 离开套用类型必须 unwrap()，同类型直接传递放行。
+// targetType: 赋值/传参/返回位置的目标声明类型；value: 源表达式；context: 场景中文描述（用于报错文案）
+func (sa *SemanticAnalyzer) checkAdoptConversion(targetType string, value ast.Expression, pos ast.Position, context string) {
+	if value == nil || targetType == "" {
+		return
+	}
+	// 去掉可空标记后再比较类型身份
+	target := strings.TrimSuffix(targetType, "?")
+	targetIsAdopt := sa.adoptTypes[target]
+
+	// 显式 adopt() 包装：只允许构造套用类型
+	if _, ok := isAdoptBuiltinCall(value); ok {
+		if !targetIsAdopt {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("adopt() 只能用于构造套用类型，但%s的目标类型 '%s' 不是套用类型", context, target),
+				pos.Line, pos.Column, "adopt_implicit",
+				"移除多余的 adopt()，或将目标声明为对应的套用类型",
+			)
+		}
+		return
+	}
+	// 显式 unwrap() 解包：结果即底层类型，一律放行
+	if _, ok := isUnwrapBuiltinCall(value); ok {
+		return
+	}
+
+	srcType := sa.inferExpressionType(value)
+	srcIsAdopt := srcType != "" && sa.adoptTypes[srcType]
+
+	// 目标是套用类型：源必须是同一套用类型（或无法推导时保守放行）
+	if targetIsAdopt {
+		if srcType == "" || srcType == target {
+			return
+		}
+		// null 可赋给底层为指针的不透明句柄类型
+		if srcType == "null" {
+			return
+		}
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("套用类型 '%s' 不能从 '%s' 隐式构造，必须使用 adopt() 显式包装", target, srcType),
+			pos.Line, pos.Column, "adopt_implicit",
+			fmt.Sprintf("改写为 adopt(...) 后再用于%s，跨越套用类型边界必须显式", context),
+		)
+		return
+	}
+
+	// 源是套用类型、目标不是同一套用类型：必须先 unwrap()
+	if srcIsAdopt && srcType != target {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("套用类型 '%s' 不能隐式转换为 '%s'，必须使用 unwrap() 显式解包", srcType, target),
+			pos.Line, pos.Column, "adopt_implicit",
+			fmt.Sprintf("先用 unwrap(...) 取得底层值，再用于%s", context),
+		)
+	}
 }
 
 // isStringLikeType 检查类型是否为字符串类型 (string/cstr/char*)

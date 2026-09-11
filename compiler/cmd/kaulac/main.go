@@ -9,6 +9,7 @@ import (
 	"kaula/internal/config"
 	errors "kaula/internal/errors"
 	"kaula/internal/formatter"
+	"kaula/internal/i18n"
 	"kaula/internal/lexer"
 	"kaula/internal/parser"
 	"kaula/internal/pkgcmd"
@@ -159,10 +160,11 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	}
 	// 本文件依赖的跨文件 pub/export 符号也注册给本地分析器
 	depDir := filepath.Dir(absPath)
+	localPubTypes := collectLocalPubTypes(localProgram, depDir)
 	localAnalyzer.SetLocalImportFuncs(collectLocalPubFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalModuleFuncs(collectLocalAllFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalPubVars(collectLocalPubVars(localProgram, depDir))
-	localAnalyzer.SetLocalPubTypes(collectLocalPubTypes(localProgram, depDir))
+	localAnalyzer.SetLocalPubTypes(localPubTypes)
 	localAnalyzer.SetLibraryMode(true) // 库文件: 跳过 unused-function 检查(函数可能被外部调用)
 	localAnalyzer.SetSOREnabled(s.cfg.SOR)
 	localAnalyzer.Analyze(localProgram)
@@ -174,6 +176,12 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	if s.stdlibConfig != nil {
 		localCG.SetStdlibConfig(s.stdlibConfig)
 	}
+	// 跨文件公共类型同样必须注入本地 codegen：
+	// 1) 前置声明阶段按 localPubTypes 跳过引用这些类型的函数原型
+	//    （typedef 在被导入文件的段中，本文件内不可见）
+	// 2) 变量声明/字面量的 convertType 需要映射 K_ 前缀 C 名
+	localCG.SetLocalPubTypes(localPubTypes)
+	localCG.SetLocalImportReturnTypes(collectLocalPubFuncReturns(localProgram, depDir))
 	localOutput := localCG.Generate(localProgram)
 
 	// 收集本地文件依赖的 std 模块头文件（如 math/math.h、memory/memory.h），
@@ -350,6 +358,9 @@ var verboseMode = false
 
 func main() {
 	totalStart := time.Now()
+
+	// 初始化本地化系统，检测系统语言
+	i18n.Init()
 
 	// ninja 风格: 默认安静, --verbose 显示完整过程
 	verbose := false
@@ -1059,13 +1070,13 @@ func main() {
 	parallelWg.Add(1)
 	go func() {
 		defer parallelWg.Done()
-		stdlibPath = findStdlib()
+		stdlibPath = findStdlib(cfg.StdlibPath)
 		stdlibConfig, _ = stdlib.LoadStdlibConfigWithPkglib(stdlibPath, cfg.PkglibPath)
 	}()
 
 	// Stage 1: Lex + Parse（与 stdlib 加载并行）
 	if verbose {
-		fmt.Println("[Stage 1] Lexing + Parsing...")
+		fmt.Println(i18n.T(i18n.MsgStage1))
 	}
 	stage1Start := time.Now()
 
@@ -1084,7 +1095,7 @@ func main() {
 
 	program := p.Parse()
 	stage1Time := time.Since(stage1Start)
-	if verbose { fmt.Printf("[Stage 1] Lex + Parse completed in %v\n", stage1Time) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage1Completed)+"\n", stage1Time) }
 
 	// 保存词法分析和语法分析的错误数量
 	stage1ErrorCount := len(errorCollector.Errors())
@@ -1095,23 +1106,24 @@ func main() {
 	if verboseMode { fmt.Printf("[Parallel] stdlib config loaded in %v\n", parallelTime) }
 
 	// Stage 2: Semantic Analysis (concurrent)
-	if verbose { fmt.Println("[Stage 2] Semantic Analysis...") }
+	if verbose { fmt.Println(i18n.T(i18n.MsgStage2)) }
 	stage2Start := time.Now()
 
 	localPubFuncs := collectLocalPubFuncs(program, inputDir)
 	localAllFuncs := collectLocalAllFuncs(program, inputDir)
 	localPubVars := collectLocalPubVars(program, inputDir)
 	localPubTypes := collectLocalPubTypes(program, inputDir)
+	localImportReturns := collectLocalPubFuncReturns(program, inputDir)
 	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes)
 	stage2Time := time.Since(stage2Start)
-	if verbose { fmt.Printf("[Stage 2] Semantic Analysis completed in %v\n", stage2Time) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time) }
 
 	// Stage 2.5: SOR Ownership Analysis (--sor)
 	var sorErrors []sor.SORError
 	var sorResult map[string]interface{}
 	poolCapacity := 0 // KMM V4 池容量（0=使用默认值）
 	if cfg.SOR {
-		fmt.Println("[Stage 2.5] SOR Ownership + Memory Analysis...")
+		fmt.Println(i18n.T(i18n.MsgStage25))
 		sorStart := time.Now()
 		// 运行完整分析流水线：安全检查 + 内存决策 + 逃逸 + 大小估算 + 活跃性 + 跨函数
 		fullResult := sor.AnalyzeFullFromAST(program)
@@ -1121,7 +1133,7 @@ func main() {
 		// 提取静态分析估算的池容量
 		poolCapacity = fullResult.PoolCapacity
 		sorTime := time.Since(sorStart)
-		if verbose { fmt.Printf("[Stage 2.5] SOR Analysis completed in %v\n", sorTime) }
+		if verbose { fmt.Printf(i18n.T(i18n.MsgStage25Completed)+"\n", sorTime) }
 		if os.Getenv("KAULA_SOR_DUMP") != "" {
 			fmt.Println(sor.FormatDecisionsSummary(fullResult.Decisions))
 			fmt.Println(sor.FormatEscapeSummary(fullResult.Escape))
@@ -1165,7 +1177,7 @@ func main() {
 	}
 
 	// Stage 3: Code Gen + C Compile (concurrent)
-	if verbose { fmt.Println("[Stage 3] Code Generation + C Compilation...") }
+	if verbose { fmt.Println(i18n.T(i18n.MsgStage3)) }
 	stage3Start := time.Now()
 
 	codegenStart := time.Now()
@@ -1186,6 +1198,7 @@ func main() {
 	if len(localPubTypes) > 0 {
 		cg.SetLocalPubTypes(localPubTypes)
 	}
+	cg.SetLocalImportReturnTypes(localImportReturns)
 
 	output := cg.Generate(program)
 	usedModules := cg.GetUsedModules()
@@ -1198,6 +1211,9 @@ func main() {
 	}
 	if localImportCode != "" {
 		output = injectLocalCode(output, localImportCode)
+	}
+	if os.Getenv("KAULAC_DUMP") != "" {
+		os.WriteFile(filepath.Join(os.TempDir(), "klc_final.c"), []byte(output), 0644)
 	}
 	// 本地文件依赖的 std 模块实现也需要参与链接（如库内部使用 std.math/memory）
 	if len(localUsedModules) > 0 {
@@ -1214,7 +1230,7 @@ func main() {
 	}
 
 	codegenTime := time.Since(codegenStart)
-	if verbose { fmt.Printf("[Stage 3a] Code generation completed in %v\n", codegenTime) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage3aCompleted)+"\n", codegenTime) }
 
 	// 检查所有阶段的诊断信息（错误与警告分开统计）
 	// 统计在此计算, 输出统一放到 Generated Code 之后、Compilation Results 之前
@@ -1280,29 +1296,29 @@ func main() {
 	var compileResult *compileResult_t
 	if errorCount > 0 {
 		compileResult = &compileResult_t{
-			Error: fmt.Errorf("%d frontend error(s), C compilation skipped", errorCount),
+			Error: fmt.Errorf(i18n.T(i18n.MsgFrontendErrorsSkipped), errorCount),
 		}
 	} else {
 		compileResult = concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity, cfg)
 	}
 	stage3Time := time.Since(stage3Start)
-	if verbose { fmt.Printf("[Stage 3] Code Gen + Compilation completed in %v\n", stage3Time) }
+	if verbose { fmt.Printf(i18n.T(i18n.MsgStage3Completed)+"\n", stage3Time) }
 
 	totalTime := time.Since(totalStart)
 
 	if verbose {
-		fmt.Println("\n=== Generated Code ===")
+		fmt.Println("\n" + i18n.T(i18n.MsgGeneratedCode))
 		fmt.Print(strings.TrimRight(output, "\n"))
 		fmt.Println()
 	}
 
 	// 输出所有阶段的诊断信息（错误与警告分开统计）— 放在 Generated Code 之后、Compilation Results 之前
 	if errorCount > 0 || warningCount > 0 {
-		fmt.Printf("\n%s=== Compilation Errors / Warnings ===%s\n", errors.ColorRed, errors.ColorReset)
+		fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgCompilationErrorsWarnings), errors.ColorReset)
 
 		// 输出词法分析和语法分析错误（阶段 1 的错误）
 		if len(stage1Errs) > 0 {
-			fmt.Printf("\n%s[Lexing & Parsing Errors] (%d errors)%s\n", errors.ColorRed, len(stage1Errs), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgLexParseErrors, len(stage1Errs)), errors.ColorReset)
 			for _, err := range stage1Errs {
 				fmt.Print(errors.FormatErrorWithContext(err))
 			}
@@ -1310,7 +1326,7 @@ func main() {
 
 		// 输出语义分析错误（阶段 2 新增的错误）
 		if len(stage2Errs) > 0 {
-			fmt.Printf("\n%s[Semantic Analysis Errors] (%d errors)%s\n", errors.ColorRed, len(stage2Errs), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgSemanticAnalysisErrors, len(stage2Errs)), errors.ColorReset)
 			for _, err := range stage2Errs {
 				fmt.Print(errors.FormatErrorWithContext(err))
 			}
@@ -1318,7 +1334,7 @@ func main() {
 
 		// 输出代码生成错误
 		if cg.HasErrors() {
-			fmt.Printf("\n%s[Code Generation Errors] (%d errors)%s\n", errors.ColorRed, len(cg.Errors()), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgCodegenErrors, len(cg.Errors())), errors.ColorReset)
 			for i, err := range cg.Errors() {
 				fmt.Printf("  %d. %s\n", i+1, err)
 			}
@@ -1326,7 +1342,7 @@ func main() {
 
 		// 输出 SOR 错误
 		if len(sorErrors) > 0 {
-			fmt.Printf("\n%s[SOR Ownership Errors] (%d errors)%s\n", errors.ColorRed, len(sorErrors), errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgSorOwnershipErrors, len(sorErrors)), errors.ColorReset)
 			for i, err := range sorErrors {
 				fmt.Printf("  %d. [%s] line %d: %s\n", i+1, err.Kind.String(), err.SourceLine, err.Message)
 				if err.Details != "" {
@@ -1337,7 +1353,7 @@ func main() {
 
 		// 输出警告（黄色高亮）
 		if warningCount > 0 {
-			fmt.Printf("\n%s[Warnings] (%d warnings)%s\n", errors.ColorYellow, warningCount, errors.ColorReset)
+			fmt.Printf("\n%s%s%s\n", errors.ColorYellow, i18n.T(i18n.MsgWarningsHeader, warningCount), errors.ColorReset)
 			for _, err := range frontendWarnings {
 				fmt.Print(errors.FormatErrorWithContext(err))
 			}
@@ -1353,39 +1369,37 @@ func main() {
 	}
 	// ninja 风格: 成功时单行紧凑输出; 失败/警告/verbose 时显示完整汇总
 	if verbose || compileResult.Error != nil || warningCount > 0 {
-		fmt.Printf("\n%s=== Compilation Results ===%s\n", titleColor, errors.ColorReset)
+		fmt.Printf("\n%s%s%s\n", titleColor, i18n.T(i18n.MsgCompilationResults), errors.ColorReset)
 	}
 	if compileResult.Error != nil {
 		printSummary(false, warningCount, errorCount)
-		fmt.Printf("Error: %v\n", compileResult.Error)
+		fmt.Printf("%s: %v\n", i18n.T(i18n.MsgError), compileResult.Error)
 		os.Exit(1)
 	}
 	printSummary(true, warningCount, errorCount)
 	if !verbose {
 		// ninja 风格成功输出: 一行内显示产物与耗时
-		fmt.Printf("  产物: %s (%v)\n", compileResult.OutputFile, totalTime.Round(time.Millisecond))
+		fmt.Printf("  %s: %s (%v)\n", i18n.T(i18n.MsgOutput), compileResult.OutputFile, totalTime.Round(time.Millisecond))
 	} else {
-		fmt.Printf("Output: %s\n", compileResult.OutputFile)
+		fmt.Printf("%s: %s\n", i18n.T(i18n.MsgOutput), compileResult.OutputFile)
 	}
 
 	if verbose {
-		fmt.Printf("\n=== Timing Breakdown ===\n")
+		fmt.Printf("\n%s\n", i18n.T(i18n.MsgTimingBreakdown))
 		fmt.Printf("Stage 1 (Lex + Parse):         %v\n", stage1Time)
 		fmt.Printf("Stage 2 (Semantic):            %v\n", stage2Time)
 		fmt.Printf("Stage 3 (Codegen+Compile):    %v\n", stage3Time)
 		fmt.Printf("---------------------------------\n")
-		fmt.Printf("Total End-to-End:              %v\n", totalTime)
+		fmt.Printf(i18n.T(i18n.MsgTotalTime)+"\n", totalTime)
 	}
 }
 
-// printSummary 输出编译汇总行:
-//   状态: 成功, 警告 0, 错误 0
-//   "成功" 绿 / "失败" 红; 警告有则黄、无则绿; 错误有则红、无则绿
+// printSummary 输出编译汇总行
 func printSummary(success bool, warnCount, errCount int) {
-	statusText := "成功"
+	statusText := i18n.T(i18n.MsgSuccess)
 	statusColor := errors.ColorGreen
 	if !success {
-		statusText = "失败"
+		statusText = i18n.T(i18n.MsgFailed)
 		statusColor = errors.ColorRed
 	}
 	warnColor := errors.ColorGreen
@@ -1396,10 +1410,11 @@ func printSummary(success bool, warnCount, errCount int) {
 	if errCount > 0 {
 		errColor = errors.ColorRed
 	}
-	fmt.Printf("状态: %s%s%s, %s警告 %d%s, %s错误 %d%s\n",
+	fmt.Printf("%s: %s%s%s, %s%s%s, %s%s%s\n",
+		i18n.T(i18n.MsgStatus),
 		statusColor, statusText, errors.ColorReset,
-		warnColor, warnCount, errors.ColorReset,
-		errColor, errCount, errors.ColorReset)
+		warnColor, i18n.T(i18n.MsgWarningsCount, warnCount), errors.ColorReset,
+		errColor, i18n.T(i18n.MsgErrorsCount, errCount), errors.ColorReset)
 }
 
 type compileResult_t struct {
@@ -2093,8 +2108,61 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 	return pubFuncs
 }
 
-// collectLocalAllFuncs 扫描本地 import 的 .kl 文件，收集全部函数名(含非 pub)
-// 用于导出检查: 调用存在于被 import 模块但非 pub/export 的函数时, 报"未导出"错误
+// collectLocalPubFuncReturns 扫描本地 import 的 .kl 文件，收集 pub/export
+// 函数的返回类型（函数名 -> Kaula 返回类型）。主程序的 AST 不含被导入文件
+// 的 FunctionStatement，codegen 侧 inferType 对此类调用查不到返回类型，
+// 导致 `html + kw_shell_js()` 这类 string 拼接被误判为 int 走 concat_int。
+func collectLocalPubFuncReturns(program *ast.Program, inputDir string) map[string]string {
+	returns := make(map[string]string)
+
+	var visit func(p *ast.Program, dir string)
+	visit = func(p *ast.Program, dir string) {
+		for _, stmt := range p.Statements {
+			imp, ok := stmt.(*ast.ImportStatement)
+			if !ok || !imp.IsLocal {
+				continue
+			}
+			for _, localPath := range localImportFiles(imp) {
+				absPath := localPath
+				if !filepath.IsAbs(absPath) {
+					if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+						absPath = candidate
+					}
+				}
+				data, err := os.ReadFile(absPath)
+				if err != nil {
+					continue
+				}
+				localLex := lexer.NewLexer(string(data))
+				localParser := parser.NewParser(localLex)
+				localParser.SetFile(absPath)
+				localParser.SetSkipMainCheck(true)
+				localParser.EnableLogging(false)
+				localProgram := localParser.Parse()
+				if localParser.HasErrors() {
+					continue
+				}
+				for _, s := range localProgram.Statements {
+					if fn, ok := s.(*ast.FunctionStatement); ok && (fn.IsPublic || fn.IsExported) && fn.ReturnType != "" {
+						returns[fn.Name] = fn.ReturnType
+					}
+					if exp, ok := s.(*ast.ExportStatement); ok && exp.Name != "" {
+						// export <name> 导出的函数：返回类型在相邻定义中，此处跳过，
+						// 由同名 FunctionStatement 分支覆盖
+						_ = exp
+					}
+				}
+				visit(localProgram, filepath.Dir(absPath))
+			}
+		}
+	}
+
+	visit(program, inputDir)
+	return returns
+}
+
+// collectLocalAllFuncs 扫描本地 import 的 .kl 文件, 收集全部函数名(含非 pub)
+// 用于调用检查: 当代码调用了被 import 模块但非 pub/export 的函数时, 给"未导出"错误
 func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool {
 	allFuncs := make(map[string]bool)
 
@@ -2274,7 +2342,16 @@ func (s *semaResult_t) HasErrors() bool {
 	return s.ErrorCollector.HasErrors()
 }
 
-func findStdlib() string {
+func findStdlib(overridePath string) string {
+	// 0. F3 修复：优先使用 --stdlib 命令行参数指定的路径
+	if overridePath != "" {
+		if _, err := os.Stat(overridePath); err == nil {
+			return overridePath
+		}
+		// 如果指定的路径不存在，打印警告但继续 fallback
+		fmt.Fprintf(os.Stderr, "[WARN] --stdlib 指定的路径不存在: %s，回退到自动查找\n", overridePath)
+	}
+
 	// 1. KAULA_HOME 环境变量
 	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
 		p := filepath.Join(envHome, "compiler", "stdlib.json")
@@ -2422,6 +2499,14 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	clangPath, err := exec.LookPath("clang")
 	if err != nil {
 		return fmt.Errorf("clang not found in PATH")
+	}
+
+	// ccache 集成：如果 ccache 可用，用它包装 clang 以缓存编译结果（大幅提升重复编译速度）
+	compilerCmd := clangPath
+	compilerPrefix := []string{}
+	if ccachePath, err := exec.LookPath("ccache"); err == nil {
+		compilerCmd = ccachePath
+		compilerPrefix = []string{clangPath}
 	}
 
 	// 查找 kaula.h 所在的目录（优先级：KAULA_HOME > 可执行文件路径 > 相对路径）
@@ -2614,6 +2699,8 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	clangArgs := []string{"-x", "c", "-", "-o", outputFile, optLevel}
+	// 编译速度优化：使用管道而非临时文件，减少 I/O 开销
+	clangArgs = append(clangArgs, "-pipe")
 	// 调试符号：--debug 启用 DWARF 生成
 	if cfg != nil && cfg.Debug {
 		clangArgs = append(clangArgs, "-g")
@@ -2624,15 +2711,18 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	clangArgs = append(clangArgs, "-I", workDir)
 	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
 	clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
-	// Windows (MSVC ABI)：强制使用 lld 而非 MSVC link.exe。
-	// llvm-ar 产出的静态库归档含 COMDAT 节，MSVC link.exe 会报 LNK1143；
-	// lld 与 clang/llvm-ar 同源，对 LLVM 产出的 COFF 归档完全兼容。
+	// 链接器优化：Windows 强制 lld（MSVC ABI 兼容性）；Linux/macOS 优先 lld（更快），不可用时回退默认
 	if runtime.GOOS == "windows" {
 		clangArgs = append(clangArgs, "-fuse-ld=lld")
 		// Windows 目标下 clang 对栈帧 >4KB 的函数默认生成 __chkstk 调用，
 		// 而本编译器不链接 CRT，导致 ld.lld 报 undefined symbol: __chkstk。
 		// 把探测阈值设到极大值即可避免（程序为单线程、栈充足，安全）。
 		clangArgs = append(clangArgs, "-mstack-probe-size=2147483647")
+	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		// 检测 lld 是否可用，可用则使用（比默认 ld 快 2-5 倍）
+		if _, err := exec.LookPath("ld.lld"); err == nil {
+			clangArgs = append(clangArgs, "-fuse-ld=lld")
+		}
 	}
 	if poolCapacity > 0 {
 		clangArgs = append(clangArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
@@ -2720,6 +2810,18 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 
+	// 去重：searchPaths 可能包含同一实际目录的多个挂载路径，
+	// 导致同一模块 .c 被重复加入。按 objPath 去重（objPath 基于模块名，与搜索路径无关）。
+	seenObj := make(map[string]bool)
+	var uniqueSources []moduleSource
+	for _, ms := range moduleSources {
+		if !seenObj[ms.objPath] {
+			seenObj[ms.objPath] = true
+			uniqueSources = append(uniqueSources, ms)
+		}
+	}
+	moduleSources = uniqueSources
+
 	// 预编译需要更新的 std 模块
 	rebuildCount := 0
 	for _, ms := range moduleSources {
@@ -2746,7 +2848,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				compileCmd := exec.Command(clangPath, "-c", optLevel, cPath, "-o", objPath)
+				compileCmd := exec.Command(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...)
 				if runtime.GOOS == "windows" {
 					compileCmd.Args = append(compileCmd.Args, "-mstack-probe-size=2147483647")
 				}
@@ -2808,7 +2910,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 			}
 			if needsRebuild {
-				rsCmd := exec.Command(clangPath, "-c", optLevel, rsSrc, "-o", rsObj)
+				rsCmd := exec.Command(compilerCmd, append(compilerPrefix, "-c", optLevel, rsSrc, "-o", rsObj)...)
 				if runtime.GOOS == "windows" {
 					rsCmd.Args = append(rsCmd.Args, "-mstack-probe-size=2147483647")
 				}
@@ -2837,23 +2939,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// 注意：必须在 .o 文件前用 -x none 重置语言类型，否则前面的 -x c 会让 clang 把 .o 当作 C 源码
 	// 安装模式下 std/freestanding 模块符号已在 kaula_std.lib / kaula_freestanding.lib 中，
 	// 不再单独链接 .o，否则与静态库中的同名符号产生 LNK2005 重复定义。
-	if len(moduleSources) > 0 && !useInstalledLibraries {
+	// 裸机模式下在此链接 moduleSources（下方 else 分支仅处理非裸机）
+	if len(moduleSources) > 0 && !useInstalledLibraries && cfg != nil && cfg.Freestanding {
 		clangArgs = append(clangArgs, "-x", "none")
 		for _, ms := range moduleSources {
 			clangArgs = append(clangArgs, ms.objPath)
-		}
-	}
-	// 添加 kmm_v4.o/spend_call.o/allocator.o（如果存在）— 裸机模式下跳过（依赖 OS 调用）
-	if !useInstalledLibraries && (cfg == nil || !cfg.Freestanding) {
-		// 无 std 模块源时（如仅使用第三方库）上面的 -x none 未生效，这里补上
-		if len(moduleSources) == 0 {
-			clangArgs = append(clangArgs, "-x", "none")
-		}
-		for _, objName := range runtimeObjs {
-			runtimeObj := filepath.Join(objectCacheDir, objName)
-			if _, err := os.Stat(runtimeObj); err == nil {
-				clangArgs = append(clangArgs, runtimeObj)
-			}
 		}
 	}
 
@@ -2969,7 +3059,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					}
 				}
 				// 再解析：配置过期时重新分析（生成桥接/新签名），
-				// 并合并旧配置里的人工库列表（如 imgui 的 d3d11/dwmapi/d3dcompiler），
+				// 并合并旧配置里的人工库列表，
 				// 避免重新分析丢掉人工链接项；缺失配置的库由导入阶段的按需分析自动处理。
 				if stdlib.ConfigStale(resolvedLibDir, lib.Name) {
 					fmt.Printf("[Info] Config for %s is stale, re-analyzing...\n", lib.Name)
@@ -3083,7 +3173,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		// elf 格式：clang 默认行为，无需额外参数
 	}
 
-	cmd := exec.Command(clangPath, clangArgs...)
+	// ccache 集成：使用 ccache 包装 clang（如果可用）
+	mainArgs := append(compilerPrefix, clangArgs...)
+	cmd := exec.Command(compilerCmd, mainArgs...)
 
 	// 通过 stdin pipe 将 C 代码传递给 clang（内存编译，避免磁盘 I/O）
 	cSource := cCodeInMemory
@@ -3221,6 +3313,22 @@ func printUsage(exe string) {
 	fmt.Printf("  kaulac pkg fetch                   强制联网拉取所有项目依赖\n")
 	fmt.Printf("  kaulac pkg update [name]           更新依赖到最新版本（全部或指定包）\n")
 	fmt.Printf("  kaulac pkg lock                    显示 kaula.lock 锁状态\n")
+
+	// F2 修复：补充语言语法文档，特别是 pub/export 的区别
+	fmt.Printf("\n语言语法 (Language Syntax):\n")
+	fmt.Printf("  变量声明: <type> <name> = <value>          例: i64 x = 42\n")
+	fmt.Printf("  函数声明: fn <name>(<params>) <ret> { }    例: fn add(a: i64, b: i64) i64\n")
+	fmt.Printf("  结构体:   struct <name> { <field>: <type> } 例: struct Point { x: f64, y: f64 }\n")
+	fmt.Printf("  类:       class <name> { ... }\n")
+	fmt.Printf("  导入:     import <module>                  例: import std.io\n")
+	fmt.Printf("\n可见性修饰符 (Visibility):\n")
+	fmt.Printf("  pub     模块级可见性：跨文件/跨模块可调用（Kaula 内部可见性）\n")
+	fmt.Printf("          用法: pub fn name() { ... } / pub struct Name { ... }\n")
+	fmt.Printf("  export  C 级 FFI 导出：生成可被 C 代码直接调用的符号\n")
+	fmt.Printf("          用法: export fn name() { ... }（自动包含 pub 语义）\n")
+	fmt.Printf("          也支持裸名转发: export <name>（导出已声明或导入的符号）\n")
+	fmt.Printf("  区别:   pub 仅控制 Kaula 模块间可见性；export 额外生成 C ABI 导出符号\n")
+	fmt.Printf("          跨文件调用 Kaula 函数用 pub；需要 C 互操作时用 export\n")
 }
 
 // ensureLibrary 按需确保库：force 为 true 或归档缺失/源码更新时重建，

@@ -88,6 +88,10 @@ kaulac pkg analyze webview
 
 ### 在 kaula.json 中声明依赖
 
+支持两种依赖格式：
+
+#### 版本约束（从注册表下载）
+
 ```json
 {
   "dependencies": {
@@ -97,6 +101,29 @@ kaulac pkg analyze webview
   "registry": "https://gitee.com/kaula-universe"
 }
 ```
+
+#### Git 仓库（从指定仓库下载）
+
+```json
+{
+  "dependencies": {
+    "mylib": {
+      "git": "https://github.com/user/repo.git",
+      "tag": "v1.0.0"
+    },
+    "another-lib": {
+      "git": "https://gitlab.com/team/project.git",
+      "branch": "main"
+    }
+  }
+}
+```
+
+Git 依赖支持以下字段：
+- `git`：git 仓库 URL（必填）
+- `tag`：指定标签（可选，默认最新标签）
+- `branch`：指定分支（可选，默认主分支）
+- `commit`：指定 commit（可选）
 
 ### 离线/在线模式
 
@@ -165,7 +192,8 @@ kaulac pkg lock
 ```json
 {
   "packages": {
-    "webview": "0.12.0"
+    "webview": "0.12.0",
+    "mylib": "1.0.0"
   },
   "entries": {
     "webview": {
@@ -174,6 +202,11 @@ kaulac pkg lock
       "registry": "https://gitee.com/kaula-universe"
     },
     "mylib": {
+      "version": "1.0.0",
+      "resolved_from": "fetch",
+      "git": "https://github.com/user/repo.git"
+    },
+    "another-lib": {
       "version": "local:../mylib-dev",
       "resolved_from": "local"
     }

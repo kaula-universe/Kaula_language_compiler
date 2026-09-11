@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"kaula/internal/config"
 	"kaula/internal/semver"
 )
 
@@ -207,4 +208,120 @@ func Fetch(registry, name, constraintStr string) (*FetchResult, error) {
 	}
 
 	return &FetchResult{Name: name, Version: norm, Tag: best, Dir: dst, Source: "fetched"}, nil
+}
+
+// FetchGitDependency 从指定的 git 仓库获取包
+// 与 Fetch 的区别：直接使用提供的 git URL，不经过注册表
+func FetchGitDependency(name string, dep config.Dependency) (*FetchResult, error) {
+	root, err := CacheRoot()
+	if err != nil {
+		return nil, err
+	}
+
+	// 确定要克隆的 ref（tag、branch 或 commit）
+	ref := ""
+	if dep.Tag != "" {
+		ref = dep.Tag
+	} else if dep.Branch != "" {
+		ref = dep.Branch
+	} else if dep.Commit != "" {
+		ref = dep.Commit
+	}
+
+	// 检查缓存中是否已有此包
+	dst := pkgDir(root, name)
+	if locked, err := LoadResolved(root, name); err == nil && locked != nil {
+		// 检查缓存的包是否匹配请求的 ref
+		if ref == "" || locked.Tag == ref || locked.Commit == ref {
+			if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
+				return &FetchResult{
+					Name:    name,
+					Version: locked.Version,
+					Tag:     locked.Tag,
+					Dir:     dst,
+					Source:  "cache",
+				}, nil
+			}
+		}
+	}
+
+	// 从 git 仓库克隆
+	fmt.Printf("[pkg] fetching %s from %s", name, dep.Git)
+	if ref != "" {
+		fmt.Printf(" (ref: %s)", ref)
+	}
+	fmt.Println()
+
+	// 清理旧缓存
+	if locked, _ := LoadResolved(root, name); locked != nil {
+		_ = os.RemoveAll(dst)
+	}
+
+	// 克隆仓库
+	if err := cloneGitRepo(dep.Git, ref, dst); err != nil {
+		return nil, fmt.Errorf("dependency %s: %w", name, err)
+	}
+
+	// 获取实际版本信息
+	version := ""
+	commit := ""
+	tag := ""
+
+	if out, cerr := exec.Command("git", "-C", dst, "rev-parse", "HEAD").CombinedOutput(); cerr == nil {
+		commit = strings.TrimSpace(string(out))
+	}
+
+	// 尝试获取当前 tag
+	if out, cerr := exec.Command("git", "-C", dst, "describe", "--tags", "--exact-match").CombinedOutput(); cerr == nil {
+		tag = strings.TrimSpace(string(out))
+		version = strings.TrimPrefix(tag, "v")
+		version = strings.TrimPrefix(version, "V")
+	}
+
+	// 如果没有 tag，使用 commit 的短哈希作为版本
+	if version == "" && commit != "" {
+		if out, cerr := exec.Command("git", "-C", dst, "rev-parse", "--short", "HEAD").CombinedOutput(); cerr == nil {
+			version = "0.0.0+" + strings.TrimSpace(string(out))
+		}
+	}
+
+	// 写解析锁
+	lock := &ResolvedLock{
+		Name:    name,
+		Version: version,
+		Tag:     tag,
+		Commit:  commit,
+	}
+	if err := SaveResolved(root, name, lock); err != nil {
+		fmt.Printf("[pkg] warning: failed to write resolved lock: %v\n", err)
+	}
+
+	return &FetchResult{
+		Name:    name,
+		Version: version,
+		Tag:     tag,
+		Dir:     dst,
+		Source:  "fetched",
+	}, nil
+}
+
+// cloneGitRepo 克隆 git 仓库到指定目录
+func cloneGitRepo(url, ref, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
+	args := []string{"clone", "--depth", "1"}
+	if ref != "" {
+		args = append(args, "--branch", ref, "--single-branch")
+	}
+	args = append(args, url, dst)
+
+	cmd := exec.Command("git", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.RemoveAll(dst)
+		return fmt.Errorf("git clone %s: %w (%s)", url, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

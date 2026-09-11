@@ -3,6 +3,7 @@
 import (
 	"fmt"
 	"kaula/internal/ast"
+	"sort"
 	"strings"
 )
 
@@ -301,14 +302,33 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 	// 嵌套函数：在参数注册之后检测捕获的外层局部变量
 	// （main/prefix/tree/asm 均不会有外层函数作用域，捕获集为空）
-	captures := fg.codegen.detectCaptures(stmt)
+	// 先收集函数体内的嵌套函数名，用于 detectCaptures 区分函数调用与变量引用
+	nestedFuncNames := collectNestedFuncNames(stmt.Body)
+	directCaptures, directCalls := fg.codegen.detectCaptures(stmt, nestedFuncNames)
+	// 预注册函数体内的其他嵌套函数：确保调用点在定义语句之前时
+	// 也能找到捕获信息（生成调用实参）。预注册包含传递闭包。
+	fg.codegen.preRegisterNestedFuncs(stmt.Body)
+	// 当前函数的捕获传递闭包：若当前函数调用了体内嵌套函数 B，
+	// 则当前函数也需要捕获 B 所需的外层变量，以便在调用 B 时转发捕获指针。
+	captures := make([]string, len(directCaptures))
+	copy(captures, directCaptures)
+	for _, called := range directCalls {
+		if info, ok := fg.codegen.nestedFuncCaptures[called]; ok {
+			for _, cap := range info.Captures {
+				if !containsStr(captures, cap) {
+					captures = append(captures, cap)
+				}
+			}
+		}
+	}
+	sort.Strings(captures)
 	if fg.codegen.inFunctionBody {
 		// 嵌套函数提升为文件级后，调用点（所在外层函数体）先于其定义出现，
 		// 必须在文件头部追加原型声明（forward declaration），否则 clang 报隐式声明错误
 		var proto strings.Builder
 		proto.WriteString(fg.mapReturnType(stmt.ReturnType))
 		proto.WriteByte(' ')
-		proto.WriteString(stmt.Name)
+		proto.WriteString(fg.codegen.UserFuncCName(stmt.Name))
 		proto.WriteByte('(')
 		for i, param := range stmt.Params {
 			if i > 0 {
@@ -316,13 +336,22 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			}
 			paramType := "int64_t"
 			if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-				if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false); ctype != "" {
+				isNullable := false
+				if i < len(stmt.ParamNullables) {
+					isNullable = stmt.ParamNullables[i]
+				}
+				if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable); ctype != "" {
 					paramType = ctype
 				}
 			}
-			proto.WriteString(paramType)
-			proto.WriteByte(' ')
-			proto.WriteString(param)
+			// 函数指针类型参数：R (*)(args) name → R (*name)(args)
+			if strings.Contains(paramType, "(*)") {
+				proto.WriteString(formatCVarDecl(paramType, param))
+			} else {
+				proto.WriteString(paramType)
+				proto.WriteByte(' ')
+				proto.WriteString(param)
+			}
 		}
 		for i := range captures {
 			if i > 0 || len(stmt.Params) > 0 {
@@ -380,9 +409,14 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteString("KAULA_EXPORT ")
 	}
 
-	safeName := stmt.Name
-	if safeName == "max" || safeName == "min" || safeName == "abs" {
-		safeName = "kaula_" + safeName
+	// 用户函数统一 K_ 前缀（避开 C 保留字/库符号）；main、extern、内置保持原名。
+	// max/min/abs 若为用户定义则 K_max，否则重定向 kaula_max，均由 UserFuncCName 统一处理。
+	// export 函数保持原名（FFI 友好，外部 C 代码直接用原名调用）。
+	var safeName string
+	if stmt.IsExported {
+		safeName = stmt.Name
+	} else {
+		safeName = fg.codegen.UserFuncCName(stmt.Name)
 	}
 
 	if stmt.IsGeneric() {
@@ -391,6 +425,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}
 
 	// 设置当前函数返回类型供 return 语句生成使用
+	// 嵌套函数生成会覆盖此值，必须保存外层值并在结束时恢复，
+	// 否则外层函数的 return 语句会误判为 void 生成空 return。
+	prevReturnType := fg.codegen.currentFunctionReturnType
 	fg.codegen.currentFunctionReturnType = stmt.ReturnType
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
@@ -404,11 +441,20 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		}
 		// 获取参数类型
 		paramType := "int64_t" // 默认类型
+		isNullable := false
 		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
+			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable)
 		}
-		builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
-		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], false, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+		// 函数指针类型参数：R (*)(args) name → R (*name)(args)（C 语法要求参数名在 (*) 中间）
+		if strings.Contains(paramType, "(*)") {
+			builder.WriteString(formatCVarDecl(paramType, param))
+		} else {
+			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
+		}
+		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], isNullable, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
 	// 嵌套函数：追加捕获参数（按引用：指针）
 	for i, capName := range captures {
@@ -446,6 +492,14 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}()
 
 	shouldUseKMM := !stmt.NoKMM && !stmt.Inline
+	// 静态分析：在函数体生成前运行全部6个pass
+	analysisResult := fg.codegen.RunStaticAnalysis(stmt.Name, stmt.Body, stmt.Params, stmt.ParamTypes)
+	// 将分析结果暴露给语句生成器（liveness 提前释放/回收路径的别名感知）
+	prevFuncAnalysis := fg.codegen.currentFuncAnalysis
+	fg.codegen.currentFuncAnalysis = analysisResult
+	defer func() {
+		fg.codegen.currentFuncAnalysis = prevFuncAnalysis
+	}()
 	if shouldUseKMM {
 		// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 		// 跨函数分析：结合函数签名判断是否需要 KMM
@@ -461,13 +515,10 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		fg.codegen.indent++
 		prevInFuncBody := fg.codegen.inFunctionBody
 		fg.codegen.inFunctionBody = true
-		for _, bodyStmt := range stmt.Body {
-			if bodyStmt == nil {
-				continue
-			}
-			bodyBuilder.WriteString(fg.codegen.indentString())
-			bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
-		}
+		// 注入静态分析警告
+		bodyBuilder.WriteString(fg.codegen.ReportAnalysisWarnings(stmt.Name, analysisResult))
+		// 结构化所有权基础层：使用带 liveness 的语句生成，实现提前释放（能力③）
+		bodyBuilder.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(stmt.Body, nil))
 		// 方案 A：per-object survivor 回收（在 KMM_V4_SCOPE_END 前发射）
 		// 若末尾是 return，return 中已通过 generateSurvivorFreeForReturn 释放，此处为死代码，跳过
 		if !lastStmtIsReturn(stmt.Body) {
@@ -505,16 +556,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteString(bodyCode)
 	}
 } else {
-	indent := fg.codegen.indentString()
 		prevInFuncBody := fg.codegen.inFunctionBody
 		fg.codegen.inFunctionBody = true
-		for _, bodyStmt := range stmt.Body {
-			if bodyStmt == nil {
-				continue
-			}
-			builder.WriteString(indent)
-			builder.WriteString(fg.codegen.generateStatement(bodyStmt))
-		}
+		// 注入静态分析警告
+		builder.WriteString(fg.codegen.ReportAnalysisWarnings(stmt.Name, analysisResult))
+		// 结构化所有权基础层：使用带 liveness 的语句生成
+		builder.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(stmt.Body, nil))
 		fg.codegen.inFunctionBody = prevInFuncBody
 	}
 
@@ -533,7 +580,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	fg.codegen.pendingNestedFuncs = nil
 
 	fg.codegen.ExitScope()
-	fg.codegen.currentFunctionReturnType = ""
+	fg.codegen.currentFunctionReturnType = prevReturnType
 	return builder.String()
 }
 
@@ -541,7 +588,7 @@ func (fg *FunctionGenerator) generatePrefixFunction(stmt *ast.FunctionStatement)
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Prefix function: AST generation for cross-file reuse\n")
-	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
+	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
 
 	if len(stmt.Params) > 0 {
 		code.WriteString("(int64_t arg) {\n")
@@ -580,7 +627,7 @@ func (fg *FunctionGenerator) generateTreeFunction(stmt *ast.FunctionStatement) s
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Tree function: AST generation with root validation\n")
-	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
+	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
 
 	if len(stmt.Params) > 0 {
 		code.WriteString("(int64_t arg) {\n")
@@ -615,7 +662,7 @@ func (fg *FunctionGenerator) generateRootTreeFunction(stmt *ast.FunctionStatemen
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Root tree function: defines global tree structure\n")
-	fmt.Fprintf(&code, "int64_t %s", stmt.Name)
+	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
 
 	if len(stmt.Params) > 0 {
 		code.WriteString("(int64_t arg) {\n")
@@ -732,6 +779,15 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 
 	// main 始终返回 int，设置返回类型供 return 语句生成使用
 	fg.codegen.currentFunctionReturnType = "int"
+
+	// 静态分析：与普通函数路径保持一致，暴露别名组给回收路径，
+	// 防止 main 中别名变量被重复释放（double-free）
+	mainAnalysis := fg.codegen.RunStaticAnalysis(stmt.Name, stmt.Body, stmt.Params, stmt.ParamTypes)
+	prevFuncAnalysis := fg.codegen.currentFuncAnalysis
+	fg.codegen.currentFuncAnalysis = mainAnalysis
+	defer func() {
+		fg.codegen.currentFuncAnalysis = prevFuncAnalysis
+	}()
 
 	funcName := "main"
 	if fg.codegen.config != nil && fg.codegen.config.Freestanding {
@@ -942,9 +998,14 @@ func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) st
 		builder.WriteByte(' ')
 	}
 
-	safeName := stmt.Name
-	if safeName == "max" || safeName == "min" || safeName == "abs" {
-		safeName = "kaula_" + safeName
+	// 用户函数统一 K_ 前缀（避开 C 保留字/库符号）；main、extern、内置保持原名。
+	// max/min/abs 若为用户定义则 K_max，否则重定向 kaula_max，均由 UserFuncCName 统一处理。
+	// export 函数保持原名（FFI 友好，外部 C 代码直接用原名调用）。
+	var safeName string
+	if stmt.IsExported {
+		safeName = stmt.Name
+	} else {
+		safeName = fg.codegen.UserFuncCName(stmt.Name)
 	}
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
@@ -957,7 +1018,11 @@ func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) st
 		}
 		paramType := "int64_t"
 		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], false)
+			isNullable := false
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
+			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable)
 		}
 		builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
 	}

@@ -122,11 +122,19 @@ kaulac pkg list
 {
   "dependencies": {
     "webview": "0.12",
-    "clay": "^1.0"
+    "clay": "^1.0",
+    "mylib": {
+      "git": "https://github.com/user/repo.git",
+      "tag": "v1.0.0"
+    }
   },
   "registry": "https://gitee.com/kaula-universe"
 }
 ```
+
+支持两种依赖格式：
+- **版本约束**：简单字符串（如 `"0.12"` 或 `"^1.0"`），从注册表下载
+- **Git 仓库**：对象格式，指定 git URL、标签、分支或 commit
 
 ```bash
 # 拉取依赖
@@ -327,8 +335,7 @@ kaulac --init
 | **编码** | encoding、crypto、compress、archive |
 | **系统** | system、subprocess、cli、time、datetime、calendar |
 | **类型** | option、traits、base、error |
-| **运行时** | vo、prefix、task、format、logging、testing、i18n |
-| **GUI** | gui（Nuklear 绑定） |
+| **运行时** | vo、prefix、task、format、logging、testing |
 | **Freestanding** | freestanding.base、freestanding.memory、freestanding.string、freestanding.math、freestanding.io（无依赖，弱符号，裸机/托管双环境） |
 
 ---
@@ -339,12 +346,10 @@ kaulac --init
 
 ```kaula
 import stb_image   // C 库
-import imgui       // C++ 库：自动生成 extern "C" 桥接
 
 fn main() {
     void* img = stbi_load("texture.png", &width, &height, &channels, 4)
     stbi_image_free(img)
-    println(kbridge_GetVersion())
 }
 ```
 

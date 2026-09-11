@@ -69,11 +69,11 @@ func LoadWorkspace(rootDir string) (*Workspace, error) {
 		// 合并共享依赖
 		if cfg.Workspace.SharedDeps != nil {
 			if memberCfg.Dependencies == nil {
-				memberCfg.Dependencies = map[string]string{}
+				memberCfg.Dependencies = map[string]config.Dependency{}
 			}
 			for name, ver := range cfg.Workspace.SharedDeps {
 				if _, exists := memberCfg.Dependencies[name]; !exists {
-					memberCfg.Dependencies[name] = ver
+					memberCfg.Dependencies[name] = config.Dependency{Version: ver}
 				}
 			}
 		}

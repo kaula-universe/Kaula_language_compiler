@@ -76,9 +76,12 @@ type Config struct {
 	Version string `json:"version,omitempty"`
 
 	// ====== 包依赖 ======
-	// 依赖声明（Cargo 风格）：包名 -> 版本约束（如 "webview": "0.12"）。
+	// 依赖声明（Cargo 风格）：包名 -> 版本约束或 git 仓库配置。
 	// 编译时自动从注册源拉取缺失依赖到 ~/.kaula/pkglib/ 缓存。
-	Dependencies map[string]string `json:"dependencies,omitempty"`
+	// 支持两种格式：
+	// 1. 简单字符串：版本约束（如 "0.12" 或 "^1.0"）
+	// 2. 对象：git 仓库配置（如 {"git": "https://github.com/user/repo.git", "tag": "v1.0.0"}）
+	Dependencies map[string]Dependency `json:"dependencies,omitempty"`
 	// 包注册源（默认 https://gitee.com/kaula-universe；可指向任意 git 仓库根/镜像）。
 	Registry string `json:"registry,omitempty"`
 
@@ -108,6 +111,66 @@ type Config struct {
 	ForcePKG     bool   `json:"force_pkg,omitempty"`    // 强制重新构建/重新分析 pkglib 库
 	SkipAutoPkg  bool   `json:"skip_auto_pkg,omitempty"` // 禁用使用库时的自动构建
 	AutoAnalyzePkg bool `json:"auto_analyze_pkg,omitempty"` // 自动分析缺失/过期的库配置
+}
+
+// Dependency 依赖配置，支持版本约束或 git 仓库
+type Dependency struct {
+	// Version 版本约束（如 "0.12" 或 "^1.0"），与 Git 字段互斥
+	Version string `json:"version,omitempty"`
+	// Git git 仓库 URL（如 "https://github.com/user/repo.git"）
+	Git string `json:"git,omitempty"`
+	// Tag 指定 git 标签（可选，默认最新标签）
+	Tag string `json:"tag,omitempty"`
+	// Branch 指定 git 分支（可选，默认主分支）
+	Branch string `json:"branch,omitempty"`
+	// Commit 指定 git commit（可选）
+	Commit string `json:"commit,omitempty"`
+}
+
+// UnmarshalJSON 实现自定义 JSON 反序列化，支持字符串和对象两种格式
+func (d *Dependency) UnmarshalJSON(data []byte) error {
+	// 尝试解析为字符串（旧格式）
+	var version string
+	if err := json.Unmarshal(data, &version); err == nil {
+		d.Version = version
+		return nil
+	}
+
+	// 尝试解析为对象（新格式）
+	type Alias Dependency
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err == nil {
+		*d = Dependency(alias)
+		return nil
+	}
+
+	return fmt.Errorf("invalid dependency format: expected string or object")
+}
+
+// MarshalJSON 实现自定义 JSON 序列化
+func (d Dependency) MarshalJSON() ([]byte, error) {
+	// 如果是简单的版本依赖，序列化为字符串
+	if !d.IsGitDependency() && d.Tag == "" && d.Branch == "" && d.Commit == "" {
+		return json.Marshal(d.Version)
+	}
+	// 否则序列化为对象
+	type Alias Dependency
+	return json.Marshal(Alias(d))
+}
+
+// IsGitDependency 检查是否是 git 依赖
+func (d Dependency) IsGitDependency() bool {
+	return d.Git != ""
+}
+
+// GetVersion 获取版本约束（如果是版本依赖）
+func (d Dependency) GetVersion() string {
+	return d.Version
+}
+
+// GetGitURL 获取 git URL（如果是 git 依赖）
+func (d Dependency) GetGitURL() string {
+	return d.Git
 }
 
 // PatchConfig 本地路径覆盖配置
@@ -142,10 +205,15 @@ func DefaultConfig() *Config {
 }
 
 // ResolveOptLevel 根据编译模式确定优化级别
-// 优先级: --opt 手动指定 > --sor > --release > 默认 O2
+// 优先级: --opt 手动指定 > --sor > --release > --debug(O1) > 默认 O2
 func (cfg *Config) ResolveOptLevel(optOverride string) string {
 	level := "-O2"
 
+	// debug 模式默认 O1：减少 clang 优化时间，提升编译速度（TDD 红绿循环更流畅）
+	// release/sor 模式仍使用 O3
+	if cfg.Debug {
+		level = "-O1"
+	}
 	if cfg.SOR {
 		level = "-O3"
 	}

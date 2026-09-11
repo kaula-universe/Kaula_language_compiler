@@ -1,4 +1,4 @@
-﻿package codegen
+package codegen
 
 import (
 	"fmt"
@@ -47,8 +47,16 @@ type CodeGenerator struct {
 	expressionGenerator *ExpressionGenerator
 	statementGenerator  *StatementGenerator
 
+	// 当前正在生成的函数的静态分析结果（含别名组），
+	// 供 liveness 提前释放/返回回收路径做别名感知，防止
+	// 别名变量的 use-after-free 与 double-free
+	currentFuncAnalysis *StaticAnalysisResult
+
 	usedThirdPartyLibs map[string]bool
 	localImportFuncs   map[string]bool
+	// 本地 import 的 pub/export 函数返回类型（函数名 -> Kaula 返回类型），
+	// 供 inferType 对跨文件调用做类型推断（println 格式选择、concat 重载等）
+	localImportReturns map[string]string
 	// 本地 import 的类型定义（跨文件 class/struct 等），用于 C 类型映射与成员访问解析
 	localPubTypes map[string]*sema.LocalPubTypeInfo
 
@@ -56,6 +64,8 @@ type CodeGenerator struct {
 	genericInstantiated   map[string]bool
 	genericFuncCode       strings.Builder // 泛型实例化函数代码
 	genericInstDepth      int             // 当前实例化深度（防止无限递归）
+
+	classImplCode strings.Builder // class 构造器/方法体（延迟到 forwardDecls 与全局变量之后输出）
 
 	genericTypeCache      map[string]string // 泛型类型实例缓存：Box<int> → K_Box_int
 	genericTypeCode       strings.Builder   // 泛型类型实例化代码（typedef 定义）
@@ -87,11 +97,38 @@ type CodeGenerator struct {
 	// needsStringConcat: 代码中使用了字符串拼接("a" + x), 注入内联 string 运行时
 	needsStringConcat bool
 
+	// 缺口4：整数溢出检查开关（debug 模式默认启用，release 模式禁用）
+	// 启用时 +、-、* 运算用 kaula_add/sub/mul_i64/u64 内联函数包装，
+	// 使用 __builtin_*_overflow 零开销检查，溢出时 abort。
+	enableOverflowCheck bool
+
 	// 修复 #25：符号声明时的 codegen 作用域栈深度（函数体=1，if/while/block=2+）
 	// SOR 分析器不把 if/while 块计为作用域（scopeID 恒为 0），
 	// 跨作用域 promote 判定需靠 codegen 自己的作用域栈
 	scopeDepth      int
 	declScopeDepth  map[string]int
+
+	// 赋值逃逸登记（KMM 回卷悬垂修复）：通过普通赋值 dst = src 把 src 所指对象
+	// 的引用传给更长生命周期持有者（外层局部/全局）的源变量名集合。
+	// 已逃逸变量：
+	//  1. 在赋值点被 promote 到幸存段（副本长期有效）；
+	//  2. 其块尾 per-object survivor_free 必须抑制——否则会释放幸存副本，
+	//     使新持有者悬垂（声明还在、内容丢失）。
+	assignEscapedVars map[string]bool
+
+	// 结构化所有权基础层扩展（从 SOR 下移的能力 + 多分配器 origin 追踪）：
+	// externFuncNames: 程序中声明的 extern 函数名集合
+	// externOriginVars: 初始值来自 extern 函数返回的变量集合（向后兼容）
+	// varOrigins: 变量的分配器来源（kmm/libc_malloc/extern/unknown），用于按来源释放
+	// promotedVars: 已被 promote 的变量集合
+	// earlyFreedVars: 已被 early free 的变量集合
+	// exportedFuncNames: export 函数名集合
+	externFuncNames   map[string]bool
+	externOriginVars  map[string]bool
+	varOrigins        map[string]string
+	promotedVars      map[string]bool
+	earlyFreedVars    map[string]bool
+	exportedFuncNames map[string]bool
 
 	sourceMap  *SourceMap
 	sourceFile string
@@ -133,6 +170,11 @@ type CodeGenerator struct {
 	pendingNestedFuncs    []string
 	nestedFuncPrototypes  strings.Builder
 	inFunctionBody        bool
+
+	// userFuncNames: 本文件全部用户自定义 fn 的名字集合（含函数体内嵌套 fn）。
+	// 这些符号在 C 侧统一加 K_ 前缀，彻底避开 C 保留字（int/double/...）与 C 库符号冲突。
+	// main 是 C 入口、extern/stdlib/第三方函数不在此集合，均保持原名。
+	userFuncNames map[string]bool
 
 	// 任务②：深提升回调（kmm_v4_scope_promote_p_deep）的合成与去重
 	// deepPromoteCBEmitted: kaula 类型名 -> true（已经合成过，避免重复）
@@ -415,6 +457,222 @@ func (cg *CodeGenerator) GetDeclScopeDepth(name string) int {
 	return 0
 }
 
+// MarkAssignEscaped 登记通过普通赋值逃逸到更长生命周期持有者的源变量。
+// 已逃逸变量的块尾 per-object survivor_free 必须抑制（对象已 promote，
+// 所有权由新持有者延续，提前 free 会造成新持有者悬垂）。
+func (cg *CodeGenerator) MarkAssignEscaped(name string) {
+	if name != "" {
+		cg.assignEscapedVars[name] = true
+	}
+}
+
+// IsAssignEscaped 查询变量是否已通过普通赋值逃逸
+func (cg *CodeGenerator) IsAssignEscaped(name string) bool {
+	return cg.assignEscapedVars[name]
+}
+
+// === 结构化所有权基础层扩展（从 SOR 下移的能力）===
+
+// IsExternFunc 查询函数名是否为 extern 声明的函数
+func (cg *CodeGenerator) IsExternFunc(name string) bool {
+	return cg.externFuncNames[name]
+}
+
+// 变量分配器来源常量（多分配器 origin 追踪）
+// 用于编译期确定每个指针变量该用哪个释放函数，零运行时开销
+const (
+	OriginKmm        = "kmm"         // KMM 分配（kmm_v4_alloc_auto 等），用 survivor_free
+	OriginLibcMalloc = "libc_malloc" // libc 分配（malloc/calloc/realloc），用 free
+	OriginExtern     = "extern"      // extern 函数返回，不释放（所有权不透明）
+	OriginUnknown    = "unknown"     // 未知来源，保守不释放
+)
+
+// kmmAllocFuncs KMM 分配函数名集合
+var kmmAllocFuncs = map[string]bool{
+	"kmm_v4_alloc_auto": true,
+	"kmm_v4_alloc":      true,
+	"kmm_v4_malloc":     true,
+	"kmm_v4_calloc":     true,
+	"kmm_v4_bump":       true,
+}
+
+// libcAllocFuncs libc 分配函数名集合
+var libcAllocFuncs = map[string]bool{
+	"malloc":  true,
+	"calloc":  true,
+	"realloc": true,
+}
+
+// RecordExternOriginFromAST 追踪变量初始化是否来自 extern 函数返回
+// 用于 return promote 时警告：extern 指针对 SOR 不透明，promote 语义可能不正确
+func (cg *CodeGenerator) RecordExternOriginFromAST(name string, expr ast.Expression) {
+	if name == "" || expr == nil {
+		return
+	}
+	var call *ast.CallExpression
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		call = e
+	case *ast.TypeCastExpression:
+		if c, ok := e.Expression.(*ast.CallExpression); ok {
+			call = c
+		}
+	}
+	if call == nil || call.Function == nil {
+		return
+	}
+	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
+		if cg.IsExternFunc(fnIdent.Name) {
+			cg.externOriginVars[name] = true
+			cg.varOrigins[name] = OriginExtern
+		}
+	}
+}
+
+// RecordVarOriginFromAST 多分配器 origin 追踪：识别变量初始化的分配函数
+// 识别顺序：KMM 分配函数 > libc 分配函数 > extern 函数 > 未知
+// freestanding 模式下 std_malloc 被重写为 kmm_v4_alloc_auto，会被识别为 KMM
+func (cg *CodeGenerator) RecordVarOriginFromAST(name string, expr ast.Expression) {
+	if name == "" || expr == nil {
+		return
+	}
+	var call *ast.CallExpression
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		call = e
+	case *ast.TypeCastExpression:
+		if c, ok := e.Expression.(*ast.CallExpression); ok {
+			call = c
+		}
+	}
+	if call == nil || call.Function == nil {
+		return
+	}
+	fnName := ""
+	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
+		fnName = fnIdent.Name
+	} else if member, ok := call.Function.(*ast.MemberExpression); ok {
+		// std.malloc 形式
+		fnName = member.Member
+	}
+	if fnName == "" {
+		return
+	}
+	// KMM 分配函数
+	if kmmAllocFuncs[fnName] {
+		cg.varOrigins[name] = OriginKmm
+		return
+	}
+	// libc 分配函数（std_malloc 在 hosted 模式下是系统 malloc）
+	if libcAllocFuncs[fnName] || fnName == "std_malloc" {
+		// freestanding 模式下 std_malloc 被重写为 kmm_v4_alloc_auto
+		// 这里保守标记为 libc_malloc，表达式生成阶段的重写不影响 origin 判断
+		// 实际释放时，如果代码中是 kmm_v4_alloc_auto，会被 KMM scope 管理
+		cg.varOrigins[name] = OriginLibcMalloc
+		return
+	}
+	// extern 函数返回
+	if cg.IsExternFunc(fnName) {
+		cg.externOriginVars[name] = true
+		cg.varOrigins[name] = OriginExtern
+		return
+	}
+}
+
+// GetVarOrigin 查询变量的分配器来源
+func (cg *CodeGenerator) GetVarOrigin(name string) string {
+	if origin, ok := cg.varOrigins[name]; ok {
+		return origin
+	}
+	// 向后兼容：externOriginVars 中有记录的视为 extern
+	if cg.externOriginVars[name] {
+		return OriginExtern
+	}
+	return OriginUnknown
+}
+
+// SetVarOrigin 手动设置变量来源（用于赋值传播等场景）
+func (cg *CodeGenerator) SetVarOrigin(name, origin string) {
+	if name != "" && origin != "" {
+		cg.varOrigins[name] = origin
+		if origin == OriginExtern {
+			cg.externOriginVars[name] = true
+		}
+	}
+}
+
+// IsExternOrigin 查询变量是否来自 extern 函数返回
+func (cg *CodeGenerator) IsExternOrigin(name string) bool {
+	return cg.externOriginVars[name] || cg.varOrigins[name] == OriginExtern
+}
+
+// MarkPromoted 标记变量已被 promote（reaching definition，防止重复 promote）
+func (cg *CodeGenerator) MarkPromoted(name string) {
+	if name != "" {
+		cg.promotedVars[name] = true
+	}
+}
+
+// IsPromoted 查询变量是否已被 promote
+func (cg *CodeGenerator) IsPromoted(name string) bool {
+	return cg.promotedVars[name]
+}
+
+// MarkEarlyFreed 标记变量已被 early free（防止 return/块尾重复释放）
+func (cg *CodeGenerator) MarkEarlyFreed(name string) {
+	if name != "" {
+		cg.earlyFreedVars[name] = true
+	}
+}
+
+// IsEarlyFreed 查询变量是否已被 early free
+func (cg *CodeGenerator) IsEarlyFreed(name string) bool {
+	return cg.earlyFreedVars[name]
+}
+
+// === 条件分支路径敏感（从 SOR 下移的能力⑤）===
+
+// SnapshotPromotedVars 快照当前已 promote 变量集合，用于条件分支的路径敏感分析。
+// 在生成 if/else 分支前调用，生成后用 RestorePromotedVars 恢复。
+func (cg *CodeGenerator) SnapshotPromotedVars() map[string]bool {
+	snapshot := make(map[string]bool, len(cg.promotedVars))
+	for k, v := range cg.promotedVars {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+// RestorePromotedVars 恢复已 promote 变量集合到快照状态。
+func (cg *CodeGenerator) RestorePromotedVars(snapshot map[string]bool) {
+	cg.promotedVars = make(map[string]bool, len(snapshot))
+	for k, v := range snapshot {
+		cg.promotedVars[k] = v
+	}
+}
+
+// MergePromotedFromBranches 合并两个分支的 promote 状态。
+// 只有在两个分支中都被 promote 的变量，才在合并点标记为已 promote（路径敏感交集）。
+// 只在一个分支中 promote 的变量，保守地不标记（因为另一个分支可能没 promote）。
+func (cg *CodeGenerator) MergePromotedFromBranches(thenPromoted, elsePromoted map[string]bool) {
+	for name := range thenPromoted {
+		if elsePromoted[name] {
+			cg.promotedVars[name] = true
+		}
+	}
+}
+
+// DiffPromotedVars 计算当前 promotedVars 与快照的差异（新增的已 promote 变量）。
+// 用于记录单个分支中新 promote 的变量。
+func (cg *CodeGenerator) DiffPromotedVars(snapshot map[string]bool) map[string]bool {
+	diff := make(map[string]bool)
+	for name := range cg.promotedVars {
+		if !snapshot[name] {
+			diff[name] = true
+		}
+	}
+	return diff
+}
+
 // IsMallocLikeCall 检查是否为 malloc 类调用（包含 hosted std_malloc，不区分 freestanding）
 // 用于编译期大小登记
 func (cg *CodeGenerator) IsMallocLikeCall(call *ast.CallExpression) bool {
@@ -542,6 +800,22 @@ func (cg *CodeGenerator) SetLocalPubTypes(types map[string]*sema.LocalPubTypeInf
 	}
 }
 
+// SetLocalImportReturnTypes 注册本地 import 的 pub/export 函数返回类型映射。
+// inferType 对跨文件函数调用查 program.FindFunction 必然失败（定义在别的
+// 文件），此处提供 O(1) 回查，保证 println 格式/concat 重载等推断正确。
+func (cg *CodeGenerator) SetLocalImportReturnTypes(m map[string]string) {
+	cg.localImportReturns = m
+	if len(m) > 0 && cg.typeGenerator != nil {
+		// 顺带把跨文件函数名注册为已知符号，便于其他按名查询的路径兜底
+		if cg.localImportFuncs == nil {
+			cg.localImportFuncs = make(map[string]bool)
+		}
+		for name := range m {
+			cg.localImportFuncs[name] = true
+		}
+	}
+}
+
 func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	tm := NewTemplateManager()
 	templatePath := filepath.Join(cfg.TemplatePath, "main.c.tmpl")
@@ -570,9 +844,12 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 			stdlibPath = "stdlib.json" // 保底: 让 LoadStdlibConfig 报真实错误
 		}
 	}
-	// 静默加载 stdlib 配置（ninja 风格: 成功路径不打印）
+	// 加载 stdlib 配置（失败时警告并置 nil，后续代码均有 nil 检查）
 	stdlibConfig, err := stdlib.LoadStdlibConfig(stdlibPath)
-	_ = err
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] 加载 stdlib 配置失败 (%s): %v; 标准库函数签名将不可用\n", stdlibPath, err)
+		stdlibConfig = nil
+	}
 
 	treeManager := core.NewTreeManager()
 	prefixManager := core.NewPrefixManager()
@@ -601,7 +878,17 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		arrayLens:           make(map[string]int),
 		sorInitSizes:        make(map[string]int),
 		declScopeDepth:      make(map[string]int),
+		assignEscapedVars:   make(map[string]bool),
+		externFuncNames:     make(map[string]bool),
+		externOriginVars:    make(map[string]bool),
+		varOrigins:          make(map[string]string),
+		promotedVars:        make(map[string]bool),
+		earlyFreedVars:      make(map[string]bool),
+		exportedFuncNames:   make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
+		// 缺口4：整数溢出检查。debug 模式默认启用（零开销 __builtin_*_overflow），
+		// release 模式禁用（wrapping 行为，与 C 一致，零开销）。
+		enableOverflowCheck: !cfg.Release,
 	}
 
 	cg.typeGenerator = NewTypeGenerator(cg)
@@ -620,6 +907,20 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.lambdaDefinitions = nil
 	cg.objectDeclCode.Reset()
 	cg.preludeInitCode.Reset()
+
+	// 收集本文件全部用户自定义 fn（含函数体内嵌套 fn），用于统一 K_ 函数前缀。
+	// main、extern fn（ExternStatement）、stdlib/第三方 C 函数都不在其中，保持原名。
+	cg.userFuncNames = make(map[string]bool)
+	// 收集 export 函数名（FFI 边界，保持原名不加 K_ 前缀）
+	cg.exportedFuncNames = make(map[string]bool)
+	program.Traverse(func(n ast.Node) {
+		if fn, ok := n.(*ast.FunctionStatement); ok && fn.Name != "" {
+			cg.userFuncNames[fn.Name] = true
+			if fn.IsExported {
+				cg.exportedFuncNames[fn.Name] = true
+			}
+		}
+	})
 
 	type rawEntry struct {
 		section string
@@ -834,6 +1135,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		} else if externStmt, ok := stmt.(*ast.ExternStatement); ok {
 			if externStmt == nil {
 				continue
+			}
+			// 结构化所有权基础层：登记 extern 函数名，用于追踪变量来源
+			if externStmt.IsFunction {
+				cg.externFuncNames[externStmt.Name] = true
 			}
 			var code string
 			if externStmt.IsFunction {
@@ -1082,27 +1387,49 @@ static inline String string_concat_float(String s, double v) {
 	forwardDecls.Grow(1024)
 	for _, stmt := range program.Statements {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.Name != "main" {
-			// 参数含 struct/class 类型的函数跳过前置声明
-			// (前置声明在 typedef 之前, 值参数需要完整类型)
-			hasStructParam := false
+			// 泛型函数跳过前置声明：原始签名的类型参数 T 无法映射为合法 C 类型，
+			// 生成原型只会产生 "unknown type name 'T'"；实际调用点经
+			// InstantiateGeneric 单态化为 identity_int 等实例（定义自带原型语义，
+			// 位于 genericFuncCode），无需也不应为此处生成原始签名原型。
+			if fnStmt.Generic || len(fnStmt.TypeParams) > 0 {
+				continue
+			}
+			// 参数/返回值含自定义类型 (struct/class/enum/type alias/跨文件类型) 的函数
+			// 跳过前置声明：这些类型的 typedef 定义在 forwardDecls 之后才输出，
+			// 若先生成原型会导致 C 编译报 "unknown type name"。
+			needsTypeBeforeDecl := false
+			// isUserDefinedType 判断 kaulaType 是否是需要 typedef 在前的自定义类型
+			isUserDefinedType := func(kaulaType string) bool {
+				base := strings.TrimSuffix(strings.TrimPrefix(kaulaType, "*"), "*")
+				tg := cg.typeGenerator
+				if tg != nil {
+					if tg.structTypes[base] || tg.classTypes[base] ||
+						tg.enumTypes[base] || tg.typeAliasTypes[base] {
+						return true
+					}
+				}
+				// 跨文件 import 的公共类型：struct/class/enum/type alias 均在
+				// 另一个 .kl 生成的 typeCode 中定义，若当前文件 forwardDecls 先生成
+				// 就会引用未定义类型，同样需要跳过前置声明。
+				if cg.localPubTypes != nil {
+					if _, ok := cg.localPubTypes[base]; ok {
+						return true
+					}
+				}
+				return false
+			}
 			for _, pType := range fnStmt.ParamTypes {
-				base := strings.TrimSuffix(strings.TrimPrefix(pType, "*"), "*")
-				if cg.typeGenerator != nil &&
-					(cg.typeGenerator.structTypes[base] || cg.typeGenerator.classTypes[base]) {
-					hasStructParam = true
+				if isUserDefinedType(pType) {
+					needsTypeBeforeDecl = true
 					break
 				}
 			}
-			// 返回类型含 struct/class 同样跳过: 返回类型生成的是 K_X* 指针,
-			// typedef struct K_X 在其后才生成, 前置声明会引用未定义类型
-			if !hasStructParam && cg.typeGenerator != nil &&
-				fnStmt.ReturnType != "" && fnStmt.ReturnType != "void" {
-				base := strings.TrimSuffix(strings.TrimPrefix(fnStmt.ReturnType, "*"), "*")
-				if cg.typeGenerator.structTypes[base] || cg.typeGenerator.classTypes[base] {
-					hasStructParam = true
+			if !needsTypeBeforeDecl && fnStmt.ReturnType != "" && fnStmt.ReturnType != "void" {
+				if isUserDefinedType(fnStmt.ReturnType) {
+					needsTypeBeforeDecl = true
 				}
 			}
-			if hasStructParam {
+			if needsTypeBeforeDecl {
 				continue
 			}
 			returnType := tgReturnTypeToC(cg.typeGenerator, fnStmt.ReturnType)
@@ -1113,19 +1440,28 @@ static inline String string_concat_float(String s, double v) {
 			}
 			forwardDecls.WriteString(returnType)
 			forwardDecls.WriteByte(' ')
-			forwardDecls.WriteString(fnStmt.Name)
+			forwardDecls.WriteString(cg.UserFuncCName(fnStmt.Name))
 			forwardDecls.WriteByte('(')
 			for i, pType := range fnStmt.ParamTypes {
 				if i > 0 {
 					forwardDecls.WriteString(", ")
 				}
-				cType := cg.typeGenerator.convertType(pType, false)
+				isNullable := false
+				if i < len(fnStmt.ParamNullables) {
+					isNullable = fnStmt.ParamNullables[i]
+				}
+				cType := cg.typeGenerator.convertType(pType, isNullable)
 				if cType == "" {
 					cType = "void*"
 				}
-				forwardDecls.WriteString(cType)
-				forwardDecls.WriteByte(' ')
-				forwardDecls.WriteString(fnStmt.Params[i])
+				// 函数指针类型参数：R (*)(args) name → R (*name)(args)
+				if strings.Contains(cType, "(*)") {
+					forwardDecls.WriteString(formatCVarDecl(cType, fnStmt.Params[i]))
+				} else {
+					forwardDecls.WriteString(cType)
+					forwardDecls.WriteByte(' ')
+					forwardDecls.WriteString(fnStmt.Params[i])
+				}
 			}
 			forwardDecls.WriteString(");\n")
 		}
@@ -1161,23 +1497,31 @@ static inline String string_concat_float(String s, double v) {
 			resultBuilder.Grow(allIncludes.Len() + forwardDecls.Len() + globalVars.Len() + typeCode.Len() + functionCode.Len() + mainCode.Len() + 256)
 			resultBuilder.WriteString(allIncludes.String())
 			resultBuilder.WriteString("\n\n")
-resultBuilder.WriteString(cg.genericTypeCode.String())
-			resultBuilder.WriteString(forwardDecls.String())
-			resultBuilder.WriteByte('\n')
-
-			typeOffset = strings.Count(allIncludes.String(), "\n") + 3 + strings.Count(forwardDecls.String(), "\n") + 1
-
+			resultBuilder.WriteString(cg.genericTypeCode.String())
+			// 修复: typedef/struct/enum/type alias (typeCode) 必须在函数前置声明
+			// (forwardDecls) 之前输出，否则当导出函数签名中含有简单枚举/type alias/
+			// 跨文件 struct 等类型时，C 编译器报 "unknown type name"。
 			resultBuilder.WriteString(typeCode.String())
 			resultBuilder.WriteByte('\n')
 
-			globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1
+			typeOffset = strings.Count(allIncludes.String(), "\n") + 3 + strings.Count(cg.genericTypeCode.String(), "\n") + 1
+
+			resultBuilder.WriteString(forwardDecls.String())
+			resultBuilder.WriteByte('\n')
+
+			globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1 + strings.Count(forwardDecls.String(), "\n") + 1
 
 			resultBuilder.WriteString(globalVars.String())
 			resultBuilder.WriteByte('\n')
 			resultBuilder.WriteString(classGlobalVars.String())
 			resultBuilder.WriteByte('\n')
 
-			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
+			// class 构造器/方法体：依赖 forwardDecls（顶层函数原型）与全局变量，
+			// 故置于两者之后、普通函数体之前
+			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1 +
+				strings.Count(cg.classImplCode.String(), "\n") + 1
+			resultBuilder.WriteString(cg.classImplCode.String())
+			resultBuilder.WriteByte('\n')
 			resultBuilder.WriteString(functionCode.String())
 
 			if useFreestanding {
@@ -1194,20 +1538,32 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 		} else {
 			result = template
 			result = strings.ReplaceAll(result, "{{includes}}", allIncludes.String())
-			result = strings.ReplaceAll(result, "{{forward_decls}}", cg.genericTypeCode.String()+forwardDecls.String())
+			// 修复: 将类型定义 (genericTypeCode + typeCode) 全部放在 forward_decls 之前。
+			// 把 forward_decls 占位符内容置空，类型与前置声明合并输出到 type_code 占位符中，
+			// 从而保证 typedef/enum/struct/type alias 定义先于引用它们的函数原型。
+			result = strings.ReplaceAll(result, "{{forward_decls}}", "")
 			result = strings.ReplaceAll(result, "{{global_vars}}", globalVars.String())
 			typeCodeWithClassGlobals := typeCode.String()
 			if classGlobalVars.Len() > 0 {
 				typeCodeWithClassGlobals += "\n" + classGlobalVars.String()
 			}
-			result = strings.ReplaceAll(result, "{{type_code}}", typeCodeWithClassGlobals)
-			result = strings.ReplaceAll(result, "{{function_code}}", functionCode.String())
+			// 合并顺序: generic 实例化类型 → 本地 typedef → 函数前置声明
+			typeAndForward := cg.genericTypeCode.String() +
+				typeCodeWithClassGlobals + "\n\n" +
+				forwardDecls.String()
+			result = strings.ReplaceAll(result, "{{type_code}}", typeAndForward)
+			// class 构造器/方法体置于函数体区段最前（已在 forwardDecls/全局变量之后）
+			funcAndImpl := cg.classImplCode.String() + "\n" + functionCode.String()
+			result = strings.ReplaceAll(result, "{{function_code}}", funcAndImpl)
 			result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
 			result = strings.ReplaceAll(result, "{{code}}", "")
 
 			idxIncludes := strings.Index(result, allIncludes.String())
-			idxForward := strings.Index(result, forwardDecls.String())
-			idxType := strings.Index(result, typeCode.String())
+			// typeOffset 现在以 cg.genericTypeCode (作为 type_code 最前缀) 定位
+			idxType := strings.Index(result, cg.genericTypeCode.String())
+			if idxType < 0 {
+				idxType = strings.Index(result, typeCode.String())
+			}
 			idxGlobal := strings.Index(result, globalVars.String())
 			idxFunc := strings.Index(result, functionCode.String())
 			idxMain := strings.Index(result, mainCode.String())
@@ -1222,7 +1578,6 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 				mainOffset = funcOffset + strings.Count(functionCode.String(), "\n")
 			}
 			_ = idxIncludes
-			_ = idxForward
 		}
 	} else {
 		var resultBuilder strings.Builder
@@ -1230,16 +1585,18 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 		resultBuilder.WriteString(allIncludes.String())
 		resultBuilder.WriteString("\n")
 		resultBuilder.WriteString(cg.genericTypeCode.String())
+		// 修复: typedef/struct/enum/type alias (typeCode) 必须在函数前置声明
+		// (forwardDecls) 之前输出，避免导出函数签名含简单枚举/type alias/
+		// 跨文件类型时出现 "unknown type name" 编译错误。
+		// 同时 typeCode 仍然在 globalVars 之前 (extern 声明同样需要类型先定义)
+		typeOffset = strings.Count(allIncludes.String(), "\n") + 2 + strings.Count(cg.genericTypeCode.String(), "\n") + 1
+		resultBuilder.WriteString(typeCode.String())
+		resultBuilder.WriteString("\n\n")
+
 		resultBuilder.WriteString(forwardDecls.String())
 		resultBuilder.WriteString("\n")
 
-		// type_code (typedef/struct/enum/type alias) 必须在 global_vars (extern/全局变量) 之前,
-		// 否则 extern 函数原型引用 type 别名/自定义类型时 C 编译失败 (undefined type)
-		typeOffset = strings.Count(allIncludes.String(), "\n") + 2 + strings.Count(forwardDecls.String(), "\n") + 1
-		resultBuilder.WriteString(typeCode.String())
-		resultBuilder.WriteString("\n")
-
-		globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1
+		globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1 + strings.Count(forwardDecls.String(), "\n") + 2
 		resultBuilder.WriteString(globalVars.String())
 		resultBuilder.WriteString("\n")
 
@@ -1247,6 +1604,13 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 		if classGlobalVars.Len() > 0 {
 			resultBuilder.WriteString("\n")
 			resultBuilder.WriteString(classGlobalVars.String())
+		}
+
+		// class 构造器/方法体：依赖 forwardDecls 与全局变量，先于普通函数体输出
+		if cg.classImplCode.Len() > 0 {
+			resultBuilder.WriteString("\n")
+			resultBuilder.WriteString(cg.classImplCode.String())
+			resultBuilder.WriteString("\n")
 		}
 
 		funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
@@ -1292,6 +1656,11 @@ resultBuilder.WriteString(cg.genericTypeCode.String())
 	// 版本头注释：编译器版本 (version.json) + 项目版本 (kaula.json "version" 字段)。
 	// 产物溯源用；两者均缺失时也输出生成时间。
 	result = prependVersionBanner(result, cg.config)
+
+	if os.Getenv("KAULAC_DUMP") != "" && cg.sourceFile != "" {
+		base := strings.ReplaceAll(filepath.Base(cg.sourceFile), ".kl", "")
+		os.WriteFile(filepath.Join(os.TempDir(), "klc_"+base+".out.c"), []byte(result), 0644)
+	}
 
 	return result
 }
@@ -1428,6 +1797,30 @@ func (cg *CodeGenerator) GetSymbolType(name string) string {
 	return ""
 }
 
+// GetVarDeclaredScopeDepth 查找变量声明所在的作用域深度（结构化所有权基础层）。
+// 从当前作用域向上遍历，找到第一个 HasLocalSymbol(name) 的作用域，返回其 depth。
+// 未找到返回 -1（全局/外部符号）。这是纯词法分析，不依赖 SOR 数据流。
+func (cg *CodeGenerator) GetVarDeclaredScopeDepth(name string) int {
+	if name == "" {
+		return -1
+	}
+	for scope := cg.currentScope; scope != nil; scope = scope.GetParent() {
+		if scope.HasLocalSymbol(name) {
+			return scope.GetScopeDepth()
+		}
+	}
+	return -1
+}
+
+// IsVarDeclaredInCurrentScope 判断变量是否在当前词法作用域声明（结构化所有权基础层）。
+// 用于 return promote 判定：只有当前块声明的指针变量返回时才需要 promote。
+func (cg *CodeGenerator) IsVarDeclaredInCurrentScope(name string) bool {
+	if name == "" || cg.currentScope == nil {
+		return false
+	}
+	return cg.currentScope.HasLocalSymbol(name)
+}
+
 // recordAllocSizeHint 从初始化表达式登记编译期可知的堆分配常量大小（修复 #25）
 // 匹配 kmm_v4_alloc_auto(<常量>) 模式（std_malloc 已在表达式生成阶段重写为它）
 func (cg *CodeGenerator) recordAllocSizeHint(varName, initValue string) {
@@ -1542,11 +1935,29 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	// 设置活跃类型映射，使函数体内的类型参数引用（T、[]T、*T 等）
 	// 在 convertType 时被替换为具体类型。生成后恢复，避免污染其他函数。
 	// 同时递增实例化深度，防止无限递归实例化。
+	// 状态隔离：实例化可能发生在任意外层函数体生成中途（调用点触发），
+	// 此时 kmmScopeDepth/indent 等 per-function 易变状态反映的是外层函数；
+	// 若不归零，generateReturnStatement 会按外层 depth 补发孤立的
+	// kmm_v4_scope_pop()，运行期 KMM 作用域栈下溢直接 abort。
+	savedScopeDepth := cg.kmmScopeDepth
+	savedEmitsPromote := cg.funcEmitsPromote
+	savedHasCheckpoint := cg.funcHasKMMCheckpoint
+	savedIndent := cg.indent
+	cg.kmmScopeDepth = 0
+	cg.funcEmitsPromote = false
+	cg.funcHasKMMCheckpoint = false
+	cg.indent = 0
+
 	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
 	cg.genericInstDepth++
 	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
 	cg.genericInstDepth--
 	cg.typeGenerator.PopActiveTypeMap(oldTypeMap)
+
+	cg.kmmScopeDepth = savedScopeDepth
+	cg.funcEmitsPromote = savedEmitsPromote
+	cg.funcHasKMMCheckpoint = savedHasCheckpoint
+	cg.indent = savedIndent
 
 	// 写入泛型实例化代码缓冲区，稍后插入到 functionCode 之前
 	if code != "" {
@@ -1596,6 +2007,10 @@ func (cg *CodeGenerator) instantiateGenericFunction(fnStmt *ast.FunctionStatemen
 
 	// 复制参数名
 	copy(instFunc.Params, fnStmt.Params)
+
+	// 复制参数可空标记
+	instFunc.ParamNullables = make([]bool, len(fnStmt.ParamNullables))
+	copy(instFunc.ParamNullables, fnStmt.ParamNullables)
 
 	// 映射参数类型
 	instFunc.ParamTypes = make([]string, len(fnStmt.ParamTypes))
@@ -1667,10 +2082,15 @@ if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 
 	// 查找泛型类型定义（类/结构体/枚举），构建类型参数映射和生成器
 	var typeParams []*ast.TypeParameter
+	var fields []*ast.FieldDeclaration
+	needSynthCtor := false
 	var generate func(instName string) string
 
 	if classStmt := cg.program.FindClass(typeName); classStmt != nil && classStmt.Generic {
 		typeParams = classStmt.TypeParams
+		fields = classStmt.Fields
+		// 无显式构造器的泛型类：同样需要合成位置构造器
+		needSynthCtor = len(classStmt.Constructors) == 0
 		generate = func(instName string) string {
 			inst := *classStmt // 浅拷贝：Fields/Methods/Constructors 共享（只读）
 			inst.Name = instName
@@ -1680,6 +2100,10 @@ if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 		}
 	} else if structStmt := cg.program.FindStruct(typeName); structStmt != nil && structStmt.Generic {
 		typeParams = structStmt.TypeParams
+		fields = structStmt.Fields
+		// struct 从不生成用户构造器，一律合成位置构造器，
+		// 使 Box<int>(42) 之类构造调用有定义可链
+		needSynthCtor = true
 		generate = func(instName string) string {
 			inst := *structStmt
 			inst.Name = instName
@@ -1714,18 +2138,74 @@ if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 
 	// 设置活跃类型映射，使字段/方法/构造函数中的类型参数引用被替换为具体类型。
 	// 生成后恢复，避免污染其他类型。同时递增实例化深度，防止无限递归实例化。
+	// 状态隔离同 InstantiateGeneric：实例化可能在外层函数/类型的生成中途触发，
+	// 需归零 per-function 状态（kmmScopeDepth 等）防止孤立 scope_pop 注入。
+	savedScopeDepth := cg.kmmScopeDepth
+	savedEmitsPromote := cg.funcEmitsPromote
+	savedHasCheckpoint := cg.funcHasKMMCheckpoint
+	savedIndent := cg.indent
+	cg.kmmScopeDepth = 0
+	cg.funcEmitsPromote = false
+	cg.funcHasKMMCheckpoint = false
+	cg.indent = 0
+
 	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
 	cg.typeGenerator.structTypes[instName] = true
 	cg.genericTypeInstDepth++
+
 	code := generate(instName)
+
+	// 合成位置构造器 instName_new(fields...)：按字段顺序初始化，
+	// 未提供实参的尾部字段保持零值。必须在 activeTypeMap 窗口内完成
+	// 字段类型的映射。函数体自包含，写入 classImplCode 延迟段。
+	synthCtor := ""
+	if needSynthCtor && len(fields) > 0 {
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("static inline %s* %s_new(", cName, instName))
+		for i, f := range fields {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			ft := cg.typeGenerator.convertType(f.Type, f.Nullable)
+			if ft == "" {
+				ft = "void*"
+			}
+			b.WriteString(fmt.Sprintf("%s %s", ft, f.Name))
+		}
+		b.WriteString(") {\n")
+		b.WriteString(fmt.Sprintf("    %s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
+		b.WriteString("    if (self == NULL) { return NULL; }\n")
+		n := len(typeArgs)
+		if n > len(fields) {
+			n = len(fields)
+		}
+		for i := 0; i < n; i++ {
+			b.WriteString(fmt.Sprintf("    self->%s = %s;\n", fields[i].Name, fields[i].Name))
+		}
+		b.WriteString("    return self;\n")
+		b.WriteString("}\n")
+		synthCtor = b.String()
+	}
+
 	cg.genericTypeInstDepth--
 	cg.typeGenerator.PopActiveTypeMap(oldTypeMap)
+
+	cg.kmmScopeDepth = savedScopeDepth
+	cg.funcEmitsPromote = savedEmitsPromote
+	cg.funcHasKMMCheckpoint = savedHasCheckpoint
+	cg.indent = savedIndent
 
 	// 写入泛型类型实例化代码缓冲区，稍后前置注入到 typeCode 之前
 	if code != "" {
 		cg.genericTypeCode.WriteString(code)
 		if !strings.HasSuffix(code, "\n") {
 			cg.genericTypeCode.WriteByte('\n')
+		}
+	}
+	if synthCtor != "" {
+		cg.classImplCode.WriteString(synthCtor)
+		if !strings.HasSuffix(synthCtor, "\n") {
+			cg.classImplCode.WriteByte('\n')
 		}
 	}
 
@@ -1859,6 +2339,45 @@ func (cg *CodeGenerator) IsClassType(name string) bool {
 		return true
 	}
 	return false
+}
+
+// isUserKaulaFunc 判断 name 是否是本仓库用户自定义的 Kaula 函数
+// （本文件 fn，含嵌套 fn；或跨文件 import 的本仓库函数）。
+// extern fn、stdlib/第三方 C 函数、内置运算符均返回 false。
+func (cg *CodeGenerator) isUserKaulaFunc(name string) bool {
+	if name == "" || name == "main" {
+		return false
+	}
+	if cg.userFuncNames != nil && cg.userFuncNames[name] {
+		return true
+	}
+	if cg.localImportFuncs != nil && cg.localImportFuncs[name] {
+		return true
+	}
+	return false
+}
+
+// UserFuncCName 返回 Kaula 用户函数在 C 侧的符号名：
+//   - 用户自定义 fn 统一加 K_ 前缀，避开 C 保留字（int/double/...）与 C 库符号；
+//   - 非用户定义的 max/min/abs 重定向到 kaula 运行时实现（kaula_max 等），避开 C 宏；
+//   - main、extern、stdlib/第三方 C 函数保持原名。
+//
+// 函数定义、前置声明、嵌套原型、调用点必须统一经此函数命名，保证定义与引用一致。
+func (cg *CodeGenerator) UserFuncCName(name string) string {
+	if name == "" || name == "main" {
+		return name
+	}
+	// export 函数保持原名（FFI 边界，外部 C 代码直接用原名调用）
+	if cg.exportedFuncNames != nil && cg.exportedFuncNames[name] {
+		return name
+	}
+	if cg.isUserKaulaFunc(name) {
+		return "K_" + name
+	}
+	if name == "max" || name == "min" || name == "abs" {
+		return "kaula_" + name
+	}
+	return name
 }
 
 // GetGenericCachedCode 获取缓存的泛型代码

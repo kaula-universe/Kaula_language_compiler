@@ -15,7 +15,7 @@ var abiTagRe = regexp.MustCompile(`\[[^\]]*\]`)
 
 // CppBridgeResult 描述一次 C++ 头文件 extern "C" 桥接生成的结果
 type CppBridgeResult struct {
-	Header      string // 相对库目录的 C 兼容头文件（如 imgui/imgui_kbridge.h）
+	Header      string // 相对库目录的 C 兼容头文件
 	Source      string // 相对库目录的 .cpp 桥接源文件
 	LibName     string
 	BridgeFuncs map[string]Function // 桥接后的 C 函数表（key=导出名，直接写入 JSON functions）
@@ -168,8 +168,7 @@ func bridgeExportName(name string) string {
 }
 
 // GenCppBridge 为需要 C++ 模式才能解析的头文件生成 extern "C" 桥接。
-// 一个库可能同时有多个 C++ 头（如 imgui 的 imgui.h 与 imgui_internal.h），
-// headerRefs 收齐全部引用，cppFuncs 为合并后的完整函数表（含 extern "C" 函数）。
+// 一个库可能同时有多个 C++ 头文件，headerRefs 收齐全部引用，cppFuncs 为合并后的完整函数表（含 extern "C" 函数）。
 // 返回的 BridgeFuncs 可作为 JSON functions 字段写入。
 //
 // 通用化（不限定"基础类型参数"子集）：
