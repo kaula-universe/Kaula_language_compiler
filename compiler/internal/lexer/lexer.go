@@ -88,6 +88,16 @@ const (
 	TOKEN_DIVIDE
 	TOKEN_MOD
 	TOKEN_ASSIGN
+	TOKEN_PLUS_ASSIGN
+	TOKEN_MINUS_ASSIGN
+	TOKEN_MULTIPLY_ASSIGN
+	TOKEN_DIVIDE_ASSIGN
+	TOKEN_MOD_ASSIGN
+	TOKEN_BITAND_ASSIGN
+	TOKEN_BITOR_ASSIGN
+	TOKEN_XOR_ASSIGN
+	TOKEN_LSHIFT_ASSIGN
+	TOKEN_RSHIFT_ASSIGN
 	TOKEN_EQ
 	TOKEN_NE
 	TOKEN_NOT
@@ -250,6 +260,11 @@ func (l *Lexer) Next() Token {
 		case char == '\'':
 			return l.scanCharLiteral()
 		case char == '+':
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_PLUS_ASSIGN, Value: "+=", Line: l.line, Column: l.column}
+			}
 			l.next()
 			return Token{Type: TOKEN_PLUS, Value: "+", Line: l.line, Column: l.column}
 		case char == '-':
@@ -258,9 +273,19 @@ func (l *Lexer) Next() Token {
 				l.next()
 				return Token{Type: TOKEN_ARROW, Value: "->", Line: l.line, Column: l.column}
 			}
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_MINUS_ASSIGN, Value: "-=", Line: l.line, Column: l.column}
+			}
 			l.next()
 			return Token{Type: TOKEN_MINUS, Value: "-", Line: l.line, Column: l.column}
 		case char == '*':
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_MULTIPLY_ASSIGN, Value: "*=", Line: l.line, Column: l.column}
+			}
 			l.next()
 			return Token{Type: TOKEN_MULTIPLY, Value: "*", Line: l.line, Column: l.column}
 		case char == '$':
@@ -270,9 +295,19 @@ func (l *Lexer) Next() Token {
 			l.next()
 			return Token{Type: TOKEN_AT, Value: "@", Line: l.line, Column: l.column}
 		case char == '/':
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_DIVIDE_ASSIGN, Value: "/=", Line: l.line, Column: l.column}
+			}
 			l.next()
 			return Token{Type: TOKEN_DIVIDE, Value: "/", Line: l.line, Column: l.column}
 		case char == '%':
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_MOD_ASSIGN, Value: "%=", Line: l.line, Column: l.column}
+			}
 			l.next()
 			return Token{Type: TOKEN_MOD, Value: "%", Line: l.line, Column: l.column}
 		case char == '=':
@@ -302,27 +337,37 @@ func (l *Lexer) Next() Token {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_LE, Value: "<=", Line: l.line, Column: l.column}
-			} else if l.peek() == '<' {
-				l.next()
+			}
+			if l.peek() == '<' {
+				l.next() // 指向第二个 '<'
+				if l.peek() == '=' {
+					l.next()
+					l.next()
+					return Token{Type: TOKEN_LSHIFT_ASSIGN, Value: "<<=", Line: l.line, Column: l.column}
+				}
 				l.next()
 				return Token{Type: TOKEN_LSHIFT, Value: "<<", Line: l.line, Column: l.column}
-			} else {
-				l.next()
-				return Token{Type: TOKEN_LT, Value: "<", Line: l.line, Column: l.column}
 			}
+			l.next()
+			return Token{Type: TOKEN_LT, Value: "<", Line: l.line, Column: l.column}
 		case char == '>':
 			if l.peek() == '=' {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_GE, Value: ">=", Line: l.line, Column: l.column}
-			} else if l.peek() == '>' {
-				l.next()
+			}
+			if l.peek() == '>' {
+				l.next() // 指向第二个 '>'
+				if l.peek() == '=' {
+					l.next()
+					l.next()
+					return Token{Type: TOKEN_RSHIFT_ASSIGN, Value: ">>=", Line: l.line, Column: l.column}
+				}
 				l.next()
 				return Token{Type: TOKEN_RSHIFT, Value: ">>", Line: l.line, Column: l.column}
-			} else {
-				l.next()
-				return Token{Type: TOKEN_GT, Value: ">", Line: l.line, Column: l.column}
 			}
+			l.next()
+			return Token{Type: TOKEN_GT, Value: ">", Line: l.line, Column: l.column}
 		case char == '(':
 			l.next()
 			return Token{Type: TOKEN_LPAREN, Value: "(", Line: l.line, Column: l.column}
@@ -361,19 +406,27 @@ func (l *Lexer) Next() Token {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_AND, Value: "&&", Line: l.line, Column: l.column}
-			} else {
-				l.next()
-				return Token{Type: TOKEN_AMPERSAND, Value: "&", Line: l.line, Column: l.column}
 			}
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_BITAND_ASSIGN, Value: "&=", Line: l.line, Column: l.column}
+			}
+			l.next()
+			return Token{Type: TOKEN_AMPERSAND, Value: "&", Line: l.line, Column: l.column}
 		case char == '|':
 			if l.peek() == '|' {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_OR, Value: "||", Line: l.line, Column: l.column}
-			} else {
-				l.next()
-				return Token{Type: TOKEN_PIPE, Value: "|", Line: l.line, Column: l.column}
 			}
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_BITOR_ASSIGN, Value: "|=", Line: l.line, Column: l.column}
+			}
+			l.next()
+			return Token{Type: TOKEN_PIPE, Value: "|", Line: l.line, Column: l.column}
 		case char == '.':
 			l.next()
 			return Token{Type: TOKEN_DOT, Value: ".", Line: l.line, Column: l.column}
@@ -381,6 +434,11 @@ func (l *Lexer) Next() Token {
 			l.next()
 			return Token{Type: TOKEN_QUESTION, Value: "?", Line: l.line, Column: l.column}
 		case char == '^':
+			if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_XOR_ASSIGN, Value: "^=", Line: l.line, Column: l.column}
+			}
 			l.next()
 			return Token{Type: TOKEN_XOR, Value: "^", Line: l.line, Column: l.column}
 		case char == '~':
@@ -981,6 +1039,26 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "MOD"
 	case TOKEN_ASSIGN:
 		return "ASSIGN"
+	case TOKEN_PLUS_ASSIGN:
+		return "PLUS_ASSIGN"
+	case TOKEN_MINUS_ASSIGN:
+		return "MINUS_ASSIGN"
+	case TOKEN_MULTIPLY_ASSIGN:
+		return "MULTIPLY_ASSIGN"
+	case TOKEN_DIVIDE_ASSIGN:
+		return "DIVIDE_ASSIGN"
+	case TOKEN_MOD_ASSIGN:
+		return "MOD_ASSIGN"
+	case TOKEN_BITAND_ASSIGN:
+		return "BITAND_ASSIGN"
+	case TOKEN_BITOR_ASSIGN:
+		return "BITOR_ASSIGN"
+	case TOKEN_XOR_ASSIGN:
+		return "XOR_ASSIGN"
+	case TOKEN_LSHIFT_ASSIGN:
+		return "LSHIFT_ASSIGN"
+	case TOKEN_RSHIFT_ASSIGN:
+		return "RSHIFT_ASSIGN"
 	case TOKEN_EQ:
 		return "EQ"
 	case TOKEN_NE:

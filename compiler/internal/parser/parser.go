@@ -3193,7 +3193,7 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 
 		// 解析右侧表达式
 		var right ast.Expression
-		if op == lexer.TOKEN_ASSIGN {
+		if isAssignOp(op) {
 			// 赋值运算符是右结合的，使用 precedence - 1 以允许连续的赋值
 			right = p.parseBinaryExpressionIterative(opPrecedence - 1)
 		} else {
@@ -3231,8 +3231,18 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 
 // precedences 运算符优先级表
 var precedences = map[lexer.TokenType]int{
-	lexer.TOKEN_ASSIGN:    1,
-	lexer.TOKEN_OR:        2,
+	lexer.TOKEN_ASSIGN:          1,
+	lexer.TOKEN_PLUS_ASSIGN:     1,
+	lexer.TOKEN_MINUS_ASSIGN:    1,
+	lexer.TOKEN_MULTIPLY_ASSIGN: 1,
+	lexer.TOKEN_DIVIDE_ASSIGN:   1,
+	lexer.TOKEN_MOD_ASSIGN:      1,
+	lexer.TOKEN_BITAND_ASSIGN:   1,
+	lexer.TOKEN_BITOR_ASSIGN:    1,
+	lexer.TOKEN_XOR_ASSIGN:      1,
+	lexer.TOKEN_LSHIFT_ASSIGN:   1,
+	lexer.TOKEN_RSHIFT_ASSIGN:   1,
+	lexer.TOKEN_OR:              2,
 	lexer.TOKEN_AND:       3,
 	lexer.TOKEN_EQ:        4,
 	lexer.TOKEN_NE:        4,
@@ -3258,6 +3268,18 @@ func (p *Parser) precedence(tokenType lexer.TokenType) int {
 		return prec
 	}
 	return 0
+}
+
+// isAssignOp 判断是否为赋值类运算符（= 及复合赋值）
+func isAssignOp(op lexer.TokenType) bool {
+	switch op {
+	case lexer.TOKEN_ASSIGN, lexer.TOKEN_PLUS_ASSIGN, lexer.TOKEN_MINUS_ASSIGN,
+		lexer.TOKEN_MULTIPLY_ASSIGN, lexer.TOKEN_DIVIDE_ASSIGN, lexer.TOKEN_MOD_ASSIGN,
+		lexer.TOKEN_BITAND_ASSIGN, lexer.TOKEN_BITOR_ASSIGN, lexer.TOKEN_XOR_ASSIGN,
+		lexer.TOKEN_LSHIFT_ASSIGN, lexer.TOKEN_RSHIFT_ASSIGN:
+		return true
+	}
+	return false
 }
 
 // parsePrimaryExpressionIterative 迭代解析基本表达式
