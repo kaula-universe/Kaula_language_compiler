@@ -99,7 +99,13 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 			}
 			// 修复 #25：跨函数参数所有权提升（* 类型形参 = ModeOwned，消费调用方指针）
 			if callee, ok := callExpr.Function.(*ast.Identifier); ok && callee.Name != "" {
-				if promotes := sg.sorCallArgPromotes(callee.Name, callExpr.Args); len(promotes) > 0 {
+				// SOR 模式传参 promote（精确，依赖 SOR 决策）
+				promotes := sg.sorCallArgPromotes(callee.Name, callExpr.Args)
+				// 基础层传参逃逸 promote（缺口3：extern 函数调用的指针实参，保守 promote）
+				if len(promotes) == 0 {
+					promotes = sg.structuralCallArgPromotes(callee.Name, callExpr.Args)
+				}
+				if len(promotes) > 0 {
 					var pb strings.Builder
 					for _, argName := range promotes {
 						sizeExpr := ""
@@ -810,9 +816,17 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_if_scope_start);\n"
 	} else if useKMM {
+		// 缺口6优化：作用域级 survivor checkpoint/rewind
+		// 块入口 checkpoint，块出口 rewind（如果块内没有 promote）
+		// 提前回收块内大对象，减少内存峰值
+		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __if_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		// 只有块内没有新增 promote 时才 rewind（promote 的对象需要长期持有）
+		if len(thenPromoted) == 0 {
+			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__if_surv_cp); /* survivor: scope reclaim */\n"
+		}
 	} else {
 		code += bodyCode.String()
 	}
@@ -867,9 +881,14 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 			code += elseCode.String()
 			code += sg.codegen.indentString() + "kmm_v4_offset_restore(_else_scope_start);\n"
 		} else if useKMMElse {
+			// 缺口6优化：作用域级 survivor checkpoint/rewind
+			code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __else_surv_cp = kmm_v4_survivor_checkpoint();\n"
 			code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 			code += elseCode.String()
 			code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+			if len(elsePromoted) == 0 {
+				code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__else_surv_cp); /* survivor: scope reclaim */\n"
+			}
 		} else {
 			code += elseCode.String()
 		}
@@ -892,6 +911,9 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
 	sg.codegen.EnterScope("while_body")
+
+	// 缺口6优化：快照 promotedVars，用于判断循环体内是否有 promote
+	whilePromotedSnapshot := sg.codegen.SnapshotPromotedVars()
 
 	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
 	// 相邻 scope 合并优化：如果循环体包含 KMM 池分配调用，使用 offset_save/restore 代替 scope_push/pop
@@ -925,15 +947,23 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	sg.codegen.ExitScope()
 	sg.codegen.indent--
 
+	// 缺口6优化：计算循环体内新增 promote 的变量
+	whilePromoted := sg.codegen.DiffPromotedVars(whilePromotedSnapshot)
+
 	if useOffset {
 		// offset_save/restore 路径：轻量级，无 scope 栈操作
 		code += sg.codegen.indentString() + "size_t _loop_scope_start = kmm_v4_offset_save();\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_loop_scope_start);\n"
 	} else if useKMM {
+		// 缺口6优化：作用域级 survivor checkpoint/rewind
+		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		if len(whilePromoted) == 0 {
+			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__while_surv_cp); /* survivor: scope reclaim */\n"
+		}
 	} else {
 		code += bodyCode.String()
 	}
@@ -2286,14 +2316,76 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	if !ok || (bin.Operator != "=" && bin.Operator != "ASSIGN") {
 		return ""
 	}
-	dstIdent, okDst := bin.Left.(*ast.Identifier)
 	srcIdent, okSrc := bin.Right.(*ast.Identifier)
-	if !okDst || !okSrc {
+	if !okSrc {
 		return ""
 	}
-	if !sg.needsAssignEscapePromote(srcIdent.Name, dstIdent.Name) {
+	// 源必须是指针/String 类型的局部变量
+	if !sg.isPointerTyped(srcIdent.Name) && !sg.isStringTyped(srcIdent.Name) {
 		return ""
 	}
+	if !sg.codegen.IsVarDeclaredInCurrentScope(srcIdent.Name) {
+		return ""
+	}
+	// 已逃逸或已 promote 的变量不重复处理
+	if sg.codegen.IsAssignEscaped(srcIdent.Name) || sg.codegen.IsPromoted(srcIdent.Name) {
+		return ""
+	}
+
+	// 判断目标类型，决定是否需要 promote
+	needsPromote := false
+	dstName := ""
+
+	switch dst := bin.Left.(type) {
+	case *ast.Identifier:
+		// 普通变量赋值：使用现有的跨作用域判断
+		dstName = dst.Name
+		needsPromote = sg.needsAssignEscapePromote(srcIdent.Name, dst.Name)
+	case *ast.MemberAccessExpression:
+		// 存入结构体字段：obj.field = ptr
+		// 目标对象（obj）的生命周期通常比源更长（外层变量/全局/参数），保守 promote
+		// 如果 obj 是当前作用域声明的局部变量且与源同层，可能不需要 promote，但保守处理
+		dstName = "struct_field"
+		needsPromote = true
+		// 例外：如果 obj 是当前作用域声明的局部变量（与源同层或更内层），且不是指针类型，可能不需要 promote
+		if objIdent, ok := dst.Object.(*ast.Identifier); ok {
+			if sg.codegen.IsVarDeclaredInCurrentScope(objIdent.Name) {
+				// obj 是当前作用域局部变量，检查其声明深度
+				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
+					if dstDepth, dstOk := sg.codegen.declScopeDepth[objIdent.Name]; dstOk {
+						if dstDepth >= srcDepth {
+							// obj 与源同层或更内层，结构体生命周期不超过源，不需要 promote
+							needsPromote = false
+						}
+					}
+				}
+			}
+		}
+	case *ast.IndexExpression:
+		// 存入数组元素：arr[i] = ptr
+		// 目标数组（arr）的生命周期通常比源更长，保守 promote
+		dstName = "array_element"
+		needsPromote = true
+		// 例外：如果 arr 是当前作用域声明的局部变量且与源同层或更内层，可能不需要 promote
+		if arrIdent, ok := dst.Object.(*ast.Identifier); ok {
+			if sg.codegen.IsVarDeclaredInCurrentScope(arrIdent.Name) {
+				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
+					if dstDepth, dstOk := sg.codegen.declScopeDepth[arrIdent.Name]; dstOk {
+						if dstDepth >= srcDepth {
+							needsPromote = false
+						}
+					}
+				}
+			}
+		}
+	default:
+		return ""
+	}
+
+	if !needsPromote {
+		return ""
+	}
+
 	sizeExpr := ""
 	if sg.isStringTyped(srcIdent.Name) {
 		sizeExpr = "sizeof(String)"
@@ -2303,11 +2395,13 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		sizeExpr = "sizeof(*" + srcIdent.Name + ")"
 	}
 	var b strings.Builder
-	b.WriteString(sg.emitPromoteForType(srcIdent.Name, sizeExpr, "promote assign-escape", srcIdent.Name))
+	b.WriteString(sg.emitPromoteForType(srcIdent.Name, sizeExpr, "promote assign-escape into "+dstName, srcIdent.Name))
 	sg.codegen.funcEmitsPromote = true          // 方案 C：函数出口跳过 survivor_rewind
 	sg.codegen.MarkAssignEscaped(srcIdent.Name) // 抑制 src 的块尾 per-object free
 	sg.codegen.MarkPromoted(srcIdent.Name)       // reaching definition：防止 return 时重复 promote
-	sg.codegen.PropagateInitSize(dstIdent.Name, srcIdent.Name)
+	if dstName != "" && dstName != "struct_field" && dstName != "array_element" {
+		sg.codegen.PropagateInitSize(dstName, srcIdent.Name)
+	}
 	b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression))
 	b.WriteString(";\n")
 	return b.String()
@@ -2993,6 +3087,42 @@ func (sg *StatementGenerator) needsReturnPromote(name string) bool {
 		return false
 	}
 	return true
+}
+
+// structuralCallArgPromotes 基础层传参逃逸分析（不依赖 SOR）。
+// 缺口3：悬垂指针/use-after-free。
+// 对于 extern 函数调用中的指针/String 实参，如果实参是当前作用域声明的局部变量，
+// 保守认为 extern 函数可能存储指针（长期持有），调用方作用域 pop 后会悬垂。
+// 在调用前自动 promote 到 survivor 段，保证被调方长期持有的安全。
+// 对于当前文件定义的函数，可通过函数体分析判断是否存储指针（暂不实现，保守不 promote）。
+func (sg *StatementGenerator) structuralCallArgPromotes(funcName string, args []ast.Expression) []string {
+	if funcName == "" {
+		return nil
+	}
+	// 仅对 extern 函数做保守 promote（当前文件定义的函数可分析，暂不处理）
+	if !sg.codegen.IsExternFunc(funcName) {
+		return nil
+	}
+	var promotes []string
+	for _, arg := range args {
+		id, ok := arg.(*ast.Identifier)
+		if !ok {
+			continue
+		}
+		// 必须是当前作用域声明的局部变量（参数和全局不需要 promote）
+		if !sg.codegen.IsVarDeclaredInCurrentScope(id.Name) {
+			continue
+		}
+		// 已通过赋值逃逸或已 promote 的变量不重复 promote
+		if sg.codegen.IsAssignEscaped(id.Name) || sg.codegen.IsPromoted(id.Name) {
+			continue
+		}
+		// 指针类型或 String 类型需要 promote
+		if sg.isPointerTyped(id.Name) || sg.isStringTyped(id.Name) {
+			promotes = append(promotes, id.Name)
+		}
+	}
+	return promotes
 }
 
 // sorCallArgPromotes 收集调用前需要提升的实参（修复 #25）
