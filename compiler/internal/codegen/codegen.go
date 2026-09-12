@@ -181,6 +181,10 @@ type CodeGenerator struct {
 	// deepPromoteCBCode: 合成的 static C 函数体（文件作用域，在 typedef 之后、函数代码之前输出）
 	deepPromoteCBEmitted map[string]struct{}
 	deepPromoteCBCode    strings.Builder
+
+	// 高级属性支持：#[test]、#[build]、#[derive]、#[command]
+	TestMode        bool // 测试模式：生成测试 runner 而非普通 main
+	attributeFeat   *AttributeFeatures
 }
 
 // EnsureDeepPromoteCB 为给定 kaula class/struct 类型合成类型化深提升回调。
@@ -908,6 +912,9 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	cg.objectDeclCode.Reset()
 	cg.preludeInitCode.Reset()
 
+	// 初始化高级属性处理器
+	cg.attributeFeat = NewAttributeFeatures(cg)
+
 	// 收集本文件全部用户自定义 fn（含函数体内嵌套 fn），用于统一 K_ 函数前缀。
 	// main、extern fn（ExternStatement）、stdlib/第三方 C 函数都不在其中，保持原名。
 	cg.userFuncNames = make(map[string]bool)
@@ -987,6 +994,16 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	mainCode.Grow(4096)
 
 	hasMain := false
+
+	// 收集高级属性：#[test]、#[derive]、#[command]
+	testFunctions := cg.attributeFeat.CollectTestFunctions(program)
+	deriveTypes := cg.attributeFeat.CollectDeriveTypes(program)
+	commands := cg.attributeFeat.CollectCommands(program)
+
+	// 测试模式下，忽略用户定义的 main，使用自动生成的测试 runner
+	if cg.TestMode && len(testFunctions) > 0 {
+		hasMain = false
+	}
 
 	importedModules := make(map[string]bool)
 
@@ -1213,6 +1230,19 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	if cg.needsObjRuntime {
 		cg.usedModules = append(cg.usedModules, "std.obj")
 		// std.string 仅使用头文件声明，不链接实现（避免 Windows C 运行时兼容性问题）
+	}
+	// 将使用的 pkglib 第三方库添加到 usedModules，使链接阶段能正确处理其 libraries/include_path
+	for libName := range cg.usedThirdPartyLibs {
+		already := false
+		for _, m := range cg.usedModules {
+			if m == libName {
+				already = true
+				break
+			}
+		}
+		if !already {
+			cg.usedModules = append(cg.usedModules, libName)
+		}
 	}
 
 	// 泛型类型实例化代码保留在 genericTypeCode 中，
@@ -1469,6 +1499,28 @@ static inline String string_concat_float(String s, double v) {
 
 	forwardDecls.WriteString(cg.nestedFuncPrototypes.String())
 
+	// #[derive] 派生函数前向声明
+	for _, d := range deriveTypes {
+		cName := "K_" + d.TypeName
+		for _, trait := range d.Traits {
+			trait = strings.TrimSpace(trait)
+			switch strings.ToLower(trait) {
+			case "debug":
+				forwardDecls.WriteString(fmt.Sprintf("void %s_debug(%s* self);\n", d.TypeName, cName))
+			case "clone":
+				forwardDecls.WriteString(fmt.Sprintf("%s* %s_clone(%s* self);\n", cName, d.TypeName, cName))
+			case "eq", "equals":
+				forwardDecls.WriteString(fmt.Sprintf("int %s_equals(%s* a, %s* b);\n", d.TypeName, cName, cName))
+			}
+		}
+	}
+
+	// #[command] 解析函数前向声明
+	for _, cmd := range commands {
+		cName := "K_" + cmd.StructName
+		forwardDecls.WriteString(fmt.Sprintf("%s* %s_parse(int argc, char* argv[]);\n", cName, cmd.StructName))
+	}
+
 	cacheDir := "cache"
 	if err := os.MkdirAll(cacheDir, 0755); err == nil {
 		os.WriteFile(filepath.Join(cacheDir, "all_includes.txt"), []byte(allIncludes.String()), 0644)
@@ -1524,8 +1576,48 @@ static inline String string_concat_float(String s, double v) {
 			resultBuilder.WriteByte('\n')
 			resultBuilder.WriteString(functionCode.String())
 
+			// 生成 #[derive] 派生实现（Debug/Clone/Eq）
+			if len(deriveTypes) > 0 {
+				resultBuilder.WriteString(cg.attributeFeat.GenerateDeriveImpls(deriveTypes, program))
+			}
+
+			// 生成 #[command] 命令行参数解析器
+			if len(commands) > 0 {
+				resultBuilder.WriteString(cg.attributeFeat.GenerateCommandParser(commands))
+			}
+
+			// 内联 pkglib 第三方库的 C 源码（Sources 字段指定的文件）
+			if cg.stdlibConfig != nil && len(cg.usedThirdPartyLibs) > 0 {
+				for _, lib := range cg.stdlibConfig.ThirdParty {
+					if !cg.usedThirdPartyLibs[lib.Name] {
+						continue
+					}
+					if lib.SourceDir == "" || len(lib.Sources) == 0 {
+						continue
+					}
+					for _, srcFile := range lib.Sources {
+						srcPath := srcFile
+						if !filepath.IsAbs(srcPath) {
+							srcPath = filepath.Join(lib.SourceDir, srcFile)
+						}
+						if data, err := os.ReadFile(srcPath); err == nil {
+							resultBuilder.WriteString("\n\n/* === pkglib ")
+							resultBuilder.WriteString(lib.Name)
+							resultBuilder.WriteString(": ")
+							resultBuilder.WriteString(srcFile)
+							resultBuilder.WriteString(" === */\n")
+							resultBuilder.Write(data)
+						}
+					}
+				}
+			}
+
 			if useFreestanding {
 				// freestanding 模式：不生成 main 函数，入口由 _start 或自定义 entry 提供
+				result = resultBuilder.String()
+			} else if cg.TestMode && len(testFunctions) > 0 {
+				// 测试模式：生成自动测试 runner
+				resultBuilder.WriteString(cg.attributeFeat.GenerateTestRunner(testFunctions))
 				result = resultBuilder.String()
 			} else {
 				mainHeader := "\n\nint main() {\n    "
@@ -1554,8 +1646,21 @@ static inline String string_concat_float(String s, double v) {
 			result = strings.ReplaceAll(result, "{{type_code}}", typeAndForward)
 			// class 构造器/方法体置于函数体区段最前（已在 forwardDecls/全局变量之后）
 			funcAndImpl := cg.classImplCode.String() + "\n" + functionCode.String()
+			// 生成 #[derive] 派生实现
+			if len(deriveTypes) > 0 {
+				funcAndImpl += cg.attributeFeat.GenerateDeriveImpls(deriveTypes, program)
+			}
+			// 生成 #[command] 命令行参数解析器
+			if len(commands) > 0 {
+				funcAndImpl += cg.attributeFeat.GenerateCommandParser(commands)
+			}
 			result = strings.ReplaceAll(result, "{{function_code}}", funcAndImpl)
-			result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
+			// 测试模式：用测试 runner 替换 main
+			if cg.TestMode && len(testFunctions) > 0 {
+				result = strings.ReplaceAll(result, "{{main_code}}", cg.attributeFeat.GenerateTestRunner(testFunctions))
+			} else {
+				result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
+			}
 			result = strings.ReplaceAll(result, "{{code}}", "")
 
 			idxIncludes := strings.Index(result, allIncludes.String())
@@ -1632,6 +1737,17 @@ static inline String string_concat_float(String s, double v) {
 			functionCode.WriteString(mainFunc)
 		}
 		resultBuilder.WriteString(functionCode.String())
+
+		// 生成 #[derive] 派生实现（Debug/Clone/Eq）
+		if len(deriveTypes) > 0 {
+			resultBuilder.WriteString(cg.attributeFeat.GenerateDeriveImpls(deriveTypes, program))
+		}
+
+		// 生成 #[command] 命令行参数解析器
+		if len(commands) > 0 {
+			resultBuilder.WriteString(cg.attributeFeat.GenerateCommandParser(commands))
+		}
+
 		result = resultBuilder.String()
 	}
 
