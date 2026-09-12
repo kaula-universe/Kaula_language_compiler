@@ -133,6 +133,7 @@ type CodeGenerator struct {
 	sourceMap  *SourceMap
 	sourceFile string
 
+	retHoistSeq   int // F17: return 表达式求值提升的临时变量序号
 	lambdaCounter     int
 	lambdaDefinitions []string
 
