@@ -94,6 +94,85 @@ comptime auto val = 1 + 2 * 3
 
 `comptime` 确保表达式在编译期求值，可用于数组大小等场景。
 
+## 高级属性扩展
+
+Kaula 还提供了三个高级属性，用于自动化常见开发任务：
+
+### `#[test]` - 自动测试
+
+标记函数为测试函数，使用 `kaulac test` 命令自动发现并运行：
+
+```kaula
+#[test]
+fn test_add() {
+    i64 result = 2 + 3
+    if result != 5 {
+        println("FAIL: 2 + 3 should be 5")
+    }
+}
+
+#[test]
+#[ignore]
+fn test_not_ready() {
+    // 暂时跳过的测试
+}
+```
+
+运行：
+```bash
+kaulac test my_tests.kl
+```
+
+输出包含每个测试的通过/失败/忽略状态及汇总统计。
+
+### `#[derive]` - 派生宏
+
+为结构体自动生成 Debug、Clone、Eq 方法：
+
+```kaula
+#[derive(Debug, Clone, Eq)]
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn main() {
+    Point p
+    p.x = 10
+    p.y = 20
+
+    Point_debug(&p)           // 输出: Point { x: 10, y: 20 }
+    Point* p2 = Point_clone(&p)  // 深拷贝
+    if Point_equals(&p, p2) == 1 {
+        println("p == p2")
+    }
+}
+```
+
+### `#[command]` - 命令行参数解析
+
+为结构体自动生成命令行参数解析函数：
+
+```kaula
+#[command]
+struct Config {
+    #[arg(short="v", long="verbose", help="启用详细输出")]
+    verbose: bool
+
+    #[arg(short="o", long="output", default="out.txt", help="输出文件")]
+    output: string
+}
+
+fn main(i32 argc, char** argv) {
+    Config* cfg = Config_parse(argc, argv)
+    if cfg.verbose == 1 {
+        println("详细模式")
+    }
+}
+```
+
+详细用法参见 [`#[]` 高级属性扩展](../attributes.md)。
+
 ## 完整示例
 
 参见 [examples/attributes.kl](examples/attributes.kl)。
