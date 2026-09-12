@@ -36,6 +36,10 @@ type ThirdPartyLibrary struct {
 	Functions      map[string]Function `json:"functions"`
 	IncludePath    string              `json:"include_path,omitempty"`
 	LibraryPath    string              `json:"library_path,omitempty"`
+	// pkglib C 源码内联：SourceDir 为库源文件根目录，Sources 为需要
+	// 直接内联进生成 C 代码的源文件列表（codegen 的第三方库内联路径使用）
+	SourceDir string   `json:"source_dir,omitempty"`
+	Sources   []string `json:"sources,omitempty"`
 }
 
 type StdlibConfig struct {
