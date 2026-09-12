@@ -4,9 +4,11 @@ Kaula 通过 `extern` 直接与 C 代码和底层符号互操作，无需绑定�
 
 > **实现状态速览**（kaulac 2026-09-12 逐项实测）：
 > - ✅ 已可用：`extern 变量: 类型` 声明、`extern fn` 声明语法（参数 `名: 类型`）、透明指针 `void()`、指针类型 `*u8` / `i32*` 两种书写、`type X = adopt <C类型>`、表达式包装 `adopt(expr)`、显式转换 `as<T>(expr)`、`sizeof(T)`
-> - ❌ 未实现/有缺陷：extern 函数的**调用**（codegen 对 extern 调用误加 `kaula_` 前缀，与声明符号不一致，任何 extern 调用都无法编译）、变参 `(...)` 语法、回调签名式记法（extern 参数位置无法解析）、`cast<T>()` / `transmute<T>()`（编译器中不存在）、`cstring()` 内置（生成非法 C 类型名）、手动 `free` extern 分配的 libc 内存（与结构化自动回收重复释放，double-free 崩溃）
+> - ❌ 未实现：变参 `(...)` 语法、回调签名式记法（extern 参数位置无法解析）、`cast<T>()` / `transmute<T>()`（编译器中不存在）、`cstring()` 内置（生成非法 C 类型名）
+> - 🐞 已知编译器缺陷：① extern 函数的**调用**符号名 mangling 错误（任何 extern 调用无法编译；修复分支 fix/extern-call-mangling 待合并）；② **F17**：自动回收在 return 路径上先于返回表达式求值执行——若返回表达式仍读取被回收指针（如 `return arr[0] + arr[1]`），生成 use-after-free，结果静默出错。当前规避写法：先把值绑定到局部变量，再 `return 局部变量`（此路径实测正确）
+> - ⚠️ 写法边界：Kaula 为自动内存管理语言，**手动 `free` 属非法写法**——写了会与结构化自动回收重复释放导致 double-free 崩溃（编译器未拦截属护栏缺失，不是可依赖的能力）。正确姿势：分配后不写任何释放，生命周期结束由编译器自动回收（`extern fn malloc` + 不调 free 的写法实测生效）
 >
-> 下文代码块展示设计语法；所有 ❌ 项均在使用处再次标注，未验证可运行的示例请勿直接照抄。
+> 下文代码块展示设计语法；所有 ❌/🐞 项均在使用处再次标注，未验证可运行的示例请勿直接照抄。
 
 ## 外部变量
 
@@ -46,12 +48,14 @@ fn main() {
     printf(msg)                            // ❌ 变参未实现
 
     void() mem = malloc(64)
-    // ...
-    free(mem)                              // ❌ 手动 free 与结构化自动回收重复 → double-free
+    // ... 使用 mem ...
+    // 到此为止：不写 free(mem)。Kaula 自动内存管理，mem 的生命周期
+    // 结束时由编译器自动释放（libc_malloc 来源追踪）。手写 free 属
+    // 非法写法，会与自动回收重复释放导致崩溃。
 }
 ```
 
-> ⚠️ 当前所有 `extern fn` 调用都无法编译：codegen 生成调用时误加用户函数前缀（如声明 `abs` 却调用 `kaula_abs`），与声明的 C 符号不一致。修复前，FFI 出向调用请改用 pkglib 库桥接路径。
+> ⚠️ 当前所有 `extern fn` 调用都无法编译：codegen 生成调用时误加用户函数前缀（如声明 `abs` 却调用 `kaula_abs`），与声明的 C 符号不一致。修复见分支 fix/extern-call-mangling（附回归测试），合并前 FFI 出向调用请改用 pkglib 库桥接路径。
 
 ## `void(T...)R` 记法：禁用裸 `void*`
 
@@ -122,7 +126,7 @@ void qsort(void *base, size_t nmemb, size_t size,
            int (*compar)(const void *, const void *));
 ```
 
-在 Kaula 中写成（⚠️ 端到端当前不可运行，三处缺陷见文首状态速览：回调签名记法无法解析、extern 调用符号名 mangling、手动 `free` 与自动回收重复释放。示例中 `as<T>(expr)`、`sizeof(T)`、`adopt(expr)`、`i32*` 声明等语法均已单独实测正确）：
+在 Kaula 中写成（⚠️ 端到端当前不可运行，两处阻断见文首状态速览：回调签名记法无法解析、extern 调用符号名 mangling（修复分支待合并）。示例遵循语言自动内存管理契约：只分配、不手写释放；`as<T>(expr)`、`sizeof(T)`、`adopt(expr)`、`i32*` 声明等语法均已单独实测正确）：
 
 ```kaula
 type Size = adopt size_t
@@ -149,7 +153,7 @@ fn main() {
     arr[4] = 5
     qsort(arr, adopt(5), adopt(sizeof(i32)), cmp_int)
     println("sorted: ", arr[0], arr[1], arr[2], arr[3], arr[4])
-    free(arr)
+    // 不写 free(arr)：自动内存管理，生命周期结束由编译器释放
 }
 ```
 
