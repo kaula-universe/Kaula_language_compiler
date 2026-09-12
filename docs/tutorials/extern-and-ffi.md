@@ -2,6 +2,12 @@
 
 Kaula 通过 `extern` 直接与 C 代码和底层符号互操作，无需绑定代码。
 
+> **实现状态速览**（kaulac 2026-09-12 逐项实测）：
+> - ✅ 已可用：`extern 变量: 类型` 声明、`extern fn` 声明语法（参数 `名: 类型`）、透明指针 `void()`、指针类型 `*u8` / `i32*` 两种书写、`type X = adopt <C类型>`、表达式包装 `adopt(expr)`、显式转换 `as<T>(expr)`、`sizeof(T)`
+> - ❌ 未实现/有缺陷：extern 函数的**调用**（codegen 对 extern 调用误加 `kaula_` 前缀，与声明符号不一致，任何 extern 调用都无法编译）、变参 `(...)` 语法、回调签名式记法（extern 参数位置无法解析）、`cast<T>()` / `transmute<T>()`（编译器中不存在）、`cstring()` 内置（生成非法 C 类型名）、手动 `free` extern 分配的 libc 内存（与结构化自动回收重复释放，double-free 崩溃）
+>
+> 下文代码块展示设计语法；所有 ❌ 项均在使用处再次标注，未验证可运行的示例请勿直接照抄。
+
 ## 外部变量
 
 声明链接器符号或 C 全局变量：
@@ -12,31 +18,40 @@ extern stack_top: u64
 extern _estack: u64
 ```
 
+（实测可用 ✅。）
+
 ## 外部函数
 
 声明 C 函数供 Kaula 调用（FFI）。
 
-为了保持类型安全，**禁止裸 `void*`**，必须使用 `void(T...)R` 记法（见下文）来描述透明指针和函数指针。
+为了保持类型安全，**禁止裸 `void*`**，透明指针使用 `void()` 记法；回调的 `void(T...)R` 签名式记法为设计目标（当前解析器不支持，见下文标注）。
+
+以下声明语法可正常解析（注意 `Size` 需先按"套用类型"一节定义；变参 `...` 行当前无法解析）：
 
 ```kaula
-extern fn printf(fmt: *u8, ...) -> i32
+type Size = adopt size_t
+
+// ❌ 变参语法未实现，暂不能写：
+// extern fn printf(fmt: *u8, ...) -> i32
 extern fn memset(dst: *u8, c: i32, n: Size) -> *u8
 extern fn malloc(size: Size) -> void()
 extern fn free(ptr: void()) void
 ```
 
-调用方式与普通 Kaula 函数相同：
+调用方式与普通 Kaula 函数相同（**当前不可用**，存在以下实测缺陷）：
 
 ```kaula
 fn main() {
-    auto msg = cstring("Hello from C!")
-    printf(msg)
+    auto msg = cstring("Hello from C!")   // ❌ cstring 内置未实现
+    printf(msg)                            // ❌ 变参未实现
 
     void() mem = malloc(64)
     // ...
-    free(mem)
+    free(mem)                              // ❌ 手动 free 与结构化自动回收重复 → double-free
 }
 ```
+
+> ⚠️ 当前所有 `extern fn` 调用都无法编译：codegen 生成调用时误加用户函数前缀（如声明 `abs` 却调用 `kaula_abs`），与声明的 C 符号不一致。修复前，FFI 出向调用请改用 pkglib 库桥接路径。
 
 ## `void(T...)R` 记法：禁用裸 `void*`
 
@@ -52,6 +67,8 @@ Kaula 不允许出现裸 `void*`，所有 FFI 边界上的类型擦除指针必�
 | `void(const void(), const void())CInt` | `int (*)(const void*, const void*)` | 比较函数（`CInt` = 套用 C 的 `int`） |
 | `void(void(), Size)void` | `void (*)(void*, size_t)` | 接受指针+大小的回调函数 |
 | `void(const GraphNode*, i64, void())void` | `void (*)(const GraphNode*, int64_t, void*)` | 混合普通类型与透明指针的回调 |
+
+> ⚠️ 实测（2026-09-12）：表中透明指针记法（`void()` / `const void()`）可用 ✅；**回调函数指针的签名式记法当前未实现**——作为 `extern fn` 参数无法解析，作为普通函数参数可通过解析但代码生成失败。以下行为设计目标语法。
 
 ### 快速记忆法
 
@@ -70,7 +87,7 @@ Kaula: void(const void(), const void())CInt
 ### 为什么禁裸强转 / 裸 `void*`
 
 1. **可读性**：看一眼 `void(void(), Size)void` 就知道这是回调；`void*` 无法区分是数据指针、函数指针还是其他。
-2. **类型安全**：使用 `cast<T>()` 或 `transmute<T>()` 显式转换时，编译器能识别来源与目标类型；裸 `void*` 强制转换（如 `(int)ptr`）无法追踪。
+2. **类型安全**：显式转换使用编译器内置 `as<T>(expr)`（实测可用：数值宽度转换如 `as<i64>(size_value)`，指针具化如 `i32* p = as<i32*>(raw)`；生成对应的 C 强制转换）。裸 C 风格强转（如 `(int)ptr`）无法追踪。注意：`cast<T>()` / `transmute<T>()` 在编译器中**不存在**（本文档旧版误载，2026-09 修正；调用会得到"未定义的变量: 'cast'"报错）。
 3. **跨平台**：`CInt` 明确表示 C 的 `int`（32 位），与 Kaula 默认的 `int`（`int64_t`）区分开，避免 ABI 不匹配。
 
 ## 套用类型（adopt）：C 兼容类型的统一入口
@@ -105,28 +122,38 @@ void qsort(void *base, size_t nmemb, size_t size,
            int (*compar)(const void *, const void *));
 ```
 
-在 Kaula 中写成：
+在 Kaula 中写成（⚠️ 端到端当前不可运行，三处缺陷见文首状态速览：回调签名记法无法解析、extern 调用符号名 mangling、手动 `free` 与自动回收重复释放。示例中 `as<T>(expr)`、`sizeof(T)`、`adopt(expr)`、`i32*` 声明等语法均已单独实测正确）：
 
 ```kaula
-extern fn qsort(void() base, Size nmemb, Size size,
-                void(const void(), const void())CInt compar) void
+type Size = adopt size_t
+type CInt = adopt int
 
-fn cmp_int(const void() a, const void() b) CInt {
-    i32 x = *(i32*)a
-    i32 y = *(i32*)b
-    if x < y { return -1 }
-    if x > y { return 1 }
-    return 0
+// ❌ compar 的签名式参数记法当前无法解析
+extern fn qsort(base: void(), nmemb: Size, size: Size,
+                compar: void(const void(), const void())CInt) void
+
+fn cmp_int(a: const void(), b: const void()) -> CInt {
+    i32* x = as<i32*>(a)
+    i32* y = as<i32*>(b)
+    if x[0] < y[0] { return adopt(-1) }
+    if x[0] > y[0] { return adopt(1) }
+    return adopt(0)
 }
 
 fn main() {
-    *i32 arr = cast<*i32>(malloc(sizeof<i32> * 5))
-    arr[0] = 3; arr[1] = 1; arr[2] = 4; arr[3] = 1; arr[4] = 5
-    qsort(arr, 5, sizeof<i32>, cmp_int)
+    i32* arr = as<i32*>(malloc(adopt(sizeof(i32) * 5)))
+    arr[0] = 3
+    arr[1] = 1
+    arr[2] = 4
+    arr[3] = 1
+    arr[4] = 5
+    qsort(arr, adopt(5), adopt(sizeof(i32)), cmp_int)
     println("sorted: ", arr[0], arr[1], arr[2], arr[3], arr[4])
     free(arr)
 }
 ```
+
+对比旧版文档示例中的错误语法（均已在 2026-09 修正）：`cast<*i32>(...)` → `as<i32*>(...)`；`sizeof<i32>` → `sizeof(i32)`；`*i32 arr = ...` → `i32* arr = ...`；`*(i32*)a` 裸强转 → `as<i32*>(a)`；extern 参数一律 `名: 类型`。
 
 ## 被 C 调用
 
