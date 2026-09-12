@@ -206,6 +206,11 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 			return p.parseAutoDeclarationIterative()
 		case lexer.TOKEN_TREE:
 			return p.parseTreeStatementIterative()
+		case lexer.TOKEN_ATTRIBUTE:
+			// 连续属性：#[test] #[ignore] fn ... — 先解析当前属性暂存，继续分发
+			p.pendingAttributes = p.parseAttributes()
+			// 递归处理下一个属性（pendingAttributes会被后续parseAttributes合并）
+			return p.parseStatementIterative()
 		case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
 			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
 			lexer.TOKEN_TYPE_VOID, lexer.TOKEN_IDENT, lexer.TOKEN_MULTIPLY:
@@ -1192,27 +1197,31 @@ func (p *Parser) parseObjectLiteralExpressionIterative() ast.Expression {
 
 // parseAttributes 解析 #[attr1, attr2(arg)] 格式的属性列表
 // 返回解析出的属性切片，如果当前 token 不是 TOKEN_ATTRIBUTE 则返回 nil
+// 支持连续属性：#[test] #[ignore] fn ... 会合并为一个属性列表
 func (p *Parser) parseAttributes() []*ast.Attribute {
-	if p.curTok.Type != lexer.TOKEN_ATTRIBUTE {
-		// 之前已解析但尚未应用的属性（#[attr] pub fn 场景）
-		if p.pendingAttributes != nil {
-			attrs := p.pendingAttributes
-			p.pendingAttributes = nil
-			return attrs
-		}
-		return nil
+	var result []*ast.Attribute
+
+	// 先处理 pendingAttributes（#[attr] pub fn 或连续属性场景）
+	if p.pendingAttributes != nil {
+		result = append(result, p.pendingAttributes...)
+		p.pendingAttributes = nil
 	}
 
-	annotationValue := p.curTok.Value
-	annotationContent := strings.TrimPrefix(annotationValue, "#[")
-	annotationContent = strings.TrimSuffix(annotationContent, "]")
+	// 循环解析连续的 #[...] 块
+	for p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
+		annotationValue := p.curTok.Value
+		annotationContent := strings.TrimPrefix(annotationValue, "#[")
+		annotationContent = strings.TrimSuffix(annotationContent, "]")
 
-	attrs := ast.ParseAttributeList(annotationContent)
+		attrs := ast.ParseAttributeList(annotationContent)
+		result = append(result, attrs...)
 
-	p.log("解析属性：%s -> %d 个属性", annotationContent, len(attrs))
+		p.log("解析属性：%s -> %d 个属性", annotationContent, len(attrs))
 
-	p.nextToken()
-	return attrs
+		p.nextToken()
+	}
+
+	return result
 }
 
 // applyFunctionAttributes 将属性列表应用到函数声明
@@ -1917,6 +1926,14 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 		Implements:   make([]string, 0, 4),
 		Pos:          pos,
 	}
+
+	// 解析属性注解（如 #[derive], #[command] 等）
+	attrs := p.parseAttributes()
+	if attrs != nil {
+		stmt.Attributes = attrs
+		p.log("类属性：%s, 属性数：%d", stmt.Name, len(attrs))
+	}
+
 	p.nextToken()
 	if p.curTok.Type == lexer.TOKEN_IDENT {
 		stmt.Name = p.curTok.Value
@@ -1954,6 +1971,12 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			p.log("当前 token: %s, 开始解析类成员", lexer.TokenTypeToString(p.curTok.Type))
 
+			// 支持字段级属性：#[arg(short="v")] field: type
+			var fieldAttrs []*ast.Attribute
+			if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
+				fieldAttrs = p.parseAttributes()
+			}
+
 			// 检查是否是类型关键字开头（方法或字段类型）
 			isTypeKeyword := false
 			switch p.curTok.Type {
@@ -1971,6 +1994,7 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 				if p.curTok.Type == lexer.TOKEN_IDENT {
 					p.memberParseFailed = false // 重置标志
 					if field := p.parseFieldDeclarationIterative(); field != nil {
+						field.Attributes = fieldAttrs
 						p.log("解析完成字段声明：%s", field.String())
 						stmt.Fields = append(stmt.Fields, field)
 						continue
@@ -2417,7 +2441,13 @@ func (p *Parser) parseStructStatementIterative() *ast.StructStatement {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 			p.memberParseFailed = false // 重置标志
+			// 支持字段级属性：#[arg(short="v")] field: type
+			var fieldAttrs []*ast.Attribute
+			if p.curTok.Type == lexer.TOKEN_ATTRIBUTE {
+				fieldAttrs = p.parseAttributes()
+			}
 			if field := p.parseFieldDeclarationIterative(); field != nil {
+				field.Attributes = fieldAttrs
 				stmt.Fields = append(stmt.Fields, field)
 			} else if p.memberParseFailed {
 				// 字段声明明确失败（已进入 name: 前缀但类型解析失败）：同步到下一个成员

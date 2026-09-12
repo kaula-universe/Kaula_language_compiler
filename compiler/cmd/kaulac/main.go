@@ -378,13 +378,14 @@ func main() {
 	pkgArgs := []string{} // pkg 子命令参数
 	fmtCmd := ""        // fmt 子命令: file, stdin, check
 	fmtArgs := []string{} // fmt 子命令参数
+	testMode := false   // 测试模式：生成 #[test] 测试 runner
 
 	// 预扫描 os.Args，提取非 flag 参数和自定义 flag
 	// 修复：-o/--output 的值不应被误认为输入文件；子命令（compile/run 等）也不是输入文件
 	customArgs := []string{}
 	positionalArgs := []string{}
 	args := os.Args[1:]
-	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true}
+	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true, "test": true}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -464,8 +465,11 @@ func main() {
 				// Go 的 flag.Parse 遇到第一个位置参数即停止解析，
 				// 若保持原顺序，排在输入文件后的旗标（如 -output-dir）会被静默忽略
 				positionalArgs = append(positionalArgs, arg)
-				// 只将非 flag、非子命令的参数视为输入文件候选
-				if !knownSubcommands[arg] {
+				// 处理 test 子命令：kaulac test [file.kl]
+				if arg == "test" {
+					testMode = true
+				} else if !knownSubcommands[arg] {
+					// 只将非 flag、非子命令的参数视为输入文件候选
 					inputFile = arg
 				}
 			} else {
@@ -531,18 +535,6 @@ func main() {
 				}
 			}
 			if err := ws.BuildAll(release, debug); err != nil {
-				fmt.Printf("Error: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		case "test":
-			wd, _ := os.Getwd()
-			ws, err := workspace.LoadWorkspace(wd)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				os.Exit(1)
-			}
-			if err := ws.TestAll(); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1002,6 +994,34 @@ func main() {
 		}
 	}
 
+	// 测试模式：如果没有指定输入文件，自动查找测试文件
+	if testMode && inputFile == "" {
+		wd, _ := os.Getwd()
+		entries, _ := os.ReadDir(wd)
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), "_test.kl") || strings.HasSuffix(e.Name(), ".test.kl") {
+				inputFile = e.Name()
+				break
+			}
+		}
+		if inputFile == "" {
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".kl") {
+					data, err := os.ReadFile(e.Name())
+					if err == nil && strings.Contains(string(data), "#[test]") {
+						inputFile = e.Name()
+						break
+					}
+				}
+			}
+		}
+		if inputFile == "" {
+			fmt.Println("No test files found.")
+			fmt.Println("Usage: kaulac test [file.kl]")
+			os.Exit(0)
+		}
+	}
+
 	// 如果没有输入文件，退出
 	if inputFile == "" {
 		os.Exit(0)
@@ -1089,7 +1109,7 @@ func main() {
 	if inputFile != "" {
 		p.SetFile(inputFile)
 	}
-	if cfg.Freestanding {
+	if cfg.Freestanding || testMode {
 		p.SetSkipMainCheck(true)
 	}
 
@@ -1182,6 +1202,7 @@ func main() {
 
 	codegenStart := time.Now()
 	cg := codegen.NewCodeGenerator(cfg)
+	cg.TestMode = testMode
 	if stdlibConfig != nil {
 		cg.SetStdlibConfig(stdlibConfig)
 	}
@@ -1391,6 +1412,25 @@ func main() {
 		fmt.Printf("Stage 3 (Codegen+Compile):    %v\n", stage3Time)
 		fmt.Printf("---------------------------------\n")
 		fmt.Printf(i18n.T(i18n.MsgTotalTime)+"\n", totalTime)
+	}
+
+	// 测试模式：编译成功后自动运行测试
+	if testMode && compileResult.Error == nil {
+		fmt.Printf("\n%s===== Running Tests =====%s\n", errors.ColorGreen, errors.ColorReset)
+		testBin := compileResult.OutputFile
+		if !strings.HasPrefix(testBin, "/") && !strings.HasPrefix(testBin, "./") {
+			testBin = "./" + testBin
+		}
+		cmd := exec.Command(testBin)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Printf("Test execution failed: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 
