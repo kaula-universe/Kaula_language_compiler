@@ -37,6 +37,7 @@
 - [核心运行时特性](core-runtime.md) - VO 系统、前缀系统、任务调度
 - [超时与内存控制](timeout-memory.md) - 资源监控、阶段统计、调试输出
 - [裸机开发指南](bare-metal.md) - freestanding 模式、内联汇编、原子操作、位域、extern 声明
+- [`#[]` 高级属性扩展](attributes.md) - #[test] 测试、#[derive] 派生、#[command] 命令行解析
 
 ## 教程
 

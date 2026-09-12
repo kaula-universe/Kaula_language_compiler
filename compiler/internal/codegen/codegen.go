@@ -1024,6 +1024,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
 			if fnStmt.Name == "main" {
+				// 测试模式下跳过用户定义的 main，使用测试 runner
+				if cg.TestMode && len(testFunctions) > 0 {
+					continue
+				}
 				hasMain = true
 			}
 			code := cg.generateStatement(stmt) + "\n"

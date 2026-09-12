@@ -1,0 +1,112 @@
+// Kaula 高级属性扩展示例：#[test] + #[derive] + #[command]
+// 运行测试: kaulac test advanced-attributes.kl
+// 正常运行: kaulac advanced-attributes.kl && ./advanced-attributes -v -o result.txt
+
+// ========== #[derive] 派生宏示例 ==========
+#[derive(Debug, Clone, Eq)]
+struct Point {
+    x: i64
+    y: i64
+}
+
+// ========== #[command] 命令行参数解析示例 ==========
+#[command]
+struct AppConfig {
+    #[arg(short="v", long="verbose", help="启用详细输出模式")]
+    verbose: bool
+
+    #[arg(short="o", long="output", default="output.txt", help="输出文件路径")]
+    output: string
+
+    #[arg(short="n", long="count", default="10", help="处理数量")]
+    count: i64
+}
+
+// ========== #[test] 自动测试示例 ==========
+#[test]
+fn test_point_debug() {
+    Point p
+    p.x = 1
+    p.y = 2
+    println("--- test_point_debug ---")
+    Point_debug(&p)
+}
+
+#[test]
+fn test_point_clone() {
+    Point p
+    p.x = 10
+    p.y = 20
+    Point* p2 = Point_clone(&p)
+    if p2.x != 10 {
+        println("FAIL: clone x should be 10")
+    }
+    if p2.y != 20 {
+        println("FAIL: clone y should be 20")
+    }
+    // 修改克隆不影响原对象
+    p2.x = 100
+    if p.x != 10 {
+        println("FAIL: original x should still be 10")
+    }
+    println("test_point_clone: OK")
+}
+
+#[test]
+fn test_point_equals() {
+    Point a
+    a.x = 5
+    a.y = 5
+    Point b
+    b.x = 5
+    b.y = 5
+
+    if Point_equals(&a, &b) != 1 {
+        println("FAIL: a and b should be equal")
+    }
+
+    b.x = 6
+    if Point_equals(&a, &b) != 0 {
+        println("FAIL: a and b should not be equal after modify")
+    }
+    println("test_point_equals: OK")
+}
+
+#[test]
+#[ignore]
+fn test_ignored_example() {
+    // 这个测试会被忽略，不会执行
+    println("this should not appear")
+}
+
+// ========== 主函数（非测试模式下运行） ==========
+fn main() {
+    println("=== Kaula 高级属性演示 ===")
+    println("")
+
+    // #[derive] 演示
+    Point p
+    p.x = 42
+    p.y = 99
+    println("1. #[derive(Debug, Clone, Eq)] 演示:")
+    Point_debug(&p)
+
+    Point* p2 = Point_clone(&p)
+    println("克隆后:")
+    Point_debug(p2)
+
+    if Point_equals(&p, p2) == 1 {
+        println("比较结果: 相等")
+    }
+    println("")
+
+    // #[command] 演示
+    println("2. #[command] 命令行参数解析:")
+    println("   运行: ./advanced-attributes -v -o result.txt -n 42")
+    println("   查看 verbose/output/count 的解析结果")
+    println("")
+
+    println("3. #[test] 自动测试:")
+    println("   运行: kaulac test advanced-attributes.kl")
+    println("   查看 4 个测试（3 个执行 + 1 个忽略）的结果")
+}
