@@ -20,9 +20,13 @@ import (
 )
 
 // CacheManager 管理单个缓存目录。
+// mode 为影响代码生成结果的编译模式串（如 "test"/"sor"/"debug"，
+// 逗号连接，普通编译为空）。缓存键与条目清单都纳入 mode，
+// 防止不同模式（生成的 C 不同）互相复用产物。
 type CacheManager struct {
 	dir     string
 	version string
+	mode    string
 }
 
 // CacheResult 是 Check 的返回值。
@@ -34,6 +38,7 @@ type CacheResult struct {
 // entryMeta 是每个缓存条目的清单。
 type entryMeta struct {
 	Version      string            `json:"version"`
+	Mode         string            `json:"mode,omitempty"`
 	SourceHash   string            `json:"source_hash"`
 	ImportHashes map[string]string `json:"import_hashes,omitempty"`
 	UsedModules  []string          `json:"used_modules,omitempty"`
@@ -47,20 +52,26 @@ func HashContent(data []byte) string {
 }
 
 // NewCacheManager 初始化缓存管理器，确保 cacheDir 存在。
-func NewCacheManager(cacheDir, version string) (*CacheManager, error) {
+// mode 为空表示普通编译，缓存键与旧版本一致（不失效既有缓存）。
+func NewCacheManager(cacheDir, version, mode string) (*CacheManager, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, err
 	}
-	return &CacheManager{dir: cacheDir, version: version}, nil
+	return &CacheManager{dir: cacheDir, version: version, mode: mode}, nil
 }
 
 // GetCacheKey 返回输入文件路径对应的稳定缓存键（文件名安全）。
+// 非空 mode 混入哈希，使同一源码在不同编译模式下拥有独立缓存条目。
 func (m *CacheManager) GetCacheKey(inputFile string) string {
 	abs, err := filepath.Abs(inputFile)
 	if err != nil {
 		abs = inputFile
 	}
-	sum := sha256.Sum256([]byte(abs))
+	if m.mode == "" {
+		sum := sha256.Sum256([]byte(abs))
+		return hex.EncodeToString(sum[:])
+	}
+	sum := sha256.Sum256([]byte(abs + "\x00" + m.mode))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -84,6 +95,9 @@ func (m *CacheManager) Check(inputFile string, data []byte, importFileHashes map
 	if meta.Version != m.version {
 		return CacheResult{Hit: false, CCodePath: cpath}
 	}
+	if meta.Mode != m.mode {
+		return CacheResult{Hit: false, CCodePath: cpath}
+	}
 	if meta.SourceHash != HashContent(data) {
 		return CacheResult{Hit: false, CCodePath: cpath}
 	}
@@ -104,6 +118,7 @@ func (m *CacheManager) Store(inputFile string, data []byte, output string, usedM
 	}
 	meta := entryMeta{
 		Version:      m.version,
+		Mode:         m.mode,
 		SourceHash:   HashContent(data),
 		ImportHashes: importFileHashes,
 		UsedModules:  usedModules,

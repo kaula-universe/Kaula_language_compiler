@@ -956,7 +956,22 @@ func main() {
 	// 初始化缓存管理器
 	cwd, _ := os.Getwd()
 	cacheDir := filepath.Join(cwd, "cache")
-	cacheManager, err := cache.NewCacheManager(cacheDir, "0.1.0-alpha")
+	// F11：将影响代码生成结果的编译模式折入缓存键，
+	// 防止 kaulac test 等命中普通编译缓存、复用不含测试 runner 的旧产物
+	var cacheModeParts []string
+	if testMode {
+		cacheModeParts = append(cacheModeParts, "test")
+	}
+	if cfg.SOR {
+		cacheModeParts = append(cacheModeParts, "sor")
+	}
+	if cfg.Debug {
+		cacheModeParts = append(cacheModeParts, "debug")
+	}
+	if cfg.Freestanding {
+		cacheModeParts = append(cacheModeParts, "freestanding")
+	}
+	cacheManager, err := cache.NewCacheManager(cacheDir, "0.1.0-alpha", strings.Join(cacheModeParts, ","))
 	if err != nil {
 		fmt.Printf("Warning: Failed to initialize cache manager: %v\n", err)
 	}
