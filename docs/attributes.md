@@ -23,11 +23,13 @@ Kaula 支持通过 `#[attribute]` 语法为函数、结构体、字段等添加�
 #[test]
 fn test_addition() {
     i64 result = 2 + 3
-    if result != 5 {
-        println("FAIL: 2 + 3 should be 5")
-    }
+    assert(result == 5)
 }
 ```
+
+断言说明：`assert(cond)` 为编译器内置，无需 import。测试模式下失败会被
+runner 记录（测试计为 FAILED，`kaulac test` 返回非零退出码）；普通模式下
+失败会打印断言文本并 `exit(1)`。
 
 ### 运行测试
 

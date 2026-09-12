@@ -139,6 +139,10 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		globalSymbolTable.AddSymbol("println", "any", false, "global", 0, 0)
 	}
 
+	// 编译器内置（F12）：assert(cond) 由 codegen 直接生成——测试模式绑定
+	// 测试 runner 的失败记录，普通模式失败即 exit(1)；两种模式均无需 import
+	globalSymbolTable.AddSymbol("assert", "any", false, "global", 0, 0)
+
 	return &SemanticAnalyzer{
 		symbolTable:        globalSymbolTable,
 		scope:              1,

@@ -60,16 +60,16 @@ type CodeGenerator struct {
 	// 本地 import 的类型定义（跨文件 class/struct 等），用于 C 类型映射与成员访问解析
 	localPubTypes map[string]*sema.LocalPubTypeInfo
 
-	genericCache          map[string]*GenericInstanceCache
-	genericInstantiated   map[string]bool
-	genericFuncCode       strings.Builder // 泛型实例化函数代码
-	genericInstDepth      int             // 当前实例化深度（防止无限递归）
+	genericCache        map[string]*GenericInstanceCache
+	genericInstantiated map[string]bool
+	genericFuncCode     strings.Builder // 泛型实例化函数代码
+	genericInstDepth    int             // 当前实例化深度（防止无限递归）
 
 	classImplCode strings.Builder // class 构造器/方法体（延迟到 forwardDecls 与全局变量之后输出）
 
-	genericTypeCache      map[string]string // 泛型类型实例缓存：Box<int> → K_Box_int
-	genericTypeCode       strings.Builder   // 泛型类型实例化代码（typedef 定义）
-	genericTypeInstDepth  int               // 泛型类型实例化深度（防止无限递归）
+	genericTypeCache     map[string]string // 泛型类型实例缓存：Box<int> → K_Box_int
+	genericTypeCode      strings.Builder   // 泛型类型实例化代码（typedef 定义）
+	genericTypeInstDepth int               // 泛型类型实例化深度（防止无限递归）
 
 	currentFunctionName       string
 	currentFunctionReturnType string
@@ -105,8 +105,8 @@ type CodeGenerator struct {
 	// 修复 #25：符号声明时的 codegen 作用域栈深度（函数体=1，if/while/block=2+）
 	// SOR 分析器不把 if/while 块计为作用域（scopeID 恒为 0），
 	// 跨作用域 promote 判定需靠 codegen 自己的作用域栈
-	scopeDepth      int
-	declScopeDepth  map[string]int
+	scopeDepth     int
+	declScopeDepth map[string]int
 
 	// 赋值逃逸登记（KMM 回卷悬垂修复）：通过普通赋值 dst = src 把 src 所指对象
 	// 的引用传给更长生命周期持有者（外层局部/全局）的源变量名集合。
@@ -167,9 +167,9 @@ type CodeGenerator struct {
 
 	// 嵌套函数延迟定义队列：函数体生成时收集，定义提升到所在外层函数结束处输出
 	// （C 语言不允许函数内嵌定义，clang 拒绝 GNU nested functions）
-	pendingNestedFuncs    []string
-	nestedFuncPrototypes  strings.Builder
-	inFunctionBody        bool
+	pendingNestedFuncs   []string
+	nestedFuncPrototypes strings.Builder
+	inFunctionBody       bool
 
 	// userFuncNames: 本文件全部用户自定义 fn 的名字集合（含函数体内嵌套 fn）。
 	// 这些符号在 C 侧统一加 K_ 前缀，彻底避开 C 保留字（int/double/...）与 C 库符号冲突。
@@ -183,8 +183,9 @@ type CodeGenerator struct {
 	deepPromoteCBCode    strings.Builder
 
 	// 高级属性支持：#[test]、#[build]、#[derive]、#[command]
-	TestMode        bool // 测试模式：生成测试 runner 而非普通 main
-	attributeFeat   *AttributeFeatures
+	TestMode         bool // 测试模式：生成测试 runner 而非普通 main
+	testRunnerActive bool // 测试模式且确有 #[test] 函数（runner 已生成）
+	attributeFeat    *AttributeFeatures
 }
 
 // EnsureDeepPromoteCB 为给定 kaula class/struct 类型合成类型化深提升回调。
@@ -193,12 +194,13 @@ type CodeGenerator struct {
 //
 // Bug 2 正解（任务②）：SOR 的跨作用域 promote 对含指针字段的对象需要把每个 * 字段
 // 都递归提升并改写为 survivor 段新地址。此函数为每个类生成静态 C 函数：
-//   static int __kaula_deeppromote_<T>(void* promoted_obj) {
-//       K_<T>* self = (K_<T>*)promoted_obj;
-//       self->ptr_field = kmm_v4_promote_deep(self->ptr_field, sizeof(*self->ptr_field), cb);
-//       ... （每个指针字段/字符串字段递归提升）
-//       return 0;
-//   }
+//
+//	static int __kaula_deeppromote_<T>(void* promoted_obj) {
+//	    K_<T>* self = (K_<T>*)promoted_obj;
+//	    self->ptr_field = kmm_v4_promote_deep(self->ptr_field, sizeof(*self->ptr_field), cb);
+//	    ... （每个指针字段/字符串字段递归提升）
+//	    return 0;
+//	}
 func (cg *CodeGenerator) EnsureDeepPromoteCB(kaulaType string) string {
 	if kaulaType == "" {
 		return ""
@@ -861,34 +863,34 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	symbolTable := symbol.NewSymbolTable(nil, "global")
 
 	cg := &CodeGenerator{
-		output:              "",
-		indent:              0,
-		templateManager:     tm,
-		config:              cfg,
-		pluginManager:       pm,
-		stdlibConfig:        stdlibConfig,
-		treeManager:         treeManager,
-		prefixManager:       prefixManager,
-		symbolTable:         symbolTable,
-		currentScope:        symbolTable,
-		errors:              []string{},
-		usedThirdPartyLibs:  make(map[string]bool),
-		localImportFuncs:    make(map[string]bool),
-		genericCache:        make(map[string]*GenericInstanceCache),
-		genericInstantiated: make(map[string]bool),
-		genericTypeCache:    make(map[string]string),
-		sourceMap:           NewSourceMap("", ""),
-		constTable:          make(map[string]string),
-		arrayLens:           make(map[string]int),
-		sorInitSizes:        make(map[string]int),
-		declScopeDepth:      make(map[string]int),
-		assignEscapedVars:   make(map[string]bool),
-		externFuncNames:     make(map[string]bool),
-		externOriginVars:    make(map[string]bool),
-		varOrigins:          make(map[string]string),
-		promotedVars:        make(map[string]bool),
-		earlyFreedVars:      make(map[string]bool),
-		exportedFuncNames:   make(map[string]bool),
+		output:               "",
+		indent:               0,
+		templateManager:      tm,
+		config:               cfg,
+		pluginManager:        pm,
+		stdlibConfig:         stdlibConfig,
+		treeManager:          treeManager,
+		prefixManager:        prefixManager,
+		symbolTable:          symbolTable,
+		currentScope:         symbolTable,
+		errors:               []string{},
+		usedThirdPartyLibs:   make(map[string]bool),
+		localImportFuncs:     make(map[string]bool),
+		genericCache:         make(map[string]*GenericInstanceCache),
+		genericInstantiated:  make(map[string]bool),
+		genericTypeCache:     make(map[string]string),
+		sourceMap:            NewSourceMap("", ""),
+		constTable:           make(map[string]string),
+		arrayLens:            make(map[string]int),
+		sorInitSizes:         make(map[string]int),
+		declScopeDepth:       make(map[string]int),
+		assignEscapedVars:    make(map[string]bool),
+		externFuncNames:      make(map[string]bool),
+		externOriginVars:     make(map[string]bool),
+		varOrigins:           make(map[string]string),
+		promotedVars:         make(map[string]bool),
+		earlyFreedVars:       make(map[string]bool),
+		exportedFuncNames:    make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
 		// 缺口4：整数溢出检查。debug 模式默认启用（零开销 __builtin_*_overflow），
 		// release 模式禁用（wrapping 行为，与 C 一致，零开销）。
@@ -1003,6 +1005,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	// 测试模式下，忽略用户定义的 main，使用自动生成的测试 runner
 	if cg.TestMode && len(testFunctions) > 0 {
 		hasMain = false
+		cg.testRunnerActive = true
 	}
 
 	importedModules := make(map[string]bool)
@@ -1419,6 +1422,14 @@ static inline String string_concat_float(String s, double v) {
 
 	var forwardDecls strings.Builder
 	forwardDecls.Grow(1024)
+
+	// 测试模式（F12）：断言辅助函数定义在文件尾部的 runner 块中，
+	// 但 #[test] 函数体的调用在其之前，需前向声明
+	if cg.TestMode && len(testFunctions) > 0 {
+		forwardDecls.WriteString("void __kaula_test_assert(int cond, const char* expr, const char* file, int line);\n")
+		forwardDecls.WriteString("void __kaula_test_assert_eq_i64(long long a, long long b, const char* file, int line);\n")
+		forwardDecls.WriteString("void __kaula_test_assert_str_eq(const char* a, const char* b, const char* file, int line);\n")
+	}
 	for _, stmt := range program.Statements {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.Name != "main" {
 			// 泛型函数跳过前置声明：原始签名的类型参数 T 无法映射为合法 C 类型，
@@ -1986,7 +1997,8 @@ func (cg *CodeGenerator) HasLocalSymbol(name string) bool {
 // 规则：kaula_<funcName>_<mangled_typeargs>，类型参数中的非字母数字字符
 // 转义为 _<codepoint>_ 以保证生成合法的 C 标识符。
 // 例：identity<int>      → kaula_identity_int
-//     identity<[]int>    → kaula_identity__91__93_int
+//
+//	identity<[]int>    → kaula_identity__91__93_int
 func MangleGenericName(funcName string, typeArgs []string) string {
 	name := "kaula_" + funcName + "_"
 	for i, arg := range typeArgs {
@@ -2153,8 +2165,9 @@ func (cg *CodeGenerator) getProgram() *ast.Program {
 // 规则：baseName_<mangled_typeargs>，类型参数中的非字母数字字符
 // 转义为 _<codepoint>_ 以保证生成合法的 C 标识符。
 // 例：Box<int>           → Box_int
-//     Result<int, string> → Result_int_string
-//     Pair<[]int, *T>     → Pair__91__93_int__42_T
+//
+//	Result<int, string> → Result_int_string
+//	Pair<[]int, *T>     → Pair__91__93_int__42_T
 func MangleGenericTypeName(baseName string, typeArgs []string) string {
 	name := baseName
 	for _, arg := range typeArgs {
@@ -2192,7 +2205,7 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 	cacheKey += ">"
 
 	// 检查缓存
-if cached, ok := cg.genericTypeCache[cacheKey]; ok {
+	if cached, ok := cg.genericTypeCache[cacheKey]; ok {
 		return cached, nil
 	}
 
