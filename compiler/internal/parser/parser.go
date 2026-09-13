@@ -5395,6 +5395,16 @@ func (p *Parser) isNextArmStart() bool {
 	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ARROW {
 		return true
 	}
+	// 带参数的枚举变体模式：Ok(v) => / Err(e) =>
+	// 启发式：枚举变体名通常首字母大写，函数名通常小写
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_LPAREN {
+		if len(p.curTok.Value) > 0 {
+			first := p.curTok.Value[0]
+			if first >= 'A' && first <= 'Z' {
+				return true
+			}
+		}
+	}
 	if p.curTok.Type == lexer.TOKEN_LITERAL_INT && p.peekTok.Type == lexer.TOKEN_ARROW {
 		return true
 	}
@@ -5405,6 +5415,10 @@ func (p *Parser) isNextArmStart() bool {
 		return true
 	}
 	if p.curTok.Type == lexer.TOKEN_FALSE && p.peekTok.Type == lexer.TOKEN_ARROW {
+		return true
+	}
+	// 通配符模式：_ =>
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == "_" && p.peekTok.Type == lexer.TOKEN_ARROW {
 		return true
 	}
 	return false
