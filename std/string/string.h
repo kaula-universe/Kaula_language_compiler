@@ -4,14 +4,23 @@
 #include "../base/types.h"
 #include <string.h>
 
-// String 类型由 types.h 提供（struct { size_t len; char* ptr; }）
+// String 类型：SSO 优化（<=15 字节零堆分配）
 
 // 常用常量
-#define STRING_EMPTY ((String){.len=0, .ptr=""})
+#define STRING_EMPTY ((String){.len=0, .sso=""})
 
-// 从 C 字符串创建 String（不复制，指针引用）
+// 从 C 字符串创建 String（短字符串拷贝到 SSO，长字符串指针引用）
 static inline String string_wrap(const char* str) {
-    return (String){.len = strlen(str), .ptr = (char*)str};
+    if (!str) return STRING_EMPTY;
+    size_t len = strlen(str);
+    String s;
+    s.len = len;
+    if (len <= STRING_SSO_CAPACITY) {
+        memcpy(s.sso, str, len + 1);
+    } else {
+        s.ptr = (char*)str;
+    }
+    return s;
 }
 
 // 字符串创建函数
@@ -76,18 +85,24 @@ extern bool string_to_bool(String str);
 extern void string_free(String str);
 extern String string_realloc(String str, size_t new_size);
 
-// StringBuilder（内部仍使用 char* buffer，输出转为 String）
+// StringBuilder（SSO 优化：短字符串使用结构体内部缓冲区，零额外堆分配）
+#define SB_SSO_SIZE 32
 typedef struct StringBuilder {
     char* buffer;
     size_t length;
     size_t capacity;
+    char sso[SB_SSO_SIZE]; // 内嵌小字符串缓冲区，<=31字节零额外分配
 } StringBuilder;
 
 extern StringBuilder* string_builder_create(void);
 extern void string_builder_destroy(StringBuilder* sb);
+extern void string_builder_reset(StringBuilder* sb);
 extern void string_builder_append(StringBuilder* sb, const char* str);
 extern void string_builder_append_char(StringBuilder* sb, char c);
 extern String string_builder_to_string(StringBuilder* sb);
+
+// SSO 感知：只有 len > 15（堆分配）时才释放，SSO 字符串零释放
+extern void string_survivor_free(String s);
 
 // 字符串工具函数
 extern bool string_is_empty(String str);

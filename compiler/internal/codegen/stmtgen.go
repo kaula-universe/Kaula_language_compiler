@@ -2104,12 +2104,12 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 			freed[name] = true
 			continue
 		}
-		// String 类型：释放 ptr 字段（用 kmm_v4_survivor_free，对非KMM指针安全no-op）
+		// String 类型：SSO 感知释放（只有 len>15 才释放堆指针）
 		if sg.isStringTyped(name) {
 			b.WriteString(indent)
-			b.WriteString("kmm_v4_survivor_free(")
+			b.WriteString("string_survivor_free(")
 			b.WriteString(name)
-			b.WriteString(".ptr); /* structural: early free (liveness, String) */\n")
+			b.WriteString("); /* structural: early free (liveness, String, SSO-aware) */\n")
 			sg.codegen.MarkEarlyFreed(name)
 		} else if origin == OriginLibcMalloc {
 			b.WriteString(indent)
@@ -2815,14 +2815,12 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 				}
 			}
 		}
-		// String 类型：释放 ptr 字段（String 是结构体，不是指针）
-		// 用 kmm_v4_survivor_free 而非 free：对非KMM指针（如字符串字面量只读内存）是安全no-op，
-		// 这样所有 String 变量（包括普通 string s = fn()）都能被正确释放，避免循环中临时String内存泄漏
+		// String 类型：SSO 感知释放（只有 len>15 才释放堆指针）
 		if sg.isStringTyped(name) {
 			b.WriteString(indent)
-			b.WriteString("kmm_v4_survivor_free(")
+			b.WriteString("string_survivor_free(")
 			b.WriteString(name)
-			b.WriteString(".ptr); /* structural: String payload reclaim */\n")
+			b.WriteString("); /* structural: String payload reclaim (SSO-aware) */\n")
 		} else {
 			// 多分配器 origin 追踪：按来源选择释放函数
 			origin := sg.codegen.GetVarOrigin(name)
