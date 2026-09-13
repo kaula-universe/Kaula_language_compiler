@@ -3,15 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-// ==================== 跨平台 snprintf 实现 ====================
-#if FORMAT_PLATFORM_WINDOWS && defined(_MSC_VER)
-    // MSVC: _snprintf_s 多一个 count 参数，用 _TRUNCATE 表示截断到缓冲区大小
-    #define format_snprintf(buf, size, fmt, ...) _snprintf_s(buf, size, _TRUNCATE, fmt, __VA_ARGS__)
-#else
-    // 标准 C / MinGW / Unix: 使用标准 snprintf
-    #define format_snprintf snprintf
-#endif
+#include <float.h>
+#include <limits.h>
+#include <math.h>
 
 // ==================== 基础格式化函数实现 ====================
 
@@ -28,13 +22,8 @@ int format_vprintf(char* buffer, size_t size, const char* format, va_list args) 
         return -1;
     }
     
-    int result;
-#if FORMAT_PLATFORM_WINDOWS && defined(_MSC_VER)
-    result = _vsnprintf_s(buffer, size, _TRUNCATE, format, args);
-#else
-    result = vsnprintf(buffer, size, format, args);
-#endif
-    
+    int result = vsnprintf(buffer, size, format, args);
+
     if (result < 0) {
         buffer[0] = '\0';
         return -1;
@@ -96,90 +85,24 @@ char* format_valloc(const char* format, va_list args) {
 // ==================== 类型格式化函数实现 ====================
 
 int format_int(char* buffer, size_t size, i64 value, int base) {
-    if (!buffer || size == 0 || base < 2 || base > 36) {
-        return -1;
-    }
-    
-    char temp[65]; // 最大 64 位 + 符号
-    int pos = 0;
-    bool negative = false;
-    
-    if (value < 0) {
-        negative = true;
-    }
-    
-    // Convert to unsigned directly - this handles INT64_MIN correctly
-    // without undefined behavior from negating INT64_MIN
-    u64 uvalue;
-    if (negative) {
-        uvalue = (u64)(-(value + 1)) + 1;
-    } else {
-        uvalue = (u64)value;
-    }
-    
-    // 转换数字
-    do {
-        int digit = uvalue % base;
-        temp[pos++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
-        uvalue /= base;
-    } while (uvalue > 0);
-    
-    if (negative) {
-        temp[pos++] = '-';
-    }
-    
-    // 反转字符串
-    if (pos >= (int)size) {
-        pos = (int)size - 1;
-    }
-    
-    for (int i = 0; i < pos; i++) {
-        buffer[i] = temp[pos - 1 - i];
-    }
-    buffer[pos] = '\0';
-    
-    return pos;
+    return format_int_opts(buffer, size, value, base, NULL);
 }
 
 int format_uint(char* buffer, size_t size, u64 value, int base) {
-    if (!buffer || size == 0 || base < 2 || base > 36) {
-        return -1;
-    }
-    
-    char temp[65];
-    int pos = 0;
-    
-    do {
-        int digit = value % base;
-        temp[pos++] = (digit < 10) ? ('0' + digit) : ('A' + digit - 10);
-        value /= base;
-    } while (value > 0);
-    
-    if (pos >= (int)size) {
-        pos = (int)size - 1;
-    }
-    
-    for (int i = 0; i < pos; i++) {
-        buffer[i] = temp[pos - 1 - i];
-    }
-    buffer[pos] = '\0';
-    
-    return pos;
+    /* Keep the historical uppercase default of the plain unsigned API. */
+    FormatOptions options = {0};
+    options.uppercase = true;
+    return format_uint_opts(buffer, size, value, base, &options);
 }
 
 int format_float(char* buffer, size_t size, f64 value, int precision) {
-    if (!buffer || size == 0 || precision < 0) {
+    if (precision < 0) {
+        if (buffer && size) buffer[0] = '\0';
         return -1;
     }
-    
-    if (precision > 20) {
-        precision = 20;
-    }
-    
-    char format_str[32];
-    format_snprintf(format_str, sizeof(format_str), "%%.%df", precision);
-    
-    return format_snprintf(buffer, size, format_str, value);
+    FormatOptions options = {0};
+    options.precision = precision;
+    return format_float_opts(buffer, size, value, &options);
 }
 
 int format_bool(char* buffer, size_t size, bool value) {
@@ -205,6 +128,7 @@ int format_char(char* buffer, size_t size, char value) {
         return -1;
     }
     
+    if (size == 1) { buffer[0] = '\0'; return 0; }
     buffer[0] = value;
     buffer[1] = '\0';
     
@@ -267,31 +191,176 @@ int format_pointer(char* buffer, size_t size, const void* ptr) {
 
 // ==================== 带选项的格式化函数实现 ====================
 
-int format_int_opts(char* buffer, size_t size, i64 value, int base, const FormatOptions* options) {
-    if (!buffer || size == 0) {
-        return -1;
-    }
-    
-    char temp[65];
-    int result = format_int(temp, sizeof(temp), value, base);
-    
-    if (result < 0) {
-        return -1;
-    }
-    
-    // 应用选项
-    // TODO: 实现宽度、对齐、填充等选项
-    
-    return format_string(buffer, size, temp, -1);
+/* All output is a prefix of the complete formatted field. Repeated padding is
+ * bounded by destination capacity, even for INT32_MAX width. */
+typedef struct { char* data; size_t capacity; size_t used; } FormatWriter;
+
+static void format_write(FormatWriter* w, const char* text, size_t count) {
+    size_t room = w->capacity - w->used;
+    if (count > room) count = room;
+    if (count) memcpy(w->data + w->used, text, count);
+    w->used += count;
 }
 
-int format_float_opts(char* buffer, size_t size, f64 value, const FormatOptions* options) {
-    if (!buffer || size == 0) {
-        return -1;
+static void format_repeat(FormatWriter* w, char c, size_t count) {
+    size_t room = w->capacity - w->used;
+    if (count > room) count = room;
+    if (count) memset(w->data + w->used, c, count);
+    w->used += count;
+}
+
+static int format_field(char* buffer, size_t size, const char* lead,
+                        const char* digits, const FormatOptions* o) {
+    if (!buffer || !size) return -1;
+    size_t prefix = strlen(lead), len = strlen(digits);
+    size_t pad = o && o->width > 0 && (size_t)o->width > prefix + len
+        ? (size_t)o->width - prefix - len : 0;
+    FormatWriter w = {buffer, size - 1 > INT_MAX ? INT_MAX : size - 1, 0};
+    char fill = o && o->pad_char ? o->pad_char : ' ';
+    if (o && o->left_align) {
+        format_write(&w, lead, prefix);
+        format_write(&w, digits, len);
+        format_repeat(&w, fill, pad);
+    } else if (o && o->zero_pad) {
+        format_write(&w, lead, prefix);
+        format_repeat(&w, '0', pad);
+        format_write(&w, digits, len);
+    } else {
+        format_repeat(&w, fill, pad);
+        format_write(&w, lead, prefix);
+        format_write(&w, digits, len);
     }
-    
-    int precision = options ? options->precision : 6;
-    return format_float(buffer, size, value, precision);
+    buffer[w.used] = '\0';
+    return (int)w.used;
+}
+
+/* Group only the decimal integral part; leave fraction/exponent untouched. */
+static void format_group(char* out, const char* text) {
+    size_t integral = 0, pos = 0;
+    while (text[integral] >= '0' && text[integral] <= '9') ++integral;
+    for (size_t i = 0; i < integral; ++i) {
+        if (i && (integral - i) % 3 == 0) out[pos++] = ',';
+        out[pos++] = text[i];
+    }
+    strcpy(out + pos, text + integral);
+}
+
+static int format_integer(char* buffer, size_t size, u64 value, bool negative,
+                          i32 base, const FormatOptions* o) {
+    if (!buffer || !size) return -1;
+    buffer[0] = '\0';
+    if (base < 2 || base > 36) return -1;
+    const char* alphabet = o && o->uppercase
+        ? "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" : "0123456789abcdefghijklmnopqrstuvwxyz";
+    char reversed[64], digits[65], grouped[86], lead[4];
+    size_t n = 0, p = 0;
+    do { reversed[n++] = alphabet[value % (u64)base]; value /= (u64)base; } while (value);
+    for (size_t i = 0; i < n; ++i) digits[i] = reversed[n - 1 - i];
+    digits[n] = '\0';
+    if (negative) lead[p++] = '-';
+    else if (o && o->show_sign) lead[p++] = '+';
+    if (o && o->show_base && (base == 2 || base == 8 || base == 16)) {
+        lead[p++] = '0';
+        lead[p++] = base == 2 ? 'b' : base == 8 ? 'o' : 'x';
+        if (o->uppercase) lead[p - 1] -= 'a' - 'A';
+    }
+    lead[p] = '\0';
+    if (o && o->thousands && base == 10) {
+        format_group(grouped, digits);
+        return format_field(buffer, size, lead, grouped, o);
+    }
+    return format_field(buffer, size, lead, digits, o);
+}
+
+int format_int_opts(char* buffer, size_t size, i64 value, int base, const FormatOptions* options) {
+    u64 magnitude = value < 0 ? (u64)(-(value + 1)) + 1 : (u64)value;
+    return format_integer(buffer, size, magnitude, value < 0, base, options);
+}
+
+i32 format_uint_opts(char* buffer, u64 size, u64 value, i32 base, const FormatOptions* options) {
+    if (size > SIZE_MAX) return -1;
+    return format_integer(buffer, (size_t)size, value, false, base, options);
+}
+
+/* DBL_MAX has DBL_MAX_10_EXP+1 integral digits. Extra room covers decimal
+ * separator, 20 fractional digits, exponent and terminator, including grouping. */
+#define FORMAT_FLOAT_CAP (DBL_MAX_10_EXP + 64)
+
+int format_float_opts(char* buffer, size_t size, f64 value, const FormatOptions* options) {
+    if (!buffer || !size) return -1;
+    buffer[0] = '\0';
+    int precision = options && options->precision >= 0 ? options->precision : 6;
+    if (precision > 20) precision = 20;
+    bool upper = options && options->uppercase;
+    bool scientific = options && options->scientific;
+    char digits[FORMAT_FLOAT_CAP], grouped[FORMAT_FLOAT_CAP * 2], lead[2] = {0};
+    if (signbit(value)) lead[0] = '-';
+    else if (options && options->show_sign) lead[0] = '+';
+    int result = snprintf(digits, sizeof(digits), scientific ? (upper ? "%.*E" : "%.*e")
+                                                          : (upper ? "%.*F" : "%.*f"),
+                          precision, fabs(value));
+    if (result < 0 || (size_t)result >= sizeof(digits)) return -1;
+    if (options && options->thousands) {
+        format_group(grouped, digits);
+        return format_field(buffer, size, lead, grouped, options);
+    }
+    return format_field(buffer, size, lead, digits, options);
+}
+
+FormatOptions* format_options_create(void) {
+    FormatOptions* o = (FormatOptions*)kmm_v4_calloc(1, sizeof(FormatOptions));
+    if (o) o->precision = 6;
+    return o;
+}
+
+void format_options_set_layout(FormatOptions* o, i32 width, bool left_align, bool zero_pad, i32 pad_char) {
+    if (!o) return;
+    o->width = width;
+    o->left_align = left_align;
+    o->zero_pad = zero_pad;
+    o->pad_char = pad_char > 0 && pad_char <= 127 ? (char)pad_char : ' ';
+}
+
+void format_options_set_precision(FormatOptions* o, i32 precision) {
+    if (o) o->precision = precision;
+}
+
+void format_options_set_flags(FormatOptions* o, bool show_sign, bool show_base,
+                              bool uppercase, bool thousands, bool scientific) {
+    if (!o) return;
+    o->show_sign = show_sign;
+    o->show_base = show_base;
+    o->uppercase = uppercase;
+    o->thousands = thousands;
+    o->scientific = scientific;
+}
+
+static char* format_text_buffer(const FormatOptions* o, size_t minimum, size_t* capacity) {
+    *capacity = o && o->width > 0 && (size_t)o->width >= minimum ? (size_t)o->width + 1 : minimum;
+    return (char*)kmm_v4_malloc(*capacity);
+}
+
+char* format_int_text(i64 value, i32 base, const FormatOptions* options) {
+    if (base < 2 || base > 36) return NULL;
+    size_t size;
+    char* buffer = format_text_buffer(options, 96, &size);
+    if (!buffer || format_int_opts(buffer, size, value, base, options) < 0) return NULL;
+    return buffer;
+}
+
+char* format_uint_text(u64 value, i32 base, const FormatOptions* options) {
+    if (base < 2 || base > 36) return NULL;
+    size_t size;
+    char* buffer = format_text_buffer(options, 96, &size);
+    if (!buffer || format_uint_opts(buffer, size, value, base, options) < 0) return NULL;
+    return buffer;
+}
+
+char* format_float_text(f64 value, const FormatOptions* options) {
+    size_t size;
+    char* buffer = format_text_buffer(options, FORMAT_FLOAT_CAP * 2, &size);
+    if (!buffer || format_float_opts(buffer, size, value, options) < 0) return NULL;
+    return buffer;
 }
 
 // ==================== 格式化构建器实现 ====================
@@ -445,7 +514,7 @@ FormatBuilder* format_builder_append_float(FormatBuilder* fb, f64 value, int pre
         return fb;
     }
     
-    char temp[64];
+    char temp[FORMAT_FLOAT_CAP];
     int len = format_float(temp, sizeof(temp), value, precision);
     
     if (len > 0) {

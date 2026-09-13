@@ -66,33 +66,33 @@ func rewriteStructDefType(cType string) string {
 }
 
 var globalTypeMap = map[string]string{
-	"i8":    "int8_t",
-	"i16":   "int16_t",
-	"i32":   "int32_t",
-	"i64":   "int64_t",
-	"int8":  "int8_t",
-	"int16": "int16_t",
-	"int32": "int32_t",
-	"int64": "int64_t",
-	"int":   "int64_t",
-	"u8":    "uint8_t",
-	"u16":   "uint16_t",
-	"u32":   "uint32_t",
-	"u64":   "uint64_t",
-	"uint8": "uint8_t",
+	"i8":     "int8_t",
+	"i16":    "int16_t",
+	"i32":    "int32_t",
+	"i64":    "int64_t",
+	"int8":   "int8_t",
+	"int16":  "int16_t",
+	"int32":  "int32_t",
+	"int64":  "int64_t",
+	"int":    "int64_t",
+	"u8":     "uint8_t",
+	"u16":    "uint16_t",
+	"u32":    "uint32_t",
+	"u64":    "uint64_t",
+	"uint8":  "uint8_t",
 	"uint16": "uint16_t",
 	"uint32": "uint32_t",
 	"uint64": "uint64_t",
-	"uint":  "uint64_t",
-	"float": "float",
-	"f32":   "float",
+	"uint":   "uint64_t",
+	"float":  "float",
+	"f32":    "float",
 	"double": "double",
-	"f64":   "double",
-	"bool":  "bool",
-	"char":  "char",
-	"byte":  "uint8_t",
-	"sbyte": "int8_t",
-	"void":  "void",
+	"f64":    "double",
+	"bool":   "bool",
+	"char":   "char",
+	"byte":   "uint8_t",
+	"sbyte":  "int8_t",
+	"void":   "void",
 	"string": "String",
 	"object": "Object*",
 }
@@ -215,6 +215,9 @@ func (tg *TypeGenerator) tryInstantiateGenericType(baseName, argsStr string) (st
 }
 
 func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
+	if t, ok := tg.closureType(kaulaType); ok {
+		return t
+	}
 	// void(T...)R 签名记法优先处理（必须保留原始大小写，参数/返回类型可能含用户定义类型）
 	if cType, ok := tg.parseVoidSignatureType(kaulaType); ok {
 		return cType

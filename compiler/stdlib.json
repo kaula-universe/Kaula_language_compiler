@@ -651,6 +651,13 @@
     }
   },
   "std.format": {
+    "format_int_opts": {"args": ["char*", "u64", "i64", "i32", "FormatOptions*"], "return": "i32"},
+    "format_uint_opts": {"args": ["char*", "u64", "u64", "i32", "FormatOptions*"], "return": "i32"},
+    "format_float_opts": {"args": ["char*", "u64", "f64", "FormatOptions*"], "return": "i32"},
+    "format_options_create": {"args": [], "return": "FormatOptions*"},
+    "format_options_set_layout": {"args": ["FormatOptions*", "i32", "bool", "bool", "i32"], "return": "void"},
+    "format_options_set_precision": {"args": ["FormatOptions*", "i32"], "return": "void"},
+    "format_options_set_flags": {"args": ["FormatOptions*", "bool", "bool", "bool", "bool", "bool"], "return": "void"},
     "header": "std/format/format.h",
     "format_printf": {
       "args": [
