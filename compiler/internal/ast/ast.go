@@ -1176,6 +1176,8 @@ type VariableDeclaration struct {
 	Value      Expression
 	Nullable   bool
 	IsAuto     bool
+	IsTryAssign bool // := 错误传播赋值（右侧为 Result enum，Err 时自动 return）
+	TryAssignResultType string // := 右侧 Result enum 的完整类型名（sema 填充）
 	IsPublic   bool         // pub 修饰符
 	IsExported bool         // export 修饰符：显式导出（含 pub 语义，跨文件可见 + C 级导出）
 	IsStatic   bool         // static 修饰符：函数内静态变量，生命周期为整个程序

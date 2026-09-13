@@ -310,6 +310,11 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 		return fmt.Sprintf("// ERROR: auto '%s' type not inferred - compilation should have stopped\n", stmt.Name)
 	}
 
+	// := 错误传播赋值：生成 if-else 传播逻辑
+	if stmt.IsTryAssign {
+		return sg.generateTryAssignDeclaration(stmt)
+	}
+
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
 	sg.codegen.RecordDeclScopeDepth(stmt.Name)
 	sg.codegen.RecordAllocSizeFromAST(stmt.Name, stmt.Value)
@@ -345,6 +350,55 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 		builder.WriteString(initCode)
 	}
 	builder.WriteString(";\n")
+	return builder.String()
+}
+
+// generateTryAssignDeclaration 生成 := 错误传播赋值
+// 生成的 C 代码：
+//   ResultType __kaula_try_N = <expr>;
+//   if (__kaula_try_N.kind == 1) { return __kaula_try_N; }
+//   T name = __kaula_try_N.data.Ok_val;
+func (sg *StatementGenerator) generateTryAssignDeclaration(stmt *ast.VariableDeclaration) string {
+	// 生成唯一临时变量名
+	tryVar := fmt.Sprintf("__kaula_try_%d", sg.codegen.tryAssignCounter)
+	sg.codegen.tryAssignCounter++
+
+	// 推断右侧表达式的 Result enum 类型（sema 已填充）
+	resultType := stmt.TryAssignResultType
+	resultCType := sg.codegen.typeGenerator.convertType(resultType, false)
+	if resultCType == "" {
+		resultCType = "auto"
+	}
+
+	cType := sg.codegen.typeGenerator.convertType(stmt.Type, false)
+	sg.codegen.AddSymbol(stmt.Name, stmt.Type, false, "local", stmt.Pos.Line, stmt.Pos.Column)
+
+	var builder strings.Builder
+	builder.Grow(256)
+
+	// 临时变量保存 Result
+	builder.WriteString(resultCType)
+	builder.WriteByte(' ')
+	builder.WriteString(tryVar)
+	builder.WriteString(" = ")
+	if stmt.Value != nil {
+		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+	}
+	builder.WriteString(";\n")
+
+	// if Err -> return
+	builder.WriteString("if (")
+	builder.WriteString(tryVar)
+	builder.WriteString(".kind == 1) { return ")
+	builder.WriteString(tryVar)
+	builder.WriteString("; }\n")
+
+	// 解包 Ok 赋值
+	builder.WriteString(sg.generateVarDeclString(cType, stmt.Name))
+	builder.WriteString(" = ")
+	builder.WriteString(tryVar)
+	builder.WriteString(".data.Ok_val;\n")
+
 	return builder.String()
 }
 

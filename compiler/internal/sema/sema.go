@@ -1656,6 +1656,53 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 		return
 	}
 
+	// := 错误传播赋值：右侧必须是 enum Result（含 Ok/Err 变体）
+	// 左侧变量类型为 Ok 变体的字段类型
+	if stmt.IsTryAssign {
+		stmt.TryAssignResultType = inferredType // 保存 Result enum 类型
+		enumName := inferredType
+		if strings.HasPrefix(enumName, "enum ") {
+			enumName = strings.TrimPrefix(enumName, "enum ")
+		}
+		enumStmt := sa.program.FindEnum(enumName)
+		if enumStmt == nil {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf(":= 右侧表达式类型 '%s' 不是 enum，无法用于错误传播", inferredType),
+				stmt.Pos.Line, stmt.Pos.Column,
+				"try_assign_non_enum",
+				":= 只能用于返回 Result enum 的表达式",
+			)
+			return
+		}
+		// 查找 Ok 变体
+		okVariant := (*ast.EnumVariant)(nil)
+		for _, v := range enumStmt.Variants {
+			if v != nil && v.Name == "Ok" {
+				okVariant = v
+				break
+			}
+		}
+		if okVariant == nil {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("enum '%s' 没有 Ok 变体，无法用于 := 错误传播", enumName),
+				stmt.Pos.Line, stmt.Pos.Column,
+				"try_assign_no_ok",
+				"Result enum 必须包含 Ok(T) 和 Err(E) 变体",
+			)
+			return
+		}
+		if len(okVariant.FieldTypes) == 0 {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("enum '%s' 的 Ok 变体没有字段，无法解包赋值", enumName),
+				stmt.Pos.Line, stmt.Pos.Column,
+				"try_assign_ok_no_field",
+				"Ok 变体必须携带一个值字段",
+			)
+			return
+		}
+		inferredType = okVariant.FieldTypes[0]
+	}
+
 	stmt.Type = inferredType
 
 	// 记录数组字面量长度，供 spend 全集证明使用
