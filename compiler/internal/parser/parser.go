@@ -256,6 +256,9 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 			return p.parseExpressionStatementIterative()
 		}
 		return p.parseFunctionStatementIterative()
+	case lexer.TOKEN_LBRACE:
+		// 裸块语句 { ... }：创建新作用域
+		return p.parseBlockStatementIterative()
 	case lexer.TOKEN_CLASS:
 		return p.parseClassStatementIterative()
 	case lexer.TOKEN_LITERAL_INTERFACE:
@@ -1291,6 +1294,28 @@ func applyFunctionAttributes(stmt *ast.FunctionStatement, attrs []*ast.Attribute
 			}
 		}
 	}
+}
+
+// parseBlockStatementIterative 迭代解析裸块语句 { ... }
+// 裸块语句创建新的作用域，用于限制变量可见范围
+func (p *Parser) parseBlockStatementIterative() *ast.BlockStatement {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	// 消费 {
+	p.nextToken()
+	block := &ast.BlockStatement{Pos: pos}
+	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		stmt := p.parseStatementIterative()
+		if stmt != nil {
+			block.Statements = append(block.Statements, stmt)
+		} else {
+			// 解析失败，跳过一个 token 避免死循环
+			p.nextToken()
+		}
+	}
+	if p.curTok.Type == lexer.TOKEN_RBRACE {
+		p.nextToken() // 消费 }
+	}
+	return block
 }
 
 // parseFunctionStatementIterative 迭代解析函数语句
