@@ -342,6 +342,10 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 		// 否则作为数组字面量表达式处理
 		return p.parseExpressionStatementIterative()
 	case lexer.TOKEN_IDENT:
+		// := 错误传播赋值：name := expr（右侧为 Result enum，Err 时自动 return）
+		if p.peekTok.Type == lexer.TOKEN_COLON_ASSIGN {
+			return p.parseTryAssignStatementIterative()
+		}
 		// 检查是否是变量声明：标识符后面跟另一个标识符（类型名）
 		// 例如：i64 x, int y, MyType obj
 		if p.peekTok.Type == lexer.TOKEN_IDENT || p.peekTok.Type == lexer.TOKEN_QUESTION || p.peekTok.Type == lexer.TOKEN_MULTIPLY || p.peekTok.Type == lexer.TOKEN_LT {
@@ -367,6 +371,30 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 	default:
 		// 尝试解析为表达式语句（如赋值、函数调用等）
 		return p.parseExpressionStatementIterative()
+	}
+}
+
+// parseTryAssignStatementIterative 解析 := 错误传播赋值
+// 语法：name := expr
+// 语义：右侧 expr 必须返回 Result enum（含 Ok/Err 变体）
+//       若为 Err，自动 return 当前函数（携带 Err 值）
+//       若为 Ok，将 Ok 中的值解包赋值给 name
+func (p *Parser) parseTryAssignStatementIterative() *ast.VariableDeclaration {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	name := p.curTok.Value
+	p.nextToken() // 跳过变量名
+	if p.curTok.Type != lexer.TOKEN_COLON_ASSIGN {
+		p.error(fmt.Sprintf("expected ':=' after '%s', got %s", name, lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
+	p.nextToken() // 跳过 :=
+	value := p.parseExpressionIterative()
+	return &ast.VariableDeclaration{
+		Name:        name,
+		Value:       value,
+		IsAuto:      true,  // 类型由右侧 Ok 变体推断
+		IsTryAssign: true,  // 标记为错误传播赋值
+		Pos:         pos,
 	}
 }
 
