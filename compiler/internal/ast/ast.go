@@ -1615,7 +1615,8 @@ type ClassStatement struct {
 	Methods      []*MethodStatement
 	Constructors []*ConstructorStatement
 	Implements   []string
-	Generic      bool // 是否是泛型类
+	Generic      bool          // 是否是泛型类
+	Attributes   []*Attribute  // 声明注解：#[derive], #[command] 等
 	Pos          Position
 }
 
@@ -1639,11 +1640,12 @@ func (c *ClassStatement) SetPosition(pos Position) {
 
 // FieldDeclaration 表示字段声明
 type FieldDeclaration struct {
-	Name     string
-	Type     string
-	Nullable bool
-	BitWidth int // 位域宽度（0=普通字段，>0=位域，如 flags: u32 : 5 → BitWidth=5）
-	Pos      Position
+	Name       string
+	Type       string
+	Nullable   bool
+	BitWidth   int           // 位域宽度（0=普通字段，>0=位域，如 flags: u32 : 5 → BitWidth=5）
+	Attributes []*Attribute  // 字段注解：#[arg(short="v", long="verbose")] 等
+	Pos        Position
 }
 
 // statementNode 实现Statement接口
