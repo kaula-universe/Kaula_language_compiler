@@ -3349,6 +3349,27 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		isCrossFileCtor = true
 	}
 	if !isCrossFileCtor {
+		// F1 修复：函数调用上下文中，未定义的函数名报"未定义的函数"而非"未定义的变量"
+		if ident, ok := expr.Function.(*ast.Identifier); ok {
+			sym := sa.symbolTable.GetSymbol(ident.Name)
+			isKnown := sym != nil ||
+				(sa.localImportFuncs != nil && sa.localImportFuncs[ident.Name]) ||
+				(sa.localModuleFuncs != nil && sa.localModuleFuncs[ident.Name]) ||
+				(sa.localPubVars != nil && sa.localPubVars[ident.Name])
+			if !isKnown {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("未定义的函数: '%s'", ident.Name),
+					ident.Pos.Line, ident.Pos.Column,
+					"undefined_function",
+					"请检查函数名拼写，或确认函数已声明/导入",
+				)
+				// 仍然分析参数，但不再分析函数名（避免重复报错）
+				for _, arg := range expr.Args {
+					sa.analyzeExpression(arg)
+				}
+				return
+			}
+		}
 		sa.analyzeExpression(expr.Function)
 	}
 	for i, arg := range expr.Args {

@@ -2262,6 +2262,16 @@ func (sg *StatementGenerator) generateStmtsWithLiveness(stmts []ast.Statement, a
 	for i, bodyStmt := range stmts {
 		b.WriteString(sg.codegen.indentString())
 		b.WriteString(sg.codegen.generateStatement(bodyStmt))
+		// F8 修复：return/break/continue 会跳过后续代码，不应在其后生成 early free（dead code）
+		if _, isReturn := bodyStmt.(*ast.ReturnStatement); isReturn {
+			continue
+		}
+		if _, isBreak := bodyStmt.(*ast.BreakStatement); isBreak {
+			continue
+		}
+		if _, isContinue := bodyStmt.(*ast.ContinueStatement); isContinue {
+			continue
+		}
 		// 在该语句后插入提前释放（变量在此处最后一次使用，且不在 alwaysLive 中）
 		b.WriteString(sg.generateEarlyFreeForStmtIndex(lastUse, i, freed, alwaysLive, ""))
 	}
