@@ -3677,6 +3677,45 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 	}
 }
 
+// parseStructLiteralWithType 解析带类型名的结构体字面量 TypeName{ .field = value, ... }
+func (p *Parser) parseStructLiteralWithType(typeName string, pos ast.Position) ast.Expression {
+	stmt := &ast.StructLiteral{
+		TypeName: typeName,
+		Fields:   []ast.StructLiteralField{},
+		Pos:      pos,
+	}
+	p.nextToken() // 跳过 {
+	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		if p.curTok.Type == lexer.TOKEN_DOT {
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_IDENT {
+				field := ast.StructLiteralField{Name: p.curTok.Value}
+				p.nextToken()
+				if p.curTok.Type == lexer.TOKEN_ASSIGN {
+					p.nextToken()
+					field.Value = p.parseExpressionIterative()
+				}
+				stmt.Fields = append(stmt.Fields, field)
+			}
+		} else if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
+			// 支持 field: value 语法
+			field := ast.StructLiteralField{Name: p.curTok.Value}
+			p.nextToken() // skip IDENT
+			p.nextToken() // skip COLON
+			field.Value = p.parseExpressionIterative()
+			stmt.Fields = append(stmt.Fields, field)
+		} else if p.curTok.Type == lexer.TOKEN_COMMA {
+			p.nextToken()
+		} else {
+			p.nextToken()
+		}
+	}
+	if p.curTok.Type == lexer.TOKEN_RBRACE {
+		p.nextToken()
+	}
+	return stmt
+}
+
 // parseStructLiteralExpression 解析结构体字面量 { .field = value, ... }
 func (p *Parser) parseStructLiteralExpression() ast.Expression {
 	pos := ast.Position{
@@ -3789,6 +3828,15 @@ func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
 		return p.parseCallExpressionIterative(expr)
 	}
 
+	// struct 字面量：TypeName{ .field = value, ... }
+	// 只有当 expr 是 Identifier 时才解析成 struct 字面量
+	// 暂时禁用：会影响 match 分支解析
+	// if p.curTok.Type == lexer.TOKEN_LBRACE {
+	// 	if ident, ok := expr.(*ast.Identifier); ok {
+	// 		return p.parseStructLiteralWithType(ident.Name, ident.Pos)
+	// 	}
+	// }
+
 	return expr
 }
 
@@ -3800,11 +3848,19 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 		File:   p.file,
 	}
 
+	name := p.curTok.Value
 	expr := &ast.Identifier{
-		Name: p.curTok.Value,
+		Name: name,
 		Pos:  pos,
 	}
 	p.nextToken()
+
+	// struct 字面量：TypeName{ .field = value, ... } 或 TypeName{ field: value, ... }
+	// 只有当标识符首字母大写（类型名）且后面跟 { 时才解析成 struct 字面量
+	// 这样不会影响 match 模式解析（match 模式不经过 parseIdentifierIterative）
+	if p.curTok.Type == lexer.TOKEN_LBRACE && len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
+		return p.parseStructLiteralWithType(name, pos)
+	}
 
 	return p.parsePostfixChain(expr)
 }
