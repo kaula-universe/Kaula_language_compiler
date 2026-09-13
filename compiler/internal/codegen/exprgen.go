@@ -891,6 +891,12 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		}
 	}
 
+	// assert 内置：测试模式绑定 runner 的失败记录函数（F12：
+	// 此前语言层无任何方式让 #[test] 真正失败），普通模式失败即退出非零
+	if funcName == "assert" {
+		return eg.generateAssertCall(e.Args)
+	}
+
 	// 直接使用标准库中定义的 println 函数
 	if funcName == "println" {
 		return eg.generatePrintlnCall(e.Args)
@@ -1338,6 +1344,23 @@ func (eg *ExpressionGenerator) symbolTypeIsStringLike(expr ast.Expression) bool 
 
 // generatePrintlnCall 生成 println 调用代码
 // 支持类型推导自动判断格式化参数
+// generateAssertCall 生成 assert(cond) 内置调用（F12）。
+// 测试模式：绑定 runner 的 __kaula_test_assert，失败被记录、测试计数正确、
+// 进程最终返回非零；普通模式：失败打印断言文本并 exit(1)。
+// cond 的 C 文本兼作断言消息（内嵌进字符串前把双引号降级为单引号防转义破坏）。
+func (eg *ExpressionGenerator) generateAssertCall(args []ast.Expression) string {
+	if len(args) != 1 {
+		eg.codegen.error("assert 需要恰好 1 个参数")
+		return "assert(/* arity error */)"
+	}
+	cond := eg.GenerateExpression(args[0])
+	msg := strings.ReplaceAll(cond, "\"", "'")
+	if eg.codegen.testRunnerActive {
+		return fmt.Sprintf("__kaula_test_assert((int)(%s), \"%s\", __FILE__, __LINE__)", cond, msg)
+	}
+	return fmt.Sprintf("if (!(%s)) { fprintf(stderr, \"assertion failed: (%s) at %%s:%%d\\n\", __FILE__, __LINE__); exit(1); }", cond, msg)
+}
+
 func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string {
 	// freestanding 模式下没有 libc 的 puts/putchar/printf，
 	// 必须使用 freestanding.io 的 println/fs_putchar 函数

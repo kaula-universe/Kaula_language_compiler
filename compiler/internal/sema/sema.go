@@ -139,6 +139,10 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		globalSymbolTable.AddSymbol("println", "any", false, "global", 0, 0)
 	}
 
+	// 编译器内置（F12）：assert(cond) 由 codegen 直接生成——测试模式绑定
+	// 测试 runner 的失败记录，普通模式失败即 exit(1)；两种模式均无需 import
+	globalSymbolTable.AddSymbol("assert", "any", false, "global", 0, 0)
+
 	return &SemanticAnalyzer{
 		symbolTable:        globalSymbolTable,
 		scope:              1,
@@ -222,6 +226,10 @@ func (sa *SemanticAnalyzer) checkUnusedFunctions(program *ast.Program) {
 			continue
 		}
 		if sa.usedFunctions[fnStmt.Name] {
+			continue
+		}
+		// #[test] 函数由测试 runner 自动调用，不算未使用
+		if ast.HasAttribute(fnStmt.Attributes, "test") {
 			continue
 		}
 		sa.errorCollector.AddSemanticWarning(
@@ -1239,6 +1247,27 @@ func (sa *SemanticAnalyzer) analyzeStructStatement(stmt *ast.StructStatement) {
 		return
 	}
 	sa.symbolTable.AddSymbol(stmt.Name, "struct", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+
+	// 注册 #[derive] 自动生成的方法，避免 sema 报"未定义变量"
+	for _, attr := range stmt.Attributes {
+		if attr != nil && attr.Name == "derive" {
+			for _, trait := range attr.Args {
+				trait = strings.TrimSpace(trait)
+				switch strings.ToLower(trait) {
+				case "debug":
+					sa.symbolTable.AddSymbol(stmt.Name+"_debug", "function", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+				case "clone":
+					sa.symbolTable.AddSymbol(stmt.Name+"_clone", "function", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+				case "eq", "equals":
+					sa.symbolTable.AddSymbol(stmt.Name+"_equals", "function", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+				}
+			}
+		}
+		// 注册 #[command] 自动生成的 parse 函数
+		if attr != nil && attr.Name == "command" {
+			sa.symbolTable.AddSymbol(stmt.Name+"_parse", "function", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+		}
+	}
 }
 
 func (sa *SemanticAnalyzer) analyzeEnumStatement(stmt *ast.EnumStatement) {
