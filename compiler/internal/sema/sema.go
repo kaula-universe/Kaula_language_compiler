@@ -478,6 +478,14 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 			)
 		}
 		sa.analyzeExpression(s.Expression)
+	case *ast.BlockStatement:
+		// 代码块：进入新作用域，分析其中的每条语句
+		oldSymbolTable := sa.symbolTable
+		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "block")
+		for _, stmt := range s.Statements {
+			sa.analyzeStatement(stmt)
+		}
+		sa.symbolTable = oldSymbolTable
 	case *ast.YieldStatement:
 		sa.analyzeYieldStatement(s)
 	case *ast.ReleaseStatement:
@@ -3412,6 +3420,37 @@ func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
 	for _, arm := range expr.Arms {
 		if arm == nil {
 			continue
+		}
+		// 注册模式绑定变量到当前作用域
+		if arm.Pattern != nil && len(arm.Pattern.Bindings) > 0 {
+			// 尝试推断绑定变量的类型（从枚举变体字段类型）
+			targetType := ""
+			if expr.Target != nil {
+				targetType = sa.inferExpressionType(expr.Target)
+			}
+			enumStmt := sa.program.FindEnum(targetType)
+			if enumStmt == nil && strings.HasPrefix(targetType, "enum ") {
+				enumStmt = sa.program.FindEnum(strings.TrimPrefix(targetType, "enum "))
+			}
+			variantName := arm.Pattern.VariantName
+			if idx := strings.LastIndex(variantName, "."); idx >= 0 {
+				variantName = variantName[idx+1:]
+			}
+			for i, binding := range arm.Pattern.Bindings {
+				if binding == "_" {
+					continue
+				}
+				bindType := "auto"
+				if enumStmt != nil {
+					for _, v := range enumStmt.Variants {
+						if v != nil && v.Name == variantName && i < len(v.FieldTypes) {
+							bindType = v.FieldTypes[i]
+							break
+						}
+					}
+				}
+				sa.symbolTable.AddSymbol(binding, bindType, false, "local", arm.Pos.Line, arm.Pos.Column)
+			}
 		}
 		for _, bodyStmt := range arm.Body {
 			sa.analyzeStatement(bodyStmt)
