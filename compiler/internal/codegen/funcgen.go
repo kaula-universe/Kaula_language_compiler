@@ -565,6 +565,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		fg.codegen.inFunctionBody = prevInFuncBody
 	}
 
+	// DEBUG: 打印函数体语句类型（已移除）
 	if !hasReturnStatement(stmt.Body) && stmt.ReturnType != "" && !isVoidType(stmt.ReturnType) {
 		builder.WriteString(fg.codegen.indentString())
 		builder.WriteString("return 0;\n")
@@ -721,6 +722,23 @@ func lastStmtIsReturn(stmts []ast.Statement) bool {
 	return ok
 }
 
+// lastStmtIsControlFlow 检查语句列表的最后一条是否是控制流语句（return/break/continue）。
+// 用于 match 分支：若末尾已是控制流语句，则后面的 break 是死代码，应跳过。
+func lastStmtIsControlFlow(stmts []ast.Statement) bool {
+	if len(stmts) == 0 {
+		return false
+	}
+	last := stmts[len(stmts)-1]
+	if last == nil {
+		return false
+	}
+	switch last.(type) {
+	case *ast.ReturnStatement, *ast.BreakStatement, *ast.ContinueStatement:
+		return true
+	}
+	return false
+}
+
 func isVoidType(typeName string) bool {
 	return typeName == "void" || typeName == "Void"
 }
@@ -858,8 +876,11 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code.WriteString(finalBody.String())
 	}
 
-	code.WriteString(fg.codegen.indentString())
-	code.WriteString("return 0;\n")
+	// 只有当用户没有显式写 return 时才自动添加 return 0;
+	if !hasReturnStatement(stmt.Body) {
+		code.WriteString(fg.codegen.indentString())
+		code.WriteString("return 0;\n")
+	}
 	fg.codegen.indent--
 	code.WriteString("}\n")
 

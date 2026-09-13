@@ -3188,7 +3188,9 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 				code.WriteString("        ")
 				code.WriteString(eg.codegen.generateStatement(bodyStmt))
 			}
-			code.WriteString("        break;\n")
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
 			code.WriteString("    }\n")
 
 		case ast.PatternVariant:
@@ -3244,7 +3246,9 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 				code.WriteString("        ")
 				code.WriteString(eg.codegen.generateStatement(bodyStmt))
 			}
-			code.WriteString("        break;\n")
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
 			code.WriteString("    }\n")
 
 		case ast.PatternInteger:
@@ -3255,7 +3259,9 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 				code.WriteString("        ")
 				code.WriteString(eg.codegen.generateStatement(bodyStmt))
 			}
-			code.WriteString("        break;\n")
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
 			code.WriteString("    }\n")
 
 		case ast.PatternString:
@@ -3279,7 +3285,9 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 				code.WriteString("        ")
 				code.WriteString(eg.codegen.generateStatement(bodyStmt))
 			}
-			code.WriteString("        break;\n")
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
 			code.WriteString("    }\n")
 
 		case ast.PatternVariable:
