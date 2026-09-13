@@ -1532,15 +1532,53 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 	code += sg.codegen.indentString()
 	code += idxType + " " + stmt.Variable.Name + " = _i_;\n"
 
+	// KMM scope 处理：与 while 循环一致，循环体内分配的内存在每次迭代结束时回卷
+	// 修复：for range 循环之前缺少 scope 处理，导致循环内临时 String/指针内存泄漏
+	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
+	useOffset := !useKMM && bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
+
+	if useKMM {
+		sg.codegen.EnterKMMScope()
+	}
+	if useOffset {
+		sg.codegen.EnterOffsetScope()
+	}
+
 	// 循环生命周期：循环变量始终存活
 	loopAlwaysLive := make(map[string]bool)
 	loopAlwaysLive[stmt.Variable.Name] = true
-	code += sg.generateStmtsWithLiveness(stmt.Body, loopAlwaysLive)
+	var bodyCode strings.Builder
+	bodyCode.WriteString(sg.generateStmtsWithLiveness(stmt.Body, loopAlwaysLive))
 	// 循环体末尾释放循环内声明的变量
 	if !lastStmtIsReturn(stmt.Body) {
-		code += sg.generateSurvivorFreeForScope()
+		bodyCode.WriteString(sg.generateSurvivorFreeForScope())
+	}
+
+	if useOffset {
+		sg.codegen.ExitOffsetScope()
+	}
+	if useKMM {
+		sg.codegen.ExitKMMScope()
 	}
 	sg.codegen.ExitScope()
+
+	// 生成 scope 包裹代码
+	if useOffset {
+		code += sg.codegen.indentString() + "size_t _for_scope_start = kmm_v4_offset_save();\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_for_scope_start);\n"
+	} else if useKMM {
+		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __for_surv_cp = kmm_v4_survivor_checkpoint();\n"
+		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		sg.codegen.indent++
+		code += bodyCode.String()
+		sg.codegen.indent--
+		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__for_surv_cp); /* survivor: for-range scope reclaim */\n"
+	} else {
+		code += bodyCode.String()
+	}
+
 	sg.codegen.indent--
 	code += sg.codegen.indentString() + "}\n"
 	return code
@@ -2066,17 +2104,13 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 			freed[name] = true
 			continue
 		}
-		// String 类型：释放 ptr 字段（只对 Nullable 的 String 释放）
+		// String 类型：SSO 感知释放（只有 len>15 才释放堆指针）
 		if sg.isStringTyped(name) {
-			if sym := sg.codegen.GetSymbol(name); sym != nil && sym.Nullable {
-				b.WriteString(indent)
-				b.WriteString("if (")
-				b.WriteString(name)
-				b.WriteString(".ptr != NULL) { free(")
-				b.WriteString(name)
-				b.WriteString(".ptr); } /* structural: early free (liveness, String) */\n")
-				sg.codegen.MarkEarlyFreed(name)
-			}
+			b.WriteString(indent)
+			b.WriteString("string_survivor_free(")
+			b.WriteString(name)
+			b.WriteString("); /* structural: early free (liveness, String, SSO-aware) */\n")
+			sg.codegen.MarkEarlyFreed(name)
 		} else if origin == OriginLibcMalloc {
 			b.WriteString(indent)
 			b.WriteString("free(")
@@ -2781,17 +2815,12 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 				}
 			}
 		}
-		// String 类型：释放 ptr 字段（String 是结构体，不是指针）
-		// 只对 Nullable 的 String 释放（非 Nullable 如字符串字面量的 ptr 指向只读内存，不能 free）
+		// String 类型：SSO 感知释放（只有 len>15 才释放堆指针）
 		if sg.isStringTyped(name) {
-			if sym := symbols[name]; sym != nil && sym.Nullable {
-				b.WriteString(indent)
-				b.WriteString("if (")
-				b.WriteString(name)
-				b.WriteString(".ptr != NULL) { free(")
-				b.WriteString(name)
-				b.WriteString(".ptr); } /* structural: String payload reclaim */\n")
-			}
+			b.WriteString(indent)
+			b.WriteString("string_survivor_free(")
+			b.WriteString(name)
+			b.WriteString("); /* structural: String payload reclaim (SSO-aware) */\n")
 		} else {
 			// 多分配器 origin 追踪：按来源选择释放函数
 			origin := sg.codegen.GetVarOrigin(name)
