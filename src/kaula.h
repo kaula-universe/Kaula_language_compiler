@@ -7,14 +7,7 @@
 #include <string.h>
 
 // ==================== 基础类型 ====================
-// 带长度前缀的字符串类型（性能优先，O(1) 取长度）
-#ifndef KAULA_STRING_DEFINED
-#define KAULA_STRING_DEFINED
-typedef struct {
-    size_t len;
-    char* ptr;
-} String;
-#endif
+// String 类型由 std/base/types.h 提供（SSO 优化：<=15 字节零堆分配）
 
 // ==================== 跨平台支持 ====================
 // platform.h will be included after configuration constants to avoid circular dependency

@@ -237,7 +237,12 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return formatFloatLiteral(e.Value)
 	case *ast.StringLiteral:
 		escaped := escapeCString(e.Value)
-		return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", decodedCStringLen(escaped), escaped)
+		slen := decodedCStringLen(escaped)
+		// SSO：<=15 字节用内嵌缓冲区，零堆分配
+		if slen <= 15 {
+			return fmt.Sprintf("((String){.len=%d, .sso=\"%s\"})", slen, escaped)
+		}
+		return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", slen, escaped)
 	case *ast.CharLiteral:
 		return "'" + e.Value + "'"
 	case *ast.BooleanLiteral:
@@ -731,7 +736,11 @@ func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression)
 			if rightLit, ok := right.(*ast.StringLiteral); ok {
 				merged := leftLit.Value + rightLit.Value
 				escaped := escapeCString(merged)
-				return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", decodedCStringLen(escaped), escaped)
+				slen := decodedCStringLen(escaped)
+				if slen <= 15 {
+					return fmt.Sprintf("((String){.len=%d, .sso=\"%s\"})", slen, escaped)
+				}
+				return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", slen, escaped)
 			}
 		}
 	}
@@ -961,7 +970,7 @@ func (eg *ExpressionGenerator) generateStdlibArgs(args []ast.Expression, sig *st
 		if i < len(sig.Args) {
 			paramType := sig.Args[i]
 			if normalizePtrType(paramType) == "char*" {
-				// 参数期望 C 字符串：字符串字面量直接输出，String 变量取 .ptr
+				// 参数期望 C 字符串：字符串字面量直接输出，String 变量用 string_cdata()（SSO 感知）
 				if strLit, ok := arg.(*ast.StringLiteral); ok {
 					escaped := escapeCString(strLit.Value)
 					code += "\"" + escaped + "\""
@@ -969,7 +978,7 @@ func (eg *ExpressionGenerator) generateStdlibArgs(args []ast.Expression, sig *st
 					argCode := eg.GenerateExpression(arg)
 					argType := eg.inferType(arg)
 					if argType == "s" {
-						code += argCode + ".ptr"
+						code += "string_cdata(" + argCode + ")"
 					} else {
 						code += argCode
 					}
@@ -1565,11 +1574,11 @@ func (eg *ExpressionGenerator) generatePrintlnMulti(args []ast.Expression) strin
 	return b.String()
 }
 
-// maybeUnwrapString 对 string 类型表达式追加 .ptr 以匹配 C %s 约定
-// cstr 类型（char*）已经是 C 字符串指针，不需要 .ptr
+// maybeUnwrapString 对 string 类型表达式用 string_cdata() 以匹配 C %s 约定（SSO 感知）
+// cstr 类型（char*）已经是 C 字符串指针，不需要转换
 func (eg *ExpressionGenerator) maybeUnwrapString(code string, typeHint string) string {
 	if typeHint == "s" {
-		return code + ".ptr"
+		return "string_cdata(" + code + ")"
 	}
 	return code
 }
@@ -2469,6 +2478,14 @@ func (eg *ExpressionGenerator) generateMemberAccessExpression(e *ast.MemberAcces
 		return object + "->" + e.Member
 	}
 
+	// String.ptr 特殊处理：SSO 感知，用 string_cdata() 替代直接访问 .ptr
+	if e.Member == "ptr" {
+		objType := eg.inferType(e.Object)
+		if objType == "s" || objType == "string" {
+			return "string_cdata(" + object + ")"
+		}
+	}
+
 	return object + "." + e.Member
 }
 
@@ -2479,9 +2496,9 @@ func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpress
 	srcKind := eg.inferType(e.Expression)
 	switch e.TargetType {
 	case "cstring", "cstr":
-		// String 结构体 → const char*: 取 .ptr 字段
+		// String 结构体 → const char*: 用 string_cdata()（SSO 感知）
 		if srcKind == "s" {
-			return "(" + exprCode + ").ptr"
+			return "string_cdata(" + exprCode + ")"
 		}
 		// 源已是 C 字符串（字面量 cstring / cstring 变量 / 指针），直接透传
 		if srcKind == "cstr" {

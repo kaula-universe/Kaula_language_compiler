@@ -68,13 +68,21 @@ typedef intptr_t ssize_t;
 #endif
 // Linux/macOS: ssize_t 由 <sys/types.h> 提供
 
-// 带长度前缀的字符串类型（性能优先，O(1) 取长度）
+// 带长度前缀的字符串类型（SSO 优化：<=15 字节零堆分配）
 #ifndef KAULA_STRING_DEFINED
 #define KAULA_STRING_DEFINED
+#define STRING_SSO_CAPACITY 15
 typedef struct {
     size_t len;
-    char* ptr;
+    union {
+        char* ptr;       // len > 15 时使用堆指针
+        char sso[16];    // len <= 15 时使用内嵌缓冲区（15字节 + null）
+    };
 } String;
+
+// SSO 感知：获取字符串数据指针（用宏而非函数，避免按值传递导致的悬垂指针）
+#define string_data(s) ((s).len <= STRING_SSO_CAPACITY ? (char*)(s).sso : (char*)(s).ptr)
+#define string_cdata(s) ((s).len <= STRING_SSO_CAPACITY ? (const char*)(s).sso : (const char*)(s).ptr)
 #endif
 
 // 类型常量（避免与Windows定义冲突）
