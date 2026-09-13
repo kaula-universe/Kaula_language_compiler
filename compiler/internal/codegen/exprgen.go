@@ -664,11 +664,14 @@ skip_constant_fold:
 			return right + ".ptr == NULL"
 		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
-			return "strcmp(" + left + ", " + right + ".ptr) == 0"
+			if leftType == "s" {
+				return "strcmp(string_cdata(" + left + "), " + right + ") == 0"
+			}
+			return "strcmp(" + left + ", string_cdata(" + right + ")) == 0"
 		}
 		if leftType == "s" && rightType == "s" {
-			// 两侧都是 String (结构体/字面量): 用 .ptr 内容比较, 避免 String 与 char* 直接比较
-			return "strcmp(" + left + ".ptr, " + right + ".ptr) == 0"
+			// 两侧都是 String (结构体/字面量): 用 string_cdata() 处理 SSO, 避免直接访问 .ptr
+			return "strcmp(string_cdata(" + left + "), string_cdata(" + right + ")) == 0"
 		}
 		if leftType == "cstr" && rightType == "cstr" {
 			return "strcmp(" + left + ", " + right + ") == 0"
@@ -685,10 +688,13 @@ skip_constant_fold:
 			return right + ".ptr != NULL"
 		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
-			return "strcmp(" + left + ", " + right + ".ptr) != 0"
+			if leftType == "s" {
+				return "strcmp(string_cdata(" + left + "), " + right + ") != 0"
+			}
+			return "strcmp(" + left + ", string_cdata(" + right + ")) != 0"
 		}
 		if leftType == "s" && rightType == "s" {
-			return "strcmp(" + left + ".ptr, " + right + ".ptr) != 0"
+			return "strcmp(string_cdata(" + left + "), string_cdata(" + right + ")) != 0"
 		}
 		if leftType == "cstr" && rightType == "cstr" {
 			return "strcmp(" + left + ", " + right + ") != 0"
@@ -2523,6 +2529,13 @@ func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpress
 		if srcKind == "s" {
 			return "string_cdata(" + exprCode + ")"
 		}
+		// 成员访问表达式（如 enum 变体字段 r.data.Err_val）类型推断可能失败，
+		// 若目标是 cstring/cstr，也用 string_cdata()
+		if _, ok := e.Expression.(*ast.MemberAccessExpression); ok {
+			if e.TargetType == "cstring" || e.TargetType == "cstr" {
+				return "string_cdata(" + exprCode + ")"
+			}
+		}
 		// 源已是 C 字符串（字面量 cstring / cstring 变量 / 指针），直接透传
 		if srcKind == "cstr" {
 			return exprCode
@@ -2919,9 +2932,9 @@ func (eg *ExpressionGenerator) generateStringMatchAssign(match *ast.MatchExpress
 			} else {
 				code.WriteString(" else if (")
 			}
-			code.WriteString("strcmp(")
+			code.WriteString("strcmp(string_cdata(")
 			code.WriteString(targetCode)
-			code.WriteString(".ptr, \"")
+			code.WriteString("), \"")
 			code.WriteString(arm.Pattern.StrValue)
 			code.WriteString("\") == 0")
 			code.WriteString(") {\n")
@@ -3070,9 +3083,9 @@ func (eg *ExpressionGenerator) GenerateMatchAssign(match *ast.MatchExpression, t
 func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpression, targetCode string) string {
 	var code strings.Builder
 	first := true
-	// 判断目标类型: char*/cstr 直接用裸指针, 其他(string 等)用 .ptr 成员
+	// 判断目标类型: char*/cstr 直接用裸指针, 其他(string 等)用 string_cdata() (SSO 感知)
 	targetType := eg.inferType(e.Target)
-	usePtr := targetType != "cstr"
+	useCdata := targetType != "cstr"
 	for _, arm := range e.Arms {
 		if arm.Pattern == nil {
 			continue
@@ -3085,9 +3098,10 @@ func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpress
 				code.WriteString(" else if (")
 			}
 			code.WriteString("strcmp(")
-			code.WriteString(targetCode)
-			if usePtr {
-				code.WriteString(".ptr")
+			if useCdata {
+				code.WriteString("string_cdata(" + targetCode + ")")
+			} else {
+				code.WriteString(targetCode)
 			}
 			code.WriteString(", \"")
 			code.WriteString(arm.Pattern.StrValue)

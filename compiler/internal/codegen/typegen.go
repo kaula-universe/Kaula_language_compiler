@@ -370,7 +370,15 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 		// 在结构体定义内部，class 类型的 typedef 名（K_Name）可能还未完成定义，
 		// 自引用/前向引用必须使用 struct K_Name 形式，否则 C 报 "unknown type name"。
 		fieldType = rewriteStructDefType(fieldType)
-		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		// 处理数组字段：C 语法为 "elemType name[N]"，而非 "elemType[N] name"
+		if strings.Contains(fieldType, "[") && !strings.HasSuffix(fieldType, "*") {
+			openBracket := strings.Index(fieldType, "[")
+			cElemType := fieldType[:openBracket]
+			arrayPart := fieldType[openBracket:]
+			code.WriteString(fmt.Sprintf("    %s %s%s;\n", cElemType, field.Name, arrayPart))
+		} else {
+			code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		}
 	}
 	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 
