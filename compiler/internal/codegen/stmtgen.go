@@ -1666,16 +1666,49 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 	// 排除被提升的返回值变量（promote 会把数据拷到幸存段，free 会造成 use-after-free）。
 	// 必须在 promote 之前执行：此时返回值变量仍指向原始位置，排除它即可；
 	// 其余 SOR 对象在此刻释放，避免 return 跳过外层作用域末尾 free 导致泄漏。
-	b.WriteString(sg.generateSurvivorFreeForReturn(promoteVarName))
+	freeCode, freedNames := sg.generateSurvivorFreeForReturn(promoteVarName)
+
+	// 方案 C：若函数不向外 promote，return 前回卷 survivor 段
+	// （若 return 自身 promote 了返回值，funcEmitsPromote 已为 true，跳过）
+	// 只有函数级 useKMM 生成了 __surv_cp 声明时才发射 rewind(否则引用未声明变量)
+	rewindOnReturn := sg.codegen.kmmScopeDepth > 0 && !sg.codegen.funcEmitsPromote && sg.codegen.funcHasKMMCheckpoint
+
+	// F17：返回表达式的求值必须提升在回收动作之前。
+	// 原实现先发射 free/rewind 再 `return <expr>`，表达式中凡访问被回收
+	// 指针（如 return arr[0]+arr[1]）即 use-after-free、结果静默出错。
+	// 统一先生成表达式代码；当本路径存在回收时，用 __typeof__ 把表达式
+	// 求值提升到临时变量（标量/结构体拷贝语义皆可），再执行回收并返回临时。
+	// 已知边界：表达式自身分配 >=2KB survivor 大对象且触发 rewind 时，
+	// 提升会使回卷回收表达式产物——此类返回值应走 promote 路径。
+	exprCode := ""
+	if !isVoid {
+		if stmt.Value != nil {
+			exprCode = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		} else {
+			exprCode = "0"
+		}
+	}
+	hoistTemp := ""
+	if !isVoid && stmt.Value != nil && (len(freedNames) > 0 || rewindOnReturn) {
+		sg.codegen.retHoistSeq++
+		hoistTemp = fmt.Sprintf("__kaula_ret%d", sg.codegen.retHoistSeq)
+		b.WriteString(sg.codegen.indentString())
+		b.WriteString("__typeof__(")
+		b.WriteString(exprCode)
+		b.WriteString(") ")
+		b.WriteString(hoistTemp)
+		b.WriteString(" = ")
+		b.WriteString(exprCode)
+		b.WriteString(";\n")
+	}
+
+	b.WriteString(freeCode)
 
 	if retPromoteLine != "" {
 		b.WriteString(retPromoteLine)
 	}
 
-	// 方案 C：若函数不向外 promote，return 前回卷 survivor 段
-	// （若 return 自身 promote 了返回值，funcEmitsPromote 已为 true，跳过）
-	// 只有函数级 useKMM 生成了 __surv_cp 声明时才发射 rewind(否则引用未声明变量)
-	if sg.codegen.kmmScopeDepth > 0 && !sg.codegen.funcEmitsPromote && sg.codegen.funcHasKMMCheckpoint {
+	if rewindOnReturn {
 		b.WriteString(sg.codegen.indentString())
 		b.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim on return */\n")
 	}
@@ -1699,10 +1732,10 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 
 	b.WriteString(sg.codegen.indentString())
 	b.WriteString("return ")
-	if stmt.Value != nil {
-		b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+	if hoistTemp != "" {
+		b.WriteString(hoistTemp)
 	} else {
-		b.WriteString("0")
+		b.WriteString(exprCode)
 	}
 	b.WriteString(";\n")
 	return b.String()
@@ -2860,10 +2893,14 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 // 值本身，已由 promote 处理）。对非 survivor 指针调用 survivor_free 是安全 no-op。
 //
 // SOR 优化层（启用时叠加）：ShouldSkipSurvivorFree / IsAssignEscaped 跳过。
-func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) string {
+// generateSurvivorFreeForReturn 发射 return 路径的 per-object 回收。
+// 第二个返回值是实际发射了释放的变量名集合（F17：调用方据此决定
+// 是否把返回表达式求值提升到回收之前）。
+func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) (string, []string) {
 	var b strings.Builder
 	indent := sg.codegen.indentString()
 	seen := make(map[string]bool) // 去重：同名变量只在最内层作用域释放一次
+	freed := make([]string, 0, 4)
 
 	adapter := sg.codegen.GetSORAdapter()
 	sorActive := adapter != nil && adapter.IsActive
@@ -2962,11 +2999,13 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 				b.WriteString("kmm_v4_survivor_free(")
 				b.WriteString(name)
 				b.WriteString("); /* structural: reclaim on return (kmm) */\n")
+				freed = append(freed, name)
 			case OriginLibcMalloc:
 				b.WriteString(indent)
 				b.WriteString("free(")
 				b.WriteString(name)
 				b.WriteString("); /* structural: reclaim on return (libc_malloc) */\n")
+				freed = append(freed, name)
 			case OriginExtern:
 				b.WriteString(indent)
 				b.WriteString("/* structural: skip free on return for ")
@@ -2978,10 +3017,11 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 				b.WriteString("kmm_v4_survivor_free(")
 				b.WriteString(name)
 				b.WriteString("); /* structural: reclaim on return (unknown origin) */\n")
+				freed = append(freed, name)
 			}
 		}
 	}
-	return b.String()
+	return b.String(), freed
 }
 
 // isPointerTyped 目标变量在 C 中必须是指针类型（含 void*），(void**)&var 才合法
