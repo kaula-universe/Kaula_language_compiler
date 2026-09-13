@@ -929,6 +929,11 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 				cg.exportedFuncNames[fn.Name] = true
 			}
 		}
+		// F15：预收集 extern 函数名，保证声明之前的调用点也能命中原名规则
+		// （输出阶段的增量收集在语句生成时才填充，晚于调用点查询）
+		if es, ok := n.(*ast.ExternStatement); ok && es.Name != "" {
+			cg.externFuncNames[es.Name] = true
+		}
 	})
 
 	type rawEntry struct {
@@ -2492,8 +2497,11 @@ func (cg *CodeGenerator) isUserKaulaFunc(name string) bool {
 
 // UserFuncCName 返回 Kaula 用户函数在 C 侧的符号名：
 //   - 用户自定义 fn 统一加 K_ 前缀，避开 C 保留字（int/double/...）与 C 库符号；
+//   - 程序中显式 extern 声明的函数保持原名（用户引入的 C 符号，F15：
+//     此前 max/min/abs 重定向先于 extern 判定，extern fn abs 调用被改
+//     成 kaula_abs 与声明符号不一致）；
 //   - 非用户定义的 max/min/abs 重定向到 kaula 运行时实现（kaula_max 等），避开 C 宏；
-//   - main、extern、stdlib/第三方 C 函数保持原名。
+//   - main、stdlib/第三方 C 函数保持原名。
 //
 // 函数定义、前置声明、嵌套原型、调用点必须统一经此函数命名，保证定义与引用一致。
 func (cg *CodeGenerator) UserFuncCName(name string) string {
@@ -2506,6 +2514,10 @@ func (cg *CodeGenerator) UserFuncCName(name string) string {
 	}
 	if cg.isUserKaulaFunc(name) {
 		return "K_" + name
+	}
+	// 显式 extern 声明优先于 max/min/abs 惯用名重定向（F15）
+	if cg.externFuncNames != nil && cg.externFuncNames[name] {
+		return name
 	}
 	if name == "max" || name == "min" || name == "abs" {
 		return "kaula_" + name
