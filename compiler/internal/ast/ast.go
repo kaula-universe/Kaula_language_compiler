@@ -1971,10 +1971,11 @@ type StructLiteralField struct {
 	Value Expression
 }
 
-// StructLiteral 表示结构体字面量表达式 { .field = value, ... }
+// StructLiteral 表示结构体字面量表达式 TypeName{ .field = value, ... }
 type StructLiteral struct {
-	Fields []StructLiteralField
-	Pos    Position
+	TypeName string                // 类型名（如 Point），为空表示裸 { ... }
+	Fields   []StructLiteralField
+	Pos      Position
 }
 
 func (s *StructLiteral) expressionNode() {}

@@ -3548,6 +3548,9 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 // generateStructLiteral 生成结构体字面量 C 代码 { .field = value, ... }
 func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) string {
 	if len(sl.Fields) == 0 {
+		if sl.TypeName != "" {
+			return fmt.Sprintf("(K_%s){0}", sl.TypeName)
+		}
 		return "{0}"
 	}
 	var parts []string
@@ -3555,5 +3558,9 @@ func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) stri
 		val := eg.GenerateExpression(f.Value)
 		parts = append(parts, fmt.Sprintf(".%s=%s", f.Name, val))
 	}
-	return "{" + strings.Join(parts, ",") + "}"
+	inner := "{" + strings.Join(parts, ",") + "}"
+	if sl.TypeName != "" {
+		return fmt.Sprintf("(K_%s)%s", sl.TypeName, inner)
+	}
+	return inner
 }
