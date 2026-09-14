@@ -256,6 +256,9 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 			return p.parseExpressionStatementIterative()
 		}
 		return p.parseFunctionStatementIterative()
+	case lexer.TOKEN_LBRACE:
+		// 裸块语句 { ... }：创建新作用域
+		return p.parseBlockStatementIterative()
 	case lexer.TOKEN_CLASS:
 		return p.parseClassStatementIterative()
 	case lexer.TOKEN_LITERAL_INTERFACE:
@@ -342,6 +345,10 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 		// 否则作为数组字面量表达式处理
 		return p.parseExpressionStatementIterative()
 	case lexer.TOKEN_IDENT:
+		// := 错误传播赋值：name := expr（右侧为 Result enum，Err 时自动 return）
+		if p.peekTok.Type == lexer.TOKEN_COLON_ASSIGN {
+			return p.parseTryAssignStatementIterative()
+		}
 		// 检查是否是变量声明：标识符后面跟另一个标识符（类型名）
 		// 例如：i64 x, int y, MyType obj
 		if p.peekTok.Type == lexer.TOKEN_IDENT || p.peekTok.Type == lexer.TOKEN_QUESTION || p.peekTok.Type == lexer.TOKEN_MULTIPLY || p.peekTok.Type == lexer.TOKEN_LT {
@@ -367,6 +374,30 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 	default:
 		// 尝试解析为表达式语句（如赋值、函数调用等）
 		return p.parseExpressionStatementIterative()
+	}
+}
+
+// parseTryAssignStatementIterative 解析 := 错误传播赋值
+// 语法：name := expr
+// 语义：右侧 expr 必须返回 Result enum（含 Ok/Err 变体）
+//       若为 Err，自动 return 当前函数（携带 Err 值）
+//       若为 Ok，将 Ok 中的值解包赋值给 name
+func (p *Parser) parseTryAssignStatementIterative() *ast.VariableDeclaration {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	name := p.curTok.Value
+	p.nextToken() // 跳过变量名
+	if p.curTok.Type != lexer.TOKEN_COLON_ASSIGN {
+		p.error(fmt.Sprintf("expected ':=' after '%s', got %s", name, lexer.TokenTypeToString(p.curTok.Type)))
+		return nil
+	}
+	p.nextToken() // 跳过 :=
+	value := p.parseExpressionIterative()
+	return &ast.VariableDeclaration{
+		Name:        name,
+		Value:       value,
+		IsAuto:      true,  // 类型由右侧 Ok 变体推断
+		IsTryAssign: true,  // 标记为错误传播赋值
+		Pos:         pos,
 	}
 }
 
@@ -1263,6 +1294,28 @@ func applyFunctionAttributes(stmt *ast.FunctionStatement, attrs []*ast.Attribute
 			}
 		}
 	}
+}
+
+// parseBlockStatementIterative 迭代解析裸块语句 { ... }
+// 裸块语句创建新的作用域，用于限制变量可见范围
+func (p *Parser) parseBlockStatementIterative() *ast.BlockStatement {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	// 消费 {
+	p.nextToken()
+	block := &ast.BlockStatement{Pos: pos}
+	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		stmt := p.parseStatementIterative()
+		if stmt != nil {
+			block.Statements = append(block.Statements, stmt)
+		} else {
+			// 解析失败，跳过一个 token 避免死循环
+			p.nextToken()
+		}
+	}
+	if p.curTok.Type == lexer.TOKEN_RBRACE {
+		p.nextToken() // 消费 }
+	}
+	return block
 }
 
 // parseFunctionStatementIterative 迭代解析函数语句
@@ -3624,6 +3677,45 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 	}
 }
 
+// parseStructLiteralWithType 解析带类型名的结构体字面量 TypeName{ .field = value, ... }
+func (p *Parser) parseStructLiteralWithType(typeName string, pos ast.Position) ast.Expression {
+	stmt := &ast.StructLiteral{
+		TypeName: typeName,
+		Fields:   []ast.StructLiteralField{},
+		Pos:      pos,
+	}
+	p.nextToken() // 跳过 {
+	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		if p.curTok.Type == lexer.TOKEN_DOT {
+			p.nextToken()
+			if p.curTok.Type == lexer.TOKEN_IDENT {
+				field := ast.StructLiteralField{Name: p.curTok.Value}
+				p.nextToken()
+				if p.curTok.Type == lexer.TOKEN_ASSIGN {
+					p.nextToken()
+					field.Value = p.parseExpressionIterative()
+				}
+				stmt.Fields = append(stmt.Fields, field)
+			}
+		} else if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
+			// 支持 field: value 语法
+			field := ast.StructLiteralField{Name: p.curTok.Value}
+			p.nextToken() // skip IDENT
+			p.nextToken() // skip COLON
+			field.Value = p.parseExpressionIterative()
+			stmt.Fields = append(stmt.Fields, field)
+		} else if p.curTok.Type == lexer.TOKEN_COMMA {
+			p.nextToken()
+		} else {
+			p.nextToken()
+		}
+	}
+	if p.curTok.Type == lexer.TOKEN_RBRACE {
+		p.nextToken()
+	}
+	return stmt
+}
+
 // parseStructLiteralExpression 解析结构体字面量 { .field = value, ... }
 func (p *Parser) parseStructLiteralExpression() ast.Expression {
 	pos := ast.Position{
@@ -3736,6 +3828,15 @@ func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
 		return p.parseCallExpressionIterative(expr)
 	}
 
+	// struct 字面量：TypeName{ .field = value, ... }
+	// 只有当 expr 是 Identifier 时才解析成 struct 字面量
+	// 暂时禁用：会影响 match 分支解析
+	// if p.curTok.Type == lexer.TOKEN_LBRACE {
+	// 	if ident, ok := expr.(*ast.Identifier); ok {
+	// 		return p.parseStructLiteralWithType(ident.Name, ident.Pos)
+	// 	}
+	// }
+
 	return expr
 }
 
@@ -3747,11 +3848,19 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 		File:   p.file,
 	}
 
+	name := p.curTok.Value
 	expr := &ast.Identifier{
-		Name: p.curTok.Value,
+		Name: name,
 		Pos:  pos,
 	}
 	p.nextToken()
+
+	// struct 字面量：TypeName{ .field = value, ... } 或 TypeName{ field: value, ... }
+	// 只有当标识符首字母大写（类型名）且后面跟 { 时才解析成 struct 字面量
+	// 这样不会影响 match 模式解析（match 模式不经过 parseIdentifierIterative）
+	if p.curTok.Type == lexer.TOKEN_LBRACE && len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
+		return p.parseStructLiteralWithType(name, pos)
+	}
 
 	return p.parsePostfixChain(expr)
 }
@@ -5395,6 +5504,16 @@ func (p *Parser) isNextArmStart() bool {
 	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ARROW {
 		return true
 	}
+	// 带参数的枚举变体模式：Ok(v) => / Err(e) =>
+	// 启发式：枚举变体名通常首字母大写，函数名通常小写
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_LPAREN {
+		if len(p.curTok.Value) > 0 {
+			first := p.curTok.Value[0]
+			if first >= 'A' && first <= 'Z' {
+				return true
+			}
+		}
+	}
 	if p.curTok.Type == lexer.TOKEN_LITERAL_INT && p.peekTok.Type == lexer.TOKEN_ARROW {
 		return true
 	}
@@ -5405,6 +5524,10 @@ func (p *Parser) isNextArmStart() bool {
 		return true
 	}
 	if p.curTok.Type == lexer.TOKEN_FALSE && p.peekTok.Type == lexer.TOKEN_ARROW {
+		return true
+	}
+	// 通配符模式：_ =>
+	if p.curTok.Type == lexer.TOKEN_IDENT && p.curTok.Value == "_" && p.peekTok.Type == lexer.TOKEN_ARROW {
 		return true
 	}
 	return false

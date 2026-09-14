@@ -504,6 +504,42 @@
         "String"
       ],
       "return": "size_t"
+    },
+    "string_builder_create": {
+      "args": [],
+      "return": "StringBuilder*"
+    },
+    "string_builder_destroy": {
+      "args": [
+        "StringBuilder*"
+      ],
+      "return": ""
+    },
+    "string_builder_reset": {
+      "args": [
+        "StringBuilder*"
+      ],
+      "return": ""
+    },
+    "string_builder_append": {
+      "args": [
+        "StringBuilder*",
+        "const char*"
+      ],
+      "return": ""
+    },
+    "string_builder_append_char": {
+      "args": [
+        "StringBuilder*",
+        "char"
+      ],
+      "return": ""
+    },
+    "string_builder_to_string": {
+      "args": [
+        "StringBuilder*"
+      ],
+      "return": "String"
     }
   },
   "std.memory": {
@@ -3335,137 +3371,116 @@
     }
   },
   "std.encoding": {
-    "header": "std/encoding/encoding.h",
-    "types": {
-      "TextEncoding": {
-        "fields": [
-          "ENCODING_AUTO",
-          "ENCODING_UTF8",
-          "ENCODING_UTF16",
-          "ENCODING_UTF32",
-          "ENCODING_GBK",
-          "ENCODING_GB2312",
-          "ENCODING_BIG5",
-          "ENCODING_SHIFT_JIS",
-          "ENCODING_EUC_KR",
-          "ENCODING_ISO_8859_1",
-          "ENCODING_WINDOWS_1252"
-        ]
-      }
+    "header": "encoding/encoding.h",
+    "hex_encode": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
     },
-    "functions": {
-      "enc_init": {
-        "args": []
-      },
-      "enc_cleanup": {
-        "args": []
-      },
-      "enc_set_encoding": {
-        "args": [
-          "TextEncoding"
-        ]
-      },
-      "enc_get_encoding": {
-        "args": [],
-        "return": "TextEncoding"
-      },
-      "enc_set_console_encoding": {
-        "args": []
-      },
-      "enc_get_encoding_name": {
-        "args": [
-          "TextEncoding"
-        ],
-        "return": "const char*"
-      },
-      "enc_convert_encoding": {
-        "args": [
-          "const char*",
-          "TextEncoding",
-          "TextEncoding"
-        ],
-        "return": "char*"
-      },
-      "enc_to_utf8": {
-        "args": [
-          "const char*",
-          "TextEncoding"
-        ],
-        "return": "char*"
-      },
-      "enc_from_utf8": {
-        "args": [
-          "const char*",
-          "TextEncoding"
-        ],
-        "return": "char*"
-      },
-      "enc_is_utf8": {
-        "args": [
-          "const char*"
-        ],
-        "return": "bool"
-      },
-      "enc_detect_encoding": {
-        "args": [
-          "const char*",
-          "TextEncoding*"
-        ],
-        "return": "bool"
-      },
-      "enc_utf8_char_count": {
-        "args": [
-          "const char*"
-        ],
-        "return": "size_t"
-      },
-      "enc_utf8_byte_length": {
-        "args": [
-          "const char*",
-          "size_t"
-        ],
-        "return": "size_t"
-      },
-      "enc_utf8_substring": {
-        "args": [
-          "const char*",
-          "size_t",
-          "size_t"
-        ],
-        "return": "char*"
-      },
-      "enc_utf8_strlen": {
-        "args": [
-          "const char*"
-        ],
-        "return": "size_t"
-      },
-      "enc_utf8_encode": {
-        "args": [
-          "uint32_t",
-          "char*"
-        ],
-        "return": "int"
-      },
-      "enc_utf8_decode": {
-        "args": [
-          "const char*",
-          "uint32_t*"
-        ],
-        "return": "int"
-      },
-      "enc_utf8_normalize": {
-        "args": [
-          "const char*"
-        ],
-        "return": "char*"
-      },
-      "enc_setup_console": {
-        "args": []
-      },
-      "enc_fix_console_output": {
-        "args": []
-      }
+    "hex_decode": {
+      "args": [
+        "const char*",
+        "size_t*"
+      ],
+      "return": "void()"
+    },
+    "hex_encode_upper": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "base32_encode": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "base32_decode": {
+      "args": [
+        "const char*",
+        "size_t*"
+      ],
+      "return": "void()"
+    },
+    "base64_encode": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "String"
+    },
+    "base64_decode": {
+      "args": [
+        "const char*",
+        "size_t*"
+      ],
+      "return": "void()"
+    },
+    "url_encode": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "url_decode": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "url_encode_component": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "url_decode_component": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "qp_encode": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "qp_decode": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "percent_encode": {
+      "args": [
+        "const char*",
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "percent_decode": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "pascal_encode": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "pascal_decode": {
+      "args": [
+        "const char*"
+      ],
+      "return": "String"
     }
   },
   "std.web": {
@@ -5824,119 +5839,6 @@
         "const char*",
         "const void()",
         "size_t"
-      ],
-      "return": "String"
-    }
-  },
-  "std.encoding": {
-    "header": "encoding/encoding.h",
-    "hex_encode": {
-      "args": [
-        "const void()",
-        "size_t"
-      ],
-      "return": "String"
-    },
-    "hex_decode": {
-      "args": [
-        "const char*",
-        "size_t*"
-      ],
-      "return": "void()"
-    },
-    "hex_encode_upper": {
-      "args": [
-        "const void()",
-        "size_t"
-      ],
-      "return": "String"
-    },
-    "base32_encode": {
-      "args": [
-        "const void()",
-        "size_t"
-      ],
-      "return": "String"
-    },
-    "base32_decode": {
-      "args": [
-        "const char*",
-        "size_t*"
-      ],
-      "return": "void()"
-    },
-    "base64_encode": {
-      "args": [
-        "const void()",
-        "size_t"
-      ],
-      "return": "String"
-    },
-    "base64_decode": {
-      "args": [
-        "const char*",
-        "size_t*"
-      ],
-      "return": "void()"
-    },
-    "url_encode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "url_decode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "url_encode_component": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "url_decode_component": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "qp_encode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "qp_decode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "percent_encode": {
-      "args": [
-        "const char*",
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "percent_decode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "pascal_encode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "pascal_decode": {
-      "args": [
-        "const char*"
       ],
       "return": "String"
     }

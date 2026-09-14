@@ -86,6 +86,7 @@ type CodeGenerator struct {
 
 	kmmScopeDepth    int
 	offsetScopeDepth int // 跟踪 offset_save/restore scope 嵌套深度，用于相邻 scope 合并优化
+	tryAssignCounter int  // := 错误传播赋值的临时变量计数器
 
 	// 方案 C：survivor 段 checkpoint/rewind 追踪
 	// funcEmitsPromote: 当前函数是否发射了 kmm_v4_scope_promote_p（yield/extract/return promote）

@@ -481,6 +481,14 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 			)
 		}
 		sa.analyzeExpression(s.Expression)
+	case *ast.BlockStatement:
+		// 代码块：进入新作用域，分析其中的每条语句
+		oldSymbolTable := sa.symbolTable
+		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "block")
+		for _, stmt := range s.Statements {
+			sa.analyzeStatement(stmt)
+		}
+		sa.symbolTable = oldSymbolTable
 	case *ast.YieldStatement:
 		sa.analyzeYieldStatement(s)
 	case *ast.ReleaseStatement:
@@ -1283,11 +1291,12 @@ func (sa *SemanticAnalyzer) analyzeEnumStatement(stmt *ast.EnumStatement) {
 
 // analyzeNonLocalStatement 分析 nonlocal 语句
 // 语义（Python 风格）：绑定外层函数作用域中的同名变量。
-//  → 本作用域已声明同名变量：报错；
-//  → 外层函数作用域存在同名变量：校验类型并注册为本作用域符号
-//    （类型取外层真实类型，供后续引用解析），不产生新变量；
-//  → 仅存在于全局作用域：报错提示"全局变量无需 nonlocal"；
-//  → 完全不存在：报错。
+//
+//	→ 本作用域已声明同名变量：报错；
+//	→ 外层函数作用域存在同名变量：校验类型并注册为本作用域符号
+//	  （类型取外层真实类型，供后续引用解析），不产生新变量；
+//	→ 仅存在于全局作用域：报错提示"全局变量无需 nonlocal"；
+//	→ 完全不存在：报错。
 func (sa *SemanticAnalyzer) analyzeNonLocalStatement(stmt *ast.NonLocalStatement) {
 	if stmt.Name == "" {
 		return
@@ -1683,6 +1692,53 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 			"使用明确类型的初始值",
 		)
 		return
+	}
+
+	// := 错误传播赋值：右侧必须是 enum Result（含 Ok/Err 变体）
+	// 左侧变量类型为 Ok 变体的字段类型
+	if stmt.IsTryAssign {
+		stmt.TryAssignResultType = inferredType // 保存 Result enum 类型
+		enumName := inferredType
+		if strings.HasPrefix(enumName, "enum ") {
+			enumName = strings.TrimPrefix(enumName, "enum ")
+		}
+		enumStmt := sa.program.FindEnum(enumName)
+		if enumStmt == nil {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf(":= 右侧表达式类型 '%s' 不是 enum，无法用于错误传播", inferredType),
+				stmt.Pos.Line, stmt.Pos.Column,
+				"try_assign_non_enum",
+				":= 只能用于返回 Result enum 的表达式",
+			)
+			return
+		}
+		// 查找 Ok 变体
+		okVariant := (*ast.EnumVariant)(nil)
+		for _, v := range enumStmt.Variants {
+			if v != nil && v.Name == "Ok" {
+				okVariant = v
+				break
+			}
+		}
+		if okVariant == nil {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("enum '%s' 没有 Ok 变体，无法用于 := 错误传播", enumName),
+				stmt.Pos.Line, stmt.Pos.Column,
+				"try_assign_no_ok",
+				"Result enum 必须包含 Ok(T) 和 Err(E) 变体",
+			)
+			return
+		}
+		if len(okVariant.FieldTypes) == 0 {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("enum '%s' 的 Ok 变体没有字段，无法解包赋值", enumName),
+				stmt.Pos.Line, stmt.Pos.Column,
+				"try_assign_ok_no_field",
+				"Ok 变体必须携带一个值字段",
+			)
+			return
+		}
+		inferredType = okVariant.FieldTypes[0]
 	}
 
 	stmt.Type = inferredType
@@ -3339,6 +3395,27 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		isCrossFileCtor = true
 	}
 	if !isCrossFileCtor {
+		// F1 修复：函数调用上下文中，未定义的函数名报"未定义的函数"而非"未定义的变量"
+		if ident, ok := expr.Function.(*ast.Identifier); ok {
+			sym := sa.symbolTable.GetSymbol(ident.Name)
+			isKnown := sym != nil ||
+				(sa.localImportFuncs != nil && sa.localImportFuncs[ident.Name]) ||
+				(sa.localModuleFuncs != nil && sa.localModuleFuncs[ident.Name]) ||
+				(sa.localPubVars != nil && sa.localPubVars[ident.Name])
+			if !isKnown {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("未定义的函数: '%s'", ident.Name),
+					ident.Pos.Line, ident.Pos.Column,
+					"undefined_function",
+					"请检查函数名拼写，或确认函数已声明/导入",
+				)
+				// 仍然分析参数，但不再分析函数名（避免重复报错）
+				for _, arg := range expr.Args {
+					sa.analyzeExpression(arg)
+				}
+				return
+			}
+		}
 		sa.analyzeExpression(expr.Function)
 	}
 	for i, arg := range expr.Args {
@@ -3363,7 +3440,8 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 }
 
 // checkLocalModuleCall 检查本地 import 模块的限定调用 lib.fn:
-//  pub 函数放行; 模块内存在但非 pub 报 not_exported; 不存在报 undefined + 相似函数建议
+//
+//	pub 函数放行; 模块内存在但非 pub 报 not_exported; 不存在报 undefined + 相似函数建议
 func (sa *SemanticAnalyzer) checkLocalModuleCall(memberAccess *ast.MemberAccessExpression, pos ast.Position) {
 	if sa.localModuleFuncsByModule == nil {
 		return
@@ -3454,61 +3532,45 @@ func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
 	if expr.Target != nil {
 		sa.analyzeExpression(expr.Target)
 	}
-	targetTypeForBindings := sa.inferExpressionType(expr.Target)
-	var matchEnum *ast.EnumStatement
-	if sa.program != nil {
-		matchEnum = sa.program.FindEnum(strings.Split(strings.TrimPrefix(targetTypeForBindings, "enum "), "<")[0])
-	}
+	_ = sa.inferExpressionType(expr.Target)
 	for _, arm := range expr.Arms {
 		if arm == nil || arm.Pattern == nil {
 			continue
 		}
-		parent := sa.symbolTable
-		sa.symbolTable = symbol.NewSymbolTable(parent, "match_arm")
-		p := arm.Pattern
-		var types []string
-		if p.Kind == ast.PatternVariant {
-			name := p.VariantName
-			if i := strings.LastIndex(name, "."); i >= 0 {
-				name = name[i+1:]
+		// 注册模式绑定变量到当前作用域
+		if arm.Pattern != nil && len(arm.Pattern.Bindings) > 0 {
+			// 尝试推断绑定变量的类型（从枚举变体字段类型）
+			targetType := ""
+			if expr.Target != nil {
+				targetType = sa.inferExpressionType(expr.Target)
 			}
-			found := false
-			if matchEnum != nil {
-				for _, v := range matchEnum.Variants {
-					if v.Name == name {
-						types = v.FieldTypes
-						found = true
-						break
-					}
-				}
+			enumStmt := sa.program.FindEnum(targetType)
+			if enumStmt == nil && strings.HasPrefix(targetType, "enum ") {
+				enumStmt = sa.program.FindEnum(strings.TrimPrefix(targetType, "enum "))
 			}
-			if !found {
-				sa.error("unknown match variant: "+p.VariantName, p.Pos.Line, p.Pos.Column)
-			} else if len(p.Bindings) != len(types) {
-				sa.error("match payload binding count does not match variant", p.Pos.Line, p.Pos.Column)
+			variantName := arm.Pattern.VariantName
+			if idx := strings.LastIndex(variantName, "."); idx >= 0 {
+				variantName = variantName[idx+1:]
 			}
-		}
-		for i, n := range p.Bindings {
-			if n == "_" {
-				continue
-			}
-			t := targetTypeForBindings
-			if p.Kind == ast.PatternVariant {
-				if i >= len(types) {
+			for i, binding := range arm.Pattern.Bindings {
+				if binding == "_" {
 					continue
 				}
-				t = types[i]
+				bindType := "auto"
+				if enumStmt != nil {
+					for _, v := range enumStmt.Variants {
+						if v != nil && v.Name == variantName && i < len(v.FieldTypes) {
+							bindType = v.FieldTypes[i]
+							break
+						}
+					}
+				}
+				sa.symbolTable.AddSymbol(binding, bindType, false, "local", arm.Pos.Line, arm.Pos.Column)
 			}
-			if sa.symbolTable.GetLocalSymbol(n) != nil {
-				sa.error("duplicate match binding: "+n, p.Pos.Line, p.Pos.Column)
-				continue
-			}
-			sa.symbolTable.AddSymbol(n, t, false, "local", p.Pos.Line, p.Pos.Column)
 		}
-		for _, st := range arm.Body {
-			sa.analyzeStatement(st)
+		for _, bodyStmt := range arm.Body {
+			sa.analyzeStatement(bodyStmt)
 		}
-		sa.symbolTable = parent
 	}
 	// 枚举穷尽检查 (clang -Wswitch 语义)
 	if expr.Target == nil || sa.program == nil {

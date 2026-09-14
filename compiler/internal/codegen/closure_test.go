@@ -17,7 +17,7 @@ func runClosureC(t *testing.T, cg *CodeGenerator, body string) {
 	if err != nil {
 		t.Skip("clang unavailable")
 	}
-	src := "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n" + cg.genericTypeCode.String() + strings.Join(cg.lambdaDefinitions, "\n") + body
+	src := "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\nstatic int64_t kaula_add_i64(int64_t a, int64_t b) { return a + b; }\n" + cg.genericTypeCode.String() + strings.Join(cg.lambdaDefinitions, "\n") + body
 	dir := t.TempDir()
 	c := filepath.Join(dir, "closure.c")
 	exe := filepath.Join(dir, "closure.exe")

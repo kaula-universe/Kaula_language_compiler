@@ -666,11 +666,14 @@ skip_constant_fold:
 			return right + ".ptr == NULL"
 		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
-			return "strcmp(" + left + ", " + right + ".ptr) == 0"
+			if leftType == "s" {
+				return "strcmp(string_cdata(" + left + "), " + right + ") == 0"
+			}
+			return "strcmp(" + left + ", string_cdata(" + right + ")) == 0"
 		}
 		if leftType == "s" && rightType == "s" {
-			// 两侧都是 String (结构体/字面量): 用 .ptr 内容比较, 避免 String 与 char* 直接比较
-			return "strcmp(" + left + ".ptr, " + right + ".ptr) == 0"
+			// 两侧都是 String (结构体/字面量): 用 string_cdata() 处理 SSO, 避免直接访问 .ptr
+			return "strcmp(string_cdata(" + left + "), string_cdata(" + right + ")) == 0"
 		}
 		if leftType == "cstr" && rightType == "cstr" {
 			return "strcmp(" + left + ", " + right + ") == 0"
@@ -687,10 +690,13 @@ skip_constant_fold:
 			return right + ".ptr != NULL"
 		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
-			return "strcmp(" + left + ", " + right + ".ptr) != 0"
+			if leftType == "s" {
+				return "strcmp(string_cdata(" + left + "), " + right + ") != 0"
+			}
+			return "strcmp(" + left + ", string_cdata(" + right + ")) != 0"
 		}
 		if leftType == "s" && rightType == "s" {
-			return "strcmp(" + left + ".ptr, " + right + ".ptr) != 0"
+			return "strcmp(string_cdata(" + left + "), string_cdata(" + right + ")) != 0"
 		}
 		if leftType == "cstr" && rightType == "cstr" {
 			return "strcmp(" + left + ", " + right + ") != 0"
@@ -2531,6 +2537,13 @@ func (eg *ExpressionGenerator) generateTypeCastExpression(e *ast.TypeCastExpress
 		if srcKind == "s" {
 			return "string_cdata(" + exprCode + ")"
 		}
+		// 成员访问表达式（如 enum 变体字段 r.data.Err_val）类型推断可能失败，
+		// 若目标是 cstring/cstr，也用 string_cdata()
+		if _, ok := e.Expression.(*ast.MemberAccessExpression); ok {
+			if e.TargetType == "cstring" || e.TargetType == "cstr" {
+				return "string_cdata(" + exprCode + ")"
+			}
+		}
 		// 源已是 C 字符串（字面量 cstring / cstring 变量 / 指针），直接透传
 		if srcKind == "cstr" {
 			return exprCode
@@ -2872,10 +2885,10 @@ func (eg *ExpressionGenerator) generateStringMatchAssign(match *ast.MatchExpress
 			} else {
 				code.WriteString(" else if (")
 			}
-			code.WriteString("strcmp(")
+			code.WriteString("strcmp(string_cdata(")
 			code.WriteString(targetCode)
-			code.WriteString(".ptr, \"")
-			code.WriteString(escapeCString(arm.Pattern.StrValue))
+			code.WriteString("), \"")
+			code.WriteString(arm.Pattern.StrValue)
 			code.WriteString("\") == 0")
 			code.WriteString(") {\n")
 			// 生成分支体语句；最后一条表达式语句作为结果赋值给 targetVar
@@ -2925,9 +2938,9 @@ func (eg *ExpressionGenerator) GenerateMatchAssign(match *ast.MatchExpression, t
 func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpression, targetCode string) string {
 	var code strings.Builder
 	first := true
-	// 判断目标类型: char*/cstr 直接用裸指针, 其他(string 等)用 .ptr 成员
+	// 判断目标类型: char*/cstr 直接用裸指针, 其他(string 等)用 string_cdata() (SSO 感知)
 	targetType := eg.inferType(e.Target)
-	usePtr := targetType != "cstr"
+	useCdata := targetType != "cstr"
 	for _, arm := range e.Arms {
 		if arm.Pattern == nil {
 			continue
@@ -2940,9 +2953,10 @@ func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpress
 				code.WriteString(" else if (")
 			}
 			code.WriteString("strcmp(")
-			code.WriteString(targetCode)
-			if usePtr {
-				code.WriteString(".ptr")
+			if useCdata {
+				code.WriteString("string_cdata(" + targetCode + ")")
+			} else {
+				code.WriteString(targetCode)
 			}
 			code.WriteString(", \"")
 			code.WriteString(escapeCString(arm.Pattern.StrValue))
@@ -2966,8 +2980,181 @@ func (eg *ExpressionGenerator) generateStringMatchExpression(e *ast.MatchExpress
 }
 
 func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) string {
-	return eg.lowerMatch(e, "")
+	targetCode := eg.GenerateExpression(e.Target)
 
+	// 检查是否为字符串匹配：任一分支包含字符串模式
+	isStringMatch := false
+	for _, arm := range e.Arms {
+		if arm.Pattern != nil && arm.Pattern.Kind == ast.PatternString {
+			isStringMatch = true
+			break
+		}
+	}
+
+	if isStringMatch {
+		return eg.generateStringMatchExpression(e, targetCode)
+	}
+
+	var code strings.Builder
+
+	// 尝试从目标表达式推断枚举类型名
+	enumName := eg.inferEnumName(e.Target)
+	cEnumName := eg.inferEnumCName(e.Target)
+	if enumName != "" {
+		// 检查枚举是否有数据变体
+		enumStmt := eg.codegen.program.FindEnum(enumName)
+		hasDataVariants := false
+		if enumStmt != nil {
+			for _, v := range enumStmt.Variants {
+				if len(v.FieldTypes) > 0 {
+					hasDataVariants = true
+					break
+				}
+			}
+		}
+		if hasDataVariants {
+			// 带数据的枚举，使用 .kind 访问
+			code.WriteString("switch (")
+			code.WriteString(targetCode)
+			code.WriteString(".kind) {\n")
+		} else {
+			// 简单枚举，直接使用值
+			code.WriteString("switch (")
+			code.WriteString(targetCode)
+			code.WriteString(") {\n")
+		}
+	} else {
+		code.WriteString("switch (")
+		code.WriteString(targetCode)
+		code.WriteString(") {\n")
+	}
+
+	for _, arm := range e.Arms {
+		if arm.Pattern == nil {
+			continue
+		}
+
+		switch arm.Pattern.Kind {
+		case ast.PatternWildcard:
+			// _ 通配符 → default
+			code.WriteString("    default:\n")
+			code.WriteString("    {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
+			code.WriteString("    }\n")
+
+		case ast.PatternVariant:
+			// VariantName(x, y) → case Enum_Kind_VariantName: { auto_type x = ...; ... break; }
+			// 支持 "枚举名.变体名" 形式 (如 Color.Red)，去掉枚举名前缀
+			caseLabel := "    case "
+			if cEnumName != "" {
+				caseLabel += cEnumName + "_Kind_"
+			}
+			variantName := arm.Pattern.VariantName
+			if idx := strings.LastIndex(variantName, "."); idx >= 0 {
+				variantName = variantName[idx+1:]
+			}
+			caseLabel += variantName + ":\n"
+			code.WriteString(caseLabel)
+			code.WriteString("    {\n")
+
+			// 生成绑定变量
+			if len(arm.Pattern.Bindings) > 0 {
+				// 查找枚举变体的字段类型
+				variant := eg.findEnumVariant(enumName, variantName)
+				for i, binding := range arm.Pattern.Bindings {
+					fieldAccess := targetCode + ".data." + variantName + "_val"
+					if variant != nil && len(variant.FieldTypes) > 1 {
+						// 多字段时使用具体字段名
+						if i < len(variant.FieldNames) && variant.FieldNames[i] != "" {
+							fieldAccess = targetCode + ".data." + variant.FieldNames[i]
+						} else {
+							// 多字段但无字段名时，使用 _val0, _val1 格式
+							fieldAccess = fmt.Sprintf("%s.data.%s_val%d", targetCode, arm.Pattern.VariantName, i)
+						}
+					}
+					bindType := "auto"
+					bindKaulaType := ""
+					if variant != nil && i < len(variant.FieldTypes) {
+						bindType = eg.matchBindingCType(variant, i, enumName, e.Target)
+						// 同步注册到 codegen 符号表：println/inferType 等依赖
+						// 标识符的类型记录决定格式化行为（否则 String 绑定
+						// 会 fallback 到 %d 打印出指针/长度垃圾）
+						if i < len(variant.FieldTypes) {
+							bindKaulaType = variant.FieldTypes[i]
+						}
+					}
+					code.WriteString(fmt.Sprintf("        %s %s = %s;\n", bindType, binding, fieldAccess))
+					if binding != "_" && bindKaulaType != "" {
+						eg.codegen.AddSymbol(binding, bindKaulaType, false, "local", e.Pos.Line, e.Pos.Column)
+					}
+				}
+			}
+
+			// 生成分支体
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
+			code.WriteString("    }\n")
+
+		case ast.PatternInteger:
+			// 整数字面量模式
+			code.WriteString(fmt.Sprintf("    case %d:\n", arm.Pattern.IntValue))
+			code.WriteString("    {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
+			code.WriteString("    }\n")
+
+		case ast.PatternString:
+			// 字符串字面量模式 - 在 C 中不能直接 switch 字符串，生成 if-else
+			// 这里简单处理，在 switch 外面用 if 包裹
+			code.WriteString("    /* string pattern: ")
+			code.WriteString(arm.Pattern.StrValue)
+			code.WriteString(" */\n")
+
+		case ast.PatternBoolean:
+			// true/false 模式
+			code.WriteString("    case ")
+			if arm.Pattern.VariantName == "true" {
+				code.WriteString("1")
+			} else {
+				code.WriteString("0")
+			}
+			code.WriteString(":\n")
+			code.WriteString("    {\n")
+			for _, bodyStmt := range arm.Body {
+				code.WriteString("        ")
+				code.WriteString(eg.codegen.generateStatement(bodyStmt))
+			}
+			if !lastStmtIsControlFlow(arm.Body) {
+				code.WriteString("        break;\n")
+			}
+			code.WriteString("    }\n")
+
+		case ast.PatternVariable:
+			// 变量绑定 - 在 switch 中无法直接处理，生成注释
+			code.WriteString("    /* variable pattern: ")
+			code.WriteString(strings.Join(arm.Pattern.Bindings, ", "))
+			code.WriteString(" */\n")
+		}
+	}
+
+	code.WriteString("}\n")
+	return code.String()
 }
 
 // inferEnumName 从目标表达式推断枚举类型名（源码名，如 Option/Status）。
@@ -3224,6 +3411,9 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 // generateStructLiteral 生成结构体字面量 C 代码 { .field = value, ... }
 func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) string {
 	if len(sl.Fields) == 0 {
+		if sl.TypeName != "" {
+			return fmt.Sprintf("(K_%s){0}", sl.TypeName)
+		}
 		return "{0}"
 	}
 	var parts []string
@@ -3231,5 +3421,9 @@ func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) stri
 		val := eg.GenerateExpression(f.Value)
 		parts = append(parts, fmt.Sprintf(".%s=%s", f.Name, val))
 	}
-	return "{" + strings.Join(parts, ",") + "}"
+	inner := "{" + strings.Join(parts, ",") + "}"
+	if sl.TypeName != "" {
+		return fmt.Sprintf("(K_%s)%s", sl.TypeName, inner)
+	}
+	return inner
 }
