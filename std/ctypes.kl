@@ -28,5 +28,7 @@ type CInt = adopt int
 type CStr = adopt const char*
 
 // StringBuilder 句柄（struct StringBuilder*）—— 字符串构建器，带 SSO 优化
-// 不透明句柄，禁止直接比较，通过 std.string.string_builder_* 函数操作
-type StringBuilder = adopt struct StringBuilder*
+// 注意：类型名用 SB 而非 StringBuilder，因为 C 侧已有 typedef struct {...} StringBuilder;
+// adopt 会生成 typedef，与 C 侧同名 typedef 冲突。SB 是零成本别名，C 侧即 StringBuilder*。
+// 不透明句柄，禁止直接比较，通过 std.string.string_builder_* 函数操作。
+type SB = adopt StringBuilder*
