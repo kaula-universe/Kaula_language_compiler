@@ -131,6 +131,7 @@ const (
 	TOKEN_SEMICOLON
 	TOKEN_COMMA
 	TOKEN_COLON
+	TOKEN_COLON_ASSIGN // := 错误传播赋值
 	TOKEN_DOUBLE_COLON
 	TOKEN_DOT
 
@@ -398,6 +399,10 @@ func (l *Lexer) Next() Token {
 				l.next()
 				l.next()
 				return Token{Type: TOKEN_DOUBLE_COLON, Value: "::", Line: l.line, Column: l.column}
+			} else if l.peek() == '=' {
+				l.next()
+				l.next()
+				return Token{Type: TOKEN_COLON_ASSIGN, Value: ":=", Line: l.line, Column: l.column}
 			} else {
 				l.next()
 				return Token{Type: TOKEN_COLON, Value: ":", Line: l.line, Column: l.column}
@@ -1118,6 +1123,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "COMMA"
 	case TOKEN_COLON:
 		return "COLON"
+	case TOKEN_COLON_ASSIGN:
+		return "COLON_ASSIGN"
 	case TOKEN_DOUBLE_COLON:
 		return "DOUBLE_COLON"
 	case TOKEN_DOT:

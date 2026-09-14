@@ -373,7 +373,15 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 		// 在结构体定义内部，class 类型的 typedef 名（K_Name）可能还未完成定义，
 		// 自引用/前向引用必须使用 struct K_Name 形式，否则 C 报 "unknown type name"。
 		fieldType = rewriteStructDefType(fieldType)
-		code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		// 处理数组字段：C 语法为 "elemType name[N]"，而非 "elemType[N] name"
+		if strings.Contains(fieldType, "[") && !strings.HasSuffix(fieldType, "*") {
+			openBracket := strings.Index(fieldType, "[")
+			cElemType := fieldType[:openBracket]
+			arrayPart := fieldType[openBracket:]
+			code.WriteString(fmt.Sprintf("    %s %s%s;\n", cElemType, field.Name, arrayPart))
+		} else {
+			code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		}
 	}
 	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 
@@ -1003,15 +1011,29 @@ func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement
 		return tg.GenerateFuncTypeAliasStatement(stmt)
 	}
 
-	// 套用类型（adopt）：底层类型表达式映射到 C 类型，生成 typedef，零成本
+	// 套用类型（adopt）：底层类型表达式映射到 C 类型，零成本
 	// 底层类型可以是 c::size_t（外部 C 类型）或 i64（Kaula 数值类型）
 	// C 侧 typedef <CType> <Name>; Kaula 侧 Name 是独立强类型
+	// 优化：若 C 侧已有同名类型（如 typedef struct {...} StringBuilder;），
+	// 则不重复生成 typedef，直接复用 C 侧类型，避免冲突
 	if stmt.IsAdopt {
 		underlying := strings.TrimSpace(stmt.AdoptUnderlying)
 		if underlying == "" {
 			underlying = strings.TrimSpace(stmt.UnderlyingType)
 		}
 		cType := tg.mapAdoptUnderlyingToC(underlying)
+		// 提取 C 类型的基础名（去掉 *、const、struct 等修饰符）
+		baseName := cType
+		baseName = strings.TrimPrefix(baseName, "const ")
+		baseName = strings.TrimPrefix(baseName, "struct ")
+		baseName = strings.TrimSuffix(baseName, "*")
+		baseName = strings.TrimSpace(baseName)
+		if baseName == stmt.Name {
+			// C 侧已有同名类型，直接复用，不生成 typedef
+			// 但需要注册到 clibTypeMap，让变量声明使用完整的 C 类型（包括 *）
+			tg.clibTypeMap[stmt.Name] = cType
+			return fmt.Sprintf("// Adopt type: %s = adopt %s (reuse existing C type)\n\n", stmt.Name, underlying)
+		}
 		return fmt.Sprintf("// Adopt type: %s = adopt %s\ntypedef %s %s;\n\n", stmt.Name, underlying, cType, stmt.Name)
 	}
 
