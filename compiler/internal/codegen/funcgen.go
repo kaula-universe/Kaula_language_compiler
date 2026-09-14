@@ -66,15 +66,9 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement)
 		return adapter.NeedsKMMScopeByVars(varNames)
 	}
 
-	// 非 SOR 模式：扫描 body 中的变量类型
-	for _, stmt := range bodyStmts {
-		if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
-			if needsKMMForType(varDecl.Type) {
-				return true
-			}
-		}
-	}
-	return false
+	// 非 SOR 模式：递归扫描 body 中的变量类型（包括循环/if 内部）
+	// Phase 2：循环内的 survivor 变量也提升到函数级 checkpoint
+	return bodyHasSurvivorType(bodyStmts)
 }
 
 // bodyHasAllocationCall 扫描函数体是否包含 KMM 分配调用
@@ -165,8 +159,9 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForFunc(funcName string, bodyStmts
 		return false
 	}
 
-	// 优化：扫描函数体是否包含分配调用，纯计算函数跳过 scope
-	if !fg.bodyHasAllocationCall(bodyStmts) {
+	// 优化：扫描函数体是否包含分配调用或 survivor 类型变量（递归扫描循环/if内部）
+	// Phase 2：循环内的 survivor 变量也提升到函数级 checkpoint
+	if !fg.bodyHasAllocationCall(bodyStmts) && !bodyHasSurvivorType(bodyStmts) {
 		return false
 	}
 
@@ -197,18 +192,11 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForFunc(funcName string, bodyStmts
 		return false
 	}
 
-	// 非 SOR 模式：扫描 body 中的变量类型
-	for _, stmt := range bodyStmts {
-		if stmt == nil {
-			continue
-		}
-		varDecl, ok := stmt.(*ast.VariableDeclaration)
-		if !ok || varDecl == nil {
-			continue
-		}
-		if needsKMMForType(varDecl.Type) {
-			return true
-		}
+	// 非 SOR 模式：递归扫描 body 中的变量类型（包括循环/if 内部）
+	// Phase 2 优化：循环内的 survivor 变量也提升到函数级 checkpoint，
+	// 避免每次循环迭代都重复 survivor checkpoint/rewind 开销
+	if bodyHasSurvivorType(bodyStmts) {
+		return true
 	}
 	return false
 }
@@ -506,6 +494,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
 		if useKMM {
 			fg.codegen.EnterKMMScope()
+			// Phase 2：在生成函数体之前设置函数级 checkpoint 标志，
+			// 使循环 codegen 能检测到并降级为 offset 回收
+			fg.codegen.funcHasKMMCheckpoint = true
 		}
 		// 方案 C：重置 promote 标志，body 生成期间若发射 promote_p 则置 true
 		fg.codegen.funcEmitsPromote = false
@@ -818,6 +809,9 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	useKMM := !stmt.NoKMM && fg.shouldUseKMMScopeForBody(stmt.Body)
 	if useKMM {
 		fg.codegen.EnterKMMScope()
+		// Phase 2：在生成函数体之前设置函数级 checkpoint 标志，
+		// 使循环 codegen 能检测到并降级为 offset 回收
+		fg.codegen.funcHasKMMCheckpoint = true
 	}
 	// 方案 C：重置 promote 标志
 	fg.codegen.funcEmitsPromote = false
