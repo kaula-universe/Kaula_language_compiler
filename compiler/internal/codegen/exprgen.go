@@ -1,4 +1,4 @@
-﻿package codegen
+package codegen
 
 import (
 	"fmt"
@@ -1613,6 +1613,71 @@ func (eg *ExpressionGenerator) maybeUnwrapString(code string, typeHint string) s
 }
 
 // inferType 推导表达式的类型（带缓存）
+// qualifiedRegisteredInferType 解析 std.<mod>.f(...) / <pkg>.f(...) 形式的
+// 限定调用：沿 MemberAccess 链取末端函数名，查 stdlib/pkglib 注册签名的
+// 返回类型。仅当链根是已知模块前缀（std.* / freestanding.*）时命中，
+// 避免与 obj.method 实例方法混淆。
+func (eg *ExpressionGenerator) qualifiedRegisteredInferType(fn ast.Expression) (string, bool) {
+	if eg.codegen.stdlibConfig == nil {
+		return "", false
+	}
+	var parts []string
+	cur := fn
+	for {
+		ma, ok := cur.(*ast.MemberAccessExpression)
+		if !ok {
+			break
+		}
+		parts = append([]string{ma.Member}, parts...)
+		cur = ma.Object
+	}
+	root, ok := cur.(*ast.Identifier)
+	if !ok {
+		return "", false
+	}
+	parts = append([]string{root.Name}, parts...)
+	if len(parts) < 3 {
+		return "", false
+	}
+	if parts[0] != "std" && parts[0] != "freestanding" {
+		return "", false
+	}
+	short := parts[len(parts)-1]
+	for _, mod := range eg.codegen.stdlibConfig.Modules {
+		if sig, ok := mod.Functions[short]; ok && sig.Return != "" {
+			if t, hit := registeredReturnInferType(sig.Return); hit {
+				return t, true
+			}
+			return "d", true
+		}
+	}
+	for _, lib := range eg.codegen.stdlibConfig.ThirdParty {
+		if sig, ok := lib.Functions[short]; ok && sig.Return != "" {
+			if t, hit := registeredReturnInferType(sig.Return); hit {
+				return t, true
+			}
+			return "d", true
+		}
+	}
+	return "", false
+}
+
+// registeredReturnInferType 把 stdlib/pkglib 注册的返回类型映射为
+// inferType 类型码；忽略大小写以兼容 stdlib.json 的 "String" 真实形态。
+func registeredReturnInferType(rt string) (string, bool) {
+	switch strings.ToLower(rt) {
+	case "string", "str":
+		return "s", true
+	case "float", "float64", "float32", "f32", "f64", "double", "single":
+		return "f", true
+	}
+	t := strings.ToLower(rt)
+	if normalizePtrType(t) == "char*" || t == "cstring" || t == "const char*" {
+		return "cstr", true
+	}
+	return "", false
+}
+
 func (eg *ExpressionGenerator) inferType(expr ast.Expression) string {
 	// 缓存命中：同一表达式指针直接返回上次推导结果
 	if cached, ok := eg.typeCache[expr]; ok {
@@ -1734,6 +1799,12 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.TypeNameExpression, *ast.FieldNameExpression, *ast.FieldTypeExpression:
 		return "s"
 	case *ast.CallExpression:
+		// 模块限定调用 std.<mod>.f(...)：e.Function 是 MemberAccess 链，
+		// 此前只处理 Identifier，整类限定调用（含注册的 String 返回函数）
+		// 推断落空 → println 用整型格式直传 String 值打非确定垃圾
+		if t, hit := eg.qualifiedRegisteredInferType(e.Function); hit {
+			return t
+		}
 		if ident, ok := e.Function.(*ast.Identifier); ok {
 			funcName := ident.Name
 			// 用户定义的顶层/类方法函数：program 中直查返回类型。
@@ -1788,31 +1859,35 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 				}
 			}
 			if eg.codegen.stdlibConfig != nil {
+				// stdlib/pkglib 按短名注册；点号全名调用（std.string.xxx()）
+				// 需回退末段匹配；返回类型比对忽略大小写（stdlib.json 真实
+				// 形态为大写 "String"，此前精确比较 "string" 恒 miss，
+				// println 退化为 printf 整型格式直传 String 值（打非确定垃圾）
+				shortName := funcName
+				if i := strings.LastIndex(shortName, "."); i >= 0 {
+					shortName = shortName[i+1:]
+				}
 				for _, mod := range eg.codegen.stdlibConfig.Modules {
-					if sig, ok := mod.Functions[funcName]; ok && sig.Return != "" {
-						if sig.Return == "string" {
-							return "s"
-						}
-						if normalizePtrType(sig.Return) == "char*" || sig.Return == "cstring" {
-							return "cstr"
-						}
-						if sig.Return == "float" || sig.Return == "f64" || sig.Return == "f32" || sig.Return == "double" {
-							return "f"
+					sig, ok := mod.Functions[funcName]
+					if !ok && shortName != funcName {
+						sig, ok = mod.Functions[shortName]
+					}
+					if ok && sig.Return != "" {
+						if t, hit := registeredReturnInferType(sig.Return); hit {
+							return t
 						}
 						return "d"
 					}
 				}
 				// 第三方库（pkglib）的函数签名单独存放
 				for _, lib := range eg.codegen.stdlibConfig.ThirdParty {
-					if sig, ok := lib.Functions[funcName]; ok && sig.Return != "" {
-						if sig.Return == "string" {
-							return "s"
-						}
-						if normalizePtrType(sig.Return) == "char*" || sig.Return == "cstring" {
-							return "cstr"
-						}
-						if sig.Return == "float" || sig.Return == "f64" || sig.Return == "f32" || sig.Return == "double" {
-							return "f"
+					sig, ok := lib.Functions[funcName]
+					if !ok && shortName != funcName {
+						sig, ok = lib.Functions[shortName]
+					}
+					if ok && sig.Return != "" {
+						if t, hit := registeredReturnInferType(sig.Return); hit {
+							return t
 						}
 						return "d"
 					}
@@ -1855,7 +1930,9 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 }
 
 // indexElementKaulaType 返回索引访问的对象元素 Kaula 类型:
-//   self.values(f64* 字段) → "f64"; [3]f64 / []f64 变量 → "f64"
+//
+//	self.values(f64* 字段) → "f64"; [3]f64 / []f64 变量 → "f64"
+//
 // 用于 println(data[i]) 的格式推断(否则 f64 索引访问被当 %d 打印成 0)
 func (eg *ExpressionGenerator) indexElementKaulaType(obj ast.Expression) string {
 	t := ""
@@ -2909,6 +2986,7 @@ func (eg *ExpressionGenerator) generateLambdaTrampoline(expr *ast.LambdaExpressi
 //	        break;
 //	    }
 //	}
+//
 // GenerateMatchAssign 生成 match 表达式作为赋值源的 C 代码：
 //
 //	switch (x) {
