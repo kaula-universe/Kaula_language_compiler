@@ -969,9 +969,25 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	// 缺口6优化：快照 promotedVars，用于判断循环体内是否有 promote
 	whilePromotedSnapshot := sg.codegen.SnapshotPromotedVars()
 
-	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
-	// 相邻 scope 合并优化：如果循环体包含 KMM 池分配调用，使用 offset_save/restore 代替 scope_push/pop
-	useOffset := !useKMM && bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
+	// Phase 1+2 优化：区分 survivor 类型变量和 bump 分配
+	// - survivor 类型变量（指针/string/slice/map）需要完整 survivor checkpoint/rewind
+	// - bump 分配（kmm_v4_malloc等）只需 offset_save/restore 轻量回收
+	// Phase 2：函数级已有 checkpoint 时，循环内 survivor 变量降级为 offset 回收
+	//   （函数级 checkpoint 在函数出口统一回收所有 survivor 对象，
+	//    循环内 offset_restore 只回收 bump 区域，不影响 survivor 区域）
+	hasSurvivor := bodyHasSurvivorType(stmt.Body)
+	hasBumpAlloc := bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
+	funcLevelCheckpoint := sg.codegen.funcHasKMMCheckpoint
+
+	var useKMM, useOffset bool
+	if funcLevelCheckpoint && hasSurvivor {
+		// 函数级 checkpoint 已覆盖，循环内用 offset 轻量回收 bump 区域
+		useKMM = false
+		useOffset = true
+	} else {
+		useKMM = hasSurvivor
+		useOffset = hasBumpAlloc
+	}
 
 	if useKMM {
 		sg.codegen.EnterKMMScope()
@@ -1004,13 +1020,25 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	// 缺口6优化：计算循环体内新增 promote 的变量
 	whilePromoted := sg.codegen.DiffPromotedVars(whilePromotedSnapshot)
 
-	if useOffset {
-		// offset_save/restore 路径：轻量级，无 scope 栈操作
+	if useKMM && useOffset {
+		// survivor scope 外层包裹 + offset 内层回收：survivor 变量走 checkpoint/rewind，
+		// bump 分配走 offset_save/restore 轻量回收，避免每次迭代完整 survivor 开销
+		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
+		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += sg.codegen.indentString() + "    size_t _loop_scope_start = kmm_v4_offset_save();\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "    kmm_v4_offset_restore(_loop_scope_start);\n"
+		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		if len(whilePromoted) == 0 {
+			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__while_surv_cp); /* survivor: scope reclaim */\n"
+		}
+	} else if useOffset {
+		// 纯 bump 分配：offset_save/restore 轻量回收，无 survivor checkpoint 开销
 		code += sg.codegen.indentString() + "size_t _loop_scope_start = kmm_v4_offset_save();\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_loop_scope_start);\n"
 	} else if useKMM {
-		// 缺口6优化：作用域级 survivor checkpoint/rewind
+		// 纯 survivor 类型：完整 survivor checkpoint/rewind
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		code += bodyCode.String()
@@ -1115,6 +1143,191 @@ func bodyContainsAllocation(stmts []ast.Statement, isFreestanding bool) bool {
 		if stmtContainsAllocation(stmt, isFreestanding) {
 			return true
 		}
+	}
+	return false
+}
+
+// bodyHasSurvivorType 递归检测语句列表中是否声明了需要 survivor 管理的类型变量
+// （指针、string、[]slice、map 等）。这些类型需要完整 survivor checkpoint/rewind，
+// 不能仅用 offset_save/restore 回收。
+func bodyHasSurvivorType(stmts []ast.Statement) bool {
+	for _, stmt := range stmts {
+		if stmt == nil {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *ast.VariableDeclaration:
+			if needsKMMForType(s.Type) {
+				return true
+			}
+		case *ast.IfStatement:
+			if bodyHasSurvivorType(s.Body) || bodyHasSurvivorType(s.Else) {
+				return true
+			}
+		case *ast.WhileStatement:
+			if bodyHasSurvivorType(s.Body) {
+				return true
+			}
+		case *ast.ForStatement:
+			if bodyHasSurvivorType(s.Body) {
+				return true
+			}
+		case *ast.ForInStatement:
+			if bodyHasSurvivorType(s.Body) {
+				return true
+			}
+		case *ast.BlockStatement:
+			if bodyHasSurvivorType(s.Statements) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// collectOuterVarNames 收集循环外（函数级）声明的变量名，用于逃逸分析
+func collectOuterVarNames(funcBody []ast.Statement, loopBody []ast.Statement) map[string]bool {
+	outer := make(map[string]bool)
+	loopStmtSet := make(map[ast.Statement]bool)
+	for _, s := range loopBody {
+		loopStmtSet[s] = true
+	}
+	var collect func(stmts []ast.Statement, inLoop bool)
+	collect = func(stmts []ast.Statement, inLoop bool) {
+		for _, stmt := range stmts {
+			if stmt == nil {
+				continue
+			}
+			if !inLoop && loopStmtSet[stmt] {
+				inLoop = true
+			}
+			switch s := stmt.(type) {
+			case *ast.VariableDeclaration:
+				if !inLoop {
+					outer[s.Name] = true
+				}
+			case *ast.IfStatement:
+				collect(s.Body, inLoop)
+				collect(s.Else, inLoop)
+			case *ast.WhileStatement:
+				collect(s.Body, true)
+			case *ast.ForStatement:
+				collect(s.Body, true)
+			case *ast.ForInStatement:
+				collect(s.Body, true)
+			case *ast.BlockStatement:
+				collect(s.Statements, inLoop)
+			}
+		}
+	}
+	collect(funcBody, false)
+	return outer
+}
+
+// allocationEscapes 检查循环体内的分配是否逃逸到循环外
+// 逃逸条件（保守判断）：
+//  1. 分配结果赋值给循环外声明的变量
+//  2. 分配结果作为函数返回值
+//  3. 分配结果作为参数传入函数调用（保守认为可能被保存）
+//
+// 返回 true 表示存在逃逸，不能用 offset_restore 回收（会导致悬垂指针）
+func allocationEscapes(loopBody []ast.Statement, outerVars map[string]bool) bool {
+	for _, stmt := range loopBody {
+		if stmtEscapes(stmt, outerVars) {
+			return true
+		}
+	}
+	return false
+}
+
+func stmtEscapes(stmt ast.Statement, outerVars map[string]bool) bool {
+	if stmt == nil {
+		return false
+	}
+	switch s := stmt.(type) {
+	case *ast.VariableDeclaration:
+		// 赋值给循环外变量？变量声明的 Name 是新变量，不算逃逸
+		// 但如果初始化表达式中分配的结果被外层引用，需要更复杂的分析
+		return exprEscapes(s.Value, outerVars)
+	case *ast.ExpressionStatement:
+		// 检查赋值表达式：x = alloc(...) 其中 x 是循环外变量
+		if bin, ok := s.Expression.(*ast.BinaryExpression); ok && bin.Operator == "=" {
+			if ident, ok := bin.Left.(*ast.Identifier); ok && outerVars[ident.Name] {
+				return true
+			}
+		}
+		return exprEscapes(s.Expression, outerVars)
+	case *ast.ReturnStatement:
+		// 返回值中包含分配 → 逃逸到函数外
+		return exprEscapes(s.Value, outerVars)
+	case *ast.IfStatement:
+		for _, bs := range s.Body {
+			if stmtEscapes(bs, outerVars) {
+				return true
+			}
+		}
+		for _, bs := range s.Else {
+			if stmtEscapes(bs, outerVars) {
+				return true
+			}
+		}
+	case *ast.WhileStatement:
+		for _, bs := range s.Body {
+			if stmtEscapes(bs, outerVars) {
+				return true
+			}
+		}
+	case *ast.ForStatement:
+		for _, bs := range s.Body {
+			if stmtEscapes(bs, outerVars) {
+				return true
+			}
+		}
+	case *ast.ForInStatement:
+		for _, bs := range s.Body {
+			if stmtEscapes(bs, outerVars) {
+				return true
+			}
+		}
+	case *ast.BlockStatement:
+		for _, bs := range s.Statements {
+			if stmtEscapes(bs, outerVars) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func exprEscapes(expr ast.Expression, outerVars map[string]bool) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		// 分配结果作为参数传入函数 → 保守认为逃逸
+		if isAllocCall(e.Function, false) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if exprEscapes(arg, outerVars) {
+				return true
+			}
+		}
+	case *ast.BinaryExpression:
+		return exprEscapes(e.Left, outerVars) || exprEscapes(e.Right, outerVars)
+	case *ast.UnaryExpression:
+		return exprEscapes(e.Right, outerVars)
+	case *ast.MemberAccessExpression:
+		return exprEscapes(e.Object, outerVars)
+	case *ast.ParenExpression:
+		return exprEscapes(e.Inner, outerVars)
+	case *ast.TypeCastExpression:
+		return exprEscapes(e.Expression, outerVars)
+	case *ast.ConditionalExpression:
+		return exprEscapes(e.Condition, outerVars) ||
+			exprEscapes(e.TrueExpr, outerVars) ||
+			exprEscapes(e.FalseExpr, outerVars)
 	}
 	return false
 }
@@ -1587,9 +1800,20 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 	code += idxType + " " + stmt.Variable.Name + " = _i_;\n"
 
 	// KMM scope 处理：与 while 循环一致，循环体内分配的内存在每次迭代结束时回卷
-	// 修复：for range 循环之前缺少 scope 处理，导致循环内临时 String/指针内存泄漏
-	useKMM := sg.shouldUseKMMScopeForBody(stmt.Body)
-	useOffset := !useKMM && bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
+	// Phase 1+2 优化：区分 survivor 类型变量和 bump 分配
+	// Phase 2：函数级已有 checkpoint 时，循环内 survivor 变量降级为 offset 回收
+	hasSurvivor := bodyHasSurvivorType(stmt.Body)
+	hasBumpAlloc := bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
+	funcLevelCheckpoint := sg.codegen.funcHasKMMCheckpoint
+
+	var useKMM, useOffset bool
+	if funcLevelCheckpoint && hasSurvivor {
+		useKMM = false
+		useOffset = true
+	} else {
+		useKMM = hasSurvivor
+		useOffset = hasBumpAlloc
+	}
 
 	if useKMM {
 		sg.codegen.EnterKMMScope()
@@ -1617,11 +1841,22 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 	sg.codegen.ExitScope()
 
 	// 生成 scope 包裹代码
-	if useOffset {
+	if useKMM && useOffset {
+		// survivor scope 外层 + offset 内层
+		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __for_surv_cp = kmm_v4_survivor_checkpoint();\n"
+		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += sg.codegen.indentString() + "    size_t _for_scope_start = kmm_v4_offset_save();\n"
+		code += bodyCode.String()
+		code += sg.codegen.indentString() + "    kmm_v4_offset_restore(_for_scope_start);\n"
+		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__for_surv_cp); /* survivor: for-range scope reclaim */\n"
+	} else if useOffset {
+		// 纯 bump 分配：offset 轻量回收
 		code += sg.codegen.indentString() + "size_t _for_scope_start = kmm_v4_offset_save();\n"
 		code += bodyCode.String()
 		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_for_scope_start);\n"
 	} else if useKMM {
+		// 纯 survivor 类型：完整 survivor checkpoint/rewind
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __for_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
 		sg.codegen.indent++
