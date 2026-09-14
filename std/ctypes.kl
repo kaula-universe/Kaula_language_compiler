@@ -26,3 +26,7 @@ type CInt = adopt int
 
 // C 字符串（const char*）—— 不透明句柄，禁止直接比较
 type CStr = adopt const char*
+
+// StringBuilder 句柄（struct StringBuilder*）—— 字符串构建器，带 SSO 优化
+// 不透明句柄，禁止直接比较，通过 std.string.string_builder_* 函数操作
+type StringBuilder = adopt struct StringBuilder*
