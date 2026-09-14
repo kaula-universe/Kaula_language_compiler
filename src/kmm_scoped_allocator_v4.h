@@ -1285,11 +1285,15 @@ static inline void kmm_v4_scope_pop(void) {
     size_t   saved_offset = stack->frames[stack->depth].offset;
     // 修复 Bug A：若 push 后发生过 refill，当前 base != saved_base，
     // 旧 offset 指向的是已废弃的旧 TLAB，直接恢复会覆盖新 TLAB 中的存活对象。
-    // 此时失效当前 thread heap，强制下次分配时重新 refill（保守但安全）。
+    // 性能优化（循环内分配超线性修复）：不 invalidate TLAB，而是保留新 TLAB
+    // 并重置 offset=0，供下次 scope/循环迭代复用。旧 TLAB 内存仍在 pool 中，
+    // 其中的存活对象不受影响（bump allocator 不释放单对象）。
+    // 旧逻辑每次都 invalidate 导致循环内每次迭代都重新 refill，pool offset
+    // 不断增长，pool_fit_offset O(n) 遍历段链 → 超线性开销。
     if (g_kmm_v4_thread_heap.base == saved_base) {
         g_kmm_v4_thread_heap.offset = saved_offset;
     } else {
-        kmm_v4_thread_heap_invalidate();
+        g_kmm_v4_thread_heap.offset = 0;
     }
     // Task #25：回卷后检查段链尾部，归还全空扩展段。
     // 仅 LEVEL 0 触发：回卷只作用于 thread heap，全局 offset 不回退，
