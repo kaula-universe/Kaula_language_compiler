@@ -177,3 +177,7 @@ bool_t test_assert_null(void* ptr, const String message, const String file, int 
 bool_t test_assert_not_null(void* ptr, const String message, const String file, int line) {
     return test_assert_true(ptr != NULL, message, file, line);
 }
+
+bool_t test_assert_int_range(i64 value, i64 minimum, i64 maximum, const String message, const String file, int line) {
+    return test_assert_true(value >= minimum && value <= maximum, message, file, line);
+}
