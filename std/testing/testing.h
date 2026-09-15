@@ -52,6 +52,7 @@ extern bool_t test_assert_equals(i64 expected, i64 actual, const String message,
 extern bool_t test_assert_string_equals(const String expected, const String actual, const String message, const String file, int line);
 extern bool_t test_assert_null(void* ptr, const String message, const String file, int line);
 extern bool_t test_assert_not_null(void* ptr, const String message, const String file, int line);
+extern bool_t test_assert_int_range(i64 value, i64 minimum, i64 maximum, const String message, const String file, int line);
 
 // Macros for convenience
 #define TEST_ASSERT_TRUE(cond) test_assert_true(cond, #cond, __FILE__, __LINE__)
@@ -60,6 +61,7 @@ extern bool_t test_assert_not_null(void* ptr, const String message, const String
 #define TEST_ASSERT_STR_EQ(expected, actual) test_assert_string_equals(expected, actual, #expected " == " #actual, __FILE__, __LINE__)
 #define TEST_ASSERT_NULL(ptr) test_assert_null(ptr, #ptr " == NULL", __FILE__, __LINE__)
 #define TEST_ASSERT_NOT_NULL(ptr) test_assert_not_null(ptr, #ptr " != NULL", __FILE__, __LINE__)
+#define TEST_ASSERT_IN_RANGE(value, minimum, maximum) test_assert_int_range(value, minimum, maximum, #value " in range", __FILE__, __LINE__)
 
 #define TEST_CASE(name, suite) TestCase* tc_##name = test_case_create(#name, test_##name, #suite)
 #define TEST_FUNC(name) void test_##name(void)
