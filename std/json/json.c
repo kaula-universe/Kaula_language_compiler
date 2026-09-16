@@ -372,6 +372,7 @@ static String json_serialize_value(JsonValue* value, int indent_level, int prett
         }
         case JSON_STRING: {
             const char* src = value->value.string_val;
+            if (!src) return string_create("\"\"");
             size_t len = strlen(src);
             size_t buf_size = len * 2 + 3;
             char* buf = (char*)kmm_v4_malloc(buf_size);
