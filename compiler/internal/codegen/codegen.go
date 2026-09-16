@@ -90,7 +90,7 @@ type CodeGenerator struct {
 
 	kmmScopeDepth    int
 	offsetScopeDepth int // 跟踪 offset_save/restore scope 嵌套深度，用于相邻 scope 合并优化
-	tryAssignCounter int  // := 错误传播赋值的临时变量计数器
+	tryAssignCounter int // := 错误传播赋值的临时变量计数器
 
 	// 方案 C：survivor 段 checkpoint/rewind 追踪
 	// funcEmitsPromote: 当前函数是否发射了 kmm_v4_scope_promote_p（yield/extract/return promote）
@@ -138,7 +138,7 @@ type CodeGenerator struct {
 	sourceMap  *SourceMap
 	sourceFile string
 
-	retHoistSeq   int // F17: return 表达式求值提升的临时变量序号
+	retHoistSeq       int // F17: return 表达式求值提升的临时变量序号
 	lambdaCounter     int
 	lambdaDefinitions []string
 
@@ -187,6 +187,9 @@ type CodeGenerator struct {
 	// deepPromoteCBCode: 合成的 static C 函数体（文件作用域，在 typedef 之后、函数代码之前输出）
 	deepPromoteCBEmitted map[string]struct{}
 	deepPromoteCBCode    strings.Builder
+	// deepPromoteCBBlock: 组装好的 cb 代码块（注释 + 全部 static cb 定义），
+	// 由 Generate 尾部在 classImplCode 之前输出（修复先使用后定义问题）
+	deepPromoteCBBlock string
 
 	// 高级属性支持：#[test]、#[build]、#[derive]、#[command]
 	TestMode         bool // 测试模式：生成测试 runner 而非普通 main
@@ -281,7 +284,14 @@ func (cg *CodeGenerator) EnsureDeepPromoteCB(kaulaType string) string {
 						kaulaType, f.Name, f.Type))
 				}
 			}
-			// 字段本身是子指针：提升 pointee，把字段值改写为 survivor 段新地址
+			// 字段本身是子指针：提升 pointee，把字段值改写为 survivor 段新地址。
+			// 说明：原生指针字段（如 f64* / []f64，fieldCB == NULL）的 pointee 字节数
+			// SOR 无法静态推断（可能指向 nin*nout 个元素的数组），按 sizeof(元素)
+			// 提升会把数组截断为单元素（提升后越界）。这是类型系统缺少长度信息的
+			// 已知限制：定长数组字段请用 [N]T 声明（值语义 memcpy 完整包含），
+			// 不定长指针字段若作为逃逸对象的内部数组，需要库侧用全局分配管理。
+			// 保持提升（保证指向作用域内存的字段不悬空），并对不确定大小的
+			// 原生指针字段输出编译警告，提示潜在截断。
 			body.WriteString(fmt.Sprintf(
 				"    if (self->%s != NULL) {\n"+
 					"        void* _field_new = kmm_v4_promote_deep(self->%s, sizeof(%s), %s);\n"+
@@ -289,6 +299,10 @@ func (cg *CodeGenerator) EnsureDeepPromoteCB(kaulaType string) string {
 					"        self->%s = (%s)_field_new;\n"+
 					"    }\n",
 				f.Name, f.Name, pointeeType, fieldCB, f.Name, fcType))
+			if fieldCB == "NULL" {
+				fmt.Printf("[kaulac] WARN: deep-promote of native pointer field '%s.%s' (%s) uses sizeof(element); arrays will be truncated - declare as fixed-size [N]T or allocate globally\n",
+					kaulaType, f.Name, f.Type)
+			}
 		} else if f.Type == "string" || f.Type == "str" || f.Type == "String" || fcType == "String" {
 			// 任务①联动：String 字段的载荷单独分配，浅拷贝提升后 ptr 仍指向作用域段。
 			// 需要把 String.ptr 重新提升并改写字段的 {len, ptr}。
@@ -1294,17 +1308,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	}
 
 	// 任务② Bug 2 正解：深提升合成回调。
-	// cb 是 static C 函数（引用 K_<Class> 类型和 string_clone_global/kmm_v4_promote_deep），
-	// 必须在 typedef/class 定义之后、class 构造器/方法体与普通函数代码之前输出。
-	// 注意：class 构造器/方法体（classImplCode）在最终组装时先于 functionCode 输出，
-	// 且构造器内部可能引用深提升 cb（如数组元素赋值的跨作用域 promote，
-	// 见 probe07/libp4.kl 的 P4Holder_new），因此 cb 必须前置到 classImplCode
-	// 之前，否则生成的 C 出现"先使用后定义"编译错误。
+	// cb 是 static C 函数（引用 K_<Class> 类型和 string_clone_global/kmm_v4_promote_deep）。
+	// 注意：不能拼进 functionCode 后输出——class 方法体（classImplCode，如 MLP_new
+	// 里的 kmm_v4_scope_promote_p_deep 调用）在最终组装时位于 functionCode 之前，
+	// 若 cb 定义在 functionCode 中会导致"先使用后定义"（static 函数 undeclared）。
+	// 因此 cb 单独保存，由 Generate 尾部在 classImplCode 之前输出。
 	if cg.deepPromoteCBCode.Len() > 0 {
 		comment := "\n// --- SOR synthesized deep-promote callbacks (Bug 2 fix) ---\n\n"
-		combined := comment + cg.deepPromoteCBCode.String() + cg.classImplCode.String()
-		cg.classImplCode.Reset()
-		cg.classImplCode.WriteString(combined)
+		cg.deepPromoteCBBlock = comment + cg.deepPromoteCBCode.String()
 	}
 
 	var allIncludes strings.Builder
@@ -1611,6 +1622,14 @@ static inline String string_concat_float(String s, double v) {
 			resultBuilder.WriteString(classGlobalVars.String())
 			resultBuilder.WriteByte('\n')
 
+			// 深提升回调（cb）必须在 classImplCode 之前输出：
+			// class 方法体（如 MLP_new 的 kmm_v4_scope_promote_p_deep）会使用 cb，
+			// 若 cb 定义在后（functionCode 中）将产生 static 先使用后定义错误。
+			if cg.deepPromoteCBBlock != "" {
+				resultBuilder.WriteString(cg.deepPromoteCBBlock)
+				resultBuilder.WriteByte('\n')
+			}
+
 			// class 构造器/方法体：依赖 forwardDecls（顶层函数原型）与全局变量，
 			// 故置于两者之后、普通函数体之前
 			funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1 +
@@ -1687,8 +1706,13 @@ static inline String string_concat_float(String s, double v) {
 				typeCodeWithClassGlobals + "\n\n" +
 				forwardDecls.String()
 			result = strings.ReplaceAll(result, "{{type_code}}", typeAndForward)
-			// class 构造器/方法体置于函数体区段最前（已在 forwardDecls/全局变量之后）
-			funcAndImpl := cg.classImplCode.String() + "\n" + functionCode.String()
+			// class 构造器/方法体置于函数体区段最前（已在 forwardDecls/全局变量之后）；
+			// 深提升 cb 必须先于 classImplCode 输出（class 方法内会使用 cb，如 MLP_new 的 promote）
+			funcAndImpl := cg.deepPromoteCBBlock
+			if funcAndImpl != "" {
+				funcAndImpl += "\n"
+			}
+			funcAndImpl += cg.classImplCode.String() + "\n" + functionCode.String()
 			// 生成 #[derive] 派生实现
 			if len(deriveTypes) > 0 {
 				funcAndImpl += cg.attributeFeat.GenerateDeriveImpls(deriveTypes, program)
@@ -1752,6 +1776,14 @@ static inline String string_concat_float(String s, double v) {
 		if classGlobalVars.Len() > 0 {
 			resultBuilder.WriteString("\n")
 			resultBuilder.WriteString(classGlobalVars.String())
+		}
+
+		// 深提升回调（cb）必须在 classImplCode 之前输出：
+		// class 方法体（如 MLP_new 的 kmm_v4_scope_promote_p_deep）会使用 cb，
+		// 若 cb 定义在后（在 functionCode 中）将产生 static 先使用后定义错误。
+		if cg.deepPromoteCBBlock != "" {
+			resultBuilder.WriteString(cg.deepPromoteCBBlock)
+			resultBuilder.WriteString("\n")
 		}
 
 		// class 构造器/方法体：依赖 forwardDecls 与全局变量，先于普通函数体输出
