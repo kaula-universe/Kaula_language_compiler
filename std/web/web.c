@@ -277,7 +277,8 @@ bool http_server_start(HttpServer* server, HttpRequestHandler handler) {
 
                 char* response_str = http_response_to_string(res);
                 if (response_str) {
-                    socket_write(client_sock, response_str, strlen(response_str));
+                    size_t total_len = http_response_get_total_length(res);
+                    socket_write(client_sock, response_str, total_len);
                 }
 
                 http_response_destroy(res);
@@ -493,22 +494,30 @@ void http_response_set_content_type(HttpResponse* res, const char* content_type)
 
 void http_response_set_header(HttpResponse* res, const char* name, const char* value) {
     if (!res || !name || !value) return;
+    const char* KAULA_WEB_FIX_MARKER = "HEADERFIX2026";
+    (void)KAULA_WEB_FIX_MARKER;
 
     size_t name_len = strlen(name);
     size_t value_len = strlen(value);
-    size_t entry_len = name_len + 2 + value_len + 2;
+    // name + ": " + value + "\r\n" + null
+    size_t entry_len = name_len + 2 + value_len + 2 + 1;
 
     char* new_entry = (char*)kmm_v4_malloc(entry_len);
     if (!new_entry) return;
 
-    snprintf(new_entry, entry_len, "%s: %s\r\n", name, value);
+    // 手动拼接避免 snprintf 截断问题
+    size_t pos = 0;
+    memcpy(new_entry + pos, name, name_len); pos += name_len;
+    memcpy(new_entry + pos, ": ", 2); pos += 2;
+    memcpy(new_entry + pos, value, value_len); pos += value_len;
+    memcpy(new_entry + pos, "\r\n", 2); pos += 2;
+    new_entry[pos] = '\0';
 
     if (res->headers) {
         size_t old_len = strlen(res->headers);
-        size_t new_len = old_len + entry_len;
-        char* new_headers = (char*)kmm_v4_realloc(res->headers, new_len + 1);
+        char* new_headers = (char*)kmm_v4_realloc(res->headers, old_len + pos + 1);
         if (new_headers) {
-            strcat(new_headers, new_entry);
+            memcpy(new_headers + old_len, new_entry, pos + 1);
             res->headers = new_headers;
         }
     } else {
@@ -537,36 +546,61 @@ void http_response_set_redirect(HttpResponse* res, const char* location) {
 char* http_response_to_string(HttpResponse* res) {
     if (!res) return NULL;
 
-    char* buffer = (char*)kmm_v4_malloc(16384);
+    size_t header_size = 4096;
+    size_t total_size = header_size + (res->body_length > 0 ? res->body_length : 0) + 16;
+    char* buffer = (char*)kmm_v4_malloc(total_size);
     if (!buffer) return NULL;
 
-    int offset = snprintf(buffer, 1024, "HTTP/1.1 %d %s\r\n",
+    int offset = snprintf(buffer, header_size, "HTTP/1.1 %d %s\r\n",
         res->status_code, res->status_message ? res->status_message : "OK");
 
     if (res->headers && strlen(res->headers) > 0) {
-        int headers_offset = snprintf(buffer + offset, 1024 - offset, "%s", res->headers);
+        int headers_offset = snprintf(buffer + offset, header_size - offset, "%s", res->headers);
         if (headers_offset > 0) {
             offset += headers_offset;
         }
     }
 
     if (res->content_type) {
-        offset += snprintf(buffer + offset, 1024 - (offset > 0 ? offset : 0), "Content-Type: %s\r\n", res->content_type);
+        offset += snprintf(buffer + offset, header_size - offset, "Content-Type: %s\r\n", res->content_type);
     }
 
     if (res->body && res->body_length > 0) {
-        offset += snprintf(buffer + offset, 1024 - (offset > 0 ? offset : 0), "Content-Length: %zu\r\n", res->body_length);
+        offset += snprintf(buffer + offset, header_size - offset, "Content-Length: %zu\r\n", res->body_length);
     }
 
-    offset += snprintf(buffer + offset, 1024 - (offset > 0 ? offset : 0), "\r\n");
+    offset += snprintf(buffer + offset, header_size - offset, "\r\n");
 
-    if (res->body && res->body_length > 0 && offset < 16384) {
+    if (res->body && res->body_length > 0 && (size_t)offset + res->body_length < total_size) {
         memcpy(buffer + offset, res->body, res->body_length);
         offset += res->body_length;
     }
 
     buffer[offset] = '\0';
     return buffer;
+}
+
+// 返回响应的总字节数（包含header和body，支持二进制body）
+size_t http_response_get_total_length(HttpResponse* res) {
+    if (!res) return 0;
+    size_t len = 0;
+    char tmp[4096];
+    len += snprintf(tmp, sizeof(tmp), "HTTP/1.1 %d %s\r\n",
+        res->status_code, res->status_message ? res->status_message : "OK");
+    if (res->headers && strlen(res->headers) > 0) {
+        len += strlen(res->headers);
+    }
+    if (res->content_type) {
+        len += snprintf(tmp, sizeof(tmp), "Content-Type: %s\r\n", res->content_type);
+    }
+    if (res->body && res->body_length > 0) {
+        len += snprintf(tmp, sizeof(tmp), "Content-Length: %zu\r\n", res->body_length);
+    }
+    len += 2; // \r\n
+    if (res->body && res->body_length > 0) {
+        len += res->body_length;
+    }
+    return len;
 }
 
 // ==================== HTTP客户端实现 ====================

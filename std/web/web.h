@@ -145,6 +145,7 @@ extern void http_response_set_json(HttpResponse* res, const char* json_string);
 extern void http_response_set_html(HttpResponse* res, const char* html);
 extern void http_response_set_redirect(HttpResponse* res, const char* location);
 extern char* http_response_to_string(HttpResponse* res);
+extern size_t http_response_get_total_length(HttpResponse* res);
 
 // ==================== HTTP客户端函数 ====================
 
