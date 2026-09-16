@@ -3456,7 +3456,9 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		// F1 修复：函数调用上下文中，未定义的函数名报"未定义的函数"而非"未定义的变量"
 		if ident, ok := expr.Function.(*ast.Identifier); ok {
 			sym := sa.symbolTable.GetSymbol(ident.Name)
-			isKnown := sym != nil ||
+			// range 是 for-in 循环的内建迭代器构造（同 analyzeIdentifier 的放行逻辑），
+			// 不作为普通函数名检查
+			isKnown := ident.Name == "range" || sym != nil ||
 				(sa.localImportFuncs != nil && sa.localImportFuncs[ident.Name]) ||
 				(sa.localModuleFuncs != nil && sa.localModuleFuncs[ident.Name]) ||
 				(sa.localPubVars != nil && sa.localPubVars[ident.Name])
