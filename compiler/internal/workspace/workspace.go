@@ -1,14 +1,16 @@
-﻿package workspace
+package workspace
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"kaula/internal/config"
+	"kaula/internal/testrunner"
 )
 
 // Workspace 表示一个多包工作空间
@@ -20,10 +22,10 @@ type Workspace struct {
 
 // Member 工作空间中的一个成员包
 type Member struct {
-	Name   string          // 成员名称（目录名）
-	Dir    string          // 成员目录的绝对路径
-	Config *config.Config  // 成员的编译配置
-	Order  int             // 拓扑排序后的编译顺序
+	Name   string         // 成员名称（目录名）
+	Dir    string         // 成员目录的绝对路径
+	Config *config.Config // 成员的编译配置
+	Order  int            // 拓扑排序后的编译顺序
 }
 
 // LoadWorkspace 从指定目录加载工作空间
@@ -257,33 +259,93 @@ func (ws *Workspace) findMemberDeps(member *Member) []string {
 
 // BuildAll 构建所有成员（按拓扑顺序）
 func (ws *Workspace) BuildAll(release bool, debug bool) error {
+	compiler, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate kaulac executable: %w", err)
+	}
+	if _, err := os.Stat(compiler); err != nil {
+		return fmt.Errorf("kaulac executable not found: %w", err)
+	}
+
 	for _, member := range ws.Members {
 		fmt.Printf("[workspace] Building %s (%d/%d)...\n", member.Name, member.Order+1, len(ws.Members))
 
-		cfg := member.Config
-		if release {
-			cfg.Release = true
+		sources, err := workspaceSources(member.Dir)
+		if err != nil {
+			return fmt.Errorf("discover sources for %s: %w", member.Name, err)
 		}
-		if debug {
-			cfg.Debug = true
+		if len(sources) == 0 {
+			return fmt.Errorf("workspace member %s has no top-level fn main source", member.Name)
 		}
 
-		// 这里调用编译器的核心编译逻辑
-		// 实际实现需要 import compiler/internal/compiler 或类似方式
-		// 暂时只做占位
-		fmt.Printf("[workspace] %s: compiling in %s\n", member.Name, member.Dir)
+		outputDir := filepath.Join(member.Dir, "build")
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			return fmt.Errorf("create build directory for %s: %w", member.Name, err)
+		}
+		for _, source := range sources {
+			args := []string{"-include", filepath.Join(ws.Root, "std"), "-stdlib", filepath.Join(ws.Root, "build", "bin", "stdlib.json"), "-source-dir", member.Dir, "-output-dir", outputDir}
+			if release {
+				args = append(args, "-release")
+			}
+			if debug {
+				args = append(args, "-debug")
+			}
+			args = append(args, source)
+			cmd := exec.Command(compiler, args...)
+			cmd.Dir = member.Dir
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("build %s (%s): %w", member.Name, filepath.Base(source), err)
+			}
+		}
 	}
 
 	return nil
 }
 
+// workspaceSources returns compilable member entrypoints in deterministic order.
+// A workspace member may contain library-only .kl files, so only files declaring
+// a top-level main are passed to kaulac.
+func workspaceSources(dir string) ([]string, error) {
+	var sources []string
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if path != dir && (info.Name() == "build" || info.Name() == ".git") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".kl" {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), "fn main") {
+			sources = append(sources, path)
+		}
+		return nil
+	})
+	sort.Strings(sources)
+	return sources, err
+}
+
 // TestAll 运行所有成员的测试
-func (ws *Workspace) TestAll() error {
-	for _, member := range ws.Members {
-		fmt.Printf("[workspace] Testing %s...\n", member.Name)
-		// 占位：实际测试逻辑
+func (ws *Workspace) TestAll(options ...testrunner.Options) error {
+	opts := testrunner.Options{}
+	if len(options) > 0 {
+		opts = options[0]
 	}
-	return nil
+	if len(ws.Members) == 0 {
+		return fmt.Errorf("no workspace members to test")
+	}
+	_, err := testrunner.Run(ws.MemberDirs(), opts)
+	return err
 }
 
 // ListMembers 列出所有成员

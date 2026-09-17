@@ -145,13 +145,16 @@ extern int format_pointer(char* buffer, size_t size, const void* ptr);
 // ==================== 格式化选项 ====================
 
 typedef struct {
-    int width;          // 字段宽度
-    int precision;      // 精度
+    i32 width;          // 字段宽度
+    i32 precision;      // 精度
     bool left_align;    // 左对齐
     bool show_sign;     // 显示符号
     bool show_base;     // 显示进制前缀（0x, 0b）
     bool zero_pad;      // 零填充
-    char pad_char;      // 填充字符
+    char pad_char;      // 填充字符（0 表示空格）
+    bool uppercase;    // 大写数字、前缀和浮点指数
+    bool thousands;    // 十进制整数部分每三位逗号分组
+    bool scientific;   // 浮点科学计数法
 } FormatOptions;
 
 /**
@@ -165,6 +168,9 @@ typedef struct {
  */
 extern int format_int_opts(char* buffer, size_t size, i64 value, int base, const FormatOptions* options);
 
+/** Format an unsigned integer with the same options. */
+extern i32 format_uint_opts(char* buffer, u64 size, u64 value, i32 base, const FormatOptions* options);
+
 /**
  * @brief 带选项的浮点数格式化
  * @param buffer 目标缓冲区
@@ -174,6 +180,19 @@ extern int format_int_opts(char* buffer, size_t size, i64 value, int base, const
  * @return 写入的字符数
  */
 extern int format_float_opts(char* buffer, size_t size, f64 value, const FormatOptions* options);
+
+/** KMM-owned options and strings; usable directly from Kaula. Precision is
+ * fractional digits (0..20, negative means 6); width <= 0 means no padding.
+ * Layout padding is an ASCII byte (1..127), otherwise space. zero_pad overrides
+ * pad_char on right alignment; left alignment disables zero_pad.
+ */
+extern FormatOptions* format_options_create(void);
+extern void format_options_set_layout(FormatOptions* options, i32 width, bool left_align, bool zero_pad, i32 pad_char);
+extern void format_options_set_precision(FormatOptions* options, i32 precision);
+extern void format_options_set_flags(FormatOptions* options, bool show_sign, bool show_base, bool uppercase, bool thousands, bool scientific);
+extern char* format_int_text(i64 value, i32 base, const FormatOptions* options);
+extern char* format_uint_text(u64 value, i32 base, const FormatOptions* options);
+extern char* format_float_text(f64 value, const FormatOptions* options);
 
 // ==================== 格式化构建器 ====================
 

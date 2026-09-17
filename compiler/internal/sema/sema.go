@@ -1,4 +1,4 @@
-﻿package sema
+package sema
 
 import (
 	"bytes"
@@ -13,45 +13,46 @@ import (
 	"kaula/internal/symbol"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 )
 
 type SemanticAnalyzer struct {
-	symbolTable        *symbol.SymbolTable
-	scope              int
-	errorCollector     *errors.ErrorCollector
-	currentFunction    *ast.FunctionStatement
-	sorGlobalEnabled   bool // 全局 SOR 模式（--sor 标志）
-	program            *ast.Program
-	stdlibConfig       *stdlib.StdlibConfig
-	genericStack       []*ast.FunctionStatement
-	typeConstraints    map[string][]string
-	exportedSymbols    map[string]bool
-	treeManager        *core.TreeManager
-	prefixManager      *core.PrefixManager
-	rootTreeFound      bool
-	source             string                         // 源码用于错误上下文
-	prefixSymbolTables map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
-	currentPrefixTable *symbol.SymbolTable            // 当前 @前缀块 的符号表
-	comptime           *comptime.Evaluator            // 编译期表达式评估器
-	importedModules    map[string]bool                // 记录实际导入的模块
-	thirdPartyTypeSet  map[string]bool                // 第三方库签名中的类型名缓存（lazy 构建）
-	funcReturnTypes    map[string]string              // 函数名 -> 返回类型（用于调用表达式类型推断）
-	arrayLens          map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
-	localImportFuncs   map[string]bool                // 本地 import 的 pub 函数名
-	localModuleFuncs   map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
-	localModuleFuncsByModule map[string]map[string]bool // 本地 import 模块名 -> 该模块全部函数名(限定调用检查用)
-	localPubVars       map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
-	localPubTypes      map[string]*LocalPubTypeInfo // 本地 import 的类型定义（class 含完整定义）
-	inElseIfChain      bool                           // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
-	usedFunctions      map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
-	libraryMode        bool                           // 库文件分析模式(跳过 unused-function 检查)
-	localModuleTypes   map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
-	adoptTypes         map[string]bool                // 套用类型名集合（adopt 声明的类型）
-	transparentAdopt   map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
-	adoptUnderlying    map[string]string              // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
+	symbolTable              *symbol.SymbolTable
+	scope                    int
+	errorCollector           *errors.ErrorCollector
+	currentFunction          *ast.FunctionStatement
+	sorGlobalEnabled         bool // 全局 SOR 模式（--sor 标志）
+	program                  *ast.Program
+	stdlibConfig             *stdlib.StdlibConfig
+	genericStack             []*ast.FunctionStatement
+	typeConstraints          map[string][]string
+	exportedSymbols          map[string]bool
+	treeManager              *core.TreeManager
+	prefixManager            *core.PrefixManager
+	rootTreeFound            bool
+	source                   string                         // 源码用于错误上下文
+	prefixSymbolTables       map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
+	currentPrefixTable       *symbol.SymbolTable            // 当前 @前缀块 的符号表
+	comptime                 *comptime.Evaluator            // 编译期表达式评估器
+	importedModules          map[string]bool                // 记录实际导入的模块
+	thirdPartyTypeSet        map[string]bool                // 第三方库签名中的类型名缓存（lazy 构建）
+	funcReturnTypes          map[string]string              // 函数名 -> 返回类型（用于调用表达式类型推断）
+	arrayLens                map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
+	localImportFuncs         map[string]bool                // 本地 import 的 pub 函数名
+	localModuleFuncs         map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
+	localModuleFuncsByModule map[string]map[string]bool     // 本地 import 模块名 -> 该模块全部函数名(限定调用检查用)
+	localPubVars             map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
+	localPubTypes            map[string]*LocalPubTypeInfo   // 本地 import 的类型定义（class 含完整定义）
+	inElseIfChain            bool                           // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
+	usedFunctions            map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
+	libraryMode              bool                           // 库文件分析模式(跳过 unused-function 检查)
+	localModuleTypes         map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
+	adoptTypes               map[string]bool                // 套用类型名集合（adopt 声明的类型）
+	transparentAdopt         map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
+	adoptUnderlying          map[string]string              // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
 }
 
 // SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
@@ -174,6 +175,8 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 	if program != nil {
 		sa.source = program.Source
 	}
+
+	sa.validateNumericSpellings(program)
 
 	sa.comptime = comptime.NewEvaluator()
 	sa.usedFunctions = make(map[string]bool)
@@ -1288,11 +1291,12 @@ func (sa *SemanticAnalyzer) analyzeEnumStatement(stmt *ast.EnumStatement) {
 
 // analyzeNonLocalStatement 分析 nonlocal 语句
 // 语义（Python 风格）：绑定外层函数作用域中的同名变量。
-//  → 本作用域已声明同名变量：报错；
-//  → 外层函数作用域存在同名变量：校验类型并注册为本作用域符号
-//    （类型取外层真实类型，供后续引用解析），不产生新变量；
-//  → 仅存在于全局作用域：报错提示"全局变量无需 nonlocal"；
-//  → 完全不存在：报错。
+//
+//	→ 本作用域已声明同名变量：报错；
+//	→ 外层函数作用域存在同名变量：校验类型并注册为本作用域符号
+//	  （类型取外层真实类型，供后续引用解析），不产生新变量；
+//	→ 仅存在于全局作用域：报错提示"全局变量无需 nonlocal"；
+//	→ 完全不存在：报错。
 func (sa *SemanticAnalyzer) analyzeNonLocalStatement(stmt *ast.NonLocalStatement) {
 	if stmt.Name == "" {
 		return
@@ -1388,6 +1392,44 @@ func (sa *SemanticAnalyzer) analyzeLambdaExpression(e *ast.LambdaExpression) {
 
 	// 捕获检测：引用的外层函数局部变量（非全局、非参数遮蔽）
 	collected := astutil.CollectIdentifiers(e.Body)
+	var nested func(reflect.Value)
+	nested = func(v reflect.Value) {
+		if !v.IsValid() {
+			return
+		}
+		if v.Kind() == reflect.Interface {
+			if !v.IsNil() {
+				nested(v.Elem())
+			}
+			return
+		}
+		if v.Kind() == reflect.Ptr {
+			if v.IsNil() {
+				return
+			}
+			if l, ok := v.Interface().(*ast.LambdaExpression); ok {
+				for _, n := range l.Captures {
+					collected.Refs[n] = true
+				}
+				return
+			}
+			nested(v.Elem())
+			return
+		}
+		if v.Kind() == reflect.Struct {
+			for i := 0; i < v.NumField(); i++ {
+				if v.Type().Field(i).PkgPath == "" {
+					nested(v.Field(i))
+				}
+			}
+		}
+		if v.Kind() == reflect.Slice {
+			for i := 0; i < v.Len(); i++ {
+				nested(v.Index(i))
+			}
+		}
+	}
+	nested(reflect.ValueOf(e.Body))
 	seen := make(map[string]bool)
 	var captures []string
 	for _, name := range orderedKeys(collected.Refs) {
@@ -1413,11 +1455,7 @@ func (sa *SemanticAnalyzer) analyzeLambdaExpression(e *ast.LambdaExpression) {
 	if len(captures) > 0 {
 		sort.Strings(captures)
 		e.Captures = captures
-		sa.errorCollector.AddSemanticError(
-			fmt.Sprintf("lambda 捕获了外层函数局部变量（%s），暂不支持", strings.Join(captures, ", ")),
-			e.Pos.Line, e.Pos.Column, "lambda_capture_unsupported",
-			"将捕获变量提升为全局变量，或改用嵌套函数（fn 定义在外层函数体内，自动支持捕获）",
-		)
+
 	}
 
 	sa.symbolTable = oldSymbolTable
@@ -1518,7 +1556,7 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 		sa.errorCollector.AddSemanticWarning(
 			fmt.Sprintf("变量 '%s' 声明未初始化, 使用前请先赋值", stmt.Name),
 			stmt.Pos.Line, stmt.Pos.Column, "uninitialized",
-			"建议在声明时初始化: " + stmt.Name + " = 初始值",
+			"建议在声明时初始化: "+stmt.Name+" = 初始值",
 		)
 	}
 
@@ -1724,6 +1762,14 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 
 // isTypeValid 检查类型是否有效
 func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
+	if strings.HasPrefix(typeName, "closure<") && strings.HasSuffix(typeName, ">") {
+		for _, t := range splitTopLevelCommasSem(typeName[8 : len(typeName)-1]) {
+			if !sa.isTypeValid(strings.TrimSpace(t)) {
+				return false
+			}
+		}
+		return true
+	}
 	// void(T...)R 签名记法：数据指针或函数指针
 	// 数据指针 void() / void(T) → 合法（T 仅类型系统跟踪，运行时 void*）
 	// 函数指针 void(T1,T2)R → 递归校验参数与返回类型
@@ -3394,7 +3440,8 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 }
 
 // checkLocalModuleCall 检查本地 import 模块的限定调用 lib.fn:
-//  pub 函数放行; 模块内存在但非 pub 报 not_exported; 不存在报 undefined + 相似函数建议
+//
+//	pub 函数放行; 模块内存在但非 pub 报 not_exported; 不存在报 undefined + 相似函数建议
 func (sa *SemanticAnalyzer) checkLocalModuleCall(memberAccess *ast.MemberAccessExpression, pos ast.Position) {
 	if sa.localModuleFuncsByModule == nil {
 		return
@@ -3485,8 +3532,9 @@ func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
 	if expr.Target != nil {
 		sa.analyzeExpression(expr.Target)
 	}
+	_ = sa.inferExpressionType(expr.Target)
 	for _, arm := range expr.Arms {
-		if arm == nil {
+		if arm == nil || arm.Pattern == nil {
 			continue
 		}
 		// 注册模式绑定变量到当前作用域
@@ -3792,6 +3840,18 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		return ""
 	}
 	switch e := expr.(type) {
+	case *ast.LambdaExpression:
+		ps := append([]string(nil), e.ParamTypes...)
+		for i := range ps {
+			if ps[i] == "" || ps[i] == "auto" {
+				ps[i] = "i64"
+			}
+		}
+		r := e.ReturnType
+		if r == "" {
+			r = "void"
+		}
+		return "closure<" + strings.Join(append(ps, r), ",") + ">"
 	case *ast.Identifier:
 		if e.Name == "true" || e.Name == "false" {
 			return "bool"

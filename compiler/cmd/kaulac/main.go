@@ -1,6 +1,7 @@
 ﻿package main
 
 import (
+ "flag"
 	"encoding/json"
 	"fmt"
 	"kaula/internal/ast"
@@ -19,7 +20,8 @@ import (
 	"kaula/internal/stdlib"
 	"kaula/internal/timeout"
 	"kaula/internal/version"
-	"kaula/internal/workspace"
+	"kaula/internal/testrunner"
+ "kaula/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -357,7 +359,14 @@ func injectLocalCode(mainCode, localCode string) string {
 var verboseMode = false
 
 func main() {
-	totalStart := time.Now()
+ // Test subcommands own their flags and must bypass compiler flag pre-scanning.
+ if len(os.Args) > 1 && os.Args[1] == "test" {
+  os.Exit(runTestsCLI(os.Args[2:], false))
+ }
+ if len(os.Args) > 2 && os.Args[1] == "workspace" && os.Args[2] == "test" {
+  os.Exit(runTestsCLI(os.Args[3:], true))
+ }
+ totalStart := time.Now()
 
 	// 初始化本地化系统，检测系统语言
 	i18n.Init()
@@ -1447,6 +1456,26 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func runTestsCLI(args []string, workspaceMode bool) int {
+ opts, paths, err := testrunner.Parse(args, os.Stdout)
+ if err == flag.ErrHelp { return 0 }
+ if err == nil && workspaceMode {
+  if len(paths) > 0 { err = fmt.Errorf("workspace test does not accept a path") } else {
+   var cwd string
+   cwd, err = os.Getwd()
+   if err == nil {
+    var ws *workspace.Workspace
+    ws, err = workspace.LoadWorkspace(cwd)
+    if err == nil { err = ws.TestAll(opts) }
+   }
+  }
+ } else if err == nil {
+  _, err = testrunner.Run(paths, opts)
+ }
+ if err != nil { fmt.Fprintf(os.Stderr, "Error: %v\n", err); return 1 }
+ return 0
 }
 
 // printSummary 输出编译汇总行
