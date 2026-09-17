@@ -120,6 +120,14 @@ func LoadPkgLibraries(pkglibPath string) ([]ThirdPartyLibrary, error) {
 			libConfig.Name = libName
 		}
 
+		// SourceDir 默认设为库目录绝对路径，使 sources 中的相对路径可被 codegen 解析
+		if libConfig.SourceDir == "" {
+			absDir, err := filepath.Abs(libDir)
+			if err == nil {
+				libConfig.SourceDir = absDir
+			}
+		}
+
 		// 注意：不在此处执行 auto-heal（ConfigStale 触发 AnalyzePackage），
 		// 因为加载阶段不知道哪些库会被使用。auto-heal 应只在 compileCCode 中
 		// 针对 usedModules 中的库执行，避免对未使用的 C++ 库生成桥接代码并触发编译。
