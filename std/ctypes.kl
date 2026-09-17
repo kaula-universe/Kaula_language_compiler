@@ -27,6 +27,10 @@ type CInt = adopt int
 // C 字符串（const char*）—— 不透明句柄，禁止直接比较
 type CStr = adopt const char*
 
+// C 可变字符串（char*）—— 用于函数指针传递、string.ptr 赋值、FFI 边界
+// 与 CStr(const char*) 区分：cstring 是可变指针，可接收 string.ptr
+type cstring = adopt char*
+
 // StringBuilder 句柄（struct StringBuilder*）—— 字符串构建器，带 SSO 优化
 // C 侧已有 typedef struct {...} StringBuilder;，adopt 检测到同名类型时
 // 不重复生成 typedef，直接复用 C 侧类型，零成本别名。

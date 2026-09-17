@@ -3310,9 +3310,9 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		return
 	}
 
-	// adopt() / unwrap() 内置转换运算符：编译期 no-op，不做函数符号检查
+	// adopt() / unwrap() / range() 内置运算符：编译期处理，不做函数符号检查
 	if ident, ok := expr.Function.(*ast.Identifier); ok {
-		if ident.Name == "adopt" || ident.Name == "unwrap" {
+		if ident.Name == "adopt" || ident.Name == "unwrap" || ident.Name == "range" {
 			for _, arg := range expr.Args {
 				sa.analyzeExpression(arg)
 			}
