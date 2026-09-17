@@ -3755,7 +3755,11 @@ func (p *Parser) parseStructLiteralExpression() ast.Expression {
 // parsePostfixChain 解析后缀表达式链：成员访问(.field)、索引访问([i])、函数调用(())
 // 从给定的初始表达式开始，循环处理后续的运算符直到不再匹配
 func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
-	// 循环处理多级成员访问和索引访问（如 std.io.println 或 arr[i].field）
+	// 循环处理多级成员访问、索引访问与调用（如 std.io.println、arr[i].field、
+	// a.b().c()、std.string.compare().ignore_case(a, b)）。
+	// 关键：调用（含泛型调用）的结果必须继续进入后缀循环，使链式调用
+	// X().y(...) 能生成 CallExpression(Function=MemberAccess(y, X()))，
+	// 而不是把 .y(...) 拆成独立的裸调用语句。
 	for {
 		if p.curTok.Type == lexer.TOKEN_DOT {
 			p.nextToken()
@@ -3780,13 +3784,21 @@ func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
 					Pos:    memberPos,
 				}
 
-				// 如果后面还有 LPAREN，说明是函数调用
+				// 如果后面还有 LPAREN，说明是函数调用：调用结果继续进入后缀循环，支持 X().y() 链式
 				if p.curTok.Type == lexer.TOKEN_LPAREN {
-					return p.parseCallExpressionIterative(expr)
+					expr = p.parseCallExpressionIterative(expr)
+					if expr == nil {
+						return nil
+					}
+					continue
 				}
 				// 泛型调用（obj.method<int>(...)），需避免与比较运算符混淆
 				if p.curTok.Type == lexer.TOKEN_LT && p.looksLikeGenericArgs() {
-					return p.parseCallExpressionIterative(expr)
+					expr = p.parseCallExpressionIterative(expr)
+					if expr == nil {
+						return nil
+					}
+					continue
 				}
 			} else {
 				break

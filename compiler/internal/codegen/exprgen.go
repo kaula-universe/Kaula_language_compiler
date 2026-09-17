@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"kaula/internal/ast"
+	"kaula/internal/astutil"
 	"kaula/internal/comptime"
 	"kaula/internal/stdlib"
 	"math"
@@ -1106,6 +1107,38 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		}
 		code += ")"
 		return code
+	}
+
+	// ===== 链式/平铺标准库调用统一生成 =====
+	// 支持 std.<mod>.<fn>() 平铺与 std.<mod>.<seg1>().<seg2>() 链式两种形式：
+	// 链段用 "_" 拼接后配合模块前缀解析出 C 函数名（如 compare+ignore_case → string_compare_ignore_case）。
+	// 命中后直接生成 C 调用并返回，避免内层链段被当作独立调用生成无效代码。
+	if modKey, segs, isChain := astutil.ExtractStdlibChain(memberAccess); isChain && eg.codegen.stdlibConfig != nil {
+		if fn, cName, resolved := eg.codegen.stdlibConfig.ResolveChainedFunction(modKey, segs); resolved {
+			lastSeg := segs[len(segs)-1]
+
+			// 特殊处理 println：多参数使用类型推导版本（与平铺路径行为一致）
+			if lastSeg == "println" && len(args) > 1 {
+				return eg.generatePrintlnMulti(args)
+			}
+
+			// 追踪第三方库使用（若链段名命中第三方库函数）
+			if isThirdParty, lib := eg.codegen.stdlibConfig.IsThirdPartyFunction(lastSeg); isThirdParty {
+				eg.codegen.usedThirdPartyLibs[lib.Name] = true
+			}
+
+			// 修复 #21：仅在 freestanding 模式下将 std_malloc 重写为
+			// kmm_v4_alloc_auto（无 libc）。hosted 模式保留 std_malloc
+			// 系统 malloc 语义，与 kmm_v4 系列分配器严格区分。
+			if (cName == "std_malloc" || lastSeg == "std_malloc") && eg.codegen.IsFreestanding() {
+				if len(args) == 1 {
+					sizeArg := eg.GenerateExpression(args[0])
+					return "kmm_v4_alloc_auto(" + sizeArg + ")"
+				}
+			}
+
+			return cName + "(" + eg.generateStdlibArgs(args, fn) + ")"
+		}
 	}
 
 	object := eg.GenerateExpression(memberAccess.Object)

@@ -3356,6 +3356,64 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		return
 	}
 
+	// ===== 链式/平铺标准库调用统一解析 =====
+	// 支持 std.<mod>.<seg1>().<seg2>()... 链式与 std.<mod>.<fn>() 平铺两种形式。
+	// 解析命中后在此完成 import 检查与实参分析并提前返回，避免内层
+	// std.<mod>.<seg1>() 被当作独立调用重复分析而产生误报。
+	if modKey, segs, isChain := astutil.ExtractStdlibChain(expr.Function); isChain && sa.stdlibConfig != nil {
+		if fn, _, resolved := sa.stdlibConfig.ResolveChainedFunction(modKey, segs); resolved {
+			// 报错位置用成员名 token 的位置（CallExpression.Pos 未设置，是零值）
+			pos := expr.Pos
+			if ma, isMA := expr.Function.(*ast.MemberAccessExpression); isMA {
+				pos = ma.Pos
+			}
+
+			// 导入检查（支持 "std.string" 与 "string" 两种导入形式）
+			moduleName := modKey
+			if strings.HasPrefix(modKey, "std.") {
+				moduleName = strings.TrimPrefix(modKey, "std.")
+			} else if strings.HasPrefix(modKey, "freestanding.") {
+				moduleName = strings.TrimPrefix(modKey, "freestanding.")
+			}
+			if !sa.importedModules[moduleName] && !sa.importedModules[modKey] {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("模块 '%s' 未导入，请添加 'import %s;' 语句", modKey, modKey),
+					pos.Line, pos.Column,
+					"missing_import",
+					fmt.Sprintf("在文件顶部添加: import %s;", modKey),
+				)
+			}
+
+			// 分析实参（链式中间段的参数在生成阶段被忽略，只分析最终调用的实参）
+			for _, arg := range expr.Args {
+				sa.analyzeExpression(arg)
+			}
+
+			// 参数个数检查（与 stdlib 签名对齐；varargs 函数只检查下限）
+			expected := len(fn.Args)
+			if fn.VarArgs {
+				if len(expr.Args) < expected {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("函数调用参数不足: 期望至少 %d 个, 实际 %d 个", expected, len(expr.Args)),
+						pos.Line, pos.Column,
+						"wrong_arg_count",
+						"补充缺失的参数",
+					)
+				}
+			} else {
+				if len(expr.Args) != expected {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("函数调用参数数量不匹配: 期望 %d 个, 实际 %d 个", expected, len(expr.Args)),
+						pos.Line, pos.Column,
+						"wrong_arg_count",
+						"检查参数数量",
+					)
+				}
+			}
+			return
+		}
+	}
+
 	// adopt() / unwrap() / range() 内置运算符：编译期处理，不做函数符号检查
 	if ident, ok := expr.Function.(*ast.Identifier); ok {
 		if ident.Name == "adopt" || ident.Name == "unwrap" || ident.Name == "range" {

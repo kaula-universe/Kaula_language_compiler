@@ -390,6 +390,40 @@ func (sc *StdlibConfig) GetCFunctionName(moduleName, funcName string) string {
 	return funcName
 }
 
+// ResolveChainedFunction 把链式调用分段解析为 stdlib 函数。
+// moduleKey 是完整模块键（如 "std.string"），segments 不含模块名（如 ["compare", "ignore_case"]）。
+// 解析规则：先把链段用 "_" 拼接（joined），依次尝试：
+//  1. joined 自身就是模块函数名（精确匹配）；
+//  2. 模块前缀 + joined。模块前缀优先取 Module.Prefix 字段；
+//     未配置 Prefix 时回退为 "<模块名>_"（如 "std.string" -> "string_"）。
+//
+// 从而把 std.string.compare().ignore_case(...) 解析为 string_compare_ignore_case，
+// 同时兼容旧平铺写法 std.string.string_create(...)（segments = ["string_create"]）。
+func (sc *StdlibConfig) ResolveChainedFunction(moduleKey string, segments []string) (*Function, string, bool) {
+	mod, ok := sc.Modules[moduleKey]
+	if !ok || len(segments) == 0 {
+		return nil, "", false
+	}
+	joined := strings.Join(segments, "_")
+
+	// 1. 精确匹配（joined 本身就是 C 函数名）
+	if fn, ok := mod.Functions[joined]; ok {
+		return &fn, joined, true
+	}
+
+	// 2. 模块前缀 + joined
+	prefix := mod.Prefix
+	if prefix == "" {
+		parts := strings.Split(moduleKey, ".")
+		prefix = parts[len(parts)-1] + "_"
+	}
+	candidate := prefix + joined
+	if fn, ok := mod.Functions[candidate]; ok {
+		return &fn, candidate, true
+	}
+	return nil, "", false
+}
+
 func (sc *StdlibConfig) IsStdlibFunction(funcName string) bool {
 	for _, module := range sc.Modules {
 		if _, ok := module.Functions[funcName]; ok {
