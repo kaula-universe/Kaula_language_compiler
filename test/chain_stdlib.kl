@@ -1,0 +1,42 @@
+import std.io
+import std.string
+
+# 链式标准库调用机制测试
+# std.<mod>.<seg1>().<seg2>()... 链段拼接 + 模块前缀 = C 函数名
+# 例: std.string.compare().ignore_case(...) → string_compare_ignore_case
+
+fn main() {
+    # 链式: compare().ignore_case() → string_compare_ignore_case
+    string a = std.string.create("Hello")
+    string b = std.string.create("hello")
+    i32 cmp = std.string.compare().ignore_case(a, b)
+    std.io.println("ignore_case(Hello, hello) = ", cmp)
+
+    # 单段链: to_upper() → string_to_upper
+    string up = std.string.to_upper(a)
+    std.io.println("to_upper(Hello) = ", up)
+
+    # 单段链: length() → string_length
+    i32 len_a = std.string.length(a)
+    std.io.println("length(Hello) = ", len_a)
+
+    # 多级链: substring().of? 不存在, 用真实存在的多段组合:
+    # substring 取子串 (单段) + compare 平铺
+    string sub = std.string.substring(a, 1, 3)
+    std.io.println("substring(Hello,1,3) = ", sub)
+
+    # 平铺旧写法仍然可用
+    string old = std.string.string_create("old style")
+    std.io.println("old style = ", old)
+
+    # std.io 链式: print().int() → print_int
+    std.io.print().int(42)
+    std.io.println("")
+
+    # 多参数 println（类型推导版本, 与平铺路径一致）
+    std.io.println("sum: ", cmp, " / end")
+
+    # 三元链: 平铺 + 链式混合表达式作为实参
+    string upper2 = std.string.string_to_upper(std.string.create("mixed"))
+    std.io.println("upper2 = ", upper2)
+}
