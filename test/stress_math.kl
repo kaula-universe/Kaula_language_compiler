@@ -1,0 +1,96 @@
+# stress_math.kl — std.math API 全覆盖压力测试
+# 验证: 绝对值/取整/幂指对数/三角/双曲/极值/随机/角度转换/类型化 abs
+import std.io
+import std.math
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn near(f64 a, f64 b) bool {
+    f64 d = a - b
+    if d < 0 {
+        d = -d
+    }
+    return d < 0.0001
+}
+
+fn main() {
+    # ---- 绝对值 ----
+    check(near(std.math.abs(-3.5), 3.5), "abs(-3.5)")
+    check(std.math.abs_i32(-7) == 7, "abs_i32(-7)")
+    check(std.math.abs_i64(-9000000000) == 9000000000, "abs_i64")
+    check(std.math.abs_i8(-5) == 5, "abs_i8(-5)")
+    check(std.math.abs_i16(-1234) == 1234, "abs_i16(-1234)")
+
+    # ---- 取整 ----
+    check(std.math.floor(3.7) == 3.0, "floor(3.7)")
+    check(std.math.ceil(3.2) == 4.0, "ceil(3.2)")
+    check(std.math.round(3.5) == 4.0, "round(3.5)")
+    check(std.math.round(3.4) == 3.0, "round(3.4)")
+    check(std.math.trunc(-3.7) == -3.0, "trunc(-3.7)")
+
+    # ---- 幂/指数/对数 ----
+    check(near(std.math.pow(2.0, 10.0), 1024.0), "pow(2,10)")
+    check(near(std.math.sqrt(81.0), 9.0), "sqrt(81)")
+    check(near(std.math.cbrt(27.0), 3.0), "cbrt(27)")
+    check(near(std.math.hypot(3.0, 4.0), 5.0), "hypot(3,4)")
+    check(near(std.math.exp(0.0), 1.0), "exp(0)")
+    check(near(std.math.exp2(3.0), 8.0), "exp2(3)")
+    check(near(std.math.log(1.0), 0.0), "log(1)")
+    check(near(std.math.log2(8.0), 3.0), "log2(8)")
+    check(near(std.math.log10(1000.0), 3.0), "log10(1000)")
+
+    # ---- 余数 / 分解 ----
+    check(near(std.math.fmod(7.5, 2.0), 1.5), "fmod(7.5,2)")
+    f64 ipart = 0
+    f64 frac = std.math.modf(3.75, &ipart)
+    check(ipart == 3.0 && near(frac, 0.75), "modf(3.75)")
+
+    # ---- 三角函数 ----
+    check(near(std.math.sin(0.0), 0.0), "sin(0)")
+    check(near(std.math.cos(0.0), 1.0), "cos(0)")
+    check(near(std.math.tan(0.0), 0.0), "tan(0)")
+    check(near(std.math.asin(0.0), 0.0), "asin(0)")
+    check(near(std.math.acos(1.0), 0.0), "acos(1)")
+    check(near(std.math.atan(0.0), 0.0), "atan(0)")
+    check(near(std.math.atan2(0.0, 1.0), 0.0), "atan2(0,1)")
+    check(near(std.math.sinh(0.0), 0.0), "sinh(0)")
+    check(near(std.math.cosh(0.0), 1.0), "cosh(0)")
+    check(near(std.math.tanh(0.0), 0.0), "tanh(0)")
+
+    # ---- 极值 ----
+    check(std.math.max(3.0, 7.0) == 7.0, "max(3,7)")
+    check(std.math.min(3.0, 7.0) == 3.0, "min(3,7)")
+    check(std.math.fmax(1.5, 2.5) == 2.5, "fmax")
+    check(std.math.fmin(1.5, 2.5) == 1.5, "fmin")
+    check(std.math.max_i32(-1, 5) == 5, "max_i32")
+    check(std.math.min_i64(-1, 5) == -1, "min_i64")
+    check(std.math.max_u32(3, 9) == 9, "max_u32")
+
+    # ---- 特殊值判定 ----
+    check(std.math.signbit(-2.0) != 0, "signbit(-2)")
+    check(std.math.isnan(0.0) == false, "isnan(0)")
+    check(std.math.isinf(1.0e300 * 1.0e300), "isinf overflow")
+    check(std.math.isfinite(1.5), "isfinite(1.5)")
+
+    # ---- 角度转换 ----
+    check(near(std.math.deg_to_rad(180.0), 3.1415926535), "deg_to_rad(180)")
+    check(near(std.math.rad_to_deg(3.1415926535), 180.0), "rad_to_deg(pi)")
+
+    # ---- 随机 ----
+    std.math.srand(42)
+    i32 r1 = std.math.rand()
+    i32 r2 = std.math.rand()
+    check(r1 != r2, "rand sequence varies")
+    f64 rf = std.math.randf()
+    check(rf >= 0.0 && rf < 1.0, "randf in [0,1)")
+    f64 rr = std.math.rand_range(10.0, 20.0)
+    check(rr >= 10.0 && rr <= 20.0, "rand_range in [10,20]")
+
+    std.io.println("--- stress_math done ---")
+}

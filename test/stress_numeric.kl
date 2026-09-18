@@ -1,0 +1,75 @@
+# stress_numeric.kl — 数值运算压力测试
+# 验证: 整数/浮点运算/除法/取模/负数/大数/混合运算/布尔/比较/位运算
+import std.io
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    # ---- 整数基础运算 ----
+    check(7 + 3 == 10, "add")
+    check(7 - 3 == 4, "sub")
+    check(7 * 3 == 21, "mul")
+    check(7 / 3 == 2, "int div trunc")
+    check(7 % 3 == 1, "mod")
+    check(-7 + 10 == 3, "negative add")
+    check(-7 % 3 == -1, "negative mod")
+
+    # ---- 运算优先级 ----
+    check(2 + 3 * 4 == 14, "precedence mul")
+    check((2 + 3) * 4 == 20, "precedence paren")
+    check(10 - 2 - 3 == 5, "left assoc sub")
+    check(2 * 3 + 4 * 5 == 26, "precedence mixed")
+
+    # ---- i64 大数 ----
+    i64 big = 9000000000
+    check(big + 1 == 9000000001, "i64 big add")
+    check(big * 2 == 18000000000, "i64 big mul")
+
+    # ---- 浮点 ----
+    f64 f = 3.5
+    check(f + 1.5 == 5.0, "f64 add")
+    check(f * 2.0 == 7.0, "f64 mul")
+    f64 div = 7.0 / 2.0
+    check(div == 3.5, "f64 div")
+
+    # ---- 混合运算 ----
+    check(2 + 3.0 == 5.0, "mixed int f64")
+    i32 mixed = 10 / 3
+    check(mixed == 3, "int division")
+
+    # ---- 比较/逻辑 ----
+    check(5 > 3 && 2 < 4, "and")
+    check(5 > 3 || 2 > 4, "or")
+    check(!(5 < 3), "not")
+    check(3 <= 3 && 5 >= 5, "le ge")
+    check(4 != 5, "ne")
+
+    # ---- 位运算 ----
+    check((5 & 3) == 1, "bit and")
+    check((5 | 3) == 7, "bit or")
+    check((5 ^ 3) == 6, "bit xor")
+    check((1 << 4) == 16, "shift left")
+    check((256 >> 4) == 16, "shift right")
+
+    # ---- 复合赋值 ----
+    i32 acc = 10
+    acc = acc + 5
+    acc = acc * 2
+    acc = acc - 4
+    check(acc == 26, "compound sequence")
+
+    # ---- 循环计数 ----
+    i32 total = 0
+    for i in range(100) {
+        total = total + i
+    }
+    check(total == 4950, "sum 0..99")
+
+    std.io.println("--- stress_numeric done ---")
+}

@@ -96,7 +96,7 @@ func TestMatchStringsNULAndSingleEvaluation(t *testing.T) {
 	if strings.Contains(code, "strcmp") {
 		t.Fatal("String must compare length and bytes")
 	}
-	runClosureC(t, cg, "#include <string.h>\ntypedef struct {char *ptr; size_t len;} String;\nint main(void){ String s={\"a\\0b\",3};int v=0;"+code+"return v!=42;}")
+	runClosureC(t, cg, "#include <string.h>\n#define STRING_SSO_CAPACITY 15\ntypedef struct { size_t len; union { char* ptr; char sso[16]; }; } String;\n#define string_cdata(s) ((s).len <= STRING_SSO_CAPACITY ? (const char*)(s).sso : (const char*)(s).ptr)\nint main(void){ String s={0}; memcpy(s.sso, \"a\\0b\", 3); s.len=3; int v=0;"+code+"return v!=42;}")
 	if got := escapeCString("a\x007"); got != "a\\0007" {
 		t.Fatalf("NUL octal bleed: %q", got)
 	}

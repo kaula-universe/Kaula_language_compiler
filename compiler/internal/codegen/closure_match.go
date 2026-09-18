@@ -55,7 +55,7 @@ func (eg *ExpressionGenerator) lowerMatch(e *ast.MatchExpression, result string)
 				if eg.inferType(e.Target) == "cstr" {
 					cond = fmt.Sprintf("strcmp(%s, %s) == 0", name, lit)
 				} else {
-					cond = fmt.Sprintf("%s.len == sizeof(%s)-1 && memcmp(%s.ptr, %s, sizeof(%s)-1) == 0", name, lit, name, lit, lit)
+					cond = fmt.Sprintf("%s.len == sizeof(%s)-1 && memcmp(string_cdata(%s), %s, sizeof(%s)-1) == 0", name, lit, name, lit, lit)
 				}
 			}
 			if !first {

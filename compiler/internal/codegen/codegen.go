@@ -1338,6 +1338,13 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			allIncludes.WriteString("#endif\n")
 			allIncludes.WriteString("#endif\n")
 		}
+		// string_cdata 兜底宏：kaula.h（std/base/types.h）在 SSO 环境中已定义
+		// （len<=15 读 sso 槽位）；在无 SSO 的最小 String 环境（如 codegen
+		// 单元测试）下未定义，回退到 .ptr。字符串 match 生成的比较代码依赖
+		// 该宏做 SSO 感知读取，否则 SSO 短字符串会读取未初始化的 ptr 槽位。
+		allIncludes.WriteString("#ifndef string_cdata\n")
+		allIncludes.WriteString("#define string_cdata(s) ((s).ptr)\n")
+		allIncludes.WriteString("#endif\n")
 	}
 
 	if cg.stdlibConfig != nil {
