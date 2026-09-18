@@ -44,12 +44,13 @@ func localImportFiles(imp *ast.ImportStatement) []string {
 }
 
 // precompileLocalImports 预解析本地 .kl 文件 import
-// 返回: (pub 函数名集合, 合并后的 C 函数定义代码, 被导入文件内容哈希表)
+// 返回: (pub 函数名集合, export 函数名集合, 合并后的 C 函数定义代码, 被导入文件内容哈希表)
 // 哈希表覆盖传递闭包内所有实际读取的 .kl 文件（绝对路径 -> SHA256），
 // 供增量缓存键校验使用
-func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, string, []string, []string, map[string]string) {
+func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, map[string]bool, string, []string, []string, map[string]string) {
 	state := &localCompileState{
 		pubFuncs:       make(map[string]bool),
+		exportFuncs:    make(map[string]bool),
 		compiled:       make(map[string]bool),
 		fileHashes:     make(map[string]string),
 		localHeaderSet: make(map[string]bool),
@@ -69,12 +70,13 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 		state.compileFile(localPath, inputDir)
 	}
 
-	return state.pubFuncs, state.allCode, state.localHeaders, state.usedModules, state.fileHashes
+	return state.pubFuncs, state.exportFuncs, state.allCode, state.localHeaders, state.usedModules, state.fileHashes
 }
 
 // localCompileState 共享本地 import 编译状态（去重 + 依序输出）
 type localCompileState struct {
 	pubFuncs       map[string]bool
+	exportFuncs    map[string]bool // 跨文件 export 函数名（C 侧保持原名，不加 K_ 前缀）
 	allCode        string
 	localHeaders   []string        // 本地文件依赖的 std 模块头文件（注入到主 TU）
 	localHeaderSet map[string]bool // 去重
@@ -152,6 +154,11 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	for _, stmt := range localProgram.Statements {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsPublic {
 			s.pubFuncs[fnStmt.Name] = true
+		}
+		// 收集 export 函数名：export 含 pub 语义（跨文件可见 + C 级导出），
+		// 调用端必须保持原名（不加 K_ 前缀），与定义端命名一致。
+		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsExported {
+			s.exportFuncs[fnStmt.Name] = true
 		}
 	}
 
@@ -1235,10 +1242,13 @@ func main() {
 	}
 	cg.SetSourceFile(inputFile)
 
-	// 多文件编译：预解析本地 .kl 文件 import，收集 pub 函数名与被导入文件内容哈希
-	localImportFuncs, localImportCode, localHeaders, localUsedModules, importFileHashes := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
+	// 多文件编译：预解析本地 .kl 文件 import，收集 pub/export 函数名与被导入文件内容哈希
+	localImportFuncs, localImportExportFuncs, localImportCode, localHeaders, localUsedModules, importFileHashes := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
 	if len(localImportFuncs) > 0 {
 		cg.SetLocalImportFuncs(localImportFuncs)
+	}
+	if len(localImportExportFuncs) > 0 {
+		cg.SetLocalImportExportFuncs(localImportExportFuncs)
 	}
 	if len(localPubTypes) > 0 {
 		cg.SetLocalPubTypes(localPubTypes)
