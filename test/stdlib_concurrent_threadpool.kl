@@ -1,0 +1,49 @@
+# TDD: std.concurrent 线程池测试 (v2)
+
+import std.testing
+import std.concurrent
+import std.io
+
+# 全局计数器 (单线程测试，竞态在 GREEN 后再测)
+i32 tasks_executed = 0
+
+fn task_func(arg: void*) {
+    tasks_executed = tasks_executed + 1
+}
+
+fn assert_msg(cond: bool, msg: string) {
+    if !cond {
+        std.io.println("FAIL: ", msg)
+    }
+}
+
+fn main() {
+    # 基础创建销毁
+    ThreadPool pool = std.concurrent.thread_pool_create(4)
+    assert_msg(pool != null, "线程池创建应成功")
+    std.concurrent.thread_pool_destroy(pool)
+
+    # 0 个线程的线程池 (边界)
+    ThreadPool pool0 = std.concurrent.thread_pool_create(0)
+    std.concurrent.thread_pool_destroy(pool0)
+
+    # 添加任务并等待
+    ThreadPool pool2 = std.concurrent.thread_pool_create(2)
+    tasks_executed = 0
+    Task task = { func: task_func, arg: null }
+    std.concurrent.thread_pool_add_task(pool2, task)
+    std.concurrent.thread_pool_wait_completion(pool2)
+    assert_msg(tasks_executed == 1, "任务应执行 1 次")
+    std.concurrent.thread_pool_destroy(pool2)
+
+    # 销毁时任务未完成 (任务丢失)
+    ThreadPool pool3 = std.concurrent.thread_pool_create(2)
+    tasks_executed = 0
+    for _i in range(0, 1000) {
+        std.concurrent.thread_pool_add_task(pool3, task)
+    }
+    std.concurrent.thread_pool_destroy(pool3)
+    # 不验证计数 - 行为未定义
+
+    std.io.println("threadpool tests complete")
+}

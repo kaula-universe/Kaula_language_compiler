@@ -1,0 +1,58 @@
+# TDD: std.async 异步事件循环测试 (v2)
+
+import std.testing
+import std.async
+import std.io
+
+fn assert_msg(cond: bool, msg: string) {
+    if !cond {
+        std.io.println("FAIL: ", msg)
+    }
+}
+
+fn main() {
+    # 基础创建销毁
+    LightAsyncLoop* loop = std.async.light_async_loop_create()
+    assert_msg(loop != null, "异步循环创建应成功")
+    std.async.light_async_loop_destroy(loop)
+
+    # 重复销毁 (危险)
+    LightAsyncLoop* loop2 = std.async.light_async_loop_create()
+    std.async.light_async_loop_destroy(loop2)
+    std.async.light_async_loop_destroy(loop2)  # 重复 destroy
+
+    # 销毁 null
+    # std.async.light_async_loop_destroy(null)  # 危险
+
+    # 销毁后添加任务 (use-after-free)
+    LightAsyncLoop* loop3 = std.async.light_async_loop_create()
+    std.async.light_async_loop_destroy(loop3)
+    # std.async.light_async_loop_add(loop3, null, null)  # use-after-free
+
+    # 并发 add 测试
+    LightAsyncLoop* loop4 = std.async.light_async_loop_create()
+    for _i in range(0, 100) {
+        std.async.light_async_loop_add(loop4, null, null)
+    }
+    i32 size = std.async.light_async_loop_size(loop4)
+    assert_msg(size == 100, "应添加 100 个任务")
+    std.async.light_async_loop_destroy(loop4)
+
+    # 空循环 poll
+    LightAsyncLoop* loop5 = std.async.light_async_loop_create()
+    i32 count = std.async.light_async_loop_poll(loop5)
+    assert_msg(count == 0, "空循环 poll 应返回 0")
+    std.async.light_async_loop_destroy(loop5)
+
+    # start/stop
+    LightAsyncLoop* loop6 = std.async.light_async_loop_create()
+    std.async.light_async_loop_start(loop6)
+    bool running = std.async.light_async_loop_is_running(loop6)
+    assert_msg(running, "启动后应运行")
+    std.async.light_async_loop_stop(loop6)
+    bool running2 = std.async.light_async_loop_is_running(loop6)
+    assert_msg(!running2, "停止后应不运行")
+    std.async.light_async_loop_destroy(loop6)
+
+    std.io.println("async tests complete")
+}

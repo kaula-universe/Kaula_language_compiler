@@ -1,0 +1,59 @@
+# TDD: std.parallel 并行算法测试 (v2)
+# 注: Kaula 不支持 volatile，并行竞态测试需要多线程才能触发
+
+import std.testing
+import std.parallel
+import std.concurrent
+import std.io
+
+# 全局计数器 (Kaula 用户代码层不支持 int/long, 用 i32 替代)
+i32 global_sum = 0
+
+fn accumulate_index(data: void*, index: i32) {
+    i32* arr = (i32*)data
+    global_sum = global_sum + arr[index]
+}
+
+fn assert_msg(cond: bool, msg: string) {
+    if !cond {
+        std.io.println("FAIL: ", msg)
+    }
+}
+
+fn main() {
+    # parallel_for 基础
+    i32 arr[10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    global_sum = 0
+    std.parallel.parallel_for(0, 10, accumulate_index, arr)
+    assert_msg(global_sum == 45, "0+1+...+9 应等于 45")
+
+    # 零长度
+    std.parallel.parallel_for(5, 5, accumulate_index, null)
+
+    # 倒序 (未定义行为)
+    std.parallel.parallel_for(10, 5, accumulate_index, null)
+
+    # 并行归约
+    i32 arr2[5] = [10, 20, 30, 40, 50]
+    i32 result = std.parallel.parallel_reduce(arr2, 5, null, 0)
+    # Bug 预期: parallel_reduce 接受 null reducer 函数, 行为可能不正确
+    assert_msg(result >= 0, "reduce 结果应非负")
+
+    # 并行排序
+    i32 arr3[10] = [5, 2, 8, 1, 9, 3, 7, 4, 6, 0]
+    std.parallel.parallel_sort(arr3, 10)
+    for i in range(0, 9) {
+        assert_msg(arr3[i] <= arr3[i+1], "排序后应递增")
+    }
+
+    # 并行前缀和
+    i32 arr4[5] = [1, 2, 3, 4, 5]
+    std.parallel.parallel_prefix_sum(arr4, 5)
+    assert_msg(arr4[0] == 1, "prefix[0]=1")
+    assert_msg(arr4[1] == 3, "prefix[1]=3")
+    assert_msg(arr4[2] == 6, "prefix[2]=6")
+    assert_msg(arr4[3] == 10, "prefix[3]=10")
+    assert_msg(arr4[4] == 15, "prefix[4]=15")
+
+    std.io.println("parallel tests complete")
+}

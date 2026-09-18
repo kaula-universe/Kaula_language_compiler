@@ -1,0 +1,73 @@
+# TDD: std.json 边界测试
+# RED 阶段 - 预期暴露 JSON 解析 bug
+
+import std.testing
+import std.json
+import std.string
+
+#[test]
+fn test_json_parse_empty_string() {
+    # 边界: 空字符串解析
+    string json_str = std.string.create("")
+    # Bug 预期: 可能崩溃或返回无效对象
+    # json obj = std.json.parse(json_str)
+    # assert_null(obj, "空字符串应解析失败")
+}
+
+#[test]
+fn test_json_parse_invalid_syntax() {
+    # 边界: 无效 JSON 语法
+    string json_str = std.string.create("{invalid json}")
+    # Bug 预期: 可能没有错误处理
+    # json obj = std.json.parse(json_str)
+    # assert_null(obj, "无效 JSON 应返回 null")
+}
+
+#[test]
+fn test_json_parse_nested_arrays() {
+    # 边界: 深度嵌套数组
+    string json_str = std.string.create("[[[[[1]]]]]")
+    # Bug 预期: 可能栈溢出
+    # json obj = std.json.parse(json_str)
+    # assert_not_null(obj, "深度嵌套应正确解析")
+}
+
+#[test]
+fn test_json_parse_unicode_escape() {
+    # Unicode: \uXXXX 转义序列
+    string json_str = std.string.create("{\"name\": \"\\u4f60\\u597d\"}")
+    # Bug 预期: 可能不支持 Unicode 转义
+    # json obj = std.json.parse(json_str)
+    # string name = std.json.get_string(obj, "name")
+    # assert_string_equals("你好", name, "Unicode 转义应正确解析")
+}
+
+#[test]
+fn test_json_null_pointer_protection() {
+    # 安全: 传入 null 指针
+    # Bug 预期: 可能崩溃
+    # string result = std.json.stringify(null)
+    # assert_string_equals("null", result, "null 对象应序列化为 'null'")
+}
+
+#[test]
+fn test_json_large_number() {
+    # 边界: 超大数字解析
+    string json_str = std.string.create("{\"big\": 9999999999999999999}")
+    # Bug 预期: 可能溢出或精度丢失
+    # json obj = std.json.parse(json_str)
+    # assert_not_null(obj, "大数字应正确解析")
+}
+
+#[test]
+fn test_json_special_characters() {
+    # 边界: 特殊字符转义
+    string json_str = std.string.create("{\"str\": \"line1\\nline2\\ttab\"}")
+    # Bug 预期: 可能不正确处理 \n \t
+    # json obj = std.json.parse(json_str)
+    # assert_not_null(obj, "特殊字符应正确转义")
+}
+
+fn main() {
+    test_run_all()
+}

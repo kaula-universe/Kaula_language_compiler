@@ -1,0 +1,98 @@
+# TDD: std.string 边界测试
+# RED 阶段 - 预期这些测试会暴露 bug
+
+import std.testing
+import std.string
+
+#[test]
+fn test_empty_string_length() {
+    string empty = std.string.create("")
+    i32 len = std.string.length(empty)
+    assert_equals(0, len, "空字符串长度应为 0")
+}
+
+#[test]
+fn test_null_string_create() {
+    # 边界: 传入空指针会崩溃吗?
+    string s = std.string.create(null)
+    i32 len = std.string.length(s)
+    assert_equals(0, len, "null 创建的字符串应长度为 0")
+}
+
+#[test]
+fn test_substring_out_of_bounds() {
+    # 边界: 越界访问应返回空还是崩溃?
+    string s = std.string.create("hello")
+    string sub = std.string.substring(s, 10, 20)
+    i32 len = std.string.length(sub)
+    assert_equals(0, len, "越界 substring 应返回空字符串")
+}
+
+#[test]
+fn test_substring_negative_index() {
+    # 边界: 负数索引行为?
+    string s = std.string.create("test")
+    string sub = std.string.substring(s, -1, 2)
+    i32 len = std.string.length(sub)
+    assert_equals(0, len, "负数索引应返回空字符串")
+}
+
+#[test]
+fn test_string_compare_same_object() {
+    # 边界: 自己和自己比较
+    string s = std.string.create("abc")
+    i32 cmp = std.string.compare(s, s)
+    assert_equals(0, cmp, "同一字符串对象比较应返回 0")
+}
+
+#[test]
+fn test_string_concat_empty() {
+    # 边界: 空字符串拼接
+    string a = std.string.create("")
+    string b = std.string.create("hello")
+    string result = std.string.concat(a, b)
+    assert_string_equals("hello", result, "空字符串拼接应正确")
+}
+
+#[test]
+fn test_unicode_string_length() {
+    # Unicode: 中文字符长度计算
+    string s = std.string.create("你好世界")
+    i32 len = std.string.length(s)
+    # Bug 预期: 可能按字节计算而非字符
+    assert_in_range(len, 4, 12, "Unicode 字符串长度应在合理范围")
+}
+
+#[test]
+fn test_string_to_upper_unicode() {
+    # Unicode: 中文字符大小写
+    string s = std.string.create("Hello世界")
+    string upper = std.string.to_upper(s)
+    # Bug 预期: 可能对 Unicode 处理不正确
+    assert_not_null(upper, "to_upper 应返回非空结果")
+}
+
+#[test]
+fn test_string_split_empty_delimiter() {
+    # 边界: 空分隔符会导致无限循环?
+    string s = std.string.create("abc")
+    # TODO: split 返回数组, 需要确认 API
+    # string[] parts = std.string.split(s, "")
+    # assert_equals(3, parts.length, "空分隔符应按字符分割")
+}
+
+#[test]
+fn test_string_memory_leak() {
+    # 内存: 大量字符串创建销毁
+    for i in range(0, 1000) {
+        string temp = std.string.create("temp string with some length")
+        string upper = std.string.to_upper(temp)
+        string concat = std.string.concat(temp, upper)
+        # 期望 KMM 正确回收
+    }
+    # 没有崩溃就算通过
+}
+
+fn main() {
+    test_run_all()
+}

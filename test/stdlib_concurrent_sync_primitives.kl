@@ -1,0 +1,59 @@
+# TDD: std.concurrent 信号量/读写锁/条件变量 (v2)
+
+import std.testing
+import std.concurrent
+import std.io
+
+fn assert_msg(cond: bool, msg: string) {
+    if !cond {
+        std.io.println("FAIL: ", msg)
+    }
+}
+
+fn main() {
+    # 信号量测试
+    Semaphore sem = std.concurrent.semaphore_create(1)
+    assert_msg(sem != null, "semaphore_create 应成功")
+    bool ok = std.concurrent.semaphore_trywait(sem)
+    assert_msg(ok, "初始值 1 trywait 应成功")
+    std.concurrent.semaphore_post(sem)
+    std.concurrent.semaphore_destroy(sem)
+
+    # 多次 post
+    Semaphore sem2 = std.concurrent.semaphore_create(0)
+    std.concurrent.semaphore_post(sem2)
+    std.concurrent.semaphore_post(sem2)
+    std.concurrent.semaphore_post(sem2)
+    i32 value = std.concurrent.semaphore_get_value(sem2)
+    assert_msg(value == 3, "3 次 post 应为 3")
+    std.concurrent.semaphore_destroy(sem2)
+
+    # 销毁有未消费资源的信号量 (危险)
+    Semaphore sem3 = std.concurrent.semaphore_create(5)
+    std.concurrent.semaphore_destroy(sem3)  # 5 个未消费资源
+
+    # 读写锁测试
+    ReadWriteLock rw = std.concurrent.rwlock_create()
+    std.concurrent.rwlock_read_lock(rw)
+    std.concurrent.rwlock_read_unlock(rw)
+    std.concurrent.rwlock_destroy(rw)
+
+    # 写锁独占
+    ReadWriteLock rw2 = std.concurrent.rwlock_create()
+    std.concurrent.rwlock_write_lock(rw2)
+    bool read_ok = std.concurrent.rwlock_try_read_lock(rw2)
+    assert_msg(!read_ok, "写锁存在时读锁 trylock 应失败")
+    std.concurrent.rwlock_write_unlock(rw2)
+    std.concurrent.rwlock_destroy(rw2)
+
+    # 条件变量
+    Condition cond = std.concurrent.condition_create()
+    Mutex m = std.concurrent.mutex_create()
+    std.concurrent.mutex_lock(m)
+    std.concurrent.condition_signal(cond)
+    std.concurrent.mutex_unlock(m)
+    std.concurrent.condition_destroy(cond)
+    std.concurrent.mutex_destroy(m)
+
+    std.io.println("sync primitive tests complete")
+}

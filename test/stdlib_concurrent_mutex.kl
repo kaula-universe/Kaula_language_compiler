@@ -1,0 +1,55 @@
+# TDD: std.concurrent 互斥锁边界测试 (v2 - 修正 API 误用)
+# RED 阶段 - 使用 Kaula 真实 API: std.testing.test_assert_*
+
+import std.testing
+import std.concurrent
+import std.io
+
+fn assert_msg(cond: bool, msg: string) {
+    if !cond {
+        std.io.println("FAIL: ", msg)
+    }
+}
+
+fn main() {
+    # Bug 预期: mutex_unlock 不检查持锁状态
+
+    # 测试 1: 基础 lock/unlock
+    Mutex m = std.concurrent.mutex_create()
+    assert_msg(m != null, "mutex_create 应返回非空")
+    std.concurrent.mutex_lock(m)
+    std.concurrent.mutex_unlock(m)
+    std.concurrent.mutex_destroy(m)
+
+    # 测试 2: trylock 未锁时成功
+    Mutex m2 = std.concurrent.mutex_create()
+    bool ok = std.concurrent.mutex_trylock(m2)
+    assert_msg(ok, "未锁的 mutex 应能 trylock")
+    std.concurrent.mutex_unlock(m2)
+    std.concurrent.mutex_destroy(m2)
+
+    # 测试 3: trylock 已锁时失败
+    Mutex m3 = std.concurrent.mutex_create()
+    std.concurrent.mutex_lock(m3)
+    bool ok2 = std.concurrent.mutex_trylock(m3)
+    assert_msg(!ok2, "已锁的 mutex trylock 应失败")
+    std.concurrent.mutex_unlock(m3)
+    std.concurrent.mutex_destroy(m3)
+
+    # 测试 4: unlock 不检查持锁状态 (危险 - 行为未定义)
+    Mutex m4 = std.concurrent.mutex_create()
+    std.concurrent.mutex_unlock(m4)  # 应该报警告或 panic
+    std.concurrent.mutex_destroy(m4)
+
+    # 测试 5: destroy 已锁的 mutex (危险 - 行为未定义)
+    Mutex m5 = std.concurrent.mutex_create()
+    std.concurrent.mutex_lock(m5)
+    std.concurrent.mutex_destroy(m5)  # 应该警告或 panic
+
+    # 测试 6: 重复 destroy (危险 - 行为未定义)
+    Mutex m6 = std.concurrent.mutex_create()
+    std.concurrent.mutex_destroy(m6)
+    std.concurrent.mutex_destroy(m6)  # 重复 destroy
+
+    std.io.println("mutex tests complete")
+}

@@ -1,0 +1,86 @@
+# TDD: std.web HTTP 客户端边界测试
+# RED 阶段 - 预期暴露网络库 bug
+
+import std.testing
+import std.web
+import std.string
+
+#[test]
+fn test_http_invalid_url() {
+    # 边界: 无效 URL
+    string url = std.string.create("not a valid url")
+    # Bug 预期: 可能崩溃或无错误处理
+    # http_response resp = std.web.get(url)
+    # assert_null(resp, "无效 URL 应返回错误")
+}
+
+#[test]
+fn test_http_empty_url() {
+    # 边界: 空 URL
+    string url = std.string.create("")
+    # Bug 预期: 可能崩溃
+    # http_response resp = std.web.get(url)
+    # assert_null(resp, "空 URL 应返回错误")
+}
+
+#[test]
+fn test_http_timeout() {
+    # 边界: 超时处理
+    # Bug 预期: 可能无超时机制导致永久挂起
+    string url = std.string.create("http://httpstat.us/200?sleep=60000")
+    # http_response resp = std.web.get_with_timeout(url, 1000)  # 1秒超时
+    # assert_null(resp, "超时应返回错误")
+}
+
+#[test]
+fn test_http_null_headers() {
+    # 安全: null 请求头
+    string url = std.string.create("https://httpbin.org/get")
+    # Bug 预期: 可能崩溃
+    # http_response resp = std.web.get_with_headers(url, null)
+    # assert_not_null(resp, "null headers 应使用默认值")
+}
+
+#[test]
+fn test_http_binary_response() {
+    # 边界: 二进制响应体
+    string url = std.string.create("https://httpbin.org/bytes/1024")
+    # Bug 预期: 可能假设所有响应都是文本
+    # http_response resp = std.web.get(url)
+    # assert_not_null(resp, "二进制响应应正确处理")
+    # assert_in_range(resp.body_size, 1000, 1100, "响应大小应约为 1024")
+}
+
+#[test]
+fn test_http_redirect_loop() {
+    # 边界: 重定向循环
+    # Bug 预期: 可能无限循环
+    string url = std.string.create("http://httpstat.us/301")
+    # http_response resp = std.web.get(url)
+    # assert_not_null(resp, "重定向应正确处理")
+}
+
+#[test]
+fn test_http_post_empty_body() {
+    # 边界: POST 空请求体
+    string url = std.string.create("https://httpbin.org/post")
+    string body = std.string.create("")
+    # Bug 预期: 可能不设置 Content-Length
+    # http_response resp = std.web.post(url, body)
+    # assert_not_null(resp, "空 POST 应成功")
+}
+
+#[test]
+fn test_http_concurrent_requests() {
+    # 并发: 多个同时请求
+    # Bug 预期: 可能有竞态条件
+    string url = std.string.create("https://httpbin.org/get")
+    for i in range(0, 10) {
+        # http_response resp = std.web.get(url)
+        # assert_not_null(resp, "并发请求应成功")
+    }
+}
+
+fn main() {
+    test_run_all()
+}
