@@ -1,0 +1,101 @@
+# stress_strings.kl — std.string API 全覆盖压力测试
+# 验证: create/copy/concat/substring/length/大小写/trim/replace/split/
+#       查找/比较/前缀后缀/空判断/转换/Builder
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    # ---- create / copy / length ----
+    string s = std.string.create("Hello, Kaula")
+    check(std.string.length(s) == 12, "length(Hello, Kaula)=12")
+
+    string copy = std.string.copy(s)
+    check(std.string.equals(s, copy), "copy equals")
+
+    # ---- concat ----
+    string a = std.string.create("foo")
+    string b = std.string.create("bar")
+    string ab = std.string.concat(a, b)
+    check(std.string.equals(ab, std.string.create("foobar")), "concat foo+bar=foobar")
+
+    string abn = std.string.concat_int(ab, 42)
+    check(std.string.equals(abn, std.string.create("foobar42")), "concat_int")
+
+    string abf = std.string.concat_float(ab, 3.5)
+    check(std.string.starts_with(abf, std.string.create("foobar")), "concat_float prefix")
+
+    # ---- substring / char_at ----
+    string sub = std.string.substring(s, 7, 5)
+    check(std.string.equals(sub, std.string.create("Kaula")), "substring(7,5)=Kaula")
+    check(std.string.char_at(s, 0) == 'H', "char_at(0)=H")
+    check(std.string.char_at(s, 1) == 'e', "char_at(1)=e")
+
+    # ---- upper / lower / trim ----
+    string up = std.string.to_upper(s)
+    check(std.string.equals(up, std.string.create("HELLO, KAULA")), "to_upper")
+    string low = std.string.to_lower(up)
+    check(std.string.equals(low, std.string.create("hello, kaula")), "to_lower")
+
+    string padded = std.string.create("  pad me  ")
+    string trimmed = std.string.trim(padded)
+    check(std.string.equals(trimmed, std.string.create("pad me")), "trim")
+    check(std.string.equals(std.string.trim_left(padded), std.string.create("pad me  ")), "trim_left")
+    check(std.string.equals(std.string.trim_right(padded), std.string.create("  pad me")), "trim_right")
+
+    # ---- replace ----
+    string rep = std.string.replace(std.string.create("a-b-c"), '-', '+')
+    check(std.string.equals(rep, std.string.create("a+b+c")), "replace char")
+    string reps = std.string.replace_string(std.string.create("cat dog cat"), std.string.create("cat"), std.string.create("rat"))
+    check(std.string.equals(reps, std.string.create("rat dog rat")), "replace_string")
+
+    # ---- index_of / contains / starts_with / ends_with ----
+    check(std.string.index_of(s, 'K') == 7, "index_of K=7")
+    check(std.string.index_of_string(s, std.string.create("Kaula")) == 7, "index_of_string")
+    check(std.string.last_index_of(s, 'a') == 11, "last_index_of a=11")
+    check(std.string.contains(s, 'K'), "contains K")
+    check(std.string.contains_string(s, std.string.create("Kaula")), "contains_string Kaula")
+    check(std.string.starts_with(s, std.string.create("Hello")), "starts_with Hello")
+    check(std.string.ends_with(s, std.string.create("Kaula")), "ends_with Kaula")
+    check(std.string.is_empty(std.string.create("")), "is_empty empty")
+    check(!std.string.is_empty(s), "is_empty non-empty")
+
+    # ---- compare / equals_ignore_case ----
+    check(std.string.compare(std.string.create("abc"), std.string.create("abd")) < 0, "compare abc<abd")
+    check(std.string.compare_ignore_case(std.string.create("ABC"), std.string.create("abc")) == 0, "compare_ignore_case")
+    check(std.string.equals_ignore_case(std.string.create("Kaula"), std.string.create("KAULA")), "equals_ignore_case")
+
+    # ---- to_int / to_float / to_bool ----
+    i32 n = std.string.to_int(std.string.create("12345"))
+    check(n == 12345, "to_int 12345")
+    f64 f = std.string.to_float(std.string.create("3.25"))
+    check(f > 3.24 && f < 3.26, "to_float 3.25")
+    bool t = std.string.to_bool(std.string.create("true"))
+    check(t, "to_bool true")
+
+    # ---- count ----
+    string cs = std.string.create("mississippi")
+    check(std.string.count(cs, 's') == 4, "count s=4")
+    check(std.string.count_string(cs, std.string.create("ss")) == 2, "count_string ss=2")
+
+    # ---- StringBuilder ----
+    auto sb = std.string.string_builder_create()
+    std.string.string_builder_append(sb, "A")
+    std.string.string_builder_append_char(sb, 'B')
+    std.string.string_builder_append(sb, "C")
+    string built = std.string.string_builder_to_string(sb)
+    check(std.string.equals(built, std.string.create("ABC")), "builder ABC")
+    std.string.string_builder_reset(sb)
+    string reset = std.string.string_builder_to_string(sb)
+    check(std.string.is_empty(reset), "builder reset empty")
+    std.string.string_builder_destroy(sb)
+
+    std.io.println("--- stress_strings done ---")
+}

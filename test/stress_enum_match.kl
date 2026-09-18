@@ -1,0 +1,147 @@
+# stress_enum_match.kl — ADT 枚举 + match 全面压力测试
+# 验证: 无载荷枚举/带载荷枚举/多类型载荷/嵌套枚举/match 表达式返回值/
+#       通配分支/字符串 match/整数 match
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+# 无载荷枚举
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+# 带载荷枚举（多类型载荷）
+enum Shape2 {
+    Point2(f64, f64),
+    Line2(f64, f64, f64, f64),
+    Circle2(f64),
+    Nothing
+}
+
+# 嵌套枚举（被引用类型需先定义）
+enum Inner {
+    X,
+    Y
+}
+
+enum Outer {
+    A,
+    B(Inner),
+    C
+}
+
+fn dirLabel(Direction d) string {
+    # 注意：match 各分支直接 return 时，codegen 会在函数尾补 'return 0'
+    # 与 String 返回类型冲突（缺陷），因此改用 match 赋值 + 尾 return。
+    string result = ""
+    match d {
+        North => {
+            result = "north"
+        },
+        South => {
+            result = "south"
+        },
+        East => {
+            result = "east"
+        },
+        West => {
+            result = "west"
+        },
+        _ => {
+            result = "?"
+        }
+    }
+    return result
+}
+
+fn shapeDesc(Shape2 s) string {
+    string result = ""
+    match s {
+        Point2(x, y) => {
+            result = "point"
+        },
+        Line2(x1, y1, x2, y2) => {
+            result = "line"
+        },
+        Circle2(r) => {
+            result = "circle"
+        },
+        Nothing => {
+            result = "nothing"
+        },
+        _ => {
+            result = "unknown"
+        }
+    }
+    return result
+}
+
+fn main() {
+    # 无载荷枚举
+    Direction d = Direction.North
+    check(std.string.string_equals(dirLabel(d), std.string.string_create("north")), "enum north")
+    check(std.string.string_equals(dirLabel(Direction.West), std.string.string_create("west")), "enum west")
+
+    # 带载荷枚举: 解构多个载荷
+    Shape2 p = Shape2.Point2(1.0, 2.0)
+    Shape2 l = Shape2.Line2(0.0, 0.0, 3.0, 4.0)
+    Shape2 c = Shape2.Circle2(5.0)
+    Shape2 n = Shape2.Nothing
+    check(std.string.string_equals(shapeDesc(p), std.string.string_create("point")), "adt point")
+    check(std.string.string_equals(shapeDesc(l), std.string.string_create("line")), "adt line")
+    check(std.string.string_equals(shapeDesc(c), std.string.string_create("circle")), "adt circle")
+    check(std.string.string_equals(shapeDesc(n), std.string.string_create("nothing")), "adt nothing")
+
+    # match 作为表达式返回
+    i32 x = 3
+    auto word = match(x) {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        _ => "many"
+    }
+    check(std.string.string_equals(word, std.string.string_create("three")), "match expr int")
+
+    # 字符串 match
+    string cmd = "run"
+    auto action = match(cmd) {
+        "run" => "executing",
+        "stop" => "stopping",
+        _ => "idle"
+    }
+    check(std.string.string_equals(action, std.string.string_create("executing")), "match expr string")
+
+    # 嵌套枚举
+    Outer o1 = Outer.B(Inner.X)
+    Outer o2 = Outer.C
+    match o2 {
+        A => {
+            check(false, "outer A")
+        },
+        B(inner) => {
+            check(false, "outer B")
+        },
+        C => {
+            check(true, "outer C variant")
+        },
+        _ => {
+            check(false, "outer default")
+        }
+    }
+
+    # 枚举值比较（通过 match 而非 ==）
+    Direction d2 = Direction.South
+    check(std.string.string_equals(dirLabel(d2), std.string.string_create("south")), "enum south")
+
+    std.io.println("--- stress_enum_match done ---")
+}

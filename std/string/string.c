@@ -127,8 +127,16 @@ String string_clone_global(String str) {
     size_t len = str.len;
     String result;
     result.len = len;
-    result.ptr = alloc_data_global(len);
-    if (result.ptr && len > 0) memcpy(result.ptr, string_cdata(str), len);
+    if (len <= STRING_SSO_CAPACITY) {
+        // SSO 短字符串（len <= 15）：数据存内嵌 sso 槽位，读取走 string_cdata
+        // 的 sso 分支。此前只写 ptr（union 与 sso 重叠）导致读取到未初始化内容
+        // （stress_generics 的 identity<string> 返回空串即由此产生）。
+        if (len > 0) memcpy(result.sso, string_cdata(str), len);
+        result.sso[len] = '\0';
+    } else {
+        result.ptr = alloc_data_global(len);
+        if (result.ptr && len > 0) memcpy(result.ptr, string_cdata(str), len);
+    }
     return result;
 }
 

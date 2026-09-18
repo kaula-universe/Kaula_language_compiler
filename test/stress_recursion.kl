@@ -1,0 +1,86 @@
+# stress_recursion.kl — 递归压力测试
+# 验证: 递归/尾递归/递归表达式/多参数递归/字符串递归
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+# 经典递归
+fn factorial(i32 n) i32 {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+# 尾递归
+fn fibTail(i32 n, i32 a, i32 b) i32 {
+    if n == 0 {
+        return a
+    }
+    return fibTail(n - 1, b, a + b)
+}
+
+fn fib(i32 n) i32 {
+    return fibTail(n, 0, 1)
+}
+
+# 双递归
+fn ackermann(i32 m, i32 n) i32 {
+    if m == 0 {
+        return n + 1
+    }
+    if n == 0 {
+        return ackermann(m - 1, 1)
+    }
+    return ackermann(m - 1, ackermann(m, n - 1))
+}
+
+# 字符串递归（反转）
+fn reverse(string s) string {
+    i32 len = std.string.string_length(s)
+    if len <= 1 {
+        return s
+    }
+    string rest = std.string.string_substring(s, 1, len - 1)
+    string revRest = reverse(rest)
+    char first = std.string.string_char_at(s, 0)
+    return std.string.string_concat_char(revRest, first)
+}
+
+# 递归计数
+fn countDown(i32 n) i32 {
+    if n == 0 {
+        return 0
+    }
+    i32 sub = countDown(n - 1)
+    return sub + 1
+}
+
+fn main() {
+    check(factorial(10) == 3628800, "factorial(10)")
+    check(fib(10) == 55, "fib(10)")
+    check(fib(20) == 6765, "fib(20)")
+    check(ackermann(2, 3) == 9, "ackermann(2,3)")
+    check(ackermann(3, 2) == 29, "ackermann(3,2)")
+
+    string rev = reverse(std.string.string_create("kaula"))
+    check(std.string.string_equals(rev, std.string.string_create("aluak")), "reverse kaula")
+
+    check(countDown(100) == 100, "countDown(100)")
+
+    # 递归 + 迭代混合
+    i32 sum = 0
+    for i in range(10) {
+        sum = sum + fib(i)
+    }
+    check(sum == 88, "sum fib(0..9)=88")
+
+    std.io.println("--- stress_recursion done ---")
+}

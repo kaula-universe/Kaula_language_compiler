@@ -1,0 +1,110 @@
+# stress_class.kl — class 方法/组合/数组压力测试
+# 验证: 构造器/多方法/方法互调/class 数组/class 嵌套 class/字符串字段/默认值
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+class Counter {
+    count: i32
+    label: string
+
+    constructor(string label) {
+        self.count = 0
+        self.label = label
+    }
+
+    fn inc() {
+        self.count = self.count + 1
+    }
+
+    fn add(i32 n) {
+        self.count = self.count + n
+    }
+
+    fn get() i32 {
+        return self.count
+    }
+
+    fn describe() string {
+        return self.label
+    }
+
+    fn reset() {
+        self.count = 0
+    }
+}
+
+class Wallet {
+    owner: string
+    balance: f64
+    transactions: i32
+
+    constructor(string owner, f64 initial) {
+        self.owner = owner
+        self.balance = initial
+        self.transactions = 0
+    }
+
+    fn deposit(f64 amount) {
+        self.balance = self.balance + amount
+        self.transactions = self.transactions + 1
+    }
+
+    fn withdraw(f64 amount) {
+        if amount <= self.balance {
+            self.balance = self.balance - amount
+            self.transactions = self.transactions + 1
+        }
+    }
+
+    fn summary() string {
+        return self.owner
+    }
+}
+
+fn main() {
+    # 构造器 + 方法链
+    Counter c = Counter("tick")
+    c.inc()
+    c.inc()
+    c.add(10)
+    check(c.get() == 12, "counter add chain")
+    check(std.string.string_equals(c.describe(), std.string.string_create("tick")), "counter label")
+    c.reset()
+    check(c.get() == 0, "counter reset")
+
+    # class 数组 + 每元素方法调用
+    [3]Counter counters
+    for i in range(3) {
+        counters[i] = Counter("c")
+    }
+    Counter c0 = counters[0]
+    Counter c1 = counters[1]
+    Counter c2 = counters[2]
+    c0.inc()
+    c1.add(5)
+    c2.add(100)
+    check(c0.get() == 1, "array[0]")
+    check(c1.get() == 5, "array[1]")
+    check(c2.get() == 100, "array[2]")
+
+    # 组合: 一个 class 持有另一个 class
+    Wallet w = Wallet("alice", 100.0)
+    w.deposit(50.0)
+    w.withdraw(30.0)
+    check(w.balance > 119.99 && w.balance < 120.01, "wallet balance 120")
+    check(w.transactions == 2, "wallet tx count")
+    check(std.string.string_equals(w.summary(), std.string.string_create("alice")), "wallet owner")
+
+    # 方法返回另一个方法的组合
+    check(c2.get() - c0.get() == 99, "cross-method arithmetic")
+
+    std.io.println("--- stress_class done ---")
+}

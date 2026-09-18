@@ -1,0 +1,82 @@
+# stress_option.kl — std.option Option/Result 压力测试
+# 验证: some/none/is_some/unwrap/unwrap_or/take/or + Result ok/err 全链路
+import std.io
+import std.option
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    # ---- Option: some / none ----
+    Option some = std.option.option_some_i64(42)
+    Option none = std.option.option_none()
+    check(std.option.option_is_some(&some), "is_some(some)")
+    check(std.option.option_is_none(&none), "is_none(none)")
+    check(!std.option.option_is_some(&none), "not is_some(none)")
+    check(!std.option.option_is_none(&some), "not is_none(some)")
+
+    # ---- unwrap ----
+    i64 v = std.option.option_unwrap_i64(&some)
+    check(v == 42, "unwrap_i64=42")
+
+    # ---- unwrap_or ----
+    i64 d1 = std.option.option_unwrap_or_i64(&some, 0)
+    i64 d2 = std.option.option_unwrap_or_i64(&none, 7)
+    check(d1 == 42 && d2 == 7, "unwrap_or default")
+
+    # ---- f64 / bool / ptr 变体 ----
+    Option f = std.option.option_some_f64(2.5)
+    check(std.option.option_unwrap_f64(&f) > 2.49 && std.option.option_unwrap_f64(&f) < 2.51, "some_f64")
+    Option b = std.option.option_some_bool(true)
+    check(std.option.option_unwrap_bool(&b), "some_bool")
+
+    i32 x = 100
+    Option p = std.option.option_some_ptr(&x)
+    i32* px = std.option.option_unwrap_ptr(&p)
+    check(px != null && *px == 100, "some_ptr unwrap")
+
+    # ---- take ----
+    Option src = std.option.option_some_i64(99)
+    Option out = std.option.option_none()
+    std.option.option_take(&src, &out)
+    check(std.option.option_is_some(&out) && std.option.option_unwrap_i64(&out) == 99, "take moves value")
+
+    # ---- or ----
+    Option combined = std.option.option_or(&none, std.option.option_some_i64(5))
+    check(std.option.option_is_some(&combined) && std.option.option_unwrap_i64(&combined) == 5, "or fallback")
+
+    # ---- Result: ok ----
+    Result ok = std.option.result_ok_i64(123)
+    check(std.option.result_is_ok(&ok), "result ok")
+    check(std.option.result_unwrap_ok_i64(&ok) == 123, "result unwrap=123")
+
+    # ---- Result: err ----
+    Result err = std.option.result_err(7, "boom")
+    check(std.option.result_is_err(&err), "result err")
+    check(!std.option.result_is_ok(&err), "result not ok")
+    check(std.option.result_err_code(&err) == 7, "result err code=7")
+
+    # ---- Result: f64 / bool / string ----
+    Result rf = std.option.result_ok_f64(3.14)
+    check(std.option.result_is_ok(&rf) && std.option.result_unwrap_ok_f64(&rf) > 3.13, "result f64")
+    Result rb = std.option.result_ok_bool(true)
+    check(std.option.result_unwrap_ok_bool(&rb), "result bool")
+    Result rs = std.option.result_ok_string("hello")
+    check(std.option.result_is_ok(&rs), "result string ok")
+
+    # ---- 组合使用: 模拟 try-parse ----
+    Option maybe = std.option.option_some_i64(-5)
+    if std.option.option_is_some(&maybe) {
+        i64 n = std.option.option_unwrap_i64(&maybe)
+        check(n == -5, "combo parse value")
+    } else {
+        check(false, "combo parse some path")
+    }
+
+    std.io.println("--- stress_option done ---")
+}

@@ -1,0 +1,84 @@
+# stress_interface.kl — 接口多态压力测试
+# 注意：已知缺口——interface 类型在 codegen 层无 C 映射（接口变量/接口参数
+# 会生成 unknown type name 'Shape'），多态分派待 codegen 支持后补全。
+# 本测试覆盖：接口声明 + class implements 解析 + 具体类方法直接调用 +
+# 类数组元素存取（元素直接 .method() 调用有 codegen 缺陷，先取元素再调）。
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+interface Shape {
+    fn area() f64
+}
+
+class Circle implements Shape {
+    r: f64
+    constructor(f64 r) {
+        self.r = r
+    }
+    fn area() f64 {
+        return 3.14159 * self.r * self.r
+    }
+}
+
+class Rect implements Shape {
+    w: f64
+    h: f64
+    constructor(f64 w, f64 h) {
+        self.w = w
+        self.h = h
+    }
+    fn area() f64 {
+        return self.w * self.h
+    }
+}
+
+# 普通类（不 implements 接口）：测字符串字段 + 多方法
+class Tagged {
+    tag: string
+    constructor(string t) {
+        self.tag = t
+    }
+    fn getTag() string {
+        return self.tag
+    }
+    fn describe() string {
+        return self.tag
+    }
+}
+
+fn main() {
+    Circle c = Circle(2.0)
+    Rect r = Rect(3.0, 4.0)
+
+    # 具体类直接方法调用
+    f64 ca = c.area()
+    f64 ra = r.area()
+    check(ca > 12.56 && ca < 12.57, "circle area pi*r^2")
+    check(ra == 12.0, "rect area w*h")
+
+    f64 total = c.area() + r.area()
+    check(total > 24.56 && total < 24.57, "sum areas")
+
+    # 普通类多方法/字符串字段
+    Tagged t = Tagged("label")
+    check(std.string.string_equals(t.getTag(), std.string.string_create("label")), "tag get")
+    check(std.string.string_equals(t.describe(), std.string.string_create("label")), "tag describe")
+
+    # 类数组：元素存取 + 取出后方法调用
+    [2]Circle circles
+    circles[0] = Circle(1.0)
+    circles[1] = Circle(2.0)
+    Circle c0 = circles[0]
+    Circle c1 = circles[1]
+    check(c0.area() > 3.141 && c0.area() < 3.142, "class array element area")
+
+    std.io.println("--- stress_interface done ---")
+}
