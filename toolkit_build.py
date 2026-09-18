@@ -22,10 +22,22 @@ import sys
 import subprocess
 import argparse
 import hashlib
+import os
 import shutil
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+
+def _detect_worker_count():
+    """自动检测并行编译 worker 数。
+
+    优先用 os.cpu_count()，但至少 2（避免 1 核机器空跑线程开销），
+    最多 16（>16 收益边际递减 + I/O 瓶颈）。
+    """
+    n = os.cpu_count() or 2
+    return max(2, min(n, 16))
 
 
 class BuildConfig:
@@ -325,6 +337,7 @@ class CBuilder:
             self.obj_ext = ".o"
 
         self.obj_files = []
+        self._obj_lock = threading.Lock()
 
     def _find_c_files(self, root_dir, skip_dirs=None):
         if skip_dirs is None:
@@ -336,6 +349,46 @@ class CBuilder:
                 if f.endswith(".c") and f not in self.config.skip_files:
                     sources.append(Path(root) / f)
         return sources
+
+    def _parallel_compile(self, sources_or_pairs, label, include_dirs=None):
+        """并行编译 .c 源文件列表 (ninja 风格进度条 + 自动 worker 数)。
+
+        自动检测 os.cpu_count() 决定 worker 数;最多 16,最少 2。
+        不接受额外参数;worker 数和 include_dirs 自动决定。
+
+        支持两种入参形态:
+          - list[Path]: 所有 source 用同一个 include_dirs
+          - list[(Path, dirs)]: 每个 source 用各自的 include_dirs (runtime 库)
+        """
+        if not sources_or_pairs:
+            return 0, 0
+        # 统一转成 (src, dirs) 列表
+        if isinstance(sources_or_pairs[0], tuple):
+            items = list(sources_or_pairs)
+        else:
+            items = [(src, include_dirs) for src in sources_or_pairs]
+
+        workers = _detect_worker_count()
+        ok, fail = 0, 0
+        with ProgressBar(len(items), label, width=40) as pbar:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(self._compile_one, src, None, dirs): src
+                    for src, dirs in items
+                }
+                for fut in as_completed(futures):
+                    src = futures[fut]
+                    pbar.set_label(src.name)
+                    try:
+                        if fut.result():
+                            ok += 1
+                        else:
+                            fail += 1
+                    except Exception as e:
+                        print(f"\n  [-] 异常 {src.name}: {e}")
+                        fail += 1
+                    pbar.update()
+        return ok, fail
 
     def _compile_one(self, src_file, out_obj=None, include_dirs=None):
         """编译单个 .c 文件。
@@ -365,7 +418,8 @@ class CBuilder:
 
         if digest and out_obj.exists() and hash_path.exists():
             if hash_path.read_text(encoding="ascii").strip() == digest:
-                self.obj_files.append(out_obj)
+                with self._obj_lock:
+                    self.obj_files.append(out_obj)
                 # ninja style: cached is silent (progress line shows current task)
                 return True
 
@@ -388,7 +442,8 @@ class CBuilder:
                 for line in err.strip().split("\n")[:5]:
                     print("      " + line)
                 return False
-            self.obj_files.append(out_obj)
+            with self._obj_lock:
+                self.obj_files.append(out_obj)
             # ninja style: success is silent
             if digest:
                 hash_path.write_text(digest, encoding="ascii")
@@ -436,16 +491,7 @@ class CBuilder:
 
         old_objs = list(self.obj_files)
         self.obj_files = []
-        ok = 0
-        fail = 0
-        with ProgressBar(len(sources), "编译标准库", width=40) as pbar:
-            for src in sources:
-                pbar.set_label(src.name)  # ninja style: show current file only
-                if self._compile_one(src):
-                    ok += 1
-                else:
-                    fail += 1
-                pbar.update()
+        ok, fail = self._parallel_compile(sources, "编译标准库")
 
         if fail > 0:
             print(f"[-] 标准库编译失败: {fail} 个文件")
@@ -477,18 +523,11 @@ class CBuilder:
 
         old_objs = list(self.obj_files)
         self.obj_files = []
-        ok = 0
-        fail = 0
         # freestanding 库自包含：仅 -I freestanding/ 即可解析所有 "base/types.h" 等
         freestanding_include_dirs = [str(self.config.freestanding_dir)]
-        with ProgressBar(len(sources), "编译 freestanding", width=40) as pbar:
-            for src in sources:
-                pbar.set_label(src.name)  # ninja style: show current file only
-                if self._compile_one(src, include_dirs=freestanding_include_dirs):
-                    ok += 1
-                else:
-                    fail += 1
-                pbar.update()
+        ok, fail = self._parallel_compile(
+            sources, "编译 freestanding", include_dirs=freestanding_include_dirs
+        )
 
         if fail > 0:
             print(f"[-] freestanding 库编译失败: {fail} 个文件")
@@ -520,28 +559,17 @@ class CBuilder:
 
         old_objs = list(self.obj_files)
         self.obj_files = []
-        ok = 0
-        fail = 0
-        with ProgressBar(len(sources), "编译运行时", width=40) as pbar:
-            for src in sources:
-                pbar.set_label(src.name)  # ninja style: show current file only
-                # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
-                # unity-include freestanding 库，必须用 freestanding 优先的 -I 顺序，
-                # 否则会错误地包含 std/memory/memory.c（依赖 libc <string.h>）。
-                if src.name == "kaula_freestanding_runtime.c":
-                    if self._compile_one(
-                        src,
-                        include_dirs=self.config.freestanding_runtime_include_dirs,
-                    ):
-                        ok += 1
-                    else:
-                        fail += 1
-                else:
-                    if self._compile_one(src):
-                        ok += 1
-                    else:
-                        fail += 1
-                pbar.update()
+        # 为每个 source 选择正确的 include_dirs:
+        # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
+        # unity-include freestanding 库,必须用 freestanding 优先的 -I 顺序,
+        # 否则会错误地包含 std/memory/memory.c(依赖 libc <string.h>)。
+        # 其他文件用默认 include_dirs(None → _compile_one 用 self.config.include_dirs)。
+        fsrt = self.config.freestanding_runtime_include_dirs
+        source_with_dirs = [
+            (src, fsrt if src.name == "kaula_freestanding_runtime.c" else None)
+            for src in sources
+        ]
+        ok, fail = self._parallel_compile(source_with_dirs, "编译运行时")
 
         if fail > 0:
             print(f"[-] 运行时编译失败: {fail} 个文件")
@@ -566,18 +594,27 @@ class CBuilder:
             (self.config.runtime_dir, "runtime"),
         ]
 
+        # headers 是纯 I/O,适合 ThreadPoolExecutor 并行 copytree
         with ProgressBar(len(targets), "安装头文件", width=40) as pbar:
-            for src, dest_name in targets:
-                if not src.exists():
+            with ThreadPoolExecutor(max_workers=_detect_worker_count()) as pool:
+                futures = {
+                    pool.submit(self._copy_headers, src, dest_name): (src, dest_name)
+                    for src, dest_name in targets
+                }
+                for fut in as_completed(futures):
+                    fut.result()  # propagate exceptions
                     pbar.update()
-                    continue
-                dest = self.config.include_dir / dest_name
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*.c", "build"))
-                pbar.update()
 
         return True
+
+    def _copy_headers(self, src, dest_name):
+        """单组头文件复制 (供 ThreadPoolExecutor 调用)。"""
+        if not src.exists():
+            return
+        dest = self.config.include_dir / dest_name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*.c", "build"))
 
 class GoBuilder:
     """Go 代码构建器"""
