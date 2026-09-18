@@ -1032,7 +1032,7 @@ func (eg *ExpressionGenerator) generateEnumConstructor(enumBase string, variant 
 			}
 		}
 		if len(argTypes) == 0 {
-			argTypes = []string{"int"}
+			argTypes = []string{"i32"}
 		}
 		eg.codegen.InstantiateGenericType(enumBase, argTypes, 0)
 		instName = MangleGenericTypeName(enumBase, argTypes)
@@ -1060,12 +1060,14 @@ func (eg *ExpressionGenerator) generateEnumConstructor(enumBase string, variant 
 }
 
 // inferConcreteType 从表达式推断 Kaula 类型名（用于泛型实例化参数推断）。
+// 注意：必须返回规范类型名（i32/f64 等），与 sema 的 numeric_names 规范保持一致，
+// 否则泛型实例化 key 会出现 K_Option_int 与 K_Option_i32 不一致的 C 类型冲突。
 func (eg *ExpressionGenerator) inferConcreteType(expr ast.Expression) string {
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
-		return "int"
+		return "i32"
 	case *ast.FloatLiteral:
-		return "double"
+		return "f64"
 	case *ast.StringLiteral:
 		return "string"
 	case *ast.BooleanLiteral:
@@ -1075,9 +1077,9 @@ func (eg *ExpressionGenerator) inferConcreteType(expr ast.Expression) string {
 			return sym.Type
 		}
 	case *ast.CallExpression:
-		return "int64"
+		return "i64"
 	case *ast.MemberAccessExpression:
-		return "int"
+		return "i32"
 	case *ast.UnaryExpression:
 		return eg.inferConcreteType(e.Right)
 	case *ast.BinaryExpression:

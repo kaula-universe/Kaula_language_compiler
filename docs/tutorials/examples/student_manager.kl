@@ -1,11 +1,11 @@
-import std.i18n
+import std.encoding
 import std.io
 import std.string
 
 class Student {
     name: char*
-    score: int
-    filled: int
+    score: i32
+    filled: i32
     fn grade() string {
         if (self.score >= 90) {
             return "优秀"
@@ -19,7 +19,7 @@ class Student {
             return "不及格"
         }
     }
-    fn set(char* newName, int newScore) {
+    fn set(char* newName, i32 newScore) {
         self.name = newName
         self.score = newScore
         self.filled = 1
@@ -29,7 +29,7 @@ class Student {
         self.score = 0
         self.filled = 0
     }
-    fn print_info(int index) {
+    fn print_info(i32 index) {
         string g = self.grade()
         std.io.println(index, ". ", self.name, " - ", self.score, " (", g, ")")
     }
@@ -50,7 +50,7 @@ Student stu4 = Student()
 
 Student stu5 = Student()
 
-fn find_empty_slot() int {
+fn find_empty_slot() i32 {
     if (stu1.filled == 0) {
         return 1
     }
@@ -69,8 +69,8 @@ fn find_empty_slot() int {
     return 0
 }
 
-fn add_student() int {
-    int slot = find_empty_slot()
+fn add_student() i32 {
+    i32 slot = find_empty_slot()
     if (slot == 0) {
         std.io.println("存储已满, 无法添加更多学生!")
         return 0
@@ -82,7 +82,7 @@ fn add_student() int {
     std.io.println("请输入成绩 (0-100): ")
     char* scoreLine = std.io.read_line()
     string scoreStr = std.string.string_create(scoreLine)
-    int inputScore = std.string.string_to_int(scoreStr)
+    i32 inputScore = std.string.string_to_int(scoreStr)
     if (inputScore < 0) {
         std.io.println("成绩无效, 必须在 0-100 之间!")
         return 0
@@ -107,7 +107,7 @@ fn add_student() int {
     return 1
 }
 
-fn grade_of(score: int) string {
+fn grade_of(score: i32) string {
     if (score >= 90) {
         return "优秀"
     } else if (score >= 80) {
@@ -123,7 +123,7 @@ fn grade_of(score: int) string {
 
 fn list_students() {
     std.io.println("===== 学生名单 =====")
-    int count = 0
+    i32 count = 0
     if (stu1.filled == 1) {
         count = count + 1
         stu1.print_info(count)
@@ -151,10 +151,10 @@ fn list_students() {
 }
 
 fn show_stats() {
-    int total = 0
-    int count = 0
-    int maxScore = 0
-    int passed = 0
+    i32 total = 0
+    i32 count = 0
+    i32 maxScore = 0
+    i32 passed = 0
     if (stu1.filled == 1) {
         total = total + stu1.score
         count = count + 1
@@ -209,7 +209,7 @@ fn show_stats() {
         std.io.println("暂无数据, 无法统计")
         return
     }
-    int avg = total / count
+    i32 avg = total / count
     std.io.println("===== 统计信息 =====")
     std.io.println("学生人数: ", count)
     std.io.println("平均分: ", avg)
@@ -240,8 +240,8 @@ fn show_menu() {
 }
 
 fn main() {
-    std.i18n.i18n_init()
-    std.i18n.i18n_setup_console()
+    std.encoding.enc_init()
+    std.encoding.enc_setup_console()
     std.io.println("欢迎使用学生成绩管理系统!")
     while (true) {
         show_menu()

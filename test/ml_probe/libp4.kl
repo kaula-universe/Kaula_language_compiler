@@ -14,7 +14,7 @@ export class P4 {
 
 export class P4Holder {
     cnt: i32
-    P4* items
+    items: P4*
 
     constructor() {
         self.cnt = 2
