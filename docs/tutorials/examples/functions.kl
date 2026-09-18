@@ -1,6 +1,6 @@
 import std.io
 
-fn add(int a, int b) int {
+fn add(i32 a, i32 b) i32 {
     return a + b
 }
 
@@ -8,7 +8,7 @@ fn greet(string name) {
     std.io.println("Hello, ", name)
 }
 
-fn factorial(int n) int {
+fn factorial(i32 n) i32 {
     if (n <= 1) {
         return 1
     }
@@ -16,11 +16,11 @@ fn factorial(int n) int {
 }
 
 fn main() {
-    int result = add(10, 20)
+    i32 result = add(10, 20)
     std.io.println("10 + 20 = ", result)
 
     greet("Kaula")
 
-    int fact = factorial(5)
+    i32 fact = factorial(5)
     std.io.println("5! = ", fact)
 }

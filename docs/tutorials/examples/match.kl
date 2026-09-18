@@ -6,7 +6,7 @@ enum Option<T> {
     None
 }
 
-fn pick(Option<int> opt) {
+fn pick(Option<i32> opt) {
     match opt {
         Some(val) => {
             std.io.println("got: ", val)
@@ -25,7 +25,7 @@ enum Status {
 
 fn main() {
     # 整数字面量 match，返回表达式值
-    int x = 2
+    i32 x = 2
     auto description = match(x) {
         1 => "one",
         2 => "two",

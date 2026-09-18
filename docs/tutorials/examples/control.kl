@@ -2,7 +2,7 @@ import std.io
 
 fn main() {
     std.io.println("=== if/else ===")
-    int score = 85
+    i32 score = 85
     if (score >= 90) {
         std.io.println("Grade: A")
     } else if (score >= 80) {
@@ -12,7 +12,7 @@ fn main() {
     }
 
     std.io.println("=== while ===")
-    int i = 0
+    i32 i = 0
     while (i < 5) {
         std.io.println("i = ", i)
         i = i + 1

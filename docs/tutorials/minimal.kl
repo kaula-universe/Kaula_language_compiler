@@ -1,5 +1,5 @@
 fn main() {
-    int x = 42
-    int y = 10
-    int z = x + y
+    i32 x = 42
+    i32 y = 10
+    i32 z = x + y
 }
