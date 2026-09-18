@@ -54,6 +54,10 @@ type CodeGenerator struct {
 
 	usedThirdPartyLibs map[string]bool
 	localImportFuncs   map[string]bool
+	// 本地 import 的 export 函数名（C 侧保持原名，不加 K_ 前缀）。
+	// export 含 pub 语义（跨文件可见 + C 级导出），定义端以原名输出，
+	// 调用端若按普通用户函数加 K_ 前缀会导致跨文件链接失败。
+	localImportExportFuncs map[string]bool
 	// 本地 import 的 pub/export 函数返回类型（函数名 -> Kaula 返回类型），
 	// 供 inferType 对跨文件调用做类型推断（println 格式选择、concat 重载等）
 	localImportReturns map[string]string
@@ -786,6 +790,12 @@ func (cg *CodeGenerator) SetLocalImportFuncs(funcs map[string]bool) {
 	cg.localImportFuncs = funcs
 }
 
+// SetLocalImportExportFuncs 注册本地导入的 export 函数名。
+// export 函数在 C 侧保持原名（FFI 边界），跨文件调用端必须与定义端命名一致。
+func (cg *CodeGenerator) SetLocalImportExportFuncs(funcs map[string]bool) {
+	cg.localImportExportFuncs = funcs
+}
+
 // SetLocalPubTypes 注册本地导入的类型定义（跨文件 class/struct 等）。
 // 同时登记到 typeGenerator 的 struct/class 类型表，使 convertType / IsClassType
 // 能正确生成指针语义（class）或值语义（struct）的 C 类型。
@@ -1285,12 +1295,16 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 
 	// 任务② Bug 2 正解：深提升合成回调。
 	// cb 是 static C 函数（引用 K_<Class> 类型和 string_clone_global/kmm_v4_promote_deep），
-	// 必须在 typedef/class 定义之后、普通函数代码之前输出。
+	// 必须在 typedef/class 定义之后、class 构造器/方法体与普通函数代码之前输出。
+	// 注意：class 构造器/方法体（classImplCode）在最终组装时先于 functionCode 输出，
+	// 且构造器内部可能引用深提升 cb（如数组元素赋值的跨作用域 promote，
+	// 见 probe07/libp4.kl 的 P4Holder_new），因此 cb 必须前置到 classImplCode
+	// 之前，否则生成的 C 出现"先使用后定义"编译错误。
 	if cg.deepPromoteCBCode.Len() > 0 {
 		comment := "\n// --- SOR synthesized deep-promote callbacks (Bug 2 fix) ---\n\n"
-		combined := comment + cg.deepPromoteCBCode.String() + functionCode.String()
-		functionCode.Reset()
-		functionCode.WriteString(combined)
+		combined := comment + cg.deepPromoteCBCode.String() + cg.classImplCode.String()
+		cg.classImplCode.Reset()
+		cg.classImplCode.WriteString(combined)
 	}
 
 	var allIncludes strings.Builder
@@ -2512,6 +2526,12 @@ func (cg *CodeGenerator) UserFuncCName(name string) string {
 	}
 	// export 函数保持原名（FFI 边界，外部 C 代码直接用原名调用）
 	if cg.exportedFuncNames != nil && cg.exportedFuncNames[name] {
+		return name
+	}
+	// 跨文件 import 的 export 函数同样保持原名：
+	// 定义端（被导入文件）以原名输出，调用端必须与之一致，否则链接失败
+	// （如 path_import 的 export fn hello_from_a 被调用时生成 K_hello_from_a）。
+	if cg.localImportExportFuncs != nil && cg.localImportExportFuncs[name] {
 		return name
 	}
 	if cg.isUserKaulaFunc(name) {
