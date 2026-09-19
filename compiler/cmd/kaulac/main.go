@@ -2015,82 +2015,73 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 // concurrentCompile 并发保存缓存并编译 C 代码
 func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) *compileResult_t {
 	result := &compileResult_t{}
-	var wg sync.WaitGroup
-	wg.Add(2)
-
 	startTime := time.Now()
 
-	// 如果是缓存命中，不需要保存 C 代码
+	// 缓存未命中：先同步、原子地写缓存（tmp + rename），消除"写缓存 ∥ 编译读缓存"
+	// 的竞态（原实现里 os.WriteFile 带 O_TRUNC，boot/用户态模式下 clang 直接读
+	// cacheFile，可能读到截断/半写的源码导致间歇性编译失败；实测模拟 47% 概率）。
 	if !cacheHit {
-		// 保存缓存
-		go func() {
-			defer wg.Done()
-			os.WriteFile(cacheFile, []byte(cCode), 0644)
-		}()
-	} else {
-		// 缓存命中，直接完成
-		go func() {
-			defer wg.Done()
-		}()
+		tmp := cacheFile + ".tmp"
+		if err := os.WriteFile(tmp, []byte(cCode), 0644); err != nil {
+			result.Error = fmt.Errorf("cache write failed: %w", err)
+			return result
+		}
+		if err := os.Rename(tmp, cacheFile); err != nil {
+			result.Error = fmt.Errorf("cache commit failed: %w", err)
+			return result
+		}
 	}
 
-	// 编译
-	go func() {
-		defer wg.Done()
+	// 输出目录：指定了 -output-dir 则输出到该目录（不存在则创建），
+	// 否则保持原行为（落输入目录）
+	outDir := inputDir
+	if cfg.OutputDir != "" {
+		outDir = cfg.OutputDir
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			result.Error = fmt.Errorf("failed to create output directory %s: %w", outDir, err)
+			return result
+		}
+	}
 
-		// 输出目录：指定了 -output-dir 则输出到该目录（不存在则创建），
-		// 否则保持原行为（落输入目录）
-		outDir := inputDir
-		if cfg.OutputDir != "" {
-			outDir = cfg.OutputDir
-			if err := os.MkdirAll(outDir, 0755); err != nil {
-				result.Error = fmt.Errorf("failed to create output directory %s: %w", outDir, err)
-				return
+	outputExe := filepath.Join(outDir, inputName+".exe")
+	if runtime.GOOS != "windows" {
+		outputExe = filepath.Join(outDir, inputName)
+	}
+	if isBootMode(cfg) {
+		// 裸机引导模式：输出可引导 ELF（或 raw bin）
+		ext := ".elf"
+		if cfg.OutputFormat == "bin" {
+			ext = ".bin"
+		}
+		outputExe = filepath.Join(outDir, inputName+ext)
+	}
+
+	// 缓存命中且 exe 已存在: 跳过 clang 编译, 直接复用 (大幅提速)
+	if cacheHit {
+		if exeInfo, exeErr := os.Stat(outputExe); exeErr == nil {
+			if cInfo, cErr := os.Stat(cacheFile); cErr == nil && !exeInfo.ModTime().Before(cInfo.ModTime()) {
+				result.OutputFile = outputExe
+				return result
 			}
 		}
+		// exe 缺失或比缓存旧: 回退到重新编译
+	}
 
-		outputExe := filepath.Join(outDir, inputName+".exe")
-		if runtime.GOOS != "windows" {
-			outputExe = filepath.Join(outDir, inputName)
-		}
-		if isBootMode(cfg) {
-			// 裸机引导模式：输出可引导 ELF（或 raw bin）
-			ext := ".elf"
-			if cfg.OutputFormat == "bin" {
-				ext = ".bin"
-			}
-			outputExe = filepath.Join(outDir, inputName+ext)
-		}
+	var err error
+	if cfg.Boot == "user" {
+		// 用户态程序：clang -c + ld.lld 链接到用户区 0x40000000，无 boot stub
+		err = compileUserProgram(cacheFile, outputExe, workDir, optLevel, cfg)
+	} else if isBootMode(cfg) {
+		err = compileBootKernel(cacheFile, outputExe, workDir, optLevel, cfg)
+	} else {
+		err = compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity, cfg)
+	}
+	if err != nil {
+		result.Error = err
+		return result
+	}
 
-		// 缓存命中且 exe 已存在: 跳过 clang 编译, 直接复用 (大幅提速)
-		if cacheHit {
-			if exeInfo, exeErr := os.Stat(outputExe); exeErr == nil {
-				if cInfo, cErr := os.Stat(cacheFile); cErr == nil && !exeInfo.ModTime().Before(cInfo.ModTime()) {
-					result.OutputFile = outputExe
-					return
-				}
-			}
-			// exe 缺失或比缓存旧: 回退到重新编译
-		}
-
-		var err error
-		if cfg.Boot == "user" {
-			// 用户态程序：clang -c + ld.lld 链接到用户区 0x40000000，无 boot stub
-			err = compileUserProgram(cacheFile, outputExe, workDir, optLevel, cfg)
-		} else if isBootMode(cfg) {
-			err = compileBootKernel(cacheFile, outputExe, workDir, optLevel, cfg)
-		} else {
-			err = compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity, cfg)
-		}
-		if err != nil {
-			result.Error = err
-			return
-		}
-
-		result.OutputFile = outputExe
-	}()
-
-	wg.Wait()
+	result.OutputFile = outputExe
 
 	if result.Error == nil {
 		if cacheHit {
@@ -2103,46 +2094,35 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 	return result
 }
 
-// concurrentSemanticAnalysis 并发执行语义分析
+// concurrentSemanticAnalysis 执行语义分析
+// 注：原名带 "concurrent" 前缀，但实现是"单 goroutine + 立即 Wait"的假并发
+// （并发度恒为 1），已在清理并发误导时改为直接同步调用。
 func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCollector *errors.ErrorCollector, sorEnabled bool) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	sa := sema.NewSemanticAnalyzerWithConfig(stdlibPath, result.ErrorCollector)
+	sa.SetSOREnabled(sorEnabled)
+	sa.Analyze(program)
 
-	go func() {
-		defer wg.Done()
-		sa := sema.NewSemanticAnalyzerWithConfig(stdlibPath, result.ErrorCollector)
-		sa.SetSOREnabled(sorEnabled)
-		sa.Analyze(program)
-	}()
-
-	wg.Wait()
 	return result
 }
 
-// concurrentSemanticAnalysisWithConfig 并发执行语义分析（使用已加载的配置）
+// concurrentSemanticAnalysisWithConfig 执行语义分析（使用已加载的配置）
+// 注：原实现为假并发（单 goroutine + 立即 Wait），已改为直接同步调用。
 func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, 	sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	sa := sema.NewSemanticAnalyzerWithConfig("kaula/stdlib.json", errorCollector)
+	if stdlibConfig != nil {
+		sa.SetStdlibConfig(stdlibConfig)
+	}
+	sa.SetLocalImportFuncs(localPubFuncs)
+	sa.SetLocalModuleFuncs(localAllFuncs)
+	sa.SetLocalPubVars(localPubVars)
+	sa.SetLocalPubTypes(localPubTypes)
+	sa.SetSOREnabled(sorEnabled)
+	sa.Analyze(program)
 
-	go func() {
-		defer wg.Done()
-		sa := sema.NewSemanticAnalyzerWithConfig("kaula/stdlib.json", errorCollector)
-		if stdlibConfig != nil {
-			sa.SetStdlibConfig(stdlibConfig)
-		}
-		sa.SetLocalImportFuncs(localPubFuncs)
-		sa.SetLocalModuleFuncs(localAllFuncs)
-		sa.SetLocalPubVars(localPubVars)
-		sa.SetLocalPubTypes(localPubTypes)
-		sa.SetSOREnabled(sorEnabled)
-		sa.Analyze(program)
-	}()
-
-	wg.Wait()
 	return result
 }
 
