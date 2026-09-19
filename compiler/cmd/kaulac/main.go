@@ -1300,6 +1300,9 @@ func main() {
 	var cacheHit bool
 
 	if cacheManager != nil && !cfg.NoCache {
+		// 编译参数混入缓存键：optLevel 与 KMM 池容量都会改变产物，
+		// 不加进键会导致 -O0/-O3 或不同池容量复用同一产物（静默吞掉参数）。
+		cacheManager.SetKeyExtra(fmt.Sprintf("%s|%d", optLevel, poolCapacity))
 		cacheKey := cacheManager.GetCacheKey(inputFile)
 		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
 
@@ -2017,20 +2020,9 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 	result := &compileResult_t{}
 	startTime := time.Now()
 
-	// 缓存未命中：先同步、原子地写缓存（tmp + rename），消除"写缓存 ∥ 编译读缓存"
-	// 的竞态（原实现里 os.WriteFile 带 O_TRUNC，boot/用户态模式下 clang 直接读
-	// cacheFile，可能读到截断/半写的源码导致间歇性编译失败；实测模拟 47% 概率）。
-	if !cacheHit {
-		tmp := cacheFile + ".tmp"
-		if err := os.WriteFile(tmp, []byte(cCode), 0644); err != nil {
-			result.Error = fmt.Errorf("cache write failed: %w", err)
-			return result
-		}
-		if err := os.Rename(tmp, cacheFile); err != nil {
-			result.Error = fmt.Errorf("cache commit failed: %w", err)
-			return result
-		}
-	}
+	// 缓存文件由调用方写入（cacheManager.Store 或无缓存模式的 os.WriteFile），
+	// 这里不再重复写；cacheHit=false 时 cacheFile 一定是已就绪的完整内容，
+	// clang（boot 模式）读取它不存在"写一半"竞态。
 
 	// 输出目录：指定了 -output-dir 则输出到该目录（不存在则创建），
 	// 否则保持原行为（落输入目录）
