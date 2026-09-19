@@ -201,6 +201,7 @@ Examples / 示例:
   python scripts/version.py --json       # Output JSON / 输出 JSON
   python scripts/version.py --snapshot   # Only snapshot / 仅快照版本
   python scripts/version.py --release    # Only release / 仅发布版本
+  python scripts/version.py --get-version  # Release version without 'v' (CI auto-tag) / 无 v 前缀发布版本（CI 打 tag）
         """
     )
     parser.add_argument("--update", action="store_true",
@@ -211,6 +212,8 @@ Examples / 示例:
                         help="Print only snapshot version / 仅打印快照版本")
     parser.add_argument("--release", action="store_true",
                         help="Print only release version / 仅打印发布版本")
+    parser.add_argument("--get-version", action="store_true",
+                        help="Print release version without 'v' prefix (for CI auto-tag) / 输出无 v 前缀的发布版本号（供 CI 自动打 tag）")
     parser.add_argument("--codename", default="kaula",
                         help="Version codename / 版本代号 (default: kaula)")
     
@@ -246,6 +249,11 @@ Examples / 示例:
     
     if args.release:
         print(release)
+        return
+    
+    if args.get_version:
+        # CI 自动打 tag 用：输出不带 v 前缀的版本号（auto-tag.yml 拼 TAG="v$VERSION"）
+        print(release[1:] if release.startswith("v") else release)
         return
     
     # Default: print both with +N if unpushed
