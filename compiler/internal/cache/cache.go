@@ -23,10 +23,14 @@ import (
 // mode 为影响代码生成结果的编译模式串（如 "test"/"sor"/"debug"，
 // 逗号连接，普通编译为空）。缓存键与条目清单都纳入 mode，
 // 防止不同模式（生成的 C 不同）互相复用产物。
+// keyExtra 为同样影响产物的编译参数（如 optLevel、KMM 池容量），
+// 在编译参数确定后通过 SetKeyExtra 设置并混入缓存键，
+// 防止 -O0/-O3 或不同池容量复用同一产物。
 type CacheManager struct {
-	dir     string
-	version string
-	mode    string
+	dir      string
+	version  string
+	mode     string
+	keyExtra string
 }
 
 // CacheResult 是 Check 的返回值。
@@ -40,6 +44,7 @@ type entryMeta struct {
 	Version      string            `json:"version"`
 	Mode         string            `json:"mode,omitempty"`
 	SourceHash   string            `json:"source_hash"`
+	CHash        string            `json:"c_hash,omitempty"` // .c 内容哈希，命中时校验防残缺缓存
 	ImportHashes map[string]string `json:"import_hashes,omitempty"`
 	UsedModules  []string          `json:"used_modules,omitempty"`
 	CreatedAt    time.Time         `json:"created_at"`
@@ -60,25 +65,46 @@ func NewCacheManager(cacheDir, version, mode string) (*CacheManager, error) {
 	return &CacheManager{dir: cacheDir, version: version, mode: mode}, nil
 }
 
+// SetKeyExtra 设置额外混入缓存键的编译参数（optLevel、池容量等）。
+// 必须在首次 GetCacheKey/Check/Store 之前调用，之后不应再变更。
+func (m *CacheManager) SetKeyExtra(extra string) {
+	m.keyExtra = extra
+}
+
+// writeAtomic 以 tmp + rename 原子写入文件，避免进程中断或并发读取
+// 看到截断/半写内容。
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // GetCacheKey 返回输入文件路径对应的稳定缓存键（文件名安全）。
-// 非空 mode 混入哈希，使同一源码在不同编译模式下拥有独立缓存条目。
+// 非空 mode 与 keyExtra 混入哈希，使同一源码在不同编译模式/参数下
+// 拥有独立缓存条目。
 func (m *CacheManager) GetCacheKey(inputFile string) string {
 	abs, err := filepath.Abs(inputFile)
 	if err != nil {
 		abs = inputFile
 	}
-	if m.mode == "" {
-		sum := sha256.Sum256([]byte(abs))
-		return hex.EncodeToString(sum[:])
+	payload := abs
+	if m.mode != "" {
+		payload += "\x00" + m.mode
 	}
-	sum := sha256.Sum256([]byte(abs + "\x00" + m.mode))
+	if m.keyExtra != "" {
+		payload += "\x00" + m.keyExtra
+	}
+	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
 }
 
 func (m *CacheManager) cCodePath(key string) string { return filepath.Join(m.dir, key+".c") }
 func (m *CacheManager) metaPath(key string) string  { return filepath.Join(m.dir, key+".meta") }
 
-// Check 校验缓存是否命中：清单存在、版本/源哈希/导入哈希全部匹配，且 .c 文件存在。
+// Check 校验缓存是否命中：清单存在、版本/源哈希/导入哈希全部匹配、
+// .c 文件存在且内容哈希一致（防止残缺/污染的缓存条目被复用）。
 // 无论命中与否，CCodePath 都指向该条目的 .c 路径（未命中时为待写入路径）。
 func (m *CacheManager) Check(inputFile string, data []byte, importFileHashes map[string]string) CacheResult {
 	key := m.GetCacheKey(inputFile)
@@ -104,22 +130,31 @@ func (m *CacheManager) Check(inputFile string, data []byte, importFileHashes map
 	if !hashMapsEqual(meta.ImportHashes, importFileHashes) {
 		return CacheResult{Hit: false, CCodePath: cpath}
 	}
-	if _, err := os.Stat(cpath); err != nil {
+	cCode, err := os.ReadFile(cpath)
+	if err != nil {
+		return CacheResult{Hit: false, CCodePath: cpath}
+	}
+	// 内容指纹校验：meta 中记录 .c 内容哈希，读出的 .c 必须一致；
+	// 旧条目（无 CHash）视为未命中，自然失效并重编译。
+	if meta.CHash == "" || meta.CHash != HashContent(cCode) {
 		return CacheResult{Hit: false, CCodePath: cpath}
 	}
 	return CacheResult{Hit: true, CCodePath: cpath}
 }
 
 // Store 写入生成的 C 代码与清单。Store 总是覆盖已有条目。
+// .c 与 .meta 均以 tmp + rename 原子写入，杜绝"进程中断/并发读"产生
+// 半写条目；meta 记录 .c 内容哈希供 Check 校验。
 func (m *CacheManager) Store(inputFile string, data []byte, output string, usedModules []string, importFileHashes map[string]string) error {
 	key := m.GetCacheKey(inputFile)
-	if err := os.WriteFile(m.cCodePath(key), []byte(output), 0o644); err != nil {
+	if err := writeAtomic(m.cCodePath(key), []byte(output), 0o644); err != nil {
 		return err
 	}
 	meta := entryMeta{
 		Version:      m.version,
 		Mode:         m.mode,
 		SourceHash:   HashContent(data),
+		CHash:        HashContent([]byte(output)),
 		ImportHashes: importFileHashes,
 		UsedModules:  usedModules,
 		CreatedAt:    time.Now().UTC(),
@@ -128,7 +163,7 @@ func (m *CacheManager) Store(inputFile string, data []byte, output string, usedM
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.metaPath(key), raw, 0o644)
+	return writeAtomic(m.metaPath(key), raw, 0o644)
 }
 
 // GetStats 返回 (条目数, .c 总字节, 最早/最近创建时间)。
