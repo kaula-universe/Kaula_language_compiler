@@ -1306,8 +1306,13 @@ func main() {
 		cacheKey := cacheManager.GetCacheKey(inputFile)
 		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
 
-		// 检查缓存是否命中（校验含被 import 文件的内容哈希）
-		cacheResult := cacheManager.Check(inputFile, data, importFileHashes)
+		// 链接输入指纹：标准库/运行时/第三方库任一源码变更，缓存即失效。
+		// 覆盖 importFileHashes 的盲区（pkglib 依赖、std 库、runtime 源）。
+		linkFpRoots := collectLinkFingerprintRoots(cwd, cfg)
+		linkFp := cache.ComputeLinkFingerprint(linkFpRoots)
+
+		// 检查缓存是否命中（校验含被 import 文件的内容哈希与链接输入指纹）
+		cacheResult := cacheManager.Check(inputFile, data, importFileHashes, linkFp)
 		if cacheResult.Hit {
 			cacheHit = true
 			// 缓存命中: 跳过编译, 不显示任何消息
@@ -1315,7 +1320,7 @@ func main() {
 			// 缓存未命中, 需要编译
 			if verbose { fmt.Printf("[Cache] 编译中: %s\n", inputBase) }
 			// 存储新生成的代码
-			if err := cacheManager.Store(inputFile, data, output, usedModules, importFileHashes); err != nil {
+			if err := cacheManager.Store(inputFile, data, output, usedModules, importFileHashes, linkFp); err != nil {
 				fmt.Printf("[Cache] Warning: Failed to store cache: %v\n", err)
 			}
 			cacheHit = false
@@ -1616,6 +1621,123 @@ func resolveBootLinkScript(cfg *config.Config) (string, error) {
 	}
 	return "", fmt.Errorf("no built-in linker script for arch %s (looked in %s). Use --link-script to provide one",
 		arch, filepath.Join(cfg.TemplatePath, "linker"))
+}
+
+// pkglibCandidateRoots 返回所有可能承载第三方库的目录（存在才列出）。
+// 与 stdlib.LoadStdlibConfigWithPkglib 的搜索路径保持一致：
+// --pkglib 指定目录、可执行文件旁 pkglib/、工作区及上级 pkglib/、~/.kaula/pkglib。
+func pkglibCandidateRoots(workDir string, cfg *config.Config) []string {
+	var roots []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		if seen[abs] {
+			return
+		}
+		seen[abs] = true
+		if st, err := os.Stat(abs); err == nil && st.IsDir() {
+			roots = append(roots, abs)
+		}
+	}
+	if cfg != nil {
+		add(cfg.PkglibPath)
+	}
+	if exePath, err := os.Executable(); err == nil {
+		add(filepath.Join(filepath.Dir(filepath.Clean(exePath)), "pkglib"))
+	}
+	add(filepath.Join(workDir, "pkglib"))
+	add(filepath.Join(workDir, "..", "pkglib"))
+	if home, herr := os.UserHomeDir(); herr == nil {
+		add(filepath.Join(home, ".kaula", "pkglib"))
+	}
+	return roots
+}
+
+// collectLinkFingerprintRoots 返回链接输入指纹覆盖的根集合：
+// std 源目录、kaula src、freestanding、runtime 源文件、pkglib 库目录。
+// 任一文件变更都会使依赖它们的缓存条目失效。
+func collectLinkFingerprintRoots(workDir string, cfg *config.Config) []string {
+	var roots []string
+	seen := map[string]bool{}
+	addDir := func(p string) {
+		if p == "" {
+			return
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		if seen[abs] {
+			return
+		}
+		seen[abs] = true
+		if st, err := os.Stat(abs); err == nil && st.IsDir() {
+			roots = append(roots, abs)
+		}
+	}
+	addFile := func(p string) {
+		if p == "" {
+			return
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		if seen[abs] {
+			return
+		}
+		seen[abs] = true
+		if st, err := os.Stat(abs); err == nil && st.Mode().IsRegular() {
+			roots = append(roots, abs)
+		}
+	}
+
+	// std / src / freestanding 源目录（workDir 及其上级，与 compileCCode 搜索路径一致）
+	for _, d := range []string{
+		filepath.Join(workDir, "std"),
+		filepath.Join(workDir, "..", "std"),
+		filepath.Join(workDir, "src"),
+		filepath.Join(workDir, "..", "src"),
+		filepath.Join(workDir, "freestanding"),
+		filepath.Join(workDir, "..", "freestanding"),
+	} {
+		addDir(d)
+	}
+
+	// runtime 源文件（kaula.h、kmm 分配器、spend_call、allocator），
+	// 位于 kaula 根目录；findBootKaulaSrcPath 返回 kaula根/src。
+	if src := findBootKaulaSrcPath(workDir); src != "" {
+		kaulaRoot := filepath.Dir(src)
+		for _, f := range []string{
+			"kaula.h",
+			"kmm_scoped_allocator_v4.c",
+			"spend_call.c",
+			"allocator.c",
+		} {
+			addFile(filepath.Join(kaulaRoot, f))
+		}
+	}
+
+	// pkglib 第三方库目录
+	for _, p := range pkglibCandidateRoots(workDir, cfg) {
+		addDir(p)
+	}
+
+	return roots
+}
+
+// linkInputMtimeRoots 返回 exe 快路径校验的链接输入根：
+// std 模块对象缓存目录（std .o + runtime .o）与 pkglib 库目录（.a）。
+func linkInputMtimeRoots(workDir string, cfg *config.Config) []string {
+	roots := []string{filepath.Join(workDir, "cache", "std-objects")}
+	roots = append(roots, pkglibCandidateRoots(workDir, cfg)...)
+	return roots
 }
 
 // findBootKaulaSrcPath 查找 kaula 源目录（src/kaula.h 所在目录），
@@ -2052,11 +2174,16 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 	if cacheHit {
 		if exeInfo, exeErr := os.Stat(outputExe); exeErr == nil {
 			if cInfo, cErr := os.Stat(cacheFile); cErr == nil && !exeInfo.ModTime().Before(cInfo.ModTime()) {
-				result.OutputFile = outputExe
-				return result
+				// 链接输入校验：exe 必须比所有 std .o / pkglib .a 都新。
+				// 否则 std 库已重编（源变更、指纹失效但 exe 快照仍存在）
+				// 或 pkglib 归档更新时，不能复用旧 exe。
+				if !exeInfo.ModTime().Before(cache.MaxLinkInputMtime(linkInputMtimeRoots(workDir, cfg))) {
+					result.OutputFile = outputExe
+					return result
+				}
 			}
 		}
-		// exe 缺失或比缓存旧: 回退到重新编译
+		// exe 缺失或比缓存/链接输入旧: 回退到重新编译
 	}
 
 	var err error

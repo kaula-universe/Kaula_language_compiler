@@ -13,9 +13,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -41,13 +43,14 @@ type CacheResult struct {
 
 // entryMeta 是每个缓存条目的清单。
 type entryMeta struct {
-	Version      string            `json:"version"`
-	Mode         string            `json:"mode,omitempty"`
-	SourceHash   string            `json:"source_hash"`
-	CHash        string            `json:"c_hash,omitempty"` // .c 内容哈希，命中时校验防残缺缓存
-	ImportHashes map[string]string `json:"import_hashes,omitempty"`
-	UsedModules  []string          `json:"used_modules,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
+	Version         string            `json:"version"`
+	Mode            string            `json:"mode,omitempty"`
+	SourceHash      string            `json:"source_hash"`
+	CHash           string            `json:"c_hash,omitempty"` // .c 内容哈希，命中时校验防残缺缓存
+	LinkFingerprint string            `json:"link_fingerprint,omitempty"` // 链接输入指纹，依赖库/标准库变更时失效
+	ImportHashes    map[string]string `json:"import_hashes,omitempty"`
+	UsedModules     []string          `json:"used_modules,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
 }
 
 // HashContent 返回 data 的 SHA-256 十六进制摘要。
@@ -103,10 +106,103 @@ func (m *CacheManager) GetCacheKey(inputFile string) string {
 func (m *CacheManager) cCodePath(key string) string { return filepath.Join(m.dir, key+".c") }
 func (m *CacheManager) metaPath(key string) string  { return filepath.Join(m.dir, key+".meta") }
 
-// Check 校验缓存是否命中：清单存在、版本/源哈希/导入哈希全部匹配、
+// ComputeLinkFingerprint 计算链接输入（标准库源、运行时源、第三方库）的指纹。
+// 对每个根递归收集所有普通文件（不按扩展名过滤，最保守），
+// 按绝对路径去重后以 (路径|大小|mtime_ns) 聚合为 SHA256。
+// 任一链接输入文件变更（新增/删除/修改/大小变化）都会改变指纹，
+// 从而让依赖 std/pkglib 源码的缓存条目失效。
+func ComputeLinkFingerprint(roots []string) string {
+	seen := make(map[string]struct{})
+	entries := make([]string, 0, 64)
+	var walk func(dir string)
+	walk = func(dir string) {
+		d, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, de := range d {
+			p := filepath.Join(dir, de.Name())
+			if de.IsDir() {
+				walk(p)
+				continue
+			}
+			info, err := de.Info()
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				abs = p
+			}
+			if _, dup := seen[abs]; dup {
+				continue
+			}
+			seen[abs] = struct{}{}
+			entries = append(entries, fmt.Sprintf("%s|%d|%d", abs, info.Size(), info.ModTime().UnixNano()))
+		}
+	}
+	for _, r := range roots {
+		if st, err := os.Stat(r); err == nil && st.IsDir() {
+			walk(r)
+		} else if err == nil && st.Mode().IsRegular() {
+			// 根本身是文件（如 pkglib 归档）：直接纳入
+			abs, aerr := filepath.Abs(r)
+			if aerr != nil {
+				abs = r
+			}
+			if _, dup := seen[abs]; !dup {
+				seen[abs] = struct{}{}
+				entries = append(entries, fmt.Sprintf("%s|%d|%d", abs, st.Size(), st.ModTime().UnixNano()))
+			}
+		}
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+// MaxLinkInputMtime 返回链接输入（std .o、pkglib .a 等）的最大修改时间。
+// 目录根递归收集所有普通文件；文件根直接 stat。
+// 用于 exe 快路径校验：exe 必须比所有链接输入都新才可复用。
+func MaxLinkInputMtime(roots []string) time.Time {
+	var max time.Time
+	var consider func(p string, info os.FileInfo)
+	consider = func(p string, info os.FileInfo) {
+		if info.ModTime().After(max) {
+			max = info.ModTime()
+		}
+	}
+	var walk func(dir string)
+	walk = func(dir string) {
+		d, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, de := range d {
+			p := filepath.Join(dir, de.Name())
+			if de.IsDir() {
+				walk(p)
+				continue
+			}
+			if info, err := de.Info(); err == nil && info.Mode().IsRegular() {
+				consider(p, info)
+			}
+		}
+	}
+	for _, r := range roots {
+		if st, err := os.Stat(r); err == nil && st.IsDir() {
+			walk(r)
+		} else if err == nil {
+			consider(r, st)
+		}
+	}
+	return max
+}
+
+// Check 校验缓存是否命中：清单存在、版本/源哈希/导入哈希/链接输入指纹全部匹配、
 // .c 文件存在且内容哈希一致（防止残缺/污染的缓存条目被复用）。
 // 无论命中与否，CCodePath 都指向该条目的 .c 路径（未命中时为待写入路径）。
-func (m *CacheManager) Check(inputFile string, data []byte, importFileHashes map[string]string) CacheResult {
+func (m *CacheManager) Check(inputFile string, data []byte, importFileHashes map[string]string, linkFingerprint string) CacheResult {
 	key := m.GetCacheKey(inputFile)
 	cpath := m.cCodePath(key)
 
@@ -130,6 +226,12 @@ func (m *CacheManager) Check(inputFile string, data []byte, importFileHashes map
 	if !hashMapsEqual(meta.ImportHashes, importFileHashes) {
 		return CacheResult{Hit: false, CCodePath: cpath}
 	}
+	// 链接输入指纹：std/pkglib/runtime 任一变更都失效。
+	// 旧条目无 LinkFingerprint 时，为兼容既有缓存不强制失效，
+	// 但内容哈希校验（下）仍会兜住残缺条目。
+	if meta.LinkFingerprint != "" && linkFingerprint != "" && meta.LinkFingerprint != linkFingerprint {
+		return CacheResult{Hit: false, CCodePath: cpath}
+	}
 	cCode, err := os.ReadFile(cpath)
 	if err != nil {
 		return CacheResult{Hit: false, CCodePath: cpath}
@@ -144,20 +246,21 @@ func (m *CacheManager) Check(inputFile string, data []byte, importFileHashes map
 
 // Store 写入生成的 C 代码与清单。Store 总是覆盖已有条目。
 // .c 与 .meta 均以 tmp + rename 原子写入，杜绝"进程中断/并发读"产生
-// 半写条目；meta 记录 .c 内容哈希供 Check 校验。
-func (m *CacheManager) Store(inputFile string, data []byte, output string, usedModules []string, importFileHashes map[string]string) error {
+// 半写条目；meta 记录 .c 内容哈希与链接输入指纹供 Check 校验。
+func (m *CacheManager) Store(inputFile string, data []byte, output string, usedModules []string, importFileHashes map[string]string, linkFingerprint string) error {
 	key := m.GetCacheKey(inputFile)
 	if err := writeAtomic(m.cCodePath(key), []byte(output), 0o644); err != nil {
 		return err
 	}
 	meta := entryMeta{
-		Version:      m.version,
-		Mode:         m.mode,
-		SourceHash:   HashContent(data),
-		CHash:        HashContent([]byte(output)),
-		ImportHashes: importFileHashes,
-		UsedModules:  usedModules,
-		CreatedAt:    time.Now().UTC(),
+		Version:         m.version,
+		Mode:            m.mode,
+		SourceHash:      HashContent(data),
+		CHash:           HashContent([]byte(output)),
+		LinkFingerprint: linkFingerprint,
+		ImportHashes:    importFileHashes,
+		UsedModules:     usedModules,
+		CreatedAt:       time.Now().UTC(),
 	}
 	raw, err := json.Marshal(meta)
 	if err != nil {
