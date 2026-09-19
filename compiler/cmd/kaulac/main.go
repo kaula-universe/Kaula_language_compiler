@@ -2689,9 +2689,29 @@ func resolveModuleDependencies(usedModules []string, validStdPaths []string, val
 }
 
 func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCodeInMemory string, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) error {
-	clangPath, err := exec.LookPath("clang")
-	if err != nil {
-		return fmt.Errorf("clang not found in PATH")
+	// 选择 C 编译器：优先使用 -cc 显式指定的编译器（可为 clang2gcc 翻译器、gcc 等），
+	// 否则按名查找 clang（原有行为）。
+	var clangPath string
+	if cfg != nil && cfg.CCompiler != "" {
+		if strings.ContainsAny(cfg.CCompiler, `/\`) {
+			// 含路径分隔符：视为可执行文件路径直接使用
+			if _, err := os.Stat(cfg.CCompiler); err != nil {
+				return fmt.Errorf("specified C compiler not found: %s", cfg.CCompiler)
+			}
+			clangPath = cfg.CCompiler
+		} else {
+			p, err := exec.LookPath(cfg.CCompiler)
+			if err != nil {
+				return fmt.Errorf("C compiler %q not found in PATH", cfg.CCompiler)
+			}
+			clangPath = p
+		}
+	} else {
+		p, err := exec.LookPath("clang")
+		if err != nil {
+			return fmt.Errorf("clang not found in PATH (use -cc to specify a C compiler, e.g. the clang2gcc translator or gcc)")
+		}
+		clangPath = p
 	}
 
 	// ccache 集成：如果 ccache 可用，用它包装 clang 以缓存编译结果（大幅提升重复编译速度）
