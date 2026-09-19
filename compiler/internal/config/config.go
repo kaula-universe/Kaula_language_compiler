@@ -55,9 +55,10 @@ type Config struct {
 	TimeoutSec    int `json:"timeout_sec,omitempty"`     // 超时限制 (秒)
 
 	// ====== 编译器选项 ======
-	CFlags   []string `json:"c_flags,omitempty"`   // 额外的 C 编译器参数
-	CDefines []string `json:"c_defines,omitempty"` // 额外的 C 宏定义 (#define)
-	CLibs    []string `json:"c_libs,omitempty"`    // 额外的链接库
+	CCompiler string   `json:"c_compiler,omitempty"` // C 编译器路径（默认按名查找 clang；可指定 clang2gcc 翻译器或 gcc 等）
+	CFlags     []string `json:"c_flags,omitempty"`   // 额外的 C 编译器参数
+	CDefines   []string `json:"c_defines,omitempty"` // 额外的 C 宏定义 (#define)
+	CLibs      []string `json:"c_libs,omitempty"`    // 额外的链接库
 
 	// ====== 源码映射 ======
 	SourceMap bool `json:"sourcemap,omitempty"`
@@ -357,6 +358,7 @@ func loadFlags(config *Config) {
 	flag.IntVar(&config.TimeoutSec, "timeout", config.TimeoutSec, "超时限制 (秒)")
 
 	// C 编译器选项
+	flag.StringVar(&config.CCompiler, "cc", config.CCompiler, "C 编译器路径（默认按名查找 clang；可指定 clang2gcc 翻译器、gcc 等）")
 	cFlags := flag.String("cflags", "", "额外的 C 编译器参数 (空格分隔)")
 	cDefines := flag.String("defines", "", "额外的 C 宏定义 (逗号分隔)")
 	cLibs := flag.String("libs", "", "额外的链接库 (逗号分隔)")
