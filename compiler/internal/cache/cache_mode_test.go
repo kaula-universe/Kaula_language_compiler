@@ -23,10 +23,10 @@ func TestCacheKeyIsModeSensitive(t *testing.T) {
 
 	// 不同模式条目不得互相复用
 	data := []byte("src")
-	if err := test.Store("/proj/in.kl", data, "GEN_TEST_C", nil, nil); err != nil {
+	if err := test.Store("/proj/in.kl", data, "GEN_TEST_C", nil, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if res := normal.Check("/proj/in.kl", data, nil); res.Hit {
+	if res := normal.Check("/proj/in.kl", data, nil, ""); res.Hit {
 		t.Errorf("normal compile must not hit test-mode cache entry")
 	}
 }
