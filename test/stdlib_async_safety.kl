@@ -5,6 +5,10 @@ import std.async
 import std.concurrent
 import std.io
 
+fn noop(arg: void*) {
+    # 空任务回调
+}
+
 fn assert_msg(cond: bool, msg: string) {
     if !cond {
         std.io.println("FAIL: ", msg)
@@ -33,7 +37,7 @@ fn main() {
     # 并发 add 测试
     LightAsyncLoop* loop4 = std.async.light_async_loop_create()
     for _i in range(0, 100) {
-        std.async.light_async_loop_add(loop4, null, null)
+        std.async.light_async_loop_add(loop4, noop, null)
     }
     i32 size = std.async.light_async_loop_size(loop4)
     assert_msg(size == 100, "应添加 100 个任务")

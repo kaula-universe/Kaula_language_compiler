@@ -1131,8 +1131,11 @@ static inline int kmm_v4_scope_promote_p_deep(void** ptr, size_t size, kmm_v4_pr
 
 static inline void* kmm_v4_alloc_auto(size_t size) {
     const size_t mask = KMM_V4_ALIGNMENT - 1;
+    // 0 字节分配返回有效指针（最小对齐块），与 malloc(0) 语义一致；
+    // 调用方未检查返回值时不会因 NULL 解引用崩溃。
+    if (KMM_V4_UNLIKELY(size == 0)) size = 1;
     // D3 修复：对齐前检查 size + mask 溢出
-    if (KMM_V4_UNLIKELY(size == 0 || size > SIZE_MAX - mask)) return NULL;
+    if (KMM_V4_UNLIKELY(size > SIZE_MAX - mask)) return NULL;
     size_t aligned_size = (size + mask) & ~mask;
 
     // 快速路径：从 per-thread heap 分配（无原子操作，无锁）
