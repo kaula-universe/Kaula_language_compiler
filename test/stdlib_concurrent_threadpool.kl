@@ -8,7 +8,8 @@ import std.io
 i32 tasks_executed = 0
 
 fn task_func(arg: void*) {
-    tasks_executed = tasks_executed + 1
+    # 原子累加：pool3 段 1000 个任务并发执行，普通 += 是数据竞争
+    std.concurrent.kaula_atomic_add(&tasks_executed, 1)
 }
 
 fn assert_msg(cond: bool, msg: string) {

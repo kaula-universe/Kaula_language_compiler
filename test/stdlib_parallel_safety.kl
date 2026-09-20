@@ -11,7 +11,8 @@ i32 global_sum = 0
 
 fn accumulate_index(data: void*, index: i32) {
     i32* arr = as<i32*>(data)
-    global_sum = global_sum + arr[index]
+    # 原子累加：多个 worker 并发写 global_sum，普通 += 是数据竞争
+    std.concurrent.kaula_atomic_add(&global_sum, arr[index])
 }
 
 fn assert_msg(cond: bool, msg: string) {
