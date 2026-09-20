@@ -56,17 +56,10 @@ KMM_TLS kmm_thread_heap_t g_kmm_v4_thread_heap = { NULL, 0, 0, 0 };
 __attribute__((aligned(KMM_V4_ALIGNMENT)))
 uint8_t g_kmm_v4_survivor_storage[KMM_V4_SURVIVOR_REGION_SIZE];
 #else
-// 动态池：大对象区独立 mmap，slab 桶 slots 在 survivor_ensure_init 中分配
+// 动态池（方案 A）：无大对象 bump 区（slab 密档覆盖 ≤1MB，超大对象页式）。
+// large_base/capacity 保留符号兼容（恒 NULL/0，header 不再使用）。
 uint8_t* g_kmm_v4_survivor_large_base = NULL;
 size_t   g_kmm_v4_survivor_large_capacity = 0;
-// Task #25（审计 D2）：LEVEL>=1 时 alloc_global 的并发慢路径会并发调用
-// survivor_commit_up_to 做 read-modify-write，普通 size_t 存在数据竞争；
-// 改用文件既有 KMM_ATOMIC_* 抽象（LEVEL 0 时退化为普通读写，零开销）。
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-static KMM_ATOMIC_TYPE g_survivor_committed_bytes = 0;
-#else
-static size_t g_survivor_committed_bytes = 0;
-#endif
 #endif
 
 // survivor 段全局状态
@@ -236,9 +229,11 @@ void kmm_v4_pool_commit(size_t needed) {
 // 线程安全的 survivor 段一次性初始化标志
 static KMM_ATOMIC_TYPE g_survivor_init_flag = 0;
 
+// 动态池（方案 A）：survivor 元数据由 header 的 kmm_v4_survivor_lazy_init
+// 一次性建立（49 档 bucket_size/slots_count，slots=NULL 懒分配）。
+// 这里只做线程安全的双检包装，不再 mmap 大对象区、不再预分配桶。
 static void survivor_ensure_init(void) {
     if (g_kmm_v4_survivor.initialized) return;
-
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     size_t expected = 0;
     if (!KMM_ATOMIC_CAS_STRONG(g_survivor_init_flag, expected, 1)) {
@@ -248,87 +243,140 @@ static void survivor_ensure_init(void) {
         return;
     }
 #endif
-
-    // 分配 slab 桶 slots 内存 + 大对象区（一次性 mmap 整块）
-    static const size_t bucket_sizes[KMM_V4_SLAB_BUCKETS] = {8,16,32,64,128,256,512,1024,2048};
-    size_t slab_total = 0;
-    for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
-        slab_total += bucket_sizes[i] * KMM_V4_SLAB_SLOTS;
-    }
-    size_t large_size = KMM_V4_SURVIVOR_REGION_SIZE - slab_total;
-    size_t total = slab_total + large_size;
-
-#ifdef _WIN32
-    uint8_t* storage = (uint8_t*)VirtualAlloc(NULL, total, MEM_RESERVE, PAGE_READWRITE);
-#else
-    void* p = mmap(NULL, total, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-    uint8_t* storage = (p == MAP_FAILED) ? NULL : (uint8_t*)p;
-#endif
-
-    if (storage) {
-        size_t off = 0;
-        for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
-            g_kmm_v4_survivor.buckets[i].bucket_size = bucket_sizes[i];
-            g_kmm_v4_survivor.buckets[i].slots = storage + off;
-            off += bucket_sizes[i] * KMM_V4_SLAB_SLOTS;
-            memset(g_kmm_v4_survivor.buckets[i].bitmap, 0, sizeof(g_kmm_v4_survivor.buckets[i].bitmap));
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-            __atomic_store_n(&g_kmm_v4_survivor.buckets[i].free_hint, 0, __ATOMIC_RELAXED);
-#else
-            g_kmm_v4_survivor.buckets[i].free_hint = 0;
-#endif
-            g_kmm_v4_survivor.buckets[i].allocated = 0;
-        }
-#ifdef _WIN32
-        // Windows: MEM_RESERVE 只保留地址空间，需 MEM_COMMIT 才可访问。
-        // 立即提交 slab 桶区域（slab_total 字节），大对象区按需提交。
-        VirtualAlloc(storage, slab_total, MEM_COMMIT, PAGE_READWRITE);
-#endif
-        g_kmm_v4_survivor_large_base = storage + off;
-        g_kmm_v4_survivor_large_capacity = large_size;
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-        KMM_ATOMIC_STORE(g_kmm_v4_survivor.large_offset, 0);
-#else
-        g_kmm_v4_survivor.large_offset = 0;
-#endif
-        g_kmm_v4_survivor.large_base = g_kmm_v4_survivor_large_base;
-        g_kmm_v4_survivor.large_capacity = large_size;
-        KMM_ATOMIC_STORE(g_survivor_committed_bytes, 0);
-        g_kmm_v4_survivor.initialized = true;
-    }
-
+    kmm_v4_survivor_lazy_init();
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     KMM_ATOMIC_STORE(g_survivor_init_flag, 2);
 #endif
 }
 
-static void survivor_commit_up_to(size_t needed) {
-    // D2 修复：CAS 循环保证计数器单调不回退（与 pool_commit_up_to 同口径）
-    size_t committed = KMM_ATOMIC_LOAD(g_survivor_committed_bytes);
-    for (;;) {
-        if (needed <= committed) return;
-        size_t commit_end = (needed + KMM_BATCH_COMMIT_SIZE - 1) & ~(KMM_BATCH_COMMIT_SIZE - 1);
-        if (commit_end > g_kmm_v4_survivor_large_capacity) commit_end = g_kmm_v4_survivor_large_capacity;
-        if (commit_end <= committed) return;
-        size_t commit_size = commit_end - committed;
-#ifdef _WIN32
-        // 先提交页面（幂等），再 CAS 推进计数器
-        if (commit_size > 0) {
-            VirtualAlloc(g_kmm_v4_survivor_large_base + committed,
-                         commit_size, MEM_COMMIT, PAGE_READWRITE);
-        }
+// 懒分配指定桶的 slots 内存（首次使用时才分配，49 档不全预分配）
+// 线程安全：CAS 双检，多线程并发 alloc 同一桶只分配一次。
+int kmm_v4_survivor_bucket_ensure(int idx) {
+    kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[idx];
+    if (b->slots != NULL) return 0;
+    size_t n = b->slots_count;
+    if (KMM_V4_UNLIKELY(n == 0)) return -1;
+    size_t bytes = n * b->bucket_size;
+    void* p = malloc(bytes);
+    if (KMM_V4_UNLIKELY(p == NULL)) return -1;
+    memset(p, 0, bytes);
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    if (__atomic_load_n(&b->slots, __ATOMIC_ACQUIRE) != NULL) {
+        free(p);  // 并发窗口内他人已建好
+        return 0;
+    }
+    __atomic_store_n(&b->slots, (uint8_t*)p, __ATOMIC_RELEASE);
 #else
-        (void)commit_size;  // Linux: mmap 自动按需提交
+    if (b->slots != NULL) { free(p); return 0; }
+    b->slots = (uint8_t*)p;
 #endif
-        if (KMM_ATOMIC_CAS_STRONG(g_survivor_committed_bytes, committed, commit_end)) return;
-        // CAS 失败：committed 被更新为当前值，下一轮重试
+    return 0;
+}
+
+// 页式超大对象（>1MB 或桶满）：magic header + payload，per-object free。
+// payload 16 字节对齐（hdr 16B：magic 4 + pad 4 + size 8，malloc 16 对齐）。
+// ⚠ 安全设计：所有页式对象登记到全局链表（g_paged_list）。survivor_free /
+// realloc 只按登记表识别页式对象——绝不从任意指针反向读内存，
+// 避免误把 TLAB/外部指针当页式对象解引用（见 memory 测试 double_free 崩溃）。
+#define KMM_V4_PAGED_MAGIC 0x4B4D4D50u  /* "KMMP" */
+typedef struct {
+    uint32_t magic;
+    uint32_t _pad;
+    size_t   size;
+} kmm_v4_paged_hdr_t;
+
+typedef struct kmm_paged_node {
+    struct kmm_paged_node* next;
+    kmm_v4_paged_hdr_t*   hdr;   // 分配头（含 payload 基址）
+} kmm_paged_node_t;
+
+// 页式对象登记链表（页式对象数量少，全局自旋锁开销可忽略）
+static kmm_paged_node_t* g_paged_list = NULL;
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+static KMM_ATOMIC_TYPE g_paged_lock = 0;
+static void kmm_v4_paged_lock(void) {
+    size_t expected = 0;
+    while (!KMM_ATOMIC_CAS_STRONG(g_paged_lock, expected, 1)) {
+        expected = 0;
+    }
+}
+static void kmm_v4_paged_unlock(void) { KMM_ATOMIC_STORE(g_paged_lock, 0); }
+#else
+static void kmm_v4_paged_lock(void) { }
+static void kmm_v4_paged_unlock(void) { }
+#endif
+
+void* kmm_v4_survivor_paged_alloc(size_t size) {
+    if (KMM_V4_UNLIKELY(size > SIZE_MAX - sizeof(kmm_v4_paged_hdr_t))) return NULL;
+    kmm_v4_paged_hdr_t* hdr = (kmm_v4_paged_hdr_t*)malloc(sizeof(kmm_v4_paged_hdr_t) + size);
+    if (KMM_V4_UNLIKELY(hdr == NULL)) return NULL;
+    hdr->magic = KMM_V4_PAGED_MAGIC;
+    hdr->size = size;
+
+    kmm_paged_node_t* node = (kmm_paged_node_t*)malloc(sizeof(kmm_paged_node_t));
+    if (KMM_V4_UNLIKELY(node == NULL)) { free(hdr); return NULL; }
+    node->hdr = hdr;
+    kmm_v4_paged_lock();
+    node->next = g_paged_list;
+    g_paged_list = node;
+    kmm_v4_paged_unlock();
+    return (uint8_t*)hdr + sizeof(kmm_v4_paged_hdr_t);
+}
+
+// 页式对象识别（登记表查找，安全：不读任意内存）
+bool kmm_v4_survivor_paged_contains(const void* ptr) {
+    if (KMM_V4_UNLIKELY(ptr == NULL)) return false;
+    kmm_v4_paged_hdr_t* want = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
+    bool found = false;
+    kmm_v4_paged_lock();
+    for (kmm_paged_node_t* n = g_paged_list; n != NULL; n = n->next) {
+        if (n->hdr == want) { found = true; break; }
+    }
+    kmm_v4_paged_unlock();
+    return found;
+}
+
+bool kmm_v4_survivor_paged_free(void* ptr) {
+    if (KMM_V4_UNLIKELY(ptr == NULL)) return false;
+    kmm_v4_paged_hdr_t* want = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
+    kmm_v4_paged_lock();
+    kmm_paged_node_t** pp = &g_paged_list;
+    while (*pp != NULL) {
+        if ((*pp)->hdr == want) {
+            kmm_paged_node_t* n = *pp;
+            *pp = n->next;
+            kmm_v4_paged_unlock();
+            if (n->hdr->magic == KMM_V4_PAGED_MAGIC) n->hdr->magic = 0;  // 防 double-free
+            free(n->hdr);
+            free(n);
+            return true;
+        }
+        pp = &(*pp)->next;
+    }
+    kmm_v4_paged_unlock();
+    return false;  // 不在登记表（TLAB/外部指针等）——安全返回
+}
+
+// 销毁全部页式对象（destroy_pool 调用）
+void kmm_v4_survivor_paged_purge(void) {
+    kmm_v4_paged_lock();
+    kmm_paged_node_t* n = g_paged_list;
+    g_paged_list = NULL;
+    kmm_v4_paged_unlock();
+    while (n != NULL) {
+        kmm_paged_node_t* nx = n->next;
+        if (n->hdr) free(n->hdr);
+        free(n);
+        n = nx;
     }
 }
 
+// 兼容保留：动态池无大对象 bump，commit 为 no-op
+// （静态池下 header 内联为 no-op，不经过这里）。
 __attribute__((used))
 void kmm_v4_survivor_commit(size_t needed) {
-    survivor_ensure_init();
-    survivor_commit_up_to(needed);
+    (void)needed;
+    survivor_ensure_init();  // 顺带保证元数据就绪
 }
 #endif // !KMM_V4_STATIC_POOL
 
@@ -660,6 +708,22 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
         }
     }
 
+#ifndef KMM_V4_STATIC_POOL
+    // 动态池：页式超大对象（登记表识别，安全——不读任意内存）。
+    // 须在 survivor_contains 之前：页式对象不在任何 slab 桶内。
+    if (kmm_v4_survivor_paged_contains(ptr)) {
+        kmm_v4_paged_hdr_t* _hdr = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
+        size_t _old = _hdr->size;
+        void* p = kmm_v4_malloc(size);
+        if (p) {
+            size_t copy_size = (size < _old) ? size : _old;
+            memcpy(p, ptr, copy_size);
+            kmm_v4_survivor_free(ptr);  // 登记表识别后释放
+        }
+        return p;
+    }
+#endif
+
     // 方案 A：检查 ptr 是否在 survivor 段内
     if (kmm_v4_survivor_contains(ptr)) {
         // D5 修复：先判断 ptr 是否在 slab 桶内，精确处理：
@@ -671,7 +735,7 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
         for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
             kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[i];
             if (b->slots != NULL && (uint8_t*)ptr >= b->slots &&
-                (uint8_t*)ptr < b->slots + KMM_V4_SLAB_SLOTS * b->bucket_size) {
+                (uint8_t*)ptr < b->slots + b->slots_count * b->bucket_size) {
                 slab_idx = i;
                 slab_bucket_size = b->bucket_size;
                 break;
@@ -693,6 +757,7 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
             }
             return p;
         }
+#ifdef KMM_V4_STATIC_POOL
         // survivor large bump 区域：无 header，保守复制到段尾（bump 固有特性）
         void* p = kmm_v4_malloc(size);
         if (p) {
@@ -704,6 +769,10 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
             memcpy(p, ptr, copy_size);
         }
         return p;
+#else
+        // 动态池：survivor 段内但不在 slab 桶（页式对象已被前置分支拦截，此处不可达）
+        return NULL;
+#endif
     }
 
     // 来自 libc fallback 的指针：走 libc realloc
@@ -785,30 +854,20 @@ void kmm_v4_destroy_pool(void) {
         g_kmm_v4_extra_capacity = 0;
 #endif
     }
-    // 方案 A：销毁 survivor 段（slab 桶 slots + 大对象区是一次性 mmap 的整块）
-    if (g_kmm_v4_survivor_large_base) {
-        // slab 桶 slots 内存与大对象区是同一块 mmap 的连续内存，起点在 buckets[0].slots
-        uint8_t* storage = g_kmm_v4_survivor.buckets[0].slots;
-        static const size_t bucket_sizes[KMM_V4_SLAB_BUCKETS] = {8,16,32,64,128,256,512,1024,2048};
-        size_t total = 0;
-        for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) total += bucket_sizes[i] * KMM_V4_SLAB_SLOTS;
-        total += g_kmm_v4_survivor_large_capacity;
-#ifdef _WIN32
-        (void)total;
-        VirtualFree(storage, 0, MEM_RELEASE);
-#else
-        munmap(storage, total);
-#endif
-        g_kmm_v4_survivor_large_base = NULL;
-        g_kmm_v4_survivor_large_capacity = 0;
-        KMM_ATOMIC_STORE(g_survivor_committed_bytes, 0);
-        g_kmm_v4_survivor.large_offset = 0;
-        g_kmm_v4_survivor.initialized = false;
-        for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
-            g_kmm_v4_survivor.buckets[i].slots = NULL;
-            g_kmm_v4_survivor.buckets[i].allocated = 0;
+    // 方案 A：销毁 survivor 段——释放各桶懒分配的 slots（各自独立 malloc）
+    // 与全部页式登记对象。
+    for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
+        kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[i];
+        if (b->slots) {
+            free(b->slots);
+            b->slots = NULL;
         }
+        b->allocated = 0;
+        b->free_hint = 0;
     }
+    kmm_v4_survivor_paged_purge();
+    g_kmm_v4_survivor.large_offset = 0;
+    g_kmm_v4_survivor.initialized = false;
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     // Task #17：复位一次性初始化标志，否则 destroy 后 pool/survivor
     // 无法重新初始化（双检锁见状态 2 会直接返回而不重新分配）
