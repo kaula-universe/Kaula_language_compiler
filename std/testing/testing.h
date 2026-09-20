@@ -46,13 +46,13 @@ extern TestReport* test_run_suite(TestSuite* suite, TestCase** cases, size_t cou
 extern void test_report_print(TestReport* report);
 extern void test_report_destroy(TestReport* report);
 
-extern bool_t test_assert_true(bool_t condition, const String message, const String file, int line);
-extern bool_t test_assert_false(bool_t condition, const String message, const String file, int line);
-extern bool_t test_assert_equals(i64 expected, i64 actual, const String message, const String file, int line);
-extern bool_t test_assert_string_equals(const String expected, const String actual, const String message, const String file, int line);
-extern bool_t test_assert_null(void* ptr, const String message, const String file, int line);
-extern bool_t test_assert_not_null(void* ptr, const String message, const String file, int line);
-extern bool_t test_assert_int_range(i64 value, i64 minimum, i64 maximum, const String message, const String file, int line);
+extern bool_t test_assert_true(bool_t condition, const char* message, const char* file, int line);
+extern bool_t test_assert_false(bool_t condition, const char* message, const char* file, int line);
+extern bool_t test_assert_equals(i64 expected, i64 actual, const char* message, const char* file, int line);
+extern bool_t test_assert_string_equals(const char* expected, const char* actual, const char* message, const char* file, int line);
+extern bool_t test_assert_null(void* ptr, const char* message, const char* file, int line);
+extern bool_t test_assert_not_null(void* ptr, const char* message, const char* file, int line);
+extern bool_t test_assert_int_range(i64 value, i64 minimum, i64 maximum, const char* message, const char* file, int line);
 
 // Macros for convenience
 #define TEST_ASSERT_TRUE(cond) test_assert_true(cond, #cond, __FILE__, __LINE__)

@@ -129,23 +129,23 @@ void test_report_destroy(TestReport* report) {
     (void)report;
 }
 
-bool_t test_assert_true(bool_t condition, const String message, const String file, int line) {
+bool_t test_assert_true(bool_t condition, const char* message, const char* file, int line) {
     if (!g_current_report || g_current_report->count == 0) return condition;
     TestResult* r = &g_current_report->results[g_current_report->count - 1];
     if (!condition) {
         r->passed = false;
-        r->message = string_copy(message);
-        r->file = string_copy(file);
+        r->message = string_create(message);
+        r->file = string_create(file);
         r->line = line;
     }
     return condition;
 }
 
-bool_t test_assert_false(bool_t condition, const String message, const String file, int line) {
+bool_t test_assert_false(bool_t condition, const char* message, const char* file, int line) {
     return test_assert_true(!condition, message, file, line);
 }
 
-bool_t test_assert_equals(i64 expected, i64 actual, const String message, const String file, int line) {
+bool_t test_assert_equals(i64 expected, i64 actual, const char* message, const char* file, int line) {
     if (expected == actual) return true;
     if (!g_current_report || g_current_report->count == 0) return false;
     TestResult* r = &g_current_report->results[g_current_report->count - 1];
@@ -153,31 +153,31 @@ bool_t test_assert_equals(i64 expected, i64 actual, const String message, const 
     r->message = string_create_from_int(expected);
     r->message = string_concat(r->message, string_create(" != "));
     r->message = string_concat(r->message, string_create_from_int(actual));
-    string_free(r->message); r->message = string_copy(message);
-    r->file = string_copy(file);
+    string_free(r->message); r->message = string_create(message);
+    r->file = string_create(file);
     r->line = line;
     return false;
 }
 
-bool_t test_assert_string_equals(const String expected, const String actual, const String message, const String file, int line) {
-    if (string_equals(expected, actual)) return true;
+bool_t test_assert_string_equals(const char* expected, const char* actual, const char* message, const char* file, int line) {
+    if (string_equals(string_create(expected), string_create(actual))) return true;
     if (!g_current_report || g_current_report->count == 0) return false;
     TestResult* r = &g_current_report->results[g_current_report->count - 1];
     r->passed = false;
-    r->message = string_copy(message);
-    r->file = string_copy(file);
+    r->message = string_create(message);
+    r->file = string_create(file);
     r->line = line;
     return false;
 }
 
-bool_t test_assert_null(void* ptr, const String message, const String file, int line) {
+bool_t test_assert_null(void* ptr, const char* message, const char* file, int line) {
     return test_assert_true(ptr == NULL, message, file, line);
 }
 
-bool_t test_assert_not_null(void* ptr, const String message, const String file, int line) {
+bool_t test_assert_not_null(void* ptr, const char* message, const char* file, int line) {
     return test_assert_true(ptr != NULL, message, file, line);
 }
 
-bool_t test_assert_int_range(i64 value, i64 minimum, i64 maximum, const String message, const String file, int line) {
+bool_t test_assert_int_range(i64 value, i64 minimum, i64 maximum, const char* message, const char* file, int line) {
     return test_assert_true(value >= minimum && value <= maximum, message, file, line);
 }
