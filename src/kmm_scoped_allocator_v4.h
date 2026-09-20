@@ -707,18 +707,29 @@ extern void kmm_v4_thread_heap_invalidate(void);
 // 调用方需确保被回卷的 survivor 对象无其他线程引用。
 
 // Slab 配置
+// 方案 A（修复 rewind 非线程安全）：大对象区 bump 在动态池移除，
+// slab 密档梯度覆盖到 1MB，超大对象走页式独立分配（per-object free）。
+// 静态池（freestanding，单线程）保留原 9 档 + large bump 旧路径。
 #define KMM_V4_SLAB_MIN_SIZE     8      // 最小 size class
-#define KMM_V4_SLAB_MAX_SIZE     2048   // 最大 slab 桶 size（超过走大对象 bump）
-#define KMM_V4_SLAB_BUCKETS      9      // 桶数：8/16/32/64/128/256/512/1024/2048
-#define KMM_V4_SLAB_SLOTS        256    // 每桶槽位数
+#define KMM_V4_SLAB_MAX_SIZE     2048   // 2 倍档位覆盖上限
+#define KMM_V4_SLAB_SLOTS        256    // bitmap 容量（每桶最大槽位数）
 #define KMM_V4_SLAB_BITMAP_WORDS ((KMM_V4_SLAB_SLOTS + 63) / 64)  // bitmap 字数
+// 动态池：9 档（8..2048，2 倍）+ 40 档（2K..1M，每 2 倍区间 4 档插值）= 49 档
+// 插值档位：区间 [B, 2B) 内 B, 1.25B, 1.5B, 1.75B（B = 2^k，k=11..20）
+#define KMM_V4_SLAB_PAGED_THRESHOLD (1024 * 1024)  // 超过走页式分配
+#ifdef KMM_V4_STATIC_POOL
+#define KMM_V4_SLAB_BUCKETS 9
+#else
+#define KMM_V4_SLAB_BUCKETS 49
+#endif
 
-// Slab 桶：固定大小槽位数组 + bitmap
+// Slab 桶：固定大小槽位数组 + bitmap（槽位数随档位递减，大档少槽控内存）
 typedef struct {
-    uint8_t* slots;                       // 槽位内存（KMM_V4_SLAB_SLOTS * bucket_size）
+    uint8_t* slots;                       // 槽位内存（slots_count * bucket_size；NULL=未懒分配）
     uint64_t bitmap[KMM_V4_SLAB_BITMAP_WORDS]; // 占用位图（1=已分配，用 __atomic 内建操作）
     size_t free_hint;                     // 下一个可能空闲的槽位（原子操作用 __atomic 内建）
     size_t bucket_size;                   // 本桶的 size class
+    size_t slots_count;                   // 本桶槽位数（≤ KMM_V4_SLAB_SLOTS）
     size_t allocated;                     // 已分配槽位数（统计用）
 } kmm_slab_bucket_t;
 
@@ -750,10 +761,13 @@ extern kmm_survivor_state_t g_kmm_v4_survivor;
 extern uint8_t g_kmm_v4_survivor_storage[KMM_V4_SURVIVOR_REGION_SIZE];
 static inline void kmm_v4_survivor_commit(size_t needed) { (void)needed; }
 #else
-// 动态池：大对象区独立 mmap，slab 桶 slots 在 survivor_ensure_init 中分配
-extern uint8_t* g_kmm_v4_survivor_large_base;
-extern size_t   g_kmm_v4_survivor_large_capacity;
-extern void kmm_v4_survivor_commit(size_t needed);
+// 动态池（方案 A）：无大对象 bump 区；桶 slots 懒分配，超大对象页式
+extern int  kmm_v4_survivor_bucket_ensure(int idx);        // 懒分配桶 slots，0=成功
+extern void* kmm_v4_survivor_paged_alloc(size_t size);     // 页式分配（登记 + magic header）
+extern bool kmm_v4_survivor_paged_free(void* ptr);         // 页式释放（登记表查找，安全）
+extern bool kmm_v4_survivor_paged_contains(const void* ptr); // 页式对象识别（登记表查找）
+extern void kmm_v4_survivor_paged_purge(void);             // 销毁全部页式对象（destroy_pool）
+extern void kmm_v4_survivor_commit(size_t needed);         // 兼容保留（no-op）
 #endif
 
 // ==================== 批量分配 API ====================
@@ -809,24 +823,63 @@ static inline void kmm_v4_offset_restore(size_t saved) {
 // kmm_v4_promote：把对象从当前作用域段"提升"到幸存段（分配 + 拷贝）。
 // 用于 SOR 在 yield/extract/return 边界实现真正的跨作用域所有权转移。
 
-// 内部：选 bucket index（size→bucket），返回桶下标，size 超限返回 -1
+// 内部：由 bucket index 计算 size class（档位表）
+// idx<9：8..2048（2 倍）；idx>=9：区间 [2^k, 2^k·2) 内 4 档插值 B·(4+i)/4
+static inline size_t kmm_v4_slab_bucket_size(int idx) {
+    if (idx < 9) return (size_t)KMM_V4_SLAB_MIN_SIZE << idx;
+    int q = idx - 9;
+    int k = 11 + q / 4;      // k=11..20，对应 2K..1M 区间
+    int i = q % 4;           // 区间内插值 0..3
+    return ((size_t)1 << (k - 2)) * (size_t)(4 + i);
+}
+
+// 内部：每档槽位数（小档密、大档少，控制单桶内存）
+static inline size_t kmm_v4_slab_slots_for(size_t bucket_size) {
+    if (bucket_size <= KMM_V4_SLAB_MAX_SIZE) return KMM_V4_SLAB_SLOTS;   // 256
+    if (bucket_size <= 65536) return 16;
+    return 4;                                                            // 128K..1M
+}
+
+// 内部：选 bucket index（size→bucket），返回桶下标，超限返回 -1
+// 动态池：≤1MB 走密档 slab；>1MB 返回 -1 由调用方走页式分配。
 static inline int kmm_v4_slab_bucket_index(size_t size) {
-    if (size == 0 || size > KMM_V4_SLAB_MAX_SIZE) return -1;
+    if (size == 0) return -1;
+#ifdef KMM_V4_STATIC_POOL
+    if (size > KMM_V4_SLAB_MAX_SIZE) return -1;
     int idx = 0;
     size_t cls = KMM_V4_SLAB_MIN_SIZE;
     while (cls < size) { cls <<= 1; idx++; }
     return idx;  // 0..8 对应 8..2048
+#else
+    if (size <= KMM_V4_SLAB_MAX_SIZE) {
+        int idx = 0;
+        size_t cls = KMM_V4_SLAB_MIN_SIZE;
+        while (cls < size) { cls <<= 1; idx++; }
+        return idx;
+    }
+    if (size > KMM_V4_SLAB_PAGED_THRESHOLD) return -1;  // 页式
+    // 密档：找最大 2 幂 B ≤ size（B ≥ 2048），区间内 4 档插值
+    size_t B = KMM_V4_SLAB_MAX_SIZE;   // 2048
+    int k = 11;                        // 2^11 = 2048
+    while (B * 2 < size) { B <<= 1; k++; }
+    size_t step = B / 4;
+    size_t i = (size - B + step - 1) / step;  // ceil((size-B)/step)，0..4
+    if (i > 3) { B <<= 1; k++; i = 0; }       // 落入区间端点 → 下一区间首档
+    return 9 + (k - 11) * 4 + (int)i;
+#endif
 }
 
 // 内部：从指定桶分配一个槽位，返回槽位指针，满返回 NULL
 static inline void* kmm_v4_slab_alloc_from_bucket(kmm_slab_bucket_t* bucket) {
+    size_t n = bucket->slots_count;
+    if (KMM_V4_UNLIKELY(n == 0)) return NULL;
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     size_t hint = __atomic_load_n(&bucket->free_hint, __ATOMIC_RELAXED);
 #else
     size_t hint = 0;
 #endif
-    for (int attempt = 0; attempt < KMM_V4_SLAB_SLOTS; attempt++) {
-        size_t slot = (hint + attempt) % KMM_V4_SLAB_SLOTS;
+    for (int attempt = 0; attempt < (int)n; attempt++) {
+        size_t slot = (hint + attempt) % n;
         size_t word = slot / 64;
         uint64_t bit = (uint64_t)1 << (slot % 64);
 #if KMM_THREAD_SAFETY_LEVEL >= 1
@@ -836,7 +889,7 @@ static inline void* kmm_v4_slab_alloc_from_bucket(kmm_slab_bucket_t* bucket) {
         uint64_t neu = old | bit;
         if (__atomic_compare_exchange_n(&bucket->bitmap[word], &old, neu, 1,
                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-            __atomic_store_n(&bucket->free_hint, (slot + 1) % KMM_V4_SLAB_SLOTS, __ATOMIC_RELAXED);
+            __atomic_store_n(&bucket->free_hint, (slot + 1) % n, __ATOMIC_RELAXED);
             bucket->allocated++;
             return bucket->slots + slot * bucket->bucket_size;
         }
@@ -855,8 +908,9 @@ static inline void* kmm_v4_slab_alloc_from_bucket(kmm_slab_bucket_t* bucket) {
 // 内部：释放指定桶中的槽位
 static inline bool kmm_v4_slab_free_from_bucket(kmm_slab_bucket_t* bucket, void* ptr) {
     if (bucket->slots == NULL) return false;
+    size_t n = bucket->slots_count;
     size_t offset = (size_t)((uint8_t*)ptr - bucket->slots);
-    if (offset >= KMM_V4_SLAB_SLOTS * bucket->bucket_size) return false;
+    if (offset >= n * bucket->bucket_size) return false;
     if (offset % bucket->bucket_size != 0) return false;
     size_t slot = offset / bucket->bucket_size;
     size_t word = slot / 64;
@@ -882,13 +936,14 @@ static inline bool kmm_v4_slab_free_from_bucket(kmm_slab_bucket_t* bucket, void*
 static inline bool kmm_v4_slab_bucket_contains(kmm_slab_bucket_t* bucket, const void* ptr) {
     return bucket->slots != NULL &&
            (const uint8_t*)ptr >= bucket->slots &&
-           (const uint8_t*)ptr <  bucket->slots + KMM_V4_SLAB_SLOTS * bucket->bucket_size;
+           (const uint8_t*)ptr <  bucket->slots + bucket->slots_count * bucket->bucket_size;
 }
 
 // ---- Survivor lazy init ----
-// kmm_v4_alloc_global 首次调用时触发，确保 slab 桶 slots 和大对象区已就绪。
-// 静态池：从 g_kmm_v4_survivor_storage 划分 slab 桶 + 大对象区。
-// 动态池：委托 kmm_v4_survivor_commit → survivor_ensure_init（mmap + 原子双检锁）。
+// kmm_v4_alloc_global 首次调用时触发。
+// 静态池：从 g_kmm_v4_survivor_storage 划分 slab 桶 + 大对象区（预分配）。
+// 动态池：只初始化桶元数据（bucket_size/slots_count），slots 置 NULL，
+// 首次分配时由 kmm_v4_survivor_bucket_ensure 懒分配（避免 49 档全预分配）。
 static inline void kmm_v4_survivor_lazy_init(void) {
     if (g_kmm_v4_survivor.initialized) return;
 #ifdef KMM_V4_STATIC_POOL
@@ -899,6 +954,7 @@ static inline void kmm_v4_survivor_lazy_init(void) {
     size_t _off = 0;
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
         g_kmm_v4_survivor.buckets[i].bucket_size = _bucket_sizes[i];
+        g_kmm_v4_survivor.buckets[i].slots_count = KMM_V4_SLAB_SLOTS;
         g_kmm_v4_survivor.buckets[i].slots = g_kmm_v4_survivor_storage + _off;
         _off += _bucket_sizes[i] * KMM_V4_SLAB_SLOTS;
         memset(g_kmm_v4_survivor.buckets[i].bitmap, 0,
@@ -911,7 +967,19 @@ static inline void kmm_v4_survivor_lazy_init(void) {
     g_kmm_v4_survivor.large_offset = 0;
     g_kmm_v4_survivor.initialized = true;
 #else
-    kmm_v4_survivor_commit(0);
+    for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
+        g_kmm_v4_survivor.buckets[i].bucket_size = kmm_v4_slab_bucket_size(i);
+        g_kmm_v4_survivor.buckets[i].slots_count = kmm_v4_slab_slots_for(g_kmm_v4_survivor.buckets[i].bucket_size);
+        g_kmm_v4_survivor.buckets[i].slots = NULL;  // 懒分配
+        g_kmm_v4_survivor.buckets[i].free_hint = 0;
+        g_kmm_v4_survivor.buckets[i].allocated = 0;
+        memset(g_kmm_v4_survivor.buckets[i].bitmap, 0,
+               sizeof(g_kmm_v4_survivor.buckets[i].bitmap));
+    }
+    g_kmm_v4_survivor.large_base = NULL;
+    g_kmm_v4_survivor.large_capacity = 0;
+    g_kmm_v4_survivor.large_offset = 0;
+    g_kmm_v4_survivor.initialized = true;
 #endif
 }
 
@@ -922,15 +990,23 @@ static inline void* kmm_v4_alloc_global(size_t size) {
     const size_t mask = KMM_V4_ALIGNMENT - 1;
     if (KMM_V4_UNLIKELY(size > SIZE_MAX - mask)) return NULL;
 
-    // 首次调用时懒初始化 survivor 段（slab 桶 slots + 大对象区）
+    // 首次调用时懒初始化 survivor 段
     if (KMM_V4_UNLIKELY(!g_kmm_v4_survivor.initialized)) {
         kmm_v4_survivor_lazy_init();
     }
 
-    // 小对象走 slab 桶
+    // 走 slab 桶（小对象 + 大对象密档；静态池仅 ≤2048）
     int idx = kmm_v4_slab_bucket_index(size);
     if (idx >= 0) {
-        void* p = kmm_v4_slab_alloc_from_bucket(&g_kmm_v4_survivor.buckets[idx]);
+        kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[idx];
+#ifndef KMM_V4_STATIC_POOL
+        if (KMM_V4_UNLIKELY(b->slots == NULL)) {
+            if (kmm_v4_survivor_bucket_ensure(idx) != 0) {
+                return NULL;  // 桶懒分配失败
+            }
+        }
+#endif
+        void* p = kmm_v4_slab_alloc_from_bucket(b);
         if (p) {
             #ifdef KMM_V4_DEBUG
             #if KMM_THREAD_SAFETY_LEVEL >= 1
@@ -941,26 +1017,19 @@ static inline void* kmm_v4_alloc_global(size_t size) {
             #endif
             return p;
         }
-        // 桶满，fallthrough 到大对象区
+        // 桶满：动态池 fallthrough 到页式；静态池 fallthrough 到大对象 bump
     }
 
-    // 大对象走 bump（仅靠 rewind 回收）
+#ifdef KMM_V4_STATIC_POOL
+    // 静态池：大对象走 bump（仅靠 rewind 回收，单线程无并发风险）
     size_t aligned_size = (size + mask) & ~mask;
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     size_t offset = KMM_ATOMIC_LOAD(g_kmm_v4_survivor.large_offset);
     size_t new_offset;
     do {
-        // D3 修复：offset + aligned_size 溢出检查
-        if (KMM_V4_UNLIKELY(aligned_size > SIZE_MAX - offset)) {
-            return NULL;
-        }
+        if (KMM_V4_UNLIKELY(aligned_size > SIZE_MAX - offset)) return NULL;
         new_offset = offset + aligned_size;
-        // D4 修复：无论 FALLBACK 是否开启，survivor 耗尽都返回 NULL。
-        // 严禁把 libc malloc 指针混入 KMM 返回值——否则 kmm_v4_free (no-op)
-        // 和 survivor_free (只收 survivor 段) 都无法回收，永久泄漏。
-        if (KMM_V4_UNLIKELY(new_offset > g_kmm_v4_survivor.large_capacity)) {
-            return NULL;
-        }
+        if (KMM_V4_UNLIKELY(new_offset > g_kmm_v4_survivor.large_capacity)) return NULL;
     } while (KMM_V4_UNLIKELY(!KMM_ATOMIC_CAS_WEAK(g_kmm_v4_survivor.large_offset, offset, new_offset)));
     kmm_v4_survivor_commit(new_offset);
     #ifdef KMM_V4_DEBUG
@@ -970,7 +1039,6 @@ static inline void* kmm_v4_alloc_global(size_t size) {
     return g_kmm_v4_survivor.large_base + offset;
 #else
     size_t offset = g_kmm_v4_survivor.large_offset;
-    // D3 修复：offset + aligned_size 溢出检查
     if (KMM_V4_UNLIKELY(aligned_size > SIZE_MAX - offset)) return NULL;
     size_t new_offset = offset + aligned_size;
     if (KMM_V4_LIKELY(new_offset <= g_kmm_v4_survivor.large_capacity)) {
@@ -982,8 +1050,11 @@ static inline void* kmm_v4_alloc_global(size_t size) {
         KMM_V4_PREFETCH(g_kmm_v4_survivor.large_base + new_offset);
         return g_kmm_v4_survivor.large_base + offset;
     }
-    // D4 修复：耗尽返回 NULL，不混入 libc malloc
     return NULL;
+#endif
+#else
+    // 动态池：超大对象（>1MB）或桶满 → 页式独立分配（magic header，per-object free）
+    return kmm_v4_survivor_paged_alloc(size);
 #endif
 }
 #endif
@@ -993,48 +1064,68 @@ static inline void* kmm_v4_alloc_global(size_t size) {
 // 返回 true 表示成功释放，false 表示 ptr 不在 survivor 段或已释放。
 static inline bool kmm_v4_survivor_free(void* ptr) {
     if (ptr == NULL) return false;
-    // 扫描所有 slab 桶
+    // 扫描所有 slab 桶（含大对象密档，全部 per-object free）
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
         if (kmm_v4_slab_free_from_bucket(&g_kmm_v4_survivor.buckets[i], ptr)) {
             return true;
         }
     }
-    // 大对象区不支持 per-object free（bump allocator 无 free）
+#ifdef KMM_V4_STATIC_POOL
+    // 静态池大对象区不支持 per-object free（bump allocator 无 free）
     return false;
+#else
+    // 动态池：不在任何桶 → 页式对象（magic 校验后释放）
+    return kmm_v4_survivor_paged_free(ptr);
+#endif
 }
 
 // ---- Survivor checkpoint/rewind API（兜底批量回收） ----
+// 动态池：大对象区已移除（全部 per-object free），rewind 为安全 no-op，
+// 保留签名以兼容编译器发射的函数级 checkpoint/rewind，多线程下无害。
+// 静态池：保留 large bump 回卷（单线程上下文，无并发风险）。
 static inline kmm_survivor_checkpoint_t kmm_v4_survivor_checkpoint(void) {
     kmm_survivor_checkpoint_t cp;
+#ifdef KMM_V4_STATIC_POOL
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     cp._large_offset = KMM_ATOMIC_LOAD(g_kmm_v4_survivor.large_offset);
 #else
     cp._large_offset = g_kmm_v4_survivor.large_offset;
 #endif
+#else
+    cp._large_offset = 0;  // 动态池无大对象区，令牌恒为 0
+#endif
     return cp;
 }
 
 // 回卷 survivor 段大对象区到 checkpoint，批量释放之后的分配。
-// ⚠ 非线程安全：调用方需确保被回卷的对象无其他线程引用。
-// ⚠ slab 桶不回卷——靠 per-object free 回收。
+// 动态池：no-op（per-object free 已覆盖全部回收）。
+// 静态池：回卷 large bump（单线程语义，非线程安全问题不存在）。
 static inline void kmm_v4_survivor_rewind(kmm_survivor_checkpoint_t cp) {
+#ifdef KMM_V4_STATIC_POOL
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     KMM_ATOMIC_STORE(g_kmm_v4_survivor.large_offset, cp._large_offset);
 #else
     g_kmm_v4_survivor.large_offset = cp._large_offset;
 #endif
+#else
+    (void)cp;
+#endif
 }
 
-// survivor 段已用字节数（slab 桶已分配槽位 + 大对象区 offset）
+// survivor 段已用字节数（slab 桶已分配槽位；动态池无大对象区）
 static inline size_t kmm_v4_survivor_usage(void) {
     size_t slab_used = 0;
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
         slab_used += g_kmm_v4_survivor.buckets[i].allocated * g_kmm_v4_survivor.buckets[i].bucket_size;
     }
+#ifdef KMM_V4_STATIC_POOL
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     return slab_used + KMM_ATOMIC_LOAD(g_kmm_v4_survivor.large_offset);
 #else
     return slab_used + g_kmm_v4_survivor.large_offset;
+#endif
+#else
+    return slab_used;
 #endif
 }
 
@@ -1042,9 +1133,15 @@ static inline size_t kmm_v4_survivor_usage(void) {
 static inline size_t kmm_v4_survivor_available(void) {
     size_t slab_total = 0;
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
-        slab_total += KMM_V4_SLAB_SLOTS * g_kmm_v4_survivor.buckets[i].bucket_size;
+        kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[i];
+        size_t slots = (b->slots_count > 0) ? b->slots_count : kmm_v4_slab_slots_for(b->bucket_size);
+        slab_total += slots * b->bucket_size;
     }
+#ifdef KMM_V4_STATIC_POOL
     return slab_total + g_kmm_v4_survivor.large_capacity - kmm_v4_survivor_usage();
+#else
+    return slab_total - kmm_v4_survivor_usage();
+#endif
 }
 
 // 判断指针是否在 survivor 段内（供 realloc/free 使用）
@@ -1490,6 +1587,7 @@ static inline void kmm_v4_init_pool(size_t reserved) {
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
         size_t bsize = bucket_sizes[i];
         g_kmm_v4_survivor.buckets[i].bucket_size = bsize;
+        g_kmm_v4_survivor.buckets[i].slots_count = KMM_V4_SLAB_SLOTS;
         g_kmm_v4_survivor.buckets[i].allocated = 0;
         g_kmm_v4_survivor.buckets[i].slots = g_kmm_v4_survivor_storage + slab_total;
         slab_total += bsize * KMM_V4_SLAB_SLOTS;
