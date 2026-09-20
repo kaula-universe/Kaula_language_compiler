@@ -2,6 +2,7 @@
 
 import std.testing
 import std.async
+import std.concurrent
 import std.io
 
 fn assert_msg(cond: bool, msg: string) {

@@ -69,5 +69,5 @@ fn test_json_special_characters() {
 }
 
 fn main() {
-    test_run_all()
+    std.testing.test_run_all()
 }

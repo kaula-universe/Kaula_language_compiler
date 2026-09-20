@@ -10,7 +10,7 @@ import std.io
 i32 global_sum = 0
 
 fn accumulate_index(data: void*, index: i32) {
-    i32* arr = (i32*)data
+    i32* arr = as<i32*>(data)
     global_sum = global_sum + arr[index]
 }
 

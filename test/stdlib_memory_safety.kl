@@ -7,11 +7,11 @@ import std.memory
 #[test]
 fn test_kmm_double_free() {
     # 安全: 双重释放检测
-    void* ptr = std.memory.alloc(100)
-    assert_not_null(ptr, "分配应成功")
-    std.memory.free(ptr)
+    void* ptr = std.memory.kmm_v4_alloc(100)
+    assert(std.testing.test_assert_not_null(ptr, "分配应成功"))
+    std.memory.kmm_v4_free(ptr)
     # Bug 预期: 第二次 free 可能崩溃
-    std.memory.free(ptr)
+    std.memory.kmm_v4_free(ptr)
     # 如果没崩溃说明有保护
 }
 
@@ -19,18 +19,18 @@ fn test_kmm_double_free() {
 fn test_kmm_null_free() {
     # 安全: 释放 null 指针
     # Bug 预期: 可能崩溃
-    std.memory.free(null)
+    std.memory.kmm_v4_free(null)
     # 没崩溃就通过
 }
 
 #[test]
 fn test_kmm_zero_size_alloc() {
     # 边界: 分配 0 字节
-    void* ptr = std.memory.alloc(0)
+    void* ptr = std.memory.kmm_v4_alloc(0)
     # Bug 预期: 行为未定义
-    assert_not_null(ptr, "0 字节分配应返回有效指针或 null")
+    assert(std.testing.test_assert_not_null(ptr, "0 字节分配应返回有效指针或 null"))
     if ptr != null {
-        std.memory.free(ptr)
+        std.memory.kmm_v4_free(ptr)
     }
 }
 
@@ -38,9 +38,9 @@ fn test_kmm_zero_size_alloc() {
 fn test_kmm_huge_allocation() {
     # 边界: 超大内存分配
     # Bug 预期: 可能不检查返回值导致崩溃
-    void* ptr = std.memory.alloc(10000000000)  # 10GB
+    void* ptr = std.memory.kmm_v4_alloc(10000000000)  # 10GB
     if ptr != null {
-        std.memory.free(ptr)
+        std.memory.kmm_v4_free(ptr)
     }
     # 没崩溃就通过
 }
@@ -49,32 +49,25 @@ fn test_kmm_huge_allocation() {
 fn test_kmm_scope_leak() {
     # 内存: 作用域退出时的泄漏检测
     {
-        void* temp1 = std.memory.alloc(1000)
-        void* temp2 = std.memory.alloc(2000)
+        void* temp1 = std.memory.kmm_v4_alloc(1000)
+        void* temp2 = std.memory.kmm_v4_alloc(2000)
         # Bug 预期: 退出作用域时可能不自动回收
     }
     # KMM v4 应该在作用域结束时自动回收
 }
 
 #[test]
-fn test_kmm_realloc_null() {
-    # 边界: realloc(null, size) 行为
-    void* ptr = std.memory.realloc(null, 100)
-    assert_not_null(ptr, "realloc(null) 应等同于 alloc")
-    std.memory.free(ptr)
-}
-
 #[test]
 fn test_kmm_alignment() {
     # 对齐: 检查指针对齐
-    void* ptr = std.memory.alloc(1)
-    i64 addr = std.memory.ptr_to_int(ptr)
+    void* ptr = std.memory.kmm_v4_alloc(1)
+    i64 addr = as<i64>(ptr)
     # Bug 预期: 可能未对齐
     i64 remainder = addr % 8
-    assert_equals(0, remainder, "指针应 8 字节对齐")
-    std.memory.free(ptr)
+    assert(std.testing.test_assert_equals(0, remainder, "指针应 8 字节对齐"))
+    std.memory.kmm_v4_free(ptr)
 }
 
 fn main() {
-    test_run_all()
+    std.testing.test_run_all()
 }

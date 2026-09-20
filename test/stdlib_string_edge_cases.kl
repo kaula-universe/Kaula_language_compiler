@@ -8,7 +8,7 @@ import std.string
 fn test_empty_string_length() {
     string empty = std.string.create("")
     i32 len = std.string.length(empty)
-    assert_equals(0, len, "空字符串长度应为 0")
+    assert(std.testing.test_assert_equals(0, len, "空字符串长度应为 0"))
 }
 
 #[test]
@@ -16,7 +16,7 @@ fn test_null_string_create() {
     # 边界: 传入空指针会崩溃吗?
     string s = std.string.create(null)
     i32 len = std.string.length(s)
-    assert_equals(0, len, "null 创建的字符串应长度为 0")
+    assert(std.testing.test_assert_equals(0, len, "null 创建的字符串应长度为 0"))
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn test_substring_out_of_bounds() {
     string s = std.string.create("hello")
     string sub = std.string.substring(s, 10, 20)
     i32 len = std.string.length(sub)
-    assert_equals(0, len, "越界 substring 应返回空字符串")
+    assert(std.testing.test_assert_equals(0, len, "越界 substring 应返回空字符串"))
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn test_substring_negative_index() {
     string s = std.string.create("test")
     string sub = std.string.substring(s, -1, 2)
     i32 len = std.string.length(sub)
-    assert_equals(0, len, "负数索引应返回空字符串")
+    assert(std.testing.test_assert_equals(0, len, "负数索引应返回空字符串"))
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn test_string_compare_same_object() {
     # 边界: 自己和自己比较
     string s = std.string.create("abc")
     i32 cmp = std.string.compare(s, s)
-    assert_equals(0, cmp, "同一字符串对象比较应返回 0")
+    assert(std.testing.test_assert_equals(0, cmp, "同一字符串对象比较应返回 0"))
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_string_concat_empty() {
     string a = std.string.create("")
     string b = std.string.create("hello")
     string result = std.string.concat(a, b)
-    assert_string_equals("hello", result, "空字符串拼接应正确")
+    assert(std.testing.test_assert_string_equals("hello", result, "空字符串拼接应正确"))
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn test_unicode_string_length() {
     string s = std.string.create("你好世界")
     i32 len = std.string.length(s)
     # Bug 预期: 可能按字节计算而非字符
-    assert_in_range(len, 4, 12, "Unicode 字符串长度应在合理范围")
+    assert(std.testing.test_assert_int_range(len, 4, 12, "Unicode 字符串长度应在合理范围"))
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn test_string_to_upper_unicode() {
     string s = std.string.create("Hello世界")
     string upper = std.string.to_upper(s)
     # Bug 预期: 可能对 Unicode 处理不正确
-    assert_not_null(upper, "to_upper 应返回非空结果")
+    assert(std.testing.test_assert_true(upper != null, "to_upper 应返回非空结果"))
 }
 
 #[test]
@@ -94,5 +94,5 @@ fn test_string_memory_leak() {
 }
 
 fn main() {
-    test_run_all()
+    std.testing.test_run_all()
 }
