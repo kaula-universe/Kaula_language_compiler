@@ -4765,9 +4765,9 @@
         "i64",
         "i64",
         "i64",
-        "String",
-        "String",
-        "i32"
+        "const char*",
+        "const char*",
+        "int"
       ],
       "return": "bool"
     }

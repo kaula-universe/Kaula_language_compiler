@@ -1722,9 +1722,17 @@ static inline String string_concat_float(String s, double v) {
 				funcAndImpl += cg.attributeFeat.GenerateCommandParser(commands)
 			}
 			result = strings.ReplaceAll(result, "{{function_code}}", funcAndImpl)
-			// 测试模式：用测试 runner 替换 main
+			// 测试模式：测试 runner 自带 main。整体替换模板的 main 壳，
+			// 避免 runner 的 int main 嵌套进模板 int main() 产生双重 main
+			// （C 报 invalid storage class）。
 			if cg.TestMode && len(testFunctions) > 0 {
-				result = strings.ReplaceAll(result, "{{main_code}}", cg.attributeFeat.GenerateTestRunner(testFunctions))
+				runner := cg.attributeFeat.GenerateTestRunner(testFunctions)
+				shell := "int main() {\n    {{main_code}}\n    return 0;\n}"
+				if strings.Contains(result, shell) {
+					result = strings.ReplaceAll(result, shell, runner)
+				} else {
+					result = strings.ReplaceAll(result, "{{main_code}}", runner)
+				}
 			} else {
 				result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
 			}
