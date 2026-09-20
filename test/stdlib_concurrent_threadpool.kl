@@ -30,7 +30,7 @@ fn main() {
     # 添加任务并等待
     ThreadPool pool2 = std.concurrent.thread_pool_create(2)
     tasks_executed = 0
-    Task task = { func: task_func, arg: null }
+    Task task = { .func = task_func, .arg = null }
     std.concurrent.thread_pool_add_task(pool2, task)
     std.concurrent.thread_pool_wait_completion(pool2)
     assert_msg(tasks_executed == 1, "任务应执行 1 次")

@@ -499,6 +499,7 @@ typedef struct ThreadPoolImpl {
     Mutex mutex;
     Condition condition;
     bool running;
+    volatile int pending_tasks; /* 已提交未完成的任务数（wait_completion 依据） */
 } ThreadPoolImpl;
 
 static void* thread_pool_worker(void* arg) {
@@ -516,6 +517,9 @@ static void* thread_pool_worker(void* arg) {
         pool->task_head = (pool->task_head + 1) % pool->task_capacity;
         mutex_unlock(pool->mutex);
         task.func(task.arg);
+        /* 任务真正执行完毕才计数（wait_completion 依据），
+           避免“队列空但任务仍在 worker 手上”的过早返回竞态 */
+        kaula_atomic_sub((volatile int*)&pool->pending_tasks, 1);
     }
     return NULL;
 }
@@ -532,6 +536,7 @@ ThreadPool thread_pool_create(size_t thread_count) {
         pool->mutex = mutex_create();
         pool->condition = condition_create();
         pool->running = true;
+        pool->pending_tasks = 0;
         for (size_t i = 0; i < thread_count; i++) {
             pool->threads[i] = thread_create(thread_pool_worker, pool);
         }
@@ -580,6 +585,7 @@ void thread_pool_add_task(ThreadPool pool, Task task) {
         }
         impl->tasks[impl->task_tail] = task;
         impl->task_tail = next_tail;
+        kaula_atomic_add((volatile int*)&impl->pending_tasks, 1);
         condition_signal(impl->condition);
         mutex_unlock(impl->mutex);
     }
@@ -588,15 +594,12 @@ void thread_pool_add_task(ThreadPool pool, Task task) {
 void thread_pool_wait_completion(ThreadPool pool) {
     ThreadPoolImpl* impl = (ThreadPoolImpl*)pool;
     if (impl) {
-        bool done;
-        do {
-            mutex_lock(impl->mutex);
-            done = impl->task_head == impl->task_tail;
-            mutex_unlock(impl->mutex);
-            if (!done) {
-                concurrent_sleep(1);
-            }
-        } while (!done);
+        /* 等待所有已提交任务真正执行完毕（pending 归零），
+           而非仅队列为空——worker 取出任务后队列即空，
+           但任务仍在执行，提前返回会与后续操作产生数据竞争 */
+        while (kaula_atomic_load((volatile int*)&impl->pending_tasks) > 0) {
+            concurrent_sleep(1);
+        }
     }
 }
 
