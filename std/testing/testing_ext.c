@@ -2,10 +2,20 @@
 #include "../memory/memory.h"
 #include "../time/time.h"
 #include "../io/io.h"
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
+
+// 本地毫秒时钟：自包含计时，不依赖 std.time 模块符号。
+// （原实现调用 kaula_test_now_ms()，但 testing 模块的 C 依赖未声明，
+// 链接时不会拉入 time.o，导致 undefined reference to time_now_ms。）
+static double kaula_test_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
 
 static TestSuiteNode* g_suites = NULL;
 static TestStats g_stats = {0, 0, 0, 0.0};
@@ -122,7 +132,7 @@ void test_run_suite_by_name(const char* suite_name) {
         return;
     }
     output_print("=== Running suite: %s ===\n", suite->name.ptr);
-    start_ms = time_now_ms();
+    start_ms = kaula_test_now_ms();
     c = suite->cases;
     while (c) {
         bool_t failed;
@@ -140,14 +150,14 @@ void test_run_suite_by_name(const char* suite_name) {
         }
         c = c->next;
     }
-    g_stats.elapsed_ms += time_now_ms() - start_ms;
+    g_stats.elapsed_ms += kaula_test_now_ms() - start_ms;
     output_print("=== Suite %s: %zu passed, %zu failed ===\n\n",
                  suite->name.ptr, g_stats.passed, g_stats.failed);
 }
 
 void test_run_all_suites(void) {
     TestSuiteNode* s = g_suites;
-    double start_ms = time_now_ms();
+    double start_ms = kaula_test_now_ms();
     g_stats.total = 0;
     g_stats.passed = 0;
     g_stats.failed = 0;
@@ -158,7 +168,7 @@ void test_run_all_suites(void) {
         test_run_suite_by_name(s->name.ptr);
         s = next;
     }
-    g_stats.elapsed_ms = time_now_ms() - start_ms;
+    g_stats.elapsed_ms = kaula_test_now_ms() - start_ms;
     output_print("========== Summary: %zu total, %zu passed, %zu failed (%.2f ms) ==========\n",
                  g_stats.total, g_stats.passed, g_stats.failed, g_stats.elapsed_ms);
 }
@@ -168,11 +178,11 @@ void test_benchmark(const char* name, BenchmarkFunc func, size_t iterations) {
     size_t i;
     if (!name || !func || iterations == 0) return;
     output_print("[BENCHMARK] %s (%zu iterations)...\n", name, iterations);
-    start_ms = time_now_ms();
+    start_ms = kaula_test_now_ms();
     for (i = 0; i < iterations; i++) {
         func(i);
     }
-    elapsed_ms = time_now_ms() - start_ms;
+    elapsed_ms = kaula_test_now_ms() - start_ms;
     output_print("[BENCHMARK] %s: %.2f ms total, %.6f ms per iteration\n",
                  name, elapsed_ms, elapsed_ms / (double)iterations);
 }
