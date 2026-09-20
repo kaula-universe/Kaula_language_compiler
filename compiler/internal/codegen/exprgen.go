@@ -1139,7 +1139,16 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 				}
 			}
 
-			return cName + "(" + eg.generateStdlibArgs(args, fn) + ")"
+			callArgs := eg.generateStdlibArgs(args, fn)
+			// std.testing 断言函数（test_assert_*）：签名末尾 (file, line)
+			// 以 __FILE__/__LINE__ 自动填充，与 sema 的 expected-2 一致。
+			if modKey == "std.testing" && strings.HasPrefix(lastSeg, "test_assert_") {
+				if len(args) > 0 {
+					callArgs += ", "
+				}
+				callArgs += "__FILE__, __LINE__"
+			}
+			return cName + "(" + callArgs + ")"
 		}
 	}
 
@@ -1284,6 +1293,14 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 					code += ", "
 				}
 				code += eg.GenerateExpression(arg)
+			}
+			// std.testing 断言函数（test_assert_*）：签名末尾 (file, line)
+			// 以 __FILE__/__LINE__ 自动填充，与 sema 的 expected-2 一致。
+			if moduleName == "testing" && strings.HasPrefix(methodName, "test_assert_") {
+				if len(args) > 0 {
+					code += ", "
+				}
+				code += "__FILE__, __LINE__"
 			}
 			code += ")"
 			return code

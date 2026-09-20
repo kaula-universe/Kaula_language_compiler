@@ -3391,6 +3391,11 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 
 			// 参数个数检查（与 stdlib 签名对齐；varargs 函数只检查下限）
 			expected := len(fn.Args)
+			// std.testing 断言函数（test_assert_*）：签名末尾的 (file, line)
+			// 由 codegen 以 __FILE__/__LINE__ 自动填充，调用方无需显式传入。
+			if modKey == "std.testing" && len(segs) > 0 && strings.HasPrefix(segs[len(segs)-1], "test_assert_") {
+				expected -= 2
+			}
 			if fn.VarArgs {
 				if len(expr.Args) < expected {
 					sa.errorCollector.AddSemanticError(

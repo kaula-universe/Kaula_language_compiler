@@ -270,8 +270,21 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			b.WriteString(sg.codegen.expressionGenerator.GenerateMatchAssign(me, stmt.Name))
 			return b.String()
 		}
-		builder.WriteString(" = ")
-		builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+		// 固定大小数组 + 数组字面量：C 要求 brace 初始化器
+		// （复合字面量 ((T[]){...}) 不能初始化数组变量）。
+		if arrLit, ok := stmt.Value.(*ast.ArrayLiteral); ok && isArray {
+			builder.WriteString(" = {")
+			for i, el := range arrLit.Elements {
+				if i > 0 {
+					builder.WriteString(", ")
+				}
+				builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(el))
+			}
+			builder.WriteString("}")
+		} else {
+			builder.WriteString(" = ")
+			builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+		}
 	} else if stmt.Nullable {
 		builder.WriteString(" = NULL")
 	}
