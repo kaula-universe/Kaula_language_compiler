@@ -767,9 +767,21 @@ extern void* kmm_v4_survivor_paged_alloc(size_t size);     // 页式分配（登
 extern bool kmm_v4_survivor_paged_free(void* ptr);         // 页式释放（登记表查找，安全）
 extern bool kmm_v4_survivor_paged_contains(const void* ptr); // 页式对象识别（登记表查找）
 extern void kmm_v4_survivor_paged_purge(void);             // 销毁全部页式对象（destroy_pool）
-extern void kmm_v4_survivor_slab_release(int bucket_idx, size_t slot); // 槽位入 TLS 垃圾箱
+extern void kmm_v4_survivor_slab_release(int bucket_idx, size_t slot); // 槽位入 TLS 垃圾箱（兼容）
 extern void kmm_v4_survivor_flush(void);                   // 批量归还垃圾箱槽位
 extern void kmm_v4_survivor_commit(size_t needed);         // 兼容保留（no-op）
+
+// ---- TLS 垃圾箱（延迟批量归还 slab 槽位，header 内联访问消除跨 TU 调用）----
+typedef struct {
+    int    bucket;   // 桶下标
+    size_t slot;     // 槽位下标
+} kmm_garbage_entry_t;
+
+#define KMM_V4_GARBAGE_CAP 4096   // 垃圾箱容量（槽位数），满则 flush
+#define KMM_V4_FLUSH_SMALL_N 16   // 小批量逐槽阈值（函数出口常见 1~16 槽）
+
+extern KMM_TLS kmm_garbage_entry_t g_kmm_garbage[KMM_V4_GARBAGE_CAP];
+extern KMM_TLS size_t              g_kmm_garbage_count;
 #endif
 
 // ==================== 批量分配 API ====================
@@ -1160,7 +1172,7 @@ static inline bool kmm_v4_survivor_free(void* ptr) {
             return false;
         }
     }
-    // 快速路径：最近命中桶（范围 + 对齐检查后入垃圾箱）
+    // 快速路径：最近命中桶（范围 + 对齐检查后入垃圾箱，内联 push）
     int last = g_survivor_last_bucket;
     if (KMM_V4_LIKELY(last >= 0 && last < KMM_V4_SLAB_BUCKETS)) {
         kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[last];
@@ -1168,7 +1180,12 @@ static inline bool kmm_v4_survivor_free(void* ptr) {
             size_t offset = (size_t)((uint8_t*)ptr - b->slots);
             if (KMM_V4_LIKELY(offset < b->slots_count * b->bucket_size &&
                               offset % b->bucket_size == 0)) {
-                kmm_v4_survivor_slab_release(last, offset / b->bucket_size);
+                if (KMM_V4_UNLIKELY(g_kmm_garbage_count >= KMM_V4_GARBAGE_CAP)) {
+                    kmm_v4_survivor_flush();
+                }
+                g_kmm_garbage[g_kmm_garbage_count].bucket = last;
+                g_kmm_garbage[g_kmm_garbage_count].slot = offset / b->bucket_size;
+                g_kmm_garbage_count++;
                 return true;
             }
         }
@@ -1180,7 +1197,12 @@ static inline bool kmm_v4_survivor_free(void* ptr) {
         size_t offset = (size_t)((uint8_t*)ptr - b->slots);
         if (offset < b->slots_count * b->bucket_size && offset % b->bucket_size == 0) {
             g_survivor_last_bucket = i;
-            kmm_v4_survivor_slab_release(i, offset / b->bucket_size);
+            if (KMM_V4_UNLIKELY(g_kmm_garbage_count >= KMM_V4_GARBAGE_CAP)) {
+                kmm_v4_survivor_flush();
+            }
+            g_kmm_garbage[g_kmm_garbage_count].bucket = i;
+            g_kmm_garbage[g_kmm_garbage_count].slot = offset / b->bucket_size;
+            g_kmm_garbage_count++;
             return true;
         }
     }
@@ -1220,7 +1242,37 @@ static inline void kmm_v4_survivor_rewind(kmm_survivor_checkpoint_t cp) {
 #endif
 #else
     (void)cp;
-    kmm_v4_survivor_flush();
+    // 内联小批量 flush：函数出口 rewind 常见 1~16 槽，逐槽清除（每槽一次
+    // bitmap CAS，无聚合固定开销），消除跨 TU 调用；大批量才调 extern
+    // 聚合版（按桶 word 掩码、每 word 一次原子清）。
+    size_t n = g_kmm_garbage_count;
+    if (KMM_V4_LIKELY(n > 0)) {
+        if (KMM_V4_LIKELY(n <= KMM_V4_FLUSH_SMALL_N)) {
+            g_kmm_garbage_count = 0;
+            for (size_t i = 0; i < n; i++) {
+                kmm_slab_bucket_t* bk = &g_kmm_v4_survivor.buckets[g_kmm_garbage[i].bucket];
+                if (KMM_V4_UNLIKELY(bk->slots == NULL)) continue;  // 防御
+                size_t slot = g_kmm_garbage[i].slot;
+                size_t word = slot / 64;
+                uint64_t bit = (uint64_t)1 << (slot % 64);
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+                uint64_t old = __atomic_load_n(&bk->bitmap[word], __ATOMIC_RELAXED);
+                for (;;) {
+                    uint64_t neu = old & ~bit;
+                    if (__atomic_compare_exchange_n(&bk->bitmap[word], &old, neu, 1,
+                                                    __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+                        break;
+                    }
+                }
+#else
+                bk->bitmap[word] &= ~bit;
+#endif
+                if (bk->allocated > 0) bk->allocated--;
+            }
+        } else {
+            kmm_v4_survivor_flush();
+        }
+    }
 #endif
 }
 
