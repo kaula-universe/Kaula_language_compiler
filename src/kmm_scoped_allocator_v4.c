@@ -371,6 +371,80 @@ void kmm_v4_survivor_paged_purge(void) {
     }
 }
 
+// ==================== TLS 垃圾箱：延迟批量归还 slab 槽位 ====================
+// 性能优化：per-object free 从"立即 bitmap CAS"降为"TLS 数组 push"（~1ns，
+// 无锁无 CAS），批量归还时机为：垃圾箱满阈值 + 函数出口 rewind（编译器
+// 每个函数都发射 kmm_v4_survivor_rewind）。线程安全不变：垃圾箱是 TLS，
+// flush 只归还本线程释放的槽位（契约上已死），无全局水位回卷。
+typedef struct {
+    int    bucket;   // 桶下标
+    size_t slot;     // 槽位下标
+} kmm_garbage_entry_t;
+
+#define KMM_V4_GARBAGE_CAP 4096  // 垃圾箱容量（槽位数），满则 flush
+
+static KMM_TLS kmm_garbage_entry_t g_kmm_garbage[KMM_V4_GARBAGE_CAP];
+static KMM_TLS size_t              g_kmm_garbage_count = 0;
+
+// 批量归还垃圾箱内全部槽位：按桶聚合 word 掩码，每个 word 一次原子清，
+// 原子操作从 N 次降到（非零 word 数）次。调用点：阈值满 / 函数出口 rewind /
+// destroy_pool。
+void kmm_v4_survivor_flush(void) {
+    size_t n = g_kmm_garbage_count;
+    if (KMM_V4_LIKELY(n == 0)) return;
+
+    // 每桶聚合 word 掩码（49 桶 × 4 words，栈上临时数组）
+    uint64_t masks[KMM_V4_SLAB_BUCKETS][KMM_V4_SLAB_BITMAP_WORDS];
+    size_t   per_bucket[KMM_V4_SLAB_BUCKETS];
+    memset(masks, 0, sizeof(masks));
+    memset(per_bucket, 0, sizeof(per_bucket));
+
+    for (size_t i = 0; i < n; i++) {
+        int b = g_kmm_garbage[i].bucket;
+        size_t slot = g_kmm_garbage[i].slot;
+        masks[b][slot / 64] |= (uint64_t)1 << (slot % 64);
+        per_bucket[b]++;
+    }
+    g_kmm_garbage_count = 0;
+
+    for (int b = 0; b < KMM_V4_SLAB_BUCKETS; b++) {
+        if (per_bucket[b] == 0) continue;
+        kmm_slab_bucket_t* bk = &g_kmm_v4_survivor.buckets[b];
+        if (KMM_V4_UNLIKELY(bk->slots == NULL)) continue;  // 防御：理论不可达
+        for (int w = 0; w < KMM_V4_SLAB_BITMAP_WORDS; w++) {
+            uint64_t mask = masks[b][w];
+            if (mask == 0) continue;
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+            uint64_t old = __atomic_load_n(&bk->bitmap[w], __ATOMIC_RELAXED);
+            for (;;) {
+                uint64_t neu = old & ~mask;
+                if (__atomic_compare_exchange_n(&bk->bitmap[w], &old, neu, 1,
+                                                __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+                    break;
+                }
+            }
+#else
+            bk->bitmap[w] &= ~mask;
+#endif
+        }
+        if (bk->allocated >= per_bucket[b]) {
+            bk->allocated -= per_bucket[b];
+        } else {
+            bk->allocated = 0;
+        }
+    }
+}
+
+// 释放一个 slab 槽位：入 TLS 垃圾箱（延迟归还），满阈值立即 flush。
+void kmm_v4_survivor_slab_release(int bucket_idx, size_t slot) {
+    if (KMM_V4_UNLIKELY(g_kmm_garbage_count >= KMM_V4_GARBAGE_CAP)) {
+        kmm_v4_survivor_flush();
+    }
+    g_kmm_garbage[g_kmm_garbage_count].bucket = bucket_idx;
+    g_kmm_garbage[g_kmm_garbage_count].slot = slot;
+    g_kmm_garbage_count++;
+}
+
 // 兼容保留：动态池无大对象 bump，commit 为 no-op
 // （静态池下 header 内联为 no-op，不经过这里）。
 __attribute__((used))
@@ -854,8 +928,9 @@ void kmm_v4_destroy_pool(void) {
         g_kmm_v4_extra_capacity = 0;
 #endif
     }
-    // 方案 A：销毁 survivor 段——释放各桶懒分配的 slots（各自独立 malloc）
-    // 与全部页式登记对象。
+    // 方案 A：销毁 survivor 段——先 flush 垃圾箱（归还延迟槽位，防旧垃圾箱
+    // 污染重建后的池），再释放各桶懒分配的 slots 与全部页式登记对象。
+    kmm_v4_survivor_flush();
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
         kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[i];
         if (b->slots) {
