@@ -846,29 +846,26 @@ static inline size_t kmm_v4_slab_slots_for(size_t bucket_size) {
 
 // 内部：选 bucket index（size→bucket），返回桶下标，超限返回 -1
 // 动态池：≤1MB 走密档 slab；>1MB 返回 -1 由调用方走页式分配。
+// O(1)：小档 ceil(log2(size))-3（clz 位长），中档 floor(log2(size)) 定位区间。
 static inline int kmm_v4_slab_bucket_index(size_t size) {
     if (size == 0) return -1;
 #ifdef KMM_V4_STATIC_POOL
     if (size > KMM_V4_SLAB_MAX_SIZE) return -1;
-    int idx = 0;
-    size_t cls = KMM_V4_SLAB_MIN_SIZE;
-    while (cls < size) { cls <<= 1; idx++; }
-    return idx;  // 0..8 对应 8..2048
+    if (size <= KMM_V4_SLAB_MIN_SIZE) return 0;
+    // 2 倍档：idx = ceil(log2(size)) - 3 = 位长(size-1) - 3
+    return (int)((sizeof(size_t) * 8 - 1) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
 #else
     if (size <= KMM_V4_SLAB_MAX_SIZE) {
-        int idx = 0;
-        size_t cls = KMM_V4_SLAB_MIN_SIZE;
-        while (cls < size) { cls <<= 1; idx++; }
-        return idx;
+        if (size <= KMM_V4_SLAB_MIN_SIZE) return 0;
+        return (int)((sizeof(size_t) * 8 - 1) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
     }
     if (size > KMM_V4_SLAB_PAGED_THRESHOLD) return -1;  // 页式
-    // 密档：找最大 2 幂 B ≤ size（B ≥ 2048），区间内 4 档插值
-    size_t B = KMM_V4_SLAB_MAX_SIZE;   // 2048
-    int k = 11;                        // 2^11 = 2048
-    while (B * 2 < size) { B <<= 1; k++; }
+    // 密档：k = floor(log2(size))（B=2^k ≤ size，k≥11），区间内 4 档插值
+    int k = (int)((sizeof(size_t) * 8 - 1) - __builtin_clzll((unsigned long long)size));
+    size_t B = (size_t)1 << k;
     size_t step = B / 4;
     size_t i = (size - B + step - 1) / step;  // ceil((size-B)/step)，0..4
-    if (i > 3) { B <<= 1; k++; i = 0; }       // 落入区间端点 → 下一区间首档
+    if (i > 3) { k++; i = 0; }                // 落入区间端点 → 下一区间首档
     return 9 + (k - 11) * 4 + (int)i;
 #endif
 }
@@ -992,6 +989,10 @@ static inline void kmm_v4_survivor_lazy_init(void) {
 }
 
 #ifndef KMM_V4_ALLOC_GLOBAL_IMPL
+// TLS 最近分配桶缓存：分配尺寸局部性强（同函数内分配相似大小对象），
+// 命中后跳过 bucket_index 计算与懒分配检查（O(1) 无分支）。
+static KMM_TLS int g_survivor_alloc_bucket = -1;
+
 static inline void* kmm_v4_alloc_global(size_t size) {
     if (KMM_V4_UNLIKELY(size == 0)) return NULL;
     // D3 修复：对齐前检查 size + mask 溢出（与 alloc_auto/bump 统一口径）
@@ -1002,6 +1003,33 @@ static inline void* kmm_v4_alloc_global(size_t size) {
     if (KMM_V4_UNLIKELY(!g_kmm_v4_survivor.initialized)) {
         kmm_v4_survivor_lazy_init();
     }
+
+#ifndef KMM_V4_STATIC_POOL
+    // 快路径：TLS 最近桶。size 严格落在该档范围（> 上一档 && ≤ 本档）才命中，
+    // 避免向上取整引入额外内部碎片；slots 已就绪则跳过懒分配检查。
+    {
+        int lb = g_survivor_alloc_bucket;
+        if (KMM_V4_LIKELY(lb >= 0 && lb < KMM_V4_SLAB_BUCKETS)) {
+            kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[lb];
+            if (KMM_V4_LIKELY(b->slots != NULL && size <= b->bucket_size &&
+                              (lb == 0 || size > kmm_v4_slab_bucket_size(lb - 1)))) {
+                void* p = kmm_v4_slab_alloc_from_bucket(b);
+                if (p) {
+                    #ifdef KMM_V4_DEBUG
+                    #if KMM_THREAD_SAFETY_LEVEL >= 1
+                    KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
+                    #else
+                    g_kmm_v4_alloc_count++;
+                    #endif
+                    #endif
+                    return p;
+                }
+                // 桶满：清缓存，落慢路径（更大档 fallback / 页式）
+                g_survivor_alloc_bucket = -1;
+            }
+        }
+    }
+#endif
 
     // 走 slab 桶（小对象 + 大对象密档；静态池仅 ≤2048）
     int idx = kmm_v4_slab_bucket_index(size);
@@ -1016,6 +1044,9 @@ static inline void* kmm_v4_alloc_global(size_t size) {
 #endif
         void* p = kmm_v4_slab_alloc_from_bucket(b);
         if (p) {
+            #ifndef KMM_V4_STATIC_POOL
+            g_survivor_alloc_bucket = idx;
+            #endif
             #ifdef KMM_V4_DEBUG
             #if KMM_THREAD_SAFETY_LEVEL >= 1
             KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
@@ -1034,6 +1065,7 @@ static inline void* kmm_v4_alloc_global(size_t size) {
             }
             void* pj = kmm_v4_slab_alloc_from_bucket(bj);
             if (pj) {
+                g_survivor_alloc_bucket = j;
                 #ifdef KMM_V4_DEBUG
                 #if KMM_THREAD_SAFETY_LEVEL >= 1
                 KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
