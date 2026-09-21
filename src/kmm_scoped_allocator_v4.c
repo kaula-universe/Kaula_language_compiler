@@ -278,6 +278,8 @@ int kmm_v4_survivor_bucket_ensure(int idx) {
 // ⚠ 安全设计：所有页式对象登记到全局链表（g_paged_list）。survivor_free /
 // realloc 只按登记表识别页式对象——绝不从任意指针反向读内存，
 // 避免误把 TLAB/外部指针当页式对象解引用（见 memory 测试 double_free 崩溃）。
+// 性能：Treiber 无锁栈（push 1 次 CAS；遍历无锁）+ 惰性节点（free 置死但
+// 节点留链上，purge 统一回收）——消除互斥锁与 free 侧 UAF 风险。
 #define KMM_V4_PAGED_MAGIC 0x4B4D4D50u  /* "KMMP" */
 typedef struct {
     uint32_t magic;
@@ -287,24 +289,14 @@ typedef struct {
 
 typedef struct kmm_paged_node {
     struct kmm_paged_node* next;
-    kmm_v4_paged_hdr_t*   hdr;   // 分配头（含 payload 基址）
+    kmm_v4_paged_hdr_t*   hdr;    // 分配头（含 payload 基址）
+    uint32_t alive;               // 1=有效 0=已释放（原子读写；节点惰性保留）
+    uint32_t _pad;
 } kmm_paged_node_t;
 
-// 页式对象登记链表（页式对象数量少，全局自旋锁开销可忽略）
+// 页式对象登记栈头（Treiber stack；节点不摘除，无 UAF）
 static kmm_paged_node_t* g_paged_list = NULL;
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-static KMM_ATOMIC_TYPE g_paged_lock = 0;
-static void kmm_v4_paged_lock(void) {
-    size_t expected = 0;
-    while (!KMM_ATOMIC_CAS_STRONG(g_paged_lock, expected, 1)) {
-        expected = 0;
-    }
-}
-static void kmm_v4_paged_unlock(void) { KMM_ATOMIC_STORE(g_paged_lock, 0); }
-#else
-static void kmm_v4_paged_lock(void) { }
-static void kmm_v4_paged_unlock(void) { }
-#endif
+static KMM_ATOMIC_TYPE g_paged_count = 0;   // 有效页式对象数（free 优先判断）
 
 void* kmm_v4_survivor_paged_alloc(size_t size) {
     if (KMM_V4_UNLIKELY(size > SIZE_MAX - sizeof(kmm_v4_paged_hdr_t))) return NULL;
@@ -316,59 +308,59 @@ void* kmm_v4_survivor_paged_alloc(size_t size) {
     kmm_paged_node_t* node = (kmm_paged_node_t*)malloc(sizeof(kmm_paged_node_t));
     if (KMM_V4_UNLIKELY(node == NULL)) { free(hdr); return NULL; }
     node->hdr = hdr;
-    kmm_v4_paged_lock();
-    node->next = g_paged_list;
-    g_paged_list = node;
-    kmm_v4_paged_unlock();
+    node->alive = 1;
+    // Treiber push：1 次 CAS 无锁
+    do {
+        node->next = __atomic_load_n(&g_paged_list, __ATOMIC_RELAXED);
+    } while (KMM_V4_UNLIKELY(!__atomic_compare_exchange_n(&g_paged_list, &node->next, node, 1,
+                                                          __ATOMIC_RELEASE, __ATOMIC_RELAXED)));
+    KMM_ATOMIC_FETCH_ADD(g_paged_count, 1);
     return (uint8_t*)hdr + sizeof(kmm_v4_paged_hdr_t);
 }
 
-// 页式对象识别（登记表查找，安全：不读任意内存）
+// 页式对象识别（登记表无锁查找，安全：不读任意内存、节点惰性不 UAF）
 bool kmm_v4_survivor_paged_contains(const void* ptr) {
     if (KMM_V4_UNLIKELY(ptr == NULL)) return false;
     kmm_v4_paged_hdr_t* want = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
-    bool found = false;
-    kmm_v4_paged_lock();
-    for (kmm_paged_node_t* n = g_paged_list; n != NULL; n = n->next) {
-        if (n->hdr == want) { found = true; break; }
+    for (kmm_paged_node_t* n = __atomic_load_n(&g_paged_list, __ATOMIC_ACQUIRE);
+         n != NULL;
+         n = __atomic_load_n(&n->next, __ATOMIC_RELAXED)) {
+        if (__atomic_load_n(&n->alive, __ATOMIC_RELAXED) && n->hdr == want) {
+            return true;
+        }
     }
-    kmm_v4_paged_unlock();
-    return found;
+    return false;
 }
 
 bool kmm_v4_survivor_paged_free(void* ptr) {
     if (KMM_V4_UNLIKELY(ptr == NULL)) return false;
     kmm_v4_paged_hdr_t* want = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
-    kmm_v4_paged_lock();
-    kmm_paged_node_t** pp = &g_paged_list;
-    while (*pp != NULL) {
-        if ((*pp)->hdr == want) {
-            kmm_paged_node_t* n = *pp;
-            *pp = n->next;
-            kmm_v4_paged_unlock();
-            if (n->hdr->magic == KMM_V4_PAGED_MAGIC) n->hdr->magic = 0;  // 防 double-free
-            free(n->hdr);
-            free(n);
+    for (kmm_paged_node_t* n = __atomic_load_n(&g_paged_list, __ATOMIC_ACQUIRE);
+         n != NULL;
+         n = __atomic_load_n(&n->next, __ATOMIC_RELAXED)) {
+        if (n->hdr == want &&
+            __atomic_load_n(&n->alive, __ATOMIC_RELAXED) &&
+            __atomic_exchange_n(&n->alive, 0, __ATOMIC_ACQ_REL) == 1) {
+            // 置死成功（double-free 只有一个线程成功）→ 释放对象内存；
+            // 节点惰性保留（16B/对象，destroy 时 purge 统一回收）
+            free(want);
+            __atomic_fetch_sub(&g_paged_count, 1, __ATOMIC_RELAXED);
             return true;
         }
-        pp = &(*pp)->next;
     }
-    kmm_v4_paged_unlock();
     return false;  // 不在登记表（TLAB/外部指针等）——安全返回
 }
 
-// 销毁全部页式对象（destroy_pool 调用）
+// 销毁全部页式对象（destroy_pool 调用；调用方保证无并发）
 void kmm_v4_survivor_paged_purge(void) {
-    kmm_v4_paged_lock();
-    kmm_paged_node_t* n = g_paged_list;
-    g_paged_list = NULL;
-    kmm_v4_paged_unlock();
+    kmm_paged_node_t* n = __atomic_exchange_n(&g_paged_list, NULL, __ATOMIC_ACQ_REL);
     while (n != NULL) {
         kmm_paged_node_t* nx = n->next;
-        if (n->hdr) free(n->hdr);
+        if (n->hdr && __atomic_load_n(&n->alive, __ATOMIC_RELAXED)) free(n->hdr);
         free(n);
         n = nx;
     }
+    __atomic_store_n(&g_paged_count, 0, __ATOMIC_RELAXED);
 }
 
 // ==================== TLS 垃圾箱：延迟批量归还 slab 槽位 ====================
@@ -376,21 +368,17 @@ void kmm_v4_survivor_paged_purge(void) {
 // 无锁无 CAS），批量归还时机为：垃圾箱满阈值 + 函数出口 rewind（编译器
 // 每个函数都发射 kmm_v4_survivor_rewind）。线程安全不变：垃圾箱是 TLS，
 // flush 只归还本线程释放的槽位（契约上已死），无全局水位回卷。
-typedef struct {
-    int    bucket;   // 桶下标
-    size_t slot;     // 槽位下标
-} kmm_garbage_entry_t;
+// 类型/常量/变量定义在 header（动态池分支）——header 的 survivor_free /
+// rewind 内联访问，消除跨 TU 调用开销。此处是唯一定义（非 static）。
+#ifndef KMM_V4_STATIC_POOL
+KMM_TLS kmm_garbage_entry_t g_kmm_garbage[KMM_V4_GARBAGE_CAP];
+KMM_TLS size_t              g_kmm_garbage_count = 0;
+#endif
 
-#define KMM_V4_GARBAGE_CAP 4096  // 垃圾箱容量（槽位数），满则 flush
-
-static KMM_TLS kmm_garbage_entry_t g_kmm_garbage[KMM_V4_GARBAGE_CAP];
-static KMM_TLS size_t              g_kmm_garbage_count = 0;
-
-// 批量归还垃圾箱内全部槽位。小批量（≤16）逐槽清除（每槽一次 CAS，无聚合
-// 固定开销——函数出口 rewind 常见 1~16 槽，此路径主导）；大批量按桶聚合
-// word 掩码、每 word 一次原子清（原子操作从 N 次降到非零 word 数）。
-// 调用点：阈值满 / 函数出口 rewind / destroy_pool。
-#define KMM_V4_FLUSH_SMALL_N 16
+// 批量归还垃圾箱内全部槽位。小批量（≤16，见 header KMM_V4_FLUSH_SMALL_N）
+// 逐槽清除（每槽一次 CAS，无聚合固定开销——函数出口 rewind 常见 1~16 槽，
+// 此路径主导）；大批量按桶聚合 word 掩码、每 word 一次原子清。
+// 调用点：阈值满 / 函数出口 rewind（header 内联小批量路径） / destroy_pool。
 void kmm_v4_survivor_flush(void) {
     size_t n = g_kmm_garbage_count;
     if (KMM_V4_LIKELY(n == 0)) return;
@@ -463,6 +451,9 @@ void kmm_v4_survivor_flush(void) {
 }
 
 // 释放一个 slab 槽位：入 TLS 垃圾箱（延迟归还），满阈值立即 flush。
+// 动态池 header 内联路径已直接操作 g_kmm_garbage（省一次跨 TU 调用），
+// 此函数保留以兼容外部调用者。
+__attribute__((used))
 void kmm_v4_survivor_slab_release(int bucket_idx, size_t slot) {
     if (KMM_V4_UNLIKELY(g_kmm_garbage_count >= KMM_V4_GARBAGE_CAP)) {
         kmm_v4_survivor_flush();
