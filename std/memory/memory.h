@@ -161,6 +161,7 @@ void kmm_v4_scope_exit(void);
  * 返回: 已使用的字节数
  */
 size_t kmm_v4_usage(void);
+size_t kmm_v4_total_usage(void);
 
 /**
  * kmm_v4_available - 查询剩余可用内存

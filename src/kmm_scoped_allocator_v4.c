@@ -297,6 +297,7 @@ typedef struct kmm_paged_node {
 // 页式对象登记栈头（Treiber stack；节点不摘除，无 UAF）
 static kmm_paged_node_t* g_paged_list = NULL;
 static KMM_ATOMIC_TYPE g_paged_count = 0;   // 有效页式对象数（free 优先判断）
+KMM_ATOMIC_TYPE g_kmm_v4_paged_bytes = 0;   // 有效页式对象总字节（总占用统计，std.memory 读取）
 
 void* kmm_v4_survivor_paged_alloc(size_t size) {
     if (KMM_V4_UNLIKELY(size > SIZE_MAX - sizeof(kmm_v4_paged_hdr_t))) return NULL;
@@ -318,6 +319,7 @@ void* kmm_v4_survivor_paged_alloc(size_t size) {
     } while (KMM_V4_UNLIKELY(!__atomic_compare_exchange_n(&g_paged_list, &node->next, node, 1,
                                                           __ATOMIC_RELEASE, __ATOMIC_RELAXED)));
     KMM_ATOMIC_FETCH_ADD(g_paged_count, 1);
+    KMM_ATOMIC_FETCH_ADD(g_kmm_v4_paged_bytes, size);
     return (uint8_t*)hdr + sizeof(kmm_v4_paged_hdr_t);
 }
 
@@ -345,9 +347,12 @@ bool kmm_v4_survivor_paged_free(void* ptr) {
             __atomic_load_n(&n->alive, __ATOMIC_RELAXED) &&
             __atomic_exchange_n(&n->alive, 0, __ATOMIC_ACQ_REL) == 1) {
             // 置死成功（double-free 只有一个线程成功）→ 释放对象内存；
-            // 节点惰性保留（16B/对象，destroy 时 purge 统一回收）
+            // 节点惰性保留（16B/对象，destroy 时 purge 统一回收）。
+            // size 须在 free(want) 前读取（free 后为 UAF）。
+            size_t sz = want->size;
             free(want);
             __atomic_fetch_sub(&g_paged_count, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_sub(&g_kmm_v4_paged_bytes, sz, __ATOMIC_RELAXED);
             return true;
         }
     }
@@ -364,6 +369,7 @@ void kmm_v4_survivor_paged_purge(void) {
         n = nx;
     }
     __atomic_store_n(&g_paged_count, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_kmm_v4_paged_bytes, 0, __ATOMIC_RELAXED);
 }
 
 // ==================== TLS 垃圾箱：延迟批量归还 slab 槽位 ====================
@@ -972,3 +978,16 @@ void kmm_v4_destroy_pool(void) {
 #endif
 }
 #endif
+
+// KMM 分配器总占用（真实持有内存视图）：TLAB 段 + slab 桶已分配 + 页式对象。
+// 供 std.memory.kmm_v4_total_usage() 导出（Kaula 基准内存统计）。
+size_t kmm_v4_total_usage(void) {
+    size_t t = kmm_v4_usage();
+    t += kmm_v4_survivor_usage();
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    t += (size_t)KMM_ATOMIC_LOAD(g_kmm_v4_paged_bytes);
+#else
+    t += g_kmm_v4_paged_bytes;
+#endif
+    return t;
+}
