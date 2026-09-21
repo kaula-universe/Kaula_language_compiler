@@ -386,14 +386,42 @@ typedef struct {
 static KMM_TLS kmm_garbage_entry_t g_kmm_garbage[KMM_V4_GARBAGE_CAP];
 static KMM_TLS size_t              g_kmm_garbage_count = 0;
 
-// 批量归还垃圾箱内全部槽位：按桶聚合 word 掩码，每个 word 一次原子清，
-// 原子操作从 N 次降到（非零 word 数）次。调用点：阈值满 / 函数出口 rewind /
-// destroy_pool。
+// 批量归还垃圾箱内全部槽位。小批量（≤16）逐槽清除（每槽一次 CAS，无聚合
+// 固定开销——函数出口 rewind 常见 1~16 槽，此路径主导）；大批量按桶聚合
+// word 掩码、每 word 一次原子清（原子操作从 N 次降到非零 word 数）。
+// 调用点：阈值满 / 函数出口 rewind / destroy_pool。
+#define KMM_V4_FLUSH_SMALL_N 16
 void kmm_v4_survivor_flush(void) {
     size_t n = g_kmm_garbage_count;
     if (KMM_V4_LIKELY(n == 0)) return;
+    g_kmm_garbage_count = 0;
 
-    // 每桶聚合 word 掩码（49 桶 × 4 words，栈上临时数组）
+    if (KMM_V4_LIKELY(n <= KMM_V4_FLUSH_SMALL_N)) {
+        // 小批量：逐槽清除（复用 slot→bitmap 逻辑，避免聚合数组 memset 开销）
+        for (size_t i = 0; i < n; i++) {
+            kmm_slab_bucket_t* bk = &g_kmm_v4_survivor.buckets[g_kmm_garbage[i].bucket];
+            if (KMM_V4_UNLIKELY(bk->slots == NULL)) continue;  // 防御
+            size_t slot = g_kmm_garbage[i].slot;
+            size_t word = slot / 64;
+            uint64_t bit = (uint64_t)1 << (slot % 64);
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+            uint64_t old = __atomic_load_n(&bk->bitmap[word], __ATOMIC_RELAXED);
+            for (;;) {
+                uint64_t neu = old & ~bit;
+                if (__atomic_compare_exchange_n(&bk->bitmap[word], &old, neu, 1,
+                                                __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+                    break;
+                }
+            }
+#else
+            bk->bitmap[word] &= ~bit;
+#endif
+            if (bk->allocated > 0) bk->allocated--;
+        }
+        return;
+    }
+
+    // 大批量：每桶聚合 word 掩码（49 桶 × 4 words，栈上临时数组）
     uint64_t masks[KMM_V4_SLAB_BUCKETS][KMM_V4_SLAB_BITMAP_WORDS];
     size_t   per_bucket[KMM_V4_SLAB_BUCKETS];
     memset(masks, 0, sizeof(masks));
@@ -405,7 +433,6 @@ void kmm_v4_survivor_flush(void) {
         masks[b][slot / 64] |= (uint64_t)1 << (slot % 64);
         per_bucket[b]++;
     }
-    g_kmm_garbage_count = 0;
 
     for (int b = 0; b < KMM_V4_SLAB_BUCKETS; b++) {
         if (per_bucket[b] == 0) continue;

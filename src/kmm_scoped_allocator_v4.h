@@ -1117,6 +1117,17 @@ static inline bool kmm_v4_survivor_free(void* ptr) {
 #else
 static inline bool kmm_v4_survivor_free(void* ptr) {
     if (ptr == NULL) return false;
+    // TLAB 快路径分配的指针归 scope 回卷管（SCOPE_END），不属于 survivor 段。
+    // O(1) 无锁快速失败：编译器对 alloc_auto 对象发射 early free 时命中此路径
+    // （本线程 heap 区间检查），避免扫 49 桶 + 页式登记表锁。
+    {
+        kmm_thread_heap_t* th = &g_kmm_v4_thread_heap;
+        if (KMM_V4_UNLIKELY(th->base != NULL &&
+                            (const uint8_t*)ptr >= th->base &&
+                            (const uint8_t*)ptr <  th->base + th->capacity)) {
+            return false;
+        }
+    }
     // 快速路径：最近命中桶（范围 + 对齐检查后入垃圾箱）
     int last = g_survivor_last_bucket;
     if (KMM_V4_LIKELY(last >= 0 && last < KMM_V4_SLAB_BUCKETS)) {
