@@ -767,6 +767,8 @@ extern void* kmm_v4_survivor_paged_alloc(size_t size);     // 页式分配（登
 extern bool kmm_v4_survivor_paged_free(void* ptr);         // 页式释放（登记表查找，安全）
 extern bool kmm_v4_survivor_paged_contains(const void* ptr); // 页式对象识别（登记表查找）
 extern void kmm_v4_survivor_paged_purge(void);             // 销毁全部页式对象（destroy_pool）
+extern void kmm_v4_survivor_slab_release(int bucket_idx, size_t slot); // 槽位入 TLS 垃圾箱
+extern void kmm_v4_survivor_flush(void);                   // 批量归还垃圾箱槽位
 extern void kmm_v4_survivor_commit(size_t needed);         // 兼容保留（no-op）
 #endif
 
@@ -834,10 +836,12 @@ static inline size_t kmm_v4_slab_bucket_size(int idx) {
 }
 
 // 内部：每档槽位数（小档密、大档少，控制单桶内存）
+// 中档 256 槽：承接连续数百~数千个 4K~64K 对象（如批量提升），
+// 避免高频分配 fallback 到页式慢路径；桶懒分配，未用档不占内存。
 static inline size_t kmm_v4_slab_slots_for(size_t bucket_size) {
     if (bucket_size <= KMM_V4_SLAB_MAX_SIZE) return KMM_V4_SLAB_SLOTS;   // 256
-    if (bucket_size <= 65536) return 16;
-    return 4;                                                            // 128K..1M
+    if (bucket_size <= 65536) return 256;
+    return 8;                                                            // 128K..1M
 }
 
 // 内部：选 bucket index（size→bucket），返回桶下标，超限返回 -1
@@ -873,6 +877,10 @@ static inline int kmm_v4_slab_bucket_index(size_t size) {
 static inline void* kmm_v4_slab_alloc_from_bucket(kmm_slab_bucket_t* bucket) {
     size_t n = bucket->slots_count;
     if (KMM_V4_UNLIKELY(n == 0)) return NULL;
+    // O(1) 判满：桶满时立即返回，避免满桶 bitmap 全扫描（fallback 链路上
+    // 满桶很常见，全扫描会放大成 O(slots) × 档数；allocated 竞争时偏保守，
+    // 可能误判满 → fallback 更大档，不影响正确性）。
+    if (KMM_V4_UNLIKELY(bucket->allocated >= n)) return NULL;
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     size_t hint = __atomic_load_n(&bucket->free_hint, __ATOMIC_RELAXED);
 #else
@@ -1017,7 +1025,29 @@ static inline void* kmm_v4_alloc_global(size_t size) {
             #endif
             return p;
         }
-        // 桶满：动态池 fallthrough 到页式；静态池 fallthrough 到大对象 bump
+#ifndef KMM_V4_STATIC_POOL
+        // 桶满：向更大档 fallback（避免高频分配直接落页式慢路径）
+        for (int j = idx + 1; j < KMM_V4_SLAB_BUCKETS; j++) {
+            kmm_slab_bucket_t* bj = &g_kmm_v4_survivor.buckets[j];
+            if (KMM_V4_UNLIKELY(bj->slots == NULL)) {
+                if (kmm_v4_survivor_bucket_ensure(j) != 0) continue;
+            }
+            void* pj = kmm_v4_slab_alloc_from_bucket(bj);
+            if (pj) {
+                #ifdef KMM_V4_DEBUG
+                #if KMM_THREAD_SAFETY_LEVEL >= 1
+                KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
+                #else
+                g_kmm_v4_alloc_count++;
+                #endif
+                #endif
+                return pj;
+            }
+        }
+        // 全部更大档也满 → fallthrough 到页式（最终兜底）
+#else
+        // 桶满：静态池 fallthrough 到大对象 bump
+#endif
     }
 
 #ifdef KMM_V4_STATIC_POOL
@@ -1062,22 +1092,59 @@ static inline void* kmm_v4_alloc_global(size_t size) {
 // ---- Survivor per-object free ----
 // 释放 survivor 段分配的对象。ptr 必须是 kmm_v4_alloc_global/promote 返回的指针。
 // 返回 true 表示成功释放，false 表示 ptr 不在 survivor 段或已释放。
+// 性能（动态池）：释放降为 TLS 垃圾箱 push（~1ns，无锁），批量归还由
+// 阈值 / 函数出口 rewind 触发（kmm_v4_survivor_flush）。
+// 静态池：保持 per-object bitmap 释放 + large bump 不可 free。
+static KMM_TLS int g_survivor_last_bucket = -1;
+
+#ifdef KMM_V4_STATIC_POOL
 static inline bool kmm_v4_survivor_free(void* ptr) {
     if (ptr == NULL) return false;
-    // 扫描所有 slab 桶（含大对象密档，全部 per-object free）
+    int last = g_survivor_last_bucket;
+    if (KMM_V4_LIKELY(last >= 0 && last < KMM_V4_SLAB_BUCKETS &&
+                      kmm_v4_slab_free_from_bucket(&g_kmm_v4_survivor.buckets[last], ptr))) {
+        return true;
+    }
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
         if (kmm_v4_slab_free_from_bucket(&g_kmm_v4_survivor.buckets[i], ptr)) {
+            g_survivor_last_bucket = i;
             return true;
         }
     }
-#ifdef KMM_V4_STATIC_POOL
     // 静态池大对象区不支持 per-object free（bump allocator 无 free）
     return false;
-#else
-    // 动态池：不在任何桶 → 页式对象（magic 校验后释放）
-    return kmm_v4_survivor_paged_free(ptr);
-#endif
 }
+#else
+static inline bool kmm_v4_survivor_free(void* ptr) {
+    if (ptr == NULL) return false;
+    // 快速路径：最近命中桶（范围 + 对齐检查后入垃圾箱）
+    int last = g_survivor_last_bucket;
+    if (KMM_V4_LIKELY(last >= 0 && last < KMM_V4_SLAB_BUCKETS)) {
+        kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[last];
+        if (b->slots != NULL) {
+            size_t offset = (size_t)((uint8_t*)ptr - b->slots);
+            if (KMM_V4_LIKELY(offset < b->slots_count * b->bucket_size &&
+                              offset % b->bucket_size == 0)) {
+                kmm_v4_survivor_slab_release(last, offset / b->bucket_size);
+                return true;
+            }
+        }
+    }
+    // 慢路径：全扫所有 slab 桶（含大对象密档）
+    for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
+        kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[i];
+        if (b->slots == NULL) continue;
+        size_t offset = (size_t)((uint8_t*)ptr - b->slots);
+        if (offset < b->slots_count * b->bucket_size && offset % b->bucket_size == 0) {
+            g_survivor_last_bucket = i;
+            kmm_v4_survivor_slab_release(i, offset / b->bucket_size);
+            return true;
+        }
+    }
+    // 动态池：不在任何桶 → 页式对象（登记表识别后释放，立即归还不延迟）
+    return kmm_v4_survivor_paged_free(ptr);
+}
+#endif
 
 // ---- Survivor checkpoint/rewind API（兜底批量回收） ----
 // 动态池：大对象区已移除（全部 per-object free），rewind 为安全 no-op，
@@ -1098,7 +1165,8 @@ static inline kmm_survivor_checkpoint_t kmm_v4_survivor_checkpoint(void) {
 }
 
 // 回卷 survivor 段大对象区到 checkpoint，批量释放之后的分配。
-// 动态池：no-op（per-object free 已覆盖全部回收）。
+// 动态池：无大对象区，rewind 即"批量回收点"——flush 本线程 TLS 垃圾箱
+// 中延迟归还的槽位（编译器每个函数出口都发射本调用，零额外调用点）。
 // 静态池：回卷 large bump（单线程语义，非线程安全问题不存在）。
 static inline void kmm_v4_survivor_rewind(kmm_survivor_checkpoint_t cp) {
 #ifdef KMM_V4_STATIC_POOL
@@ -1109,6 +1177,7 @@ static inline void kmm_v4_survivor_rewind(kmm_survivor_checkpoint_t cp) {
 #endif
 #else
     (void)cp;
+    kmm_v4_survivor_flush();
 #endif
 }
 
