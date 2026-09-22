@@ -864,12 +864,16 @@ static inline int kmm_v4_slab_bucket_index(size_t size) {
 #ifdef KMM_V4_STATIC_POOL
     if (size > KMM_V4_SLAB_MAX_SIZE) return -1;
     if (size <= KMM_V4_SLAB_MIN_SIZE) return 0;
-    // 2 倍档：idx = ceil(log2(size)) - 3 = 位长(size-1) - 3
-    return (int)((sizeof(size_t) * 8 - 1) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
+    // 2 倍档：idx = ceil(log2(size)) - 3 = 位长(size-1) - 3。
+    // 位长 = 64 - clzll（clzll 是前导零数），不能用 63 - clzll
+    // （那是最高位索引）：差 1 会让 16B 请求落入 8B 档、64B 落入 32B 档，
+    // 写第 2 个 8 字节时越界覆盖相邻槽（16B slot 并发场景实测错位）。
+    return (int)((sizeof(size_t) * 8) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
 #else
     if (size <= KMM_V4_SLAB_MAX_SIZE) {
         if (size <= KMM_V4_SLAB_MIN_SIZE) return 0;
-        return (int)((sizeof(size_t) * 8 - 1) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
+        // 同静态池：64 - clzll 为位长，63 - clzll 为最高位索引（差 1 会错档）
+        return (int)((sizeof(size_t) * 8) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
     }
     if (size > KMM_V4_SLAB_PAGED_THRESHOLD) return -1;  // 页式
     // 密档：k = floor(log2(size))（B=2^k ≤ size，k≥11），区间内 4 档插值

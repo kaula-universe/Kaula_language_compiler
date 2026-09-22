@@ -644,6 +644,15 @@ func (cg *CodeGenerator) IsPromoted(name string) bool {
 	return cg.promotedVars[name]
 }
 
+// ResetLifetimeFlags 重置变量生命周期标志。同名变量重新声明（循环体内
+// 每次迭代声明一次）即新实例：上一实例的 promoted/assign-escaped 标志
+// 不适用于新实例，否则 thread_create 实参提升在第二轮迭代起被误跳过。
+func (cg *CodeGenerator) ResetLifetimeFlags(name string) {
+	delete(cg.promotedVars, name)
+	delete(cg.assignEscapedVars, name)
+	delete(cg.earlyFreedVars, name)
+}
+
 // MarkEarlyFreed 标记变量已被 early free（防止 return/块尾重复释放）
 func (cg *CodeGenerator) MarkEarlyFreed(name string) {
 	if name != "" {

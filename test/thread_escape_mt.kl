@@ -1,0 +1,49 @@
+# 线程逃逸并发回归：4 线程直接传参（Identifier 实参），
+# 每个 worker 读自己的 slot 写全局。修复前 slot 被提前回收/回卷 → 错值或 UAF。
+# 修复后：实参提升到幸存段（不随作用域回卷），worker 内参数/别名/全局均不回收。
+import std.memory
+import std.concurrent
+import std.io
+
+i64* g_accs = 0
+
+fn worker(arg: void*) void* {
+    i64* p = as<i64*>(arg)
+    i64 v = p[0]
+    i64 idx = p[1]
+    g_accs[idx] = v
+    return null
+}
+
+fn main() {
+    i64 n = 4
+    i64* accs = std.memory.kmm_v4_alloc(n * 8)
+    g_accs = accs
+    Thread* ts = std.memory.kmm_v4_alloc(n * 8)
+    i64 i = 0
+    while i < n {
+        i64* slot = std.memory.kmm_v4_alloc(16)
+        slot[0] = 100 + i
+        slot[1] = i
+        ts[i] = std.concurrent.thread_create(worker, slot)
+        i += 1
+    }
+    i = 0
+    while i < n {
+        std.concurrent.thread_join(ts[i])
+        i += 1
+    }
+    i64 ok = 1
+    i = 0
+    while i < n {
+        if g_accs[i] != 100 + i {
+            ok = 0
+        }
+        i += 1
+    }
+    if ok == 1 {
+        std.io.println("MT-OK ", g_accs[0], " ", g_accs[1], " ", g_accs[2], " ", g_accs[3])
+    } else {
+        std.io.println("MT-FAIL ", g_accs[0], " ", g_accs[1], " ", g_accs[2], " ", g_accs[3])
+    }
+}
