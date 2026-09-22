@@ -763,10 +763,10 @@ static inline void kmm_v4_survivor_commit(size_t needed) { (void)needed; }
 #else
 // 动态池（方案 A）：无大对象 bump 区；桶 slots 懒分配，超大对象页式
 extern int  kmm_v4_survivor_bucket_ensure(int idx);        // 懒分配桶 slots，0=成功
-extern void* kmm_v4_survivor_paged_alloc(size_t size);     // 页式分配（登记 + magic header）
-extern bool kmm_v4_survivor_paged_free(void* ptr);         // 页式释放（登记表查找，安全）
-extern bool kmm_v4_survivor_paged_contains(const void* ptr); // 页式对象识别（登记表查找）
-extern void kmm_v4_survivor_paged_purge(void);             // 销毁全部页式对象（destroy_pool）
+extern void* kmm_v4_survivor_paged_alloc(size_t size);     // 页式分配（池化复用 + 登记）
+extern bool kmm_v4_survivor_paged_free(void* ptr);         // 页式释放（O(1) 双 magic + alive CAS，池化/归还）
+extern bool kmm_v4_survivor_paged_contains(const void* ptr); // 页式对象识别（O(1) magic 校验）
+extern void kmm_v4_survivor_paged_purge(void);             // 销毁全部页式对象（活跃 + 池，destroy_pool）
 extern void kmm_v4_survivor_slab_release(int bucket_idx, size_t slot); // 槽位入 TLS 垃圾箱（兼容）
 extern void kmm_v4_survivor_flush(void);                   // 批量归还垃圾箱槽位
 extern void kmm_v4_survivor_commit(size_t needed);         // 兼容保留（no-op）
