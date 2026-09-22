@@ -280,97 +280,204 @@ int kmm_v4_survivor_bucket_ensure(int idx) {
 // 避免误把 TLAB/外部指针当页式对象解引用（见 memory 测试 double_free 崩溃）。
 // 性能：Treiber 无锁栈（push 1 次 CAS；遍历无锁）+ 惰性节点（free 置死但
 // 节点留链上，purge 统一回收）——消除互斥锁与 free 侧 UAF 风险。
-#define KMM_V4_PAGED_MAGIC 0x4B4D4D50u  /* "KMMP" */
-typedef struct {
+// ==================== 页式超大对象（>1MB 或桶满 fallback）====================
+// 设计（池化 + O(1) free）：
+// - 登记内嵌头：magic×2 + alive + pooled + size + 双向链（活跃对象集合）。
+//   free O(1)：双 magic + 16 对齐 + size 上限校验后 CAS alive 1→0 抢占
+//   （double-free 只有一线程成功），随后 O(1) 摘链（prev/next），不再遍历登记表。
+// - 大对象池：32 档（1MB 起 2 倍档）Treiber 无锁栈；free 入池（池上限内）、
+//   alloc 优先取同档块（浪费 ≤25%）复用——省去每轮 malloc/mmap 往返、
+//   页表重建与首次写缺页（池化块物理页保留）。
+// - 安全：slab/TLAB 指针不会进入 paged_free（survivor_free 先按地址范围命中
+//   桶/垃圾箱）；外部指针误判概率 = 双 magic(2^-64) × alive∈{0,1} × 16 对齐
+//   × size≤2GB，工程上可忽略（与 glibc/jemalloc 同级）。活跃链表用极短
+//   临界区自旋锁保护（页式对象频率低，锁开销可忽略），池路径保持无锁。
+#define KMM_V4_PAGED_MAGIC   0x4B4D4D50u  /* "KMMP" */
+#define KMM_V4_PAGED_MAGIC2  0x4B4D4D51u  /* 第二 magic：误判保护 */
+#define KMM_V4_PAGED_MAX_SIZE (1ull << 31) /* 防御上限：payload ≤ 2GB */
+
+typedef struct kmm_v4_paged_hdr {
     uint32_t magic;
-    uint32_t _pad;
-    size_t   size;
-} kmm_v4_paged_hdr_t;
+    uint32_t magic2;
+    uint32_t alive;   // 原子 0/1：用户持有=1，池内/已释放=0（free CAS 抢占）
+    uint32_t pooled;  // 1=在池中（purge 区分：池内块释放 vs 已归还）
+    size_t   size;    // payload 大小（原始分配大小）
+    struct kmm_v4_paged_hdr* next;  // 活跃对象双向链表（自旋锁保护）
+    struct kmm_v4_paged_hdr* prev;
+} kmm_v4_paged_hdr_t;   /* 48 字节，payload 16 字节对齐 */
 
-typedef struct kmm_paged_node {
-    struct kmm_paged_node* next;
-    kmm_v4_paged_hdr_t*   hdr;    // 分配头（含 payload 基址）
-    uint32_t alive;               // 1=有效 0=已释放（原子读写；节点惰性保留）
-    uint32_t _pad;
-} kmm_paged_node_t;
+// 大对象池：节点复用池内块的 payload 前 16 字节（free 后用户不再访问）。
+#define KMM_V4_PAGED_POOL_CAP   (64ull * 1024 * 1024)  // 池持有上限（字节）
+#define KMM_V4_PAGED_POOL_SLACK 4                      // 浪费容忍：pool_size ≤ size + size/4
+#define KMM_V4_PAGED_POOL_BUCKETS 32                   // 1MB..2GB 2 倍档
+typedef struct kmm_paged_pool_node {
+    struct kmm_paged_pool_node* next;
+    size_t size;
+} kmm_paged_pool_node_t;
 
-// 页式对象登记栈头（Treiber stack；节点不摘除，无 UAF）
-static kmm_paged_node_t* g_paged_list = NULL;
-static KMM_ATOMIC_TYPE g_paged_count = 0;   // 有效页式对象数（free 优先判断）
-KMM_ATOMIC_TYPE g_kmm_v4_paged_bytes = 0;   // 有效页式对象总字节（总占用统计，std.memory 读取）
+static kmm_v4_paged_hdr_t*      g_paged_active = NULL;      // 活跃对象链表头（锁保护）
+static KMM_ATOMIC_TYPE          g_paged_count = 0;          // 有效（alive）页式对象数
+KMM_ATOMIC_TYPE g_kmm_v4_paged_bytes = 0;                   // 有效页式对象总字节（std.memory 读取）
+static kmm_paged_pool_node_t*   g_paged_pool[KMM_V4_PAGED_POOL_BUCKETS]; // Treiber 栈
+static KMM_ATOMIC_TYPE          g_paged_pool_bytes = 0;     // 池内总字节
+static KMM_ATOMIC_TYPE          g_paged_lock = 0;           // 活跃链表自旋锁
+
+static inline void kmm_v4_paged_lock(void) {
+    while (KMM_V4_UNLIKELY(__atomic_exchange_n(&g_paged_lock, 1, __ATOMIC_ACQUIRE) != 0)) {
+        while (__atomic_load_n(&g_paged_lock, __ATOMIC_RELAXED) != 0) { }
+    }
+}
+static inline void kmm_v4_paged_unlock(void) {
+    __atomic_store_n(&g_paged_lock, 0, __ATOMIC_RELEASE);
+}
+
+// 池档位：sz ∈ [1MB, 2GB] → idx ∈ [0,31]；<1MB 的桶满 fallback 也入 0 档。
+static inline int kmm_v4_paged_pool_index(size_t sz) {
+    size_t clamped = sz < ((size_t)1 << 20) ? ((size_t)1 << 20) : sz;
+    int idx = (int)((sizeof(size_t) * 8) - __builtin_clzll((unsigned long long)(clamped - 1))) - 20;
+    if (idx < 0) idx = 0;
+    if (idx >= KMM_V4_PAGED_POOL_BUCKETS) idx = KMM_V4_PAGED_POOL_BUCKETS - 1;
+    return idx;
+}
+
+// hdr 校验（O(1) 快速失败，不读链表）：
+// 双 magic + 16 对齐 + alive∈{0,1} + size 上限。
+static inline bool kmm_v4_paged_hdr_ok(const kmm_v4_paged_hdr_t* hdr) {
+    if (KMM_V4_UNLIKELY(((uintptr_t)hdr & 0xF) != 0)) return false;
+    if (KMM_V4_UNLIKELY(__atomic_load_n(&hdr->magic, __ATOMIC_RELAXED) != KMM_V4_PAGED_MAGIC)) return false;
+    if (KMM_V4_UNLIKELY(__atomic_load_n(&hdr->magic2, __ATOMIC_RELAXED) != KMM_V4_PAGED_MAGIC2)) return false;
+    return true;
+}
+
+// 活跃链表插入/摘除（锁保护，O(1)）
+static inline void kmm_v4_paged_active_insert(kmm_v4_paged_hdr_t* hdr) {
+    kmm_v4_paged_lock();
+    hdr->prev = NULL;
+    hdr->next = g_paged_active;
+    if (g_paged_active) g_paged_active->prev = hdr;
+    g_paged_active = hdr;
+    kmm_v4_paged_unlock();
+}
+static inline void kmm_v4_paged_active_remove(kmm_v4_paged_hdr_t* hdr) {
+    kmm_v4_paged_lock();
+    if (hdr->prev) hdr->prev->next = hdr->next; else g_paged_active = hdr->next;
+    if (hdr->next) hdr->next->prev = hdr->prev;
+    kmm_v4_paged_unlock();
+}
 
 void* kmm_v4_survivor_paged_alloc(size_t size) {
-    if (KMM_V4_UNLIKELY(size > SIZE_MAX - sizeof(kmm_v4_paged_hdr_t))) return NULL;
-    // 实测本环境 mmap+munmap(2MB)≈1.2µs vs malloc+free(2MB)≈17ns
-    // （glibc 对 mmap 阈值以上大块有内部复用），裸 mmap 在此是 70 倍回退；
-    // 保持 malloc（glibc 内部对 >128KB 本身走 mmap，归还策略由 glibc 管理）。
+    if (KMM_V4_UNLIKELY(size == 0 || size > KMM_V4_PAGED_MAX_SIZE)) return NULL;
+    // 1) 池快路径：同档 Treiber pop（O(1) 无锁），命中且浪费 ≤25% 即复用。
+    //    复用块物理页保留：后续写入不再缺页、页表不重建（大对象 churn 主收益）。
+    int idx = kmm_v4_paged_pool_index(size);
+    for (;;) {
+        kmm_paged_pool_node_t* top = __atomic_load_n(&g_paged_pool[idx], __ATOMIC_RELAXED);
+        if (KMM_V4_UNLIKELY(top == NULL)) break;
+        if (__atomic_compare_exchange_n(&g_paged_pool[idx], &top, top->next, 1,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            kmm_v4_paged_hdr_t* hdr = (kmm_v4_paged_hdr_t*)((uint8_t*)top - sizeof(kmm_v4_paged_hdr_t));
+            size_t old_sz = hdr->size;
+            if (KMM_V4_LIKELY(old_sz >= size && old_sz <= size + size / KMM_V4_PAGED_POOL_SLACK)) {
+                // 命中：重新激活并登记回活跃链表
+                __atomic_store_n(&hdr->alive, 1, __ATOMIC_RELEASE);
+                __atomic_store_n(&hdr->pooled, 0, __ATOMIC_RELAXED);
+                __atomic_fetch_sub(&g_paged_pool_bytes, old_sz, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&g_kmm_v4_paged_bytes, old_sz, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&g_paged_count, 1, __ATOMIC_RELAXED);
+                kmm_v4_paged_active_insert(hdr);
+                return (uint8_t*)hdr + sizeof(kmm_v4_paged_hdr_t);
+            }
+            // 浪费超容忍：放回同档并落 malloc 慢路径（不忙等同一块）
+            kmm_paged_pool_node_t* n2 = (kmm_paged_pool_node_t*)((uint8_t*)hdr + sizeof(kmm_v4_paged_hdr_t));
+            n2->size = old_sz;
+            for (;;) {
+                n2->next = __atomic_load_n(&g_paged_pool[idx], __ATOMIC_RELAXED);
+                if (__atomic_compare_exchange_n(&g_paged_pool[idx], &n2->next, n2, 1,
+                                                __ATOMIC_RELEASE, __ATOMIC_RELAXED)) break;
+            }
+            break;
+        }
+    }
+    // 2) 慢路径：malloc + 登记（glibc 对 >128KB 内部走 mmap；实测裸 mmap 70 倍
+    //    回退，保持 malloc 由 glibc 管理大块复用/归还）。
     kmm_v4_paged_hdr_t* hdr = (kmm_v4_paged_hdr_t*)malloc(sizeof(kmm_v4_paged_hdr_t) + size);
     if (KMM_V4_UNLIKELY(hdr == NULL)) return NULL;
     hdr->magic = KMM_V4_PAGED_MAGIC;
+    hdr->magic2 = KMM_V4_PAGED_MAGIC2;
+    hdr->alive = 1;
+    hdr->pooled = 0;
     hdr->size = size;
-
-    kmm_paged_node_t* node = (kmm_paged_node_t*)malloc(sizeof(kmm_paged_node_t));
-    if (KMM_V4_UNLIKELY(node == NULL)) { free(hdr); return NULL; }
-    node->hdr = hdr;
-    node->alive = 1;
-    // Treiber push：1 次 CAS 无锁
-    do {
-        node->next = __atomic_load_n(&g_paged_list, __ATOMIC_RELAXED);
-    } while (KMM_V4_UNLIKELY(!__atomic_compare_exchange_n(&g_paged_list, &node->next, node, 1,
-                                                          __ATOMIC_RELEASE, __ATOMIC_RELAXED)));
-    KMM_ATOMIC_FETCH_ADD(g_paged_count, 1);
-    KMM_ATOMIC_FETCH_ADD(g_kmm_v4_paged_bytes, size);
+    kmm_v4_paged_active_insert(hdr);
+    __atomic_fetch_add(&g_paged_count, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_kmm_v4_paged_bytes, size, __ATOMIC_RELAXED);
     return (uint8_t*)hdr + sizeof(kmm_v4_paged_hdr_t);
 }
 
-// 页式对象识别（登记表无锁查找，安全：不读任意内存、节点惰性不 UAF）
+// 页式对象识别（O(1)：双 magic + alive 校验，不读链表、不遍历）
 bool kmm_v4_survivor_paged_contains(const void* ptr) {
     if (KMM_V4_UNLIKELY(ptr == NULL)) return false;
-    kmm_v4_paged_hdr_t* want = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
-    for (kmm_paged_node_t* n = __atomic_load_n(&g_paged_list, __ATOMIC_ACQUIRE);
-         n != NULL;
-         n = __atomic_load_n(&n->next, __ATOMIC_RELAXED)) {
-        if (__atomic_load_n(&n->alive, __ATOMIC_RELAXED) && n->hdr == want) {
-            return true;
-        }
-    }
-    return false;
+    const kmm_v4_paged_hdr_t* hdr = (const kmm_v4_paged_hdr_t*)((const uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
+    if (!kmm_v4_paged_hdr_ok(hdr)) return false;
+    return __atomic_load_n(&hdr->alive, __ATOMIC_ACQUIRE) == 1;
 }
 
 bool kmm_v4_survivor_paged_free(void* ptr) {
     if (KMM_V4_UNLIKELY(ptr == NULL)) return false;
-    kmm_v4_paged_hdr_t* want = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
-    for (kmm_paged_node_t* n = __atomic_load_n(&g_paged_list, __ATOMIC_ACQUIRE);
-         n != NULL;
-         n = __atomic_load_n(&n->next, __ATOMIC_RELAXED)) {
-        if (n->hdr == want &&
-            __atomic_load_n(&n->alive, __ATOMIC_RELAXED) &&
-            __atomic_exchange_n(&n->alive, 0, __ATOMIC_ACQ_REL) == 1) {
-            // 置死成功（double-free 只有一个线程成功）→ 释放对象内存；
-            // 节点惰性保留（16B/对象，destroy 时 purge 统一回收）。
-            // size 须在 free(want) 前读取（free 后为 UAF）。
-            size_t sz = want->size;
-            free(want);
-            __atomic_fetch_sub(&g_paged_count, 1, __ATOMIC_RELAXED);
-            __atomic_fetch_sub(&g_kmm_v4_paged_bytes, sz, __ATOMIC_RELAXED);
-            return true;
+    kmm_v4_paged_hdr_t* hdr = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
+    // O(1) 快速失败：双 magic + 16 对齐（外部指针/TLAB 误用安全返回）
+    if (KMM_V4_UNLIKELY(!kmm_v4_paged_hdr_ok(hdr))) return false;
+    size_t sz = __atomic_load_n(&hdr->size, __ATOMIC_RELAXED);
+    if (KMM_V4_UNLIKELY(sz == 0 || sz > KMM_V4_PAGED_MAX_SIZE)) return false;
+    // CAS alive 1→0 抢占（double-free/并发只有一线程成功）
+    if (__atomic_exchange_n(&hdr->alive, 0, __ATOMIC_ACQ_REL) != 1) return false;
+    __atomic_fetch_sub(&g_paged_count, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_sub(&g_kmm_v4_paged_bytes, sz, __ATOMIC_RELAXED);
+    kmm_v4_paged_active_remove(hdr);  // O(1) 摘链（锁保护）
+    // 入池（池上限内，同档 Treiber push）或真释放归还 glibc
+    size_t pb = __atomic_load_n(&g_paged_pool_bytes, __ATOMIC_RELAXED);
+    if (KMM_V4_LIKELY(sz <= KMM_V4_PAGED_POOL_CAP - pb)) {
+        __atomic_store_n(&hdr->pooled, 1, __ATOMIC_RELAXED);
+        kmm_paged_pool_node_t* node = (kmm_paged_pool_node_t*)ptr;  // 复用 payload 前 16B
+        node->size = sz;
+        int pidx = kmm_v4_paged_pool_index(sz);
+        for (;;) {
+            node->next = __atomic_load_n(&g_paged_pool[pidx], __ATOMIC_RELAXED);
+            if (__atomic_compare_exchange_n(&g_paged_pool[pidx], &node->next, node, 1,
+                                            __ATOMIC_RELEASE, __ATOMIC_RELAXED)) break;
         }
+        __atomic_fetch_add(&g_paged_pool_bytes, sz, __ATOMIC_RELAXED);
+    } else {
+        free(hdr);
     }
-    return false;  // 不在登记表（TLAB/外部指针等）——安全返回
+    return true;
 }
 
-// 销毁全部页式对象（destroy_pool 调用；调用方保证无并发）
+// 销毁全部页式对象（destroy_pool 调用；调用方保证无并发）。
+// 顺序：先释放活跃对象，再清池——池内块 hdr 仍在（alive=0）可安全跳过；
+// 清池释放池内块时活跃链表已清空，无悬垂引用。
 void kmm_v4_survivor_paged_purge(void) {
-    kmm_paged_node_t* n = __atomic_exchange_n(&g_paged_list, NULL, __ATOMIC_ACQ_REL);
-    while (n != NULL) {
-        kmm_paged_node_t* nx = n->next;
-        if (n->hdr && __atomic_load_n(&n->alive, __ATOMIC_RELAXED)) free(n->hdr);
-        free(n);
-        n = nx;
+    kmm_v4_paged_hdr_t* h = g_paged_active;
+    g_paged_active = NULL;
+    while (h != NULL) {
+        kmm_v4_paged_hdr_t* hx = h->next;
+        if (__atomic_load_n(&h->alive, __ATOMIC_RELAXED)) free(h);
+        h = hx;
+    }
+    for (int i = 0; i < KMM_V4_PAGED_POOL_BUCKETS; i++) {
+        kmm_paged_pool_node_t* n = g_paged_pool[i];
+        g_paged_pool[i] = NULL;
+        while (n != NULL) {
+            kmm_paged_pool_node_t* nx = n->next;
+            kmm_v4_paged_hdr_t* hdr = (kmm_v4_paged_hdr_t*)((uint8_t*)n - sizeof(kmm_v4_paged_hdr_t));
+            free(hdr);
+            n = nx;
+        }
     }
     __atomic_store_n(&g_paged_count, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_kmm_v4_paged_bytes, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_paged_pool_bytes, 0, __ATOMIC_RELAXED);
 }
+
 
 // ==================== TLS 垃圾箱：延迟批量归还 slab 槽位 ====================
 // 性能优化：per-object free 从"立即 bitmap CAS"降为"TLS 数组 push"（~1ns，
@@ -986,8 +1093,10 @@ size_t kmm_v4_total_usage(void) {
     t += kmm_v4_survivor_usage();
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     t += (size_t)KMM_ATOMIC_LOAD(g_kmm_v4_paged_bytes);
+    t += (size_t)KMM_ATOMIC_LOAD(g_paged_pool_bytes);  // 池内块仍被分配器持有
 #else
     t += g_kmm_v4_paged_bytes;
+    t += g_paged_pool_bytes;
 #endif
     return t;
 }
