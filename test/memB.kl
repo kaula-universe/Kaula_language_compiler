@@ -1,0 +1,47 @@
+// 场景 B：200 万节点链（32MB）构建+遍历，分配前/中/后采样
+import std.memory
+import std.time
+import std.io
+import stat_helper
+
+struct Node {
+    next: i64
+    value: i64
+}
+
+fn main() {
+    i64 n = 2000000
+    i64* s = std.memory.kmm_v4_alloc(64 * 8)
+    i64 ns = 0
+    i64 acc = 0
+    i64 t0 = std.time.time_now_ms()
+    s[ns] = std.memory.kmm_v4_total_usage()
+    ns += 1
+    Node* nodes = std.memory.kmm_v4_alloc(n * 16)
+    s[ns] = std.memory.kmm_v4_total_usage()
+    ns += 1
+    i64 i = 0
+    while i < n {
+        nodes[i].value = i
+        if i + 1 < n {
+            nodes[i].next = i + 1
+        } else {
+            nodes[i].next = -1
+        }
+        i += 1
+    }
+    s[ns] = std.memory.kmm_v4_total_usage()
+    ns += 1
+    i64 cur = 0
+    i64 steps = 0
+    while cur >= 0 && steps < n {
+        acc += nodes[cur].value
+        cur = nodes[cur].next
+        steps += 1
+    }
+    s[ns] = std.memory.kmm_v4_total_usage()
+    ns += 1
+    i64 t1 = std.time.time_now_ms()
+    std.io.println("[B] chain_2M         ", t1 - t0, " ms   acc=", acc)
+    report(s, ns, "B chain")
+}

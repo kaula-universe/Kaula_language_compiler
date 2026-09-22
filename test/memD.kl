@@ -1,0 +1,36 @@
+// 场景 D：8×8MB 大对象生命周期（单块复用：分配→使用→编译器自动回收）
+import std.memory
+import std.time
+import std.io
+import stat_helper
+
+fn main() {
+    i64 blocks = 8
+    i64 per = 8000000
+    i64* s = std.memory.kmm_v4_alloc(64 * 8)
+    i64 ns = 0
+    i64 acc = 0
+    i64 t0 = std.time.time_now_ms()
+    i64 b = 0
+    while b < blocks {
+        i64* arr = std.memory.kmm_v4_alloc(per * 8)
+        s[ns] = std.memory.kmm_v4_total_usage()
+        ns += 1
+        i64 i = 0
+        while i < per {
+            arr[i] = b * per + i
+            i += 1
+        }
+        i64 j = 0
+        while j < 1000 {
+            acc += arr[j * 8000]
+            j += 1
+        }
+        b += 1
+    }
+    s[ns] = std.memory.kmm_v4_total_usage()
+    ns += 1
+    i64 t1 = std.time.time_now_ms()
+    std.io.println("[D] lifetime_8x8MB   ", t1 - t0, " ms   acc=", acc)
+    report(s, ns, "D lifetime")
+}

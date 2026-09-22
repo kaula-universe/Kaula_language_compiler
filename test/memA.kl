@@ -1,0 +1,30 @@
+// 场景 A：小对象 churn（30 轮 × 20 万次 64B），每轮采样 KMM usage
+import std.memory
+import std.time
+import std.io
+import stat_helper
+
+fn main() {
+    i64 rounds = 30
+    i64 count = 200000
+    i64* s = std.memory.kmm_v4_alloc(64 * 8)
+    i64 ns = 0
+    i64 acc = 0
+    i64 t0 = std.time.time_now_ms()
+    i64 r = 0
+    while r < rounds {
+        s[ns] = std.memory.kmm_v4_total_usage()
+        ns += 1
+        i64 i = 0
+        while i < count {
+            i64* p = std.memory.kmm_v4_alloc(64)
+            p[0] = i
+            acc += p[0]
+            i += 1
+        }
+        r += 1
+    }
+    i64 t1 = std.time.time_now_ms()
+    std.io.println("[A] churn_small      ", t1 - t0, " ms   acc=", acc)
+    report(s, ns, "A churn")
+}
