@@ -1,0 +1,91 @@
+# 并发大对象生命周期：2 线程 × 4 轮 × 64MB（总流量 = 单线程场景 D）
+# 验证：无锁页式路径（Treiber 栈 + alive CAS）并发正确性与吞吐
+import std.memory
+import std.time
+import std.concurrent
+import std.io
+import stat_helper
+
+struct MTRes {
+    idx: i64
+    acc: i64
+    samples: i64*
+}
+
+i64 g_per = 8000000
+i64 g_rounds = 4
+i64 g_threads = 2
+MTRes* g_res
+i64* g_samp
+
+fn worker(arg: void*) void* {
+    MTRes* res = as<MTRes*>(arg)
+    i64 idx = res.idx
+    i64 per = g_per
+    i64 rounds = g_rounds
+    i64 acc = 0
+    i64* s = std.memory.kmm_v4_alloc(64 * 8)
+    i64 ns = 0
+    i64 b = 0
+    while b < rounds {
+        i64* arr = std.memory.kmm_v4_alloc(per * 8)
+        s[ns] = std.memory.kmm_v4_total_usage()
+        ns += 1
+        i64 i = 0
+        while i < per {
+            arr[i] = b * per + i
+            i += 1
+        }
+        i64 j = 0
+        while j < 1000 {
+            acc += arr[j * 8000]
+            j += 1
+        }
+        b += 1
+    }
+    res.acc = acc
+    i64 k = 0
+    while k < ns {
+        res.samples[k] = s[k]
+        k += 1
+    }
+    return null
+}
+
+fn main() {
+    i64* samp = std.memory.kmm_v4_alloc(g_threads * 32 * 8)
+    g_samp = samp
+    MTRes* res = std.memory.kmm_v4_alloc(g_threads * 16)
+    g_res = res
+    Thread* ts = std.memory.kmm_v4_alloc(g_threads * 8)
+    i64 t0 = std.time.time_now_ms()
+    i64 i = 0
+    while i < g_threads {
+        res[i].idx = i
+        res[i].samples = &g_samp[i * 32]
+        ts[i] = std.concurrent.thread_create(worker, &res[i])
+        i += 1
+    }
+    i = 0
+    while i < g_threads {
+        std.concurrent.thread_join(ts[i])
+        i += 1
+    }
+    i64 t1 = std.time.time_now_ms()
+    i64 total = 0
+    i64 ns = 0
+    i64* all = std.memory.kmm_v4_alloc(64 * 8)
+    i = 0
+    while i < g_threads {
+        total += res[i].acc
+        i64 k = 0
+        while k < 4 {
+            all[ns] = res[i].samples[k]
+            ns += 1
+            k += 1
+        }
+        i += 1
+    }
+    std.io.println("[MT-large] 2t x 4r x 64MB   ", t1 - t0, " ms   acc=", total)
+    report(all, ns, "MT-large")
+}
