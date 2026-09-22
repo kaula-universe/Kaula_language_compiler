@@ -11,18 +11,14 @@ fn main() {
     i64 ns = 0
     i64 acc = 0
     i64 t0 = std.time.time_now_ms()
-    i64 r = 0
-    while r < rounds {
+    for r in range(rounds) {
         s[ns] = std.memory.kmm_v4_total_usage()
         ns += 1
-        i64 i = 0
-        while i < count {
+        for i in range(count) {
             i64* p = std.memory.kmm_v4_alloc(64)
             p[0] = i
             acc += p[0]
-            i += 1
         }
-        r += 1
     }
     i64 t1 = std.time.time_now_ms()
     std.io.println("[A] churn_small      ", t1 - t0, " ms   acc=", acc)

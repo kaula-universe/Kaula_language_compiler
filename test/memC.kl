@@ -16,19 +16,15 @@ fn main() {
     i64* arr = std.memory.kmm_v4_alloc(n * 8)
     s[ns] = std.memory.kmm_v4_total_usage()
     ns += 1
-    i64 i = 0
-    while i < n {
+    for i in range(n) {
         arr[i] = i
-        i += 1
     }
     s[ns] = std.memory.kmm_v4_total_usage()
     ns += 1
     i64 seed = 12345
-    i64 j = 0
-    while j < reads {
+    for j in range(reads) {
         seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
         acc += arr[seed & (n - 1)]
-        j += 1
     }
     s[ns] = std.memory.kmm_v4_total_usage()
     ns += 1
