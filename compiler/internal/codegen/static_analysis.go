@@ -360,6 +360,20 @@ func (cg *CodeGenerator) processAliasAssignment(dst string, src ast.Expression, 
 			}
 		}
 	}
+	// 线程逃逸修复：类型转换别名（dst = as<T>(src)）与原变量指向同一内存，
+	// 必须并入同一别名组，否则参数别名会被 early free 提前释放。
+	if cast, ok := src.(*ast.TypeCastExpression); ok {
+		if inner, ok := cast.Expression.(*ast.Identifier); ok {
+			if srcGroup, ok := aliasMap[inner.Name]; ok {
+				aliasMap[dst] = srcGroup
+				group := result.AliasGroups[srcGroup]
+				if !containsStr(group, dst) {
+					result.AliasGroups[srcGroup] = append(group, dst)
+				}
+				return
+			}
+		}
+	}
 	aliasMap[dst] = *nextGroupID
 	result.AliasGroups[*nextGroupID] = []string{dst}
 	*nextGroupID++

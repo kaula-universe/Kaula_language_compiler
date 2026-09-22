@@ -94,6 +94,11 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		callExpr, isCall := interface{}(s.Expression).(*ast.CallExpression)
 		if isCall && callExpr != nil && callExpr.Function != nil {
 			if _, isMemberAccess := callExpr.Function.(*ast.MemberAccessExpression); isMemberAccess {
+				// 跨线程逃逸：thread_create/thread_pool_add_task 的实参对象被
+				// 另一线程异步使用，必须提升到幸存段并抑制提前回收（防 UAF）。
+				if prefix, ok := sg.handleThreadSpawnEscape(callExpr); ok {
+					return prefix + sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
+				}
 				// 这是模块函数调用，直接生成函数调用代码
 				return sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 			}
@@ -176,6 +181,11 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 
 	sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local", stmt.Pos.Line, stmt.Pos.Column)
 
+	// 线程逃逸修复：同名变量重新声明 = 新实例（循环体内每迭代声明一次），
+	// 重置生命周期标志，避免上一实例的 promoted/assign-escaped 误跳过本实例
+	// 的 thread_create 实参提升。
+	sg.codegen.ResetLifetimeFlags(stmt.Name)
+
 	// KMM 回卷悬垂修复：所有模式下登记 malloc 类初始化的常量分配大小，
 	// 供赋值逃逸 promote 的大小解析使用（SOR 模式另有生成文本匹配路径）
 	if stmt.Value != nil {
@@ -220,13 +230,21 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	if isPointer && !isArray && !stmt.IsStatic && !stmt.IsExported {
 		baseType := strings.TrimRight(cType, "*")
 		var initValue string
+		// 线程逃逸修复（声明路径）：Thread t = thread_create(worker, slot) 中
+		// slot 被另一线程异步使用，实参提升到幸存段并抑制提前回收。
+		var promotePrefix string
 		if stmt.Value != nil {
+			if callExpr, ok := stmt.Value.(*ast.CallExpression); ok {
+				if prefix, okSpawn := sg.handleThreadSpawnEscape(callExpr); okSpawn {
+					promotePrefix = prefix
+				}
+			}
 			initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 		}
 		if initValue != "" {
 			// 有初始值：直接用初始值初始化，不调用 alloc_auto
 			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
-			return fmt.Sprintf("%s = %s;\n", formatCVarDecl(cType, stmt.Name), initValue)
+			return promotePrefix + fmt.Sprintf("%s = %s;\n", formatCVarDecl(cType, stmt.Name), initValue)
 		}
 		// 无初始值：用 kmm_v4_alloc_auto 分配
 		sg.codegen.recordAllocSizeHint(stmt.Name, "sizeof("+baseType+")")
@@ -261,6 +279,14 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	builder.WriteString(sg.generateVarDeclString(cType, stmt.Name))
 
 	if stmt.Value != nil {
+		// 线程逃逸修复（声明路径，值类型变量如 Thread t = thread_create(...)）：
+		// 实参对象被另一线程异步使用，提升到幸存段并抑制提前回收。
+		var promotePrefix string
+		if callExpr, ok := stmt.Value.(*ast.CallExpression); ok {
+			if prefix, okSpawn := sg.handleThreadSpawnEscape(callExpr); okSpawn {
+				promotePrefix = prefix
+			}
+		}
 		// match 表达式作为变量初始化值：C 的 switch 不能作为表达式值，
 		// 改为声明后接 switch 赋值
 		if me, ok := stmt.Value.(*ast.MatchExpression); ok && cType != "auto" {
@@ -285,6 +311,7 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			builder.WriteString(" = ")
 			builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
 		}
+		return promotePrefix + builder.String() + ";\n"
 	} else if stmt.Nullable {
 		builder.WriteString(" = NULL")
 	}
@@ -472,6 +499,67 @@ func (sg *StatementGenerator) generateExpressionInMain(expr ast.Expression) stri
 		}
 	}
 	return sg.codegen.expressionGenerator.GenerateExpression(expr) + ";\n"
+}
+
+// threadSpawnFns 跨线程逃逸的标准库调用：实参对象被另一线程异步使用，
+// 生命周期远超调用点。编译器活体分析会误判其在调用后死亡，提前回收
+// （early free / 作用域回卷 / 函数出口 rewind），另一线程读取即 UAF。
+// 修复：调用前把实参提升到幸存段（offset_restore/rewind 不回卷幸存段），
+// 并登记为 assign-escaped 抑制全部后续回收路径。
+var threadSpawnFns = map[string]bool{
+	"thread_create":        true,
+	"thread_pool_add_task": true,
+}
+
+// extractCallTailName 提取调用表达式目标链的最末端成员名：
+// std.concurrent.thread_create -> "thread_create"；普通函数调用返回空。
+func (sg *StatementGenerator) extractCallTailName(expr ast.Expression) string {
+	ma, ok := expr.(*ast.MemberAccessExpression)
+	if !ok {
+		return ""
+	}
+	return ma.Member
+}
+
+// handleThreadSpawnEscape 处理线程启动调用的实参跨线程逃逸。
+// 命中线程启动函数且存在指针/String 实参时：逐实参 promote + 登记
+// assign-escaped，返回 promote 前缀（调用方自行拼接完整语句）与 true；
+// 否则返回空串与 false。
+func (sg *StatementGenerator) handleThreadSpawnEscape(callExpr *ast.CallExpression) (string, bool) {
+	if callExpr == nil || callExpr.Function == nil {
+		return "", false
+	}
+	fnName := sg.extractCallTailName(callExpr.Function)
+	if !threadSpawnFns[fnName] {
+		return "", false
+	}
+	var b strings.Builder
+	promoted := false
+	for _, arg := range callExpr.Args {
+		ident, ok := arg.(*ast.Identifier)
+		if !ok || ident.Name == "" {
+			continue
+		}
+		if sg.codegen.IsAssignEscaped(ident.Name) || sg.codegen.IsPromoted(ident.Name) {
+			continue
+		}
+		if !sg.isPointerTyped(ident.Name) && !sg.isStringTyped(ident.Name) {
+			continue
+		}
+		sizeExpr := "sizeof(*" + ident.Name + ")"
+		if size, ok := sg.sorPromoteSize(ident.Name, ident.Name); ok {
+			sizeExpr = size
+		}
+		b.WriteString(sg.emitPromoteForType(ident.Name, sizeExpr, "promote thread arg into "+fnName, ident.Name))
+		sg.codegen.MarkAssignEscaped(ident.Name) // 抑制 early free / 作用域回收 / return 回收
+		sg.codegen.MarkPromoted(ident.Name)       // reaching definition：防止 return 时重复 promote
+		promoted = true
+	}
+	if !promoted {
+		return "", false
+	}
+	sg.codegen.funcEmitsPromote = true // 方案 C：函数出口跳过 survivor_rewind
+	return b.String(), true
 }
 
 // generateSpendStatement 生成 spend 强制消费流代码
@@ -2411,11 +2499,30 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 		if name == excludeName {
 			continue
 		}
+		// 线程逃逸修复：函数参数（借用，所有权属调用方）与全局（模块持有）
+		// 绝不提前释放——参数可被跨线程异步读取，全局可被多线程共享。
+		if sym := sg.codegen.GetSymbol(name); sym != nil &&
+			(sym.Scope == "parameter" || sym.Scope == "global") {
+			continue
+		}
 		// 始终存活的变量不提前释放（如循环条件中使用的变量）
 		if alwaysLive != nil && alwaysLive[name] {
 			continue
 		}
 		if len(group) >= 2 {
+			// 线程逃逸修复：别名组内任一成员是参数/全局 → 整组不提前释放
+			//（组指向调用方/模块所有权的内存，本函数无权回收）。
+			skipGroup := false
+			for _, m := range group {
+				if sm := sg.codegen.GetSymbol(m); sm != nil &&
+					(sm.Scope == "parameter" || sm.Scope == "global") {
+					skipGroup = true
+					break
+				}
+			}
+			if skipGroup {
+				continue
+			}
 			rep := sg.selectAliasGroupRepresentative(group)
 			if rep != name {
 				freed[name] = true
@@ -2746,6 +2853,14 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	bin, ok := stmt.Expression.(*ast.BinaryExpression)
 	if !ok || (bin.Operator != "=" && bin.Operator != "ASSIGN") {
 		return ""
+	}
+	// 线程逃逸修复：dst = thread_create(...) / dst = thread_pool_add_task(...) 赋值路径。
+	// 实参对象被另一线程异步使用（与语句调用路径相同的 UAF 风险）——
+	// 提升到幸存段并抑制提前回收后再执行赋值。
+	if callExpr, okCall := bin.Right.(*ast.CallExpression); okCall {
+		if prefix, okSpawn := sg.handleThreadSpawnEscape(callExpr); okSpawn {
+			return prefix + sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression) + ";\n"
+		}
 	}
 	srcIdent, okSrc := bin.Right.(*ast.Identifier)
 	if !okSrc {
@@ -3101,6 +3216,15 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 			b.WriteString(" (parameter, borrowed from caller) */\n")
 			continue
 		}
+		// 线程逃逸修复：全局对象生命周期归模块（可被多个线程共享访问），
+		// 任何函数（含线程函数）退出时都不得回收全局对象。
+		if sym := symbols[name]; sym != nil && sym.Scope == "global" {
+			b.WriteString(indent)
+			b.WriteString("/* structural: skip survivor_free for ")
+			b.WriteString(name)
+			b.WriteString(" (global, module-owned) */\n")
+			continue
+		}
 		// 基础层：必须是 C 指针类型或 String 类型（kmm_v4_alloc_auto 返回指针，String 含 ptr 字段）
 		if !sg.isPointerTyped(name) && !sg.isStringTyped(name) {
 			continue
@@ -3242,6 +3366,14 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 				b.WriteString("/* structural: skip survivor_free on return for ")
 				b.WriteString(name)
 				b.WriteString(" (parameter, borrowed from caller) */\n")
+				continue
+			}
+			// 线程逃逸修复：全局对象生命周期归模块，函数（含线程函数）返回不得回收。
+			if sym := symbols[name]; sym != nil && sym.Scope == "global" {
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip survivor_free on return for ")
+				b.WriteString(name)
+				b.WriteString(" (global, module-owned) */\n")
 				continue
 			}
 			// 已被 early free 的变量跳过（防止重复释放）
