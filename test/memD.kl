@@ -11,22 +11,16 @@ fn main() {
     i64 ns = 0
     i64 acc = 0
     i64 t0 = std.time.time_now_ms()
-    i64 b = 0
-    while b < blocks {
+    for b in range(blocks) {
         i64* arr = std.memory.kmm_v4_alloc(per * 8)
         s[ns] = std.memory.kmm_v4_total_usage()
         ns += 1
-        i64 i = 0
-        while i < per {
+        for i in range(per) {
             arr[i] = b * per + i
-            i += 1
         }
-        i64 j = 0
-        while j < 1000 {
+        for j in range(1000) {
             acc += arr[j * 8000]
-            j += 1
         }
-        b += 1
     }
     s[ns] = std.memory.kmm_v4_total_usage()
     ns += 1
