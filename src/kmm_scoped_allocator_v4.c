@@ -446,6 +446,20 @@ bool kmm_v4_survivor_paged_free(void* ptr) {
                                             __ATOMIC_RELEASE, __ATOMIC_RELAXED)) break;
         }
         __atomic_fetch_add(&g_paged_pool_bytes, sz, __ATOMIC_RELAXED);
+#if defined(__linux__) && defined(MADV_FREE)
+        // 方案 B：惰性懒释放。池内块是 glibc mmap 大块（hdr 起点页对齐），
+        // 告知内核其物理页可回收：内存充裕时保留（继续免缺页/免 mmap 往返），
+        // 内存压力下由内核回收（不持续占死物理内存）。alloc 复用会重新写入
+        // 全部内容（池化块语义 = 未初始化新分配），回收后缺页自动重填零页，安全。
+        // 注：madvise 要求 addr 页对齐，故从块起点（hdr，=mmap 返回地址）按页取整。
+        {
+            uintptr_t blk = (uintptr_t)hdr;
+            size_t total = sizeof(kmm_v4_paged_hdr_t) + (size_t)sz;
+            size_t pagesz = (size_t)sysconf(_SC_PAGESIZE);
+            total = (total + pagesz - 1) & ~(pagesz - 1);
+            madvise((void*)blk, total, MADV_FREE);  // 失败非致命：退回页保留
+        }
+#endif
     } else {
         free(hdr);
     }
