@@ -12,6 +12,7 @@ type TypeGenerator struct {
 	clibTypeMap    map[string]string
 	structTypes    map[string]bool
 	classTypes     map[string]bool // class 类型名 (指针语义, 与 struct 区分)
+	interfaceTypes map[string]bool // interface 类型名 (接口句柄结构体, 多态分派)
 	enumTypes      map[string]bool // 简单枚举类型名 (typedef enum { ... } Name)
 	typeAliasTypes map[string]bool // type alias 类型名 (typedef ... Name)
 
@@ -29,6 +30,7 @@ func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 		},
 		structTypes:    make(map[string]bool),
 		classTypes:     make(map[string]bool),
+		interfaceTypes: make(map[string]bool),
 		enumTypes:      make(map[string]bool),
 		typeAliasTypes: make(map[string]bool),
 		activeTypeMap:  nil,
@@ -309,6 +311,10 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 		return "const " + tg.MapKaulaTypeToC(innerType)
 	}
 	if tg.structTypes[kaulaType] {
+		// 接口类型：接口句柄结构体按值传递/存储（K_Iface 结构体）
+		if tg.interfaceTypes[kaulaType] {
+			return kaulaStructTag(kaulaType)
+		}
 		// 区分 struct 类型和 class 类型：
 		// struct 实例按值传递/存储（使用 K_StructName）
 		// class 实例按引用/指针传递/存储（使用 K_ClassName*，始终是堆分配指针）
@@ -412,6 +418,20 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 
 	for _, method := range stmt.Methods {
 		impl.WriteString(tg.GenerateMethodStatement(stmt.Name, method))
+	}
+
+	// 为每个 implements 的接口生成"具体类 → 接口句柄"提升函数。
+	// 调用点把具体类对象实参（如 K_Circle*）提升为接口句柄（K_Shape），
+	// 使接口参数能拿到方法组 + 对象指针，进而在调用处走 vtbl 多态分派。
+	for _, ifaceName := range stmt.Implements {
+		ifaceC := kaulaStructTag(ifaceName) // K_Shape
+		classC := kaulaStructTag(stmt.Name) // K_Circle
+		impl.WriteString(fmt.Sprintf("static inline %s %s_from_%s(%s* obj) {\n", ifaceC, ifaceC, stmt.Name, classC))
+		impl.WriteString(fmt.Sprintf("    %s s;\n", ifaceC))
+		impl.WriteString(fmt.Sprintf("    s.vtbl = obj->%s;\n", ifaceName)) // 方法组字段名 = 接口名
+		impl.WriteString("    s.self = (void*)obj;\n")
+		impl.WriteString("    return s;\n")
+		impl.WriteString("}\n\n")
 	}
 
 	return code.String()
@@ -558,6 +578,18 @@ func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement
 		code.WriteString(");\n")
 	}
 	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(methodGroupName)))
+
+	// 接口句柄结构体：方法组 + 具体对象指针。
+	// 使 interface 类型具备 C 映射（接口变量/接口参数），多态分派经
+	// p.vtbl.method(p.self) 走方法组，由 class implements 时生成的提升函数
+	// （K_<Iface>_from_<Class>）把具体类对象提升为接口句柄。
+	tg.interfaceTypes[stmt.Name] = true
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("// Interface handle: %s\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
+	code.WriteString(fmt.Sprintf("    %s vtbl;\n", kaulaStructTag(methodGroupName)))
+	code.WriteString("    void* self;\n")
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
 
 	return code.String()
 }

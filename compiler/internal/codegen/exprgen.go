@@ -937,6 +937,16 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		}
 		return cFuncName + "()"
 	} else {
+		// 接口形参提升：用户函数的形参若为 interface 类型，实参为具体类对象时
+		// 需提升为接口句柄（K_<Iface>_from_<Class>），否则 C 侧类型不匹配。
+		if lifted, ok := eg.liftInterfaceArgsIfNeeded(funcName, e.Args); ok {
+			code := cFuncName + "(" + lifted
+			if capArgs := eg.codegen.captureArgsFor(funcName); capArgs != "" {
+				code += ", " + capArgs
+			}
+			code += ")"
+			return code
+		}
 		// 尝试查找 stdlib 函数签名以生成类型正确的参数
 		var sig *stdlib.Function
 		if eg.codegen.stdlibConfig != nil {
@@ -949,6 +959,108 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 		code += ")"
 		return code
 	}
+}
+
+// liftInterfaceArgsIfNeeded 对用户函数调用做接口形参的实参提升。
+// 当且仅当形参存在 interface 类型时走此路径：每个实参按 GenerateExpression 生成，
+// 若该实参是可推断的具体类对象且形参是接口，则包装为接口句柄提升函数调用。
+// 返回 (实参列表串, 是否命中接口形参)。
+func (eg *ExpressionGenerator) liftInterfaceArgsIfNeeded(funcName string, args []ast.Expression) (string, bool) {
+	var paramTypes []string
+	if eg.codegen.program != nil {
+		paramTypes = findUserFunctionParamTypes(eg.codegen.program, funcName)
+	}
+	if paramTypes == nil {
+		return "", false
+	}
+	// 先判定是否存在接口形参，无则完全走原逻辑（不影响 stdlib/普通函数）。
+	hasIface := false
+	for i := range paramTypes {
+		pType := strings.TrimSuffix(paramTypes[i], "*")
+		if eg.codegen.IsInterfaceType(pType) {
+			hasIface = true
+			break
+		}
+	}
+	if !hasIface {
+		return "", false
+	}
+
+	code := ""
+	for i, arg := range args {
+		if i > 0 {
+			code += ", "
+		}
+		argCode := eg.GenerateExpression(arg)
+		if i < len(paramTypes) {
+			pType := strings.TrimSuffix(paramTypes[i], "*")
+			if eg.codegen.IsInterfaceType(pType) {
+				if cls := eg.inferClassType(arg); cls != "" && !eg.codegen.IsInterfaceType(cls) {
+					code += kaulaStructTag(pType) + "_from_" + cls + "(" + argCode + ")"
+					continue
+				}
+			}
+		}
+		code += argCode
+	}
+	return code, true
+}
+
+// findUserFunctionParamTypes 在程序 AST 中（含嵌套函数）查找名为 name 的函数形参类型。
+// 顶层函数经 FindFunction 可查；嵌套函数（定义在其它函数体内的 fn）需递归遍历。
+func findUserFunctionParamTypes(prog *ast.Program, name string) []string {
+	if prog == nil {
+		return nil
+	}
+	for _, s := range prog.Statements {
+		if fn, ok := s.(*ast.FunctionStatement); ok {
+			if fn.Name == name {
+				return fn.ParamTypes
+			}
+			if r := findNestedFnParams(fn.Body, name); r != nil {
+				return r
+			}
+		}
+	}
+	return nil
+}
+
+func findNestedFnParams(stmts []ast.Statement, name string) []string {
+	for _, s := range stmts {
+		switch n := s.(type) {
+		case *ast.FunctionStatement:
+			if n.Name == name {
+				return n.ParamTypes
+			}
+			if r := findNestedFnParams(n.Body, name); r != nil {
+				return r
+			}
+		case *ast.BlockStatement:
+			if r := findNestedFnParams(n.Statements, name); r != nil {
+				return r
+			}
+		case *ast.IfStatement:
+			if r := findNestedFnParams(n.Body, name); r != nil {
+				return r
+			}
+			if r := findNestedFnParams(n.Else, name); r != nil {
+				return r
+			}
+		case *ast.WhileStatement:
+			if r := findNestedFnParams(n.Body, name); r != nil {
+				return r
+			}
+		case *ast.ForInStatement:
+			if r := findNestedFnParams(n.Body, name); r != nil {
+				return r
+			}
+		case *ast.ForStatement:
+			if r := findNestedFnParams(n.Body, name); r != nil {
+				return r
+			}
+		}
+	}
+	return nil
 }
 
 // normalizePtrType 规范化 C 指针类型字符串：去除 const 与空格，用于宽松匹配
@@ -1318,6 +1430,16 @@ func (eg *ExpressionGenerator) generateObjectMethodCall(objectAST ast.Expression
 		className = "Object"
 	}
 
+	// 接口接收者：多态分派，走接口句柄的方法组（p.vtbl.method(p.self)）。
+	if eg.codegen.IsInterfaceType(className) {
+		code := object + ".vtbl." + methodName + "(" + object + ".self"
+		for _, arg := range args {
+			code += ", " + eg.GenerateExpression(arg)
+		}
+		code += ")"
+		return code
+	}
+
 	code := className + "_" + methodName + "("
 	code += object
 
@@ -1336,8 +1458,11 @@ func (eg *ExpressionGenerator) inferClassType(expr ast.Expression) string {
 		sym := eg.codegen.currentScope.GetSymbol(e.Name)
 		if sym != nil {
 			typeName := strings.TrimSuffix(sym.Type, "*")
-			if typeName != "" && eg.codegen.findClassStmt(typeName) != nil {
-				return typeName
+			if typeName != "" {
+				// class：具体类（直接静态调用）；interface：接口句柄（走 vtbl 分派）
+				if eg.codegen.findClassStmt(typeName) != nil || eg.codegen.IsInterfaceType(typeName) {
+					return typeName
+				}
 			}
 		}
 	case *ast.MemberAccessExpression:
@@ -1364,8 +1489,20 @@ func (eg *ExpressionGenerator) inferClassType(expr ast.Expression) string {
 	case *ast.IndexExpression:
 		// arr[i] / ptr[i]：元素类型与数组变量类型相同（class 指针字段的数组元素）
 		elemType := eg.inferClassType(e.Object)
-		if elemType != "" && eg.codegen.findClassStmt(elemType) != nil {
+		if elemType != "" && (eg.codegen.findClassStmt(elemType) != nil || eg.codegen.IsInterfaceType(elemType)) {
 			return elemType
+		}
+		// 值数组 [N]T / []T：从 Object 符号类型提取元素类型（如 [2]Circle → Circle）
+		if ident, ok := e.Object.(*ast.Identifier); ok {
+			if sym := eg.codegen.currentScope.GetSymbol(ident.Name); sym != nil {
+				t := sym.Type
+				if i := strings.Index(t, "]"); i >= 0 {
+					elem := strings.TrimSuffix(t[i+1:], "*")
+					if eg.codegen.findClassStmt(elem) != nil || eg.codegen.IsInterfaceType(elem) {
+						return elem
+					}
+				}
+			}
 		}
 		return ""
 	case *ast.CallExpression:
