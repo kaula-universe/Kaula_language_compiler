@@ -38,6 +38,10 @@ type CodeGenerator struct {
 	prefixManager   *core.PrefixManager
 	symbolTable     *symbol.SymbolTable
 	currentScope    *symbol.SymbolTable
+	// survivorStopScope：当前函数 return 路径的 per-object 回收作用域链边界。
+	// = 进入当前函数前的外层作用域；generateSurvivorFreeForReturn 遍历到此停，
+	// 防止嵌套函数回收外层函数存活变量（use-after-free）。
+	survivorStopScope *symbol.SymbolTable
 	errors          []string
 	usedModules     []string
 	trackedModules  map[string]bool
@@ -2528,6 +2532,24 @@ func (cg *CodeGenerator) findClassStmt(name string) *ast.ClassStatement {
 		return info.Class
 	}
 	return nil
+}
+
+// findInterfaceStmt 查找接口定义（主程序 AST；跨文件 import 的接口暂未映射）。
+func (cg *CodeGenerator) findInterfaceStmt(name string) *ast.InterfaceStatement {
+	if cg.program != nil {
+		if stmt := cg.program.FindInterface(name); stmt != nil {
+			return stmt
+		}
+	}
+	return nil
+}
+
+// IsInterfaceType 检查指定名称是否是已定义的接口类型。
+func (cg *CodeGenerator) IsInterfaceType(name string) bool {
+	if cg.typeGenerator != nil && cg.typeGenerator.interfaceTypes[name] {
+		return true
+	}
+	return cg.findInterfaceStmt(name) != nil
 }
 
 // IsClassType 检查指定名称是否是已定义的类类型（含已实例化的泛型类：如 Box_int）

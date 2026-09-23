@@ -3342,6 +3342,10 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 	sorActive := adapter != nil && adapter.IsActive
 
 	for scope := sg.codegen.GetCurrentScope(); scope != nil; scope = scope.GetParent() {
+		// 函数边界：不跨入外层函数作用域回收（嵌套函数的 return 不得释放外层变量）
+		if scope == sg.codegen.survivorStopScope {
+			break
+		}
 		symbols := scope.GetAllSymbols()
 		if len(symbols) == 0 {
 			continue

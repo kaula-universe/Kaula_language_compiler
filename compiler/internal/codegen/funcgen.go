@@ -268,6 +268,12 @@ func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 }
 
 func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStatement) string {
+	// 函数作用域边界隔离：return 路径的 per-object survivor 回收（
+	// generateSurvivorFreeForReturn 遍历当前作用域到根的作用域链）必须停在
+	// 当前函数的外层作用域，否则嵌套函数的 return 会回收外层函数的存活变量，
+	// 造成 use-after-free。保存进入函数前的外层 scope，生成后恢复。
+	prevStopScope := fg.codegen.survivorStopScope
+	fg.codegen.survivorStopScope = fg.codegen.GetCurrentScope()
 	fg.codegen.EnterScope("function_" + stmt.Name)
 
 	if stmt.IsAsm {
@@ -417,6 +423,17 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 否则外层函数的 return 语句会误判为 void 生成空 return。
 	prevReturnType := fg.codegen.currentFunctionReturnType
 	fg.codegen.currentFunctionReturnType = stmt.ReturnType
+
+	// 嵌套函数作用域隔离：函数体生成期间 kmmScopeDepth 必须归零，
+	// 否则嵌套函数会继承外层函数的活跃作用域深度，导致其 return 语句
+	// 注入孤立的 kmm_v4_scope_pop()，运行期 KMM 作用域栈下溢直接 abort。
+	// 与外层隔离：生成后恢复，保证外层后续语句的作用域深度不受影响。
+	savedScopeDepth := fg.codegen.kmmScopeDepth
+	savedEmitsPromote := fg.codegen.funcEmitsPromote
+	savedHasCheckpoint := fg.codegen.funcHasKMMCheckpoint
+	fg.codegen.kmmScopeDepth = 0
+	fg.codegen.funcEmitsPromote = false
+	fg.codegen.funcHasKMMCheckpoint = false
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
@@ -573,6 +590,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 	fg.codegen.ExitScope()
 	fg.codegen.currentFunctionReturnType = prevReturnType
+	// 恢复外层函数的 kmmScopeDepth 等 per-function 状态（嵌套函数隔离的对称恢复）
+	fg.codegen.kmmScopeDepth = savedScopeDepth
+	fg.codegen.funcEmitsPromote = savedEmitsPromote
+	fg.codegen.funcHasKMMCheckpoint = savedHasCheckpoint
+	// 恢复外层函数的 survivor 回收边界
+	fg.codegen.survivorStopScope = prevStopScope
 	return builder.String()
 }
 
