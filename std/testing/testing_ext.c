@@ -13,7 +13,14 @@
 // 链接时不会拉入 time.o，导致 undefined reference to time_now_ms。）
 static double kaula_test_now_ms(void) {
     struct timespec ts;
+#if defined(_WIN32)
+    /* Windows/MSVC target: clock_gettime 不可用，用 C11 timespec_get。
+       基准测试只需单调递增的毫秒读数，此实现足够。 */
+    timespec_get(&ts, TIME_UTC);
+#else
+    /* POSIX: 单调时钟，不受系统时间调整影响 */
     clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
