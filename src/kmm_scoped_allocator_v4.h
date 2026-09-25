@@ -325,10 +325,12 @@ size_t strlen(const char* s);
 // 原子操作支持（基于线程安全级别）
 // 修复 #14：区分循环 CAS（weak）和非循环 CAS（strong）
 #if KMM_THREAD_SAFETY_LEVEL >= 1
-#ifdef __STDC_NO_ATOMICS__
-// C11 不支持原子操作，使用 GCC/Clang 内置函数
+// 统一使用 GCC/Clang 内置原子函数（__atomic_*）。
+// 注意：__atomic_* 不接受 _Atomic 限定类型，clang 会报
+// "address argument to atomic operation must be a pointer to integer or pointer"，
+// 因此 KMM_ATOMIC_TYPE 保持普通整型，原子性完全由内置函数提供。
 #define KMM_USE_ATOMICS 1
-#define KMM_ATOMIC_TYPE unsigned long
+#define KMM_ATOMIC_TYPE size_t
 #define KMM_ATOMIC_LOAD(var) __atomic_load_n(&(var), __ATOMIC_RELAXED)
 #define KMM_ATOMIC_STORE(var, val) __atomic_store_n(&(var), (val), __ATOMIC_RELAXED)
 // 循环 CAS（允许伪失败，循环重试）
@@ -339,22 +341,6 @@ size_t strlen(const char* s);
     __atomic_compare_exchange_n(&(var), &(expected), (desired), 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
 #define KMM_ATOMIC_FETCH_ADD(var, val) \
     __atomic_fetch_add(&(var), (val), __ATOMIC_RELAXED)
-#else
-// 使用 C11 标准原子操作
-#define KMM_USE_ATOMICS 1
-#include <stdatomic.h>
-#define KMM_ATOMIC_TYPE _Atomic size_t
-#define KMM_ATOMIC_LOAD(var) atomic_load(&(var))
-#define KMM_ATOMIC_STORE(var, val) atomic_store(&(var), (val))
-// 循环 CAS（weak，允许伪失败）
-#define KMM_ATOMIC_CAS_WEAK(var, expected, desired) \
-    atomic_compare_exchange_weak(&(var), &(expected), (desired))
-// 非循环 CAS（strong，不允许伪失败）
-#define KMM_ATOMIC_CAS_STRONG(var, expected, desired) \
-    atomic_compare_exchange_strong(&(var), &(expected), (desired))
-#define KMM_ATOMIC_FETCH_ADD(var, val) \
-    atomic_fetch_add(&(var), (val))
-#endif
 #else
 // 单线程模式，无原子操作
 #define KMM_USE_ATOMICS 0
