@@ -176,6 +176,10 @@ func (sa *SemanticAnalyzer) Analyze(program *ast.Program) {
 		sa.source = program.Source
 	}
 
+	// 单语句多变量声明（i64 a = 1, b = 2）先展平为独立声明，
+	// 使后续符号表/类型检查与逐条声明的处理完全一致（幂等）
+	astutil.FlattenDeclarations(program)
+
 	sa.validateNumericSpellings(program)
 
 	sa.comptime = comptime.NewEvaluator()

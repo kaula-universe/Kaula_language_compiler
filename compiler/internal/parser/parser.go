@@ -552,7 +552,51 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		return nil
 	}
 
-	stmt.Type = typeName
+	// 基础类型名：同语句内逗号分隔的后续声明符共享（i64 a = 1, b = 2 的 b 同为 i64）
+	baseType := typeName
+
+	// 解析第一个声明符：变量名 + 指针/数组后缀 + 可选初始化
+	p.parseVarDeclarator(stmt, baseType)
+
+	// 单语句内多变量声明：i64 a = 1, b = 2, c（也支持无初值 i64 a, b）。
+	// 仅当逗号后紧跟变量名时才继续，避免误吞后续语句的 token。
+	for p.curTok.Type == lexer.TOKEN_COMMA && p.peekTok.Type == lexer.TOKEN_IDENT {
+		p.nextToken() // 跳过 ','
+		more := &ast.VariableDeclaration{
+			Type:        baseType,
+			Nullable:    stmt.Nullable,
+			IsAuto:      stmt.IsAuto,
+			IsTryAssign: stmt.IsTryAssign,
+			IsPublic:    stmt.IsPublic,
+			IsExported:  stmt.IsExported,
+			IsStatic:    stmt.IsStatic,
+			IsConst:     stmt.IsConst,
+			Attributes:  stmt.Attributes,
+			Pos: ast.Position{
+				Line:   p.curTok.Line,
+				Column: p.curTok.Column,
+				File:   p.file,
+			},
+		}
+		p.parseVarDeclarator(more, baseType)
+		stmt.More = append(stmt.More, more)
+	}
+
+	if len(stmt.More) > 0 {
+		stmt.BaseType = baseType
+	}
+
+	return stmt
+}
+
+// parseVarDeclarator 解析单个声明符的剩余部分：
+//
+//	变量名 [指针后缀 *] [数组后缀 [N]] [= 初始化表达式]
+//
+// 调用前 curTok 必须是变量名（标识符），调用后 curTok 停在声明符之后。
+// 类型名与语句级修饰符由调用方预先填入 stmt。
+func (p *Parser) parseVarDeclarator(stmt *ast.VariableDeclaration, baseType string) {
+	stmt.Type = baseType
 	stmt.Name = p.curTok.Value
 	p.nextToken()
 
@@ -586,8 +630,19 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		p.nextToken()
 		stmt.Value = p.parseExpressionIterative()
 	}
+}
 
-	return stmt
+// applyToAllDeclarators 把语句级修饰符同步到同语句内逗号分隔的后续声明符。
+// static/const/pub/export 等修饰符在 parseVariableDeclarationIterative 返回后
+// 才补写到主声明上，因此需要显式传播到 More。
+func applyToAllDeclarators(stmt *ast.VariableDeclaration, apply func(*ast.VariableDeclaration)) {
+	if stmt == nil {
+		return
+	}
+	apply(stmt)
+	for _, more := range stmt.More {
+		apply(more)
+	}
 }
 
 // parseExternStatementIterative 解析 extern 外部符号/函数声明
@@ -735,9 +790,7 @@ func (p *Parser) parseExternFunctionIterative(stmt *ast.ExternStatement) *ast.Ex
 func (p *Parser) parseStaticDeclarationIterative() *ast.VariableDeclaration {
 	p.nextToken() // 跳过 static
 	stmt := p.parseVariableDeclarationIterative()
-	if stmt != nil {
-		stmt.IsStatic = true
-	}
+	applyToAllDeclarators(stmt, func(d *ast.VariableDeclaration) { d.IsStatic = true })
 	return stmt
 }
 
@@ -763,15 +816,39 @@ func (p *Parser) parseConstDeclarationIterative() *ast.VariableDeclaration {
 			p.nextToken()
 			stmt.Value = p.parseExpressionIterative()
 		}
+		// 单语句内多常量声明：const a = 1, b = 2
+		for p.curTok.Type == lexer.TOKEN_COMMA && p.peekTok.Type == lexer.TOKEN_IDENT {
+			p.nextToken() // 跳过 ','
+			more := &ast.VariableDeclaration{
+				IsConst: true,
+				Pos: ast.Position{
+					Line:   p.curTok.Line,
+					Column: p.curTok.Column,
+					File:   p.file,
+				},
+			}
+			more.Name = p.curTok.Value
+			p.nextToken()
+			if p.curTok.Type != lexer.TOKEN_ASSIGN {
+				p.error("const 声明必须有初始值")
+				break
+			}
+			p.nextToken()
+			more.Value = p.parseExpressionIterative()
+			stmt.More = append(stmt.More, more)
+		}
 		return stmt
 	}
 
 	stmt := p.parseVariableDeclarationIterative()
 	if stmt != nil {
-		stmt.IsConst = true
-		if stmt.Value == nil {
-			p.error("const 声明必须有初始值")
-			return nil
+		applyToAllDeclarators(stmt, func(d *ast.VariableDeclaration) { d.IsConst = true })
+		// 每个声明符都必须有初始值
+		for _, d := range stmt.AllDeclarators() {
+			if d.Value == nil {
+				p.error("const 声明必须有初始值")
+				return nil
+			}
 		}
 	}
 	return stmt
@@ -813,6 +890,34 @@ func (p *Parser) parseAutoDeclarationIterative() *ast.VariableDeclaration {
 
 	p.nextToken()
 	stmt.Value = p.parseExpressionIterative()
+
+	// 单语句内多变量声明：auto a = 1, b = 2（各自独立推导类型）
+	for p.curTok.Type == lexer.TOKEN_COMMA && p.peekTok.Type == lexer.TOKEN_IDENT {
+		p.nextToken() // 跳过 ','
+		more := &ast.VariableDeclaration{
+			IsAuto:      true,
+			IsTryAssign: stmt.IsTryAssign,
+			IsPublic:    stmt.IsPublic,
+			IsExported:  stmt.IsExported,
+			IsStatic:    stmt.IsStatic,
+			IsConst:     stmt.IsConst,
+			Attributes:  stmt.Attributes,
+			Pos: ast.Position{
+				Line:   p.curTok.Line,
+				Column: p.curTok.Column,
+				File:   p.file,
+			},
+		}
+		more.Name = p.curTok.Value
+		p.nextToken()
+		if p.curTok.Type != lexer.TOKEN_ASSIGN {
+			p.error("auto 声明必须有初始值用于类型推导 (auto name = value)")
+			break
+		}
+		p.nextToken()
+		more.Value = p.parseExpressionIterative()
+		stmt.More = append(stmt.More, more)
+	}
 
 	return stmt
 }
@@ -1822,9 +1927,7 @@ func (p *Parser) parsePubStatementIterative() ast.Statement {
 		lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
 		lexer.TOKEN_TYPE_VOID, lexer.TOKEN_IDENT, lexer.TOKEN_AUTO:
 		stmt := p.parseVariableDeclarationIterative()
-		if stmt != nil {
-			stmt.IsPublic = true
-		}
+		applyToAllDeclarators(stmt, func(d *ast.VariableDeclaration) { d.IsPublic = true })
 		return stmt
 	default:
 		// pub 后面不是已知声明类型，报错
@@ -1865,19 +1968,19 @@ func (p *Parser) parseExportStatementIterative() ast.Statement {
 		return p.parseObjectStatementIterative()
 	case lexer.TOKEN_CONST:
 		stmt := p.parseConstDeclarationIterative()
-		if stmt != nil {
-			stmt.IsPublic = true
-			stmt.IsExported = true
-		}
+		applyToAllDeclarators(stmt, func(d *ast.VariableDeclaration) {
+			d.IsPublic = true
+			d.IsExported = true
+		})
 		return stmt
 	case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
 		lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
 		lexer.TOKEN_TYPE_VOID, lexer.TOKEN_AUTO:
 		stmt := p.parseVariableDeclarationIterative()
-		if stmt != nil {
-			stmt.IsPublic = true
-			stmt.IsExported = true
-		}
+		applyToAllDeclarators(stmt, func(d *ast.VariableDeclaration) {
+			d.IsPublic = true
+			d.IsExported = true
+		})
 		return stmt
 	}
 
@@ -1917,10 +2020,10 @@ func (p *Parser) parseExportStatementIterative() ast.Statement {
 			p.peekTok.Type == lexer.TOKEN_TYPE_VOID || p.peekTok.Type == lexer.TOKEN_AUTO
 		if isDecl {
 			stmt := p.parseVariableDeclarationIterative()
-			if stmt != nil {
-				stmt.IsPublic = true
-				stmt.IsExported = true
-			}
+			applyToAllDeclarators(stmt, func(d *ast.VariableDeclaration) {
+				d.IsPublic = true
+				d.IsExported = true
+			})
 			return stmt
 		}
 	}

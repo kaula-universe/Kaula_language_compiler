@@ -246,6 +246,10 @@ func traverseNode(node Node, visitor func(Node)) {
 		if n.Value != nil {
 			traverseNode(n.Value, visitor)
 		}
+		// 逗号分隔的后续声明符（i64 a = 1, b = 2）
+		for _, m := range n.More {
+			traverseNode(m, visitor)
+		}
 	case *ExpressionStatement:
 		if n.Expression != nil {
 			traverseNode(n.Expression, visitor)
@@ -1170,6 +1174,15 @@ func (n *NonLocalStatement) SetPosition(pos Position) {
 }
 
 // VariableDeclaration 表示变量声明语句
+//
+// 单条语句可声明多个变量（逗号分隔声明符），此时本节点承载第一个声明符，
+// More 依次承载后续声明符，例如 `i64 a = 1, b = 2`：
+//
+//	Type = "i64", Name = "a", Value = 1
+//	More = [{Type: "i64", Name: "b", Value: 2}]
+//
+// 后续声明符共享主声明的类型与修饰符（parse 时复制到各节点），
+// 语义分析与代码生成阶段通过 AllDeclarators 展开为逐个声明处理。
 type VariableDeclaration struct {
 	Type       string
 	Name       string
@@ -1183,7 +1196,26 @@ type VariableDeclaration struct {
 	IsStatic   bool         // static 修饰符：函数内静态变量，生命周期为整个程序
 	IsConst    bool         // const 修饰符：编译期常量，不可修改
 	Attributes []*Attribute // 声明注解：#[volatile], #[section("...")], #[aligned(N)] 等
-	Pos        Position
+	More       []*VariableDeclaration // 同语句内逗号分隔的后续声明符（无则为单变量声明）
+	// BaseType 逗号分隔多变量声明共享的类型名（`i64 a = 1, b = 2` 中的 "i64"）。
+	// 仅格式化阶段使用：主声明 Type 已叠加自身后缀（name* / name[N]），
+	// 还原书写形式时需用 BaseType + 各声明符后缀；单变量声明为空。
+	BaseType string
+	Pos      Position
+}
+
+// AllDeclarators 按书写顺序返回本语句声明的全部变量（含自身）。
+// 主声明与 More 各自携带完整信息（类型/修饰符/初值），可逐个独立分析与生成。
+func (v *VariableDeclaration) AllDeclarators() []*VariableDeclaration {
+	if v == nil {
+		return nil
+	}
+	out := make([]*VariableDeclaration, 0, 1+len(v.More))
+	out = append(out, v)
+	for _, m := range v.More {
+		out = append(out, m.AllDeclarators()...)
+	}
+	return out
 }
 
 // statementNode 实现Statement接口

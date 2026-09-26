@@ -143,15 +143,32 @@ type ClassStatement struct {
 
 ```go
 type VariableDeclaration struct {
-    Type     string      // 类型名
+    Type     string      // 类型名（该声明符的完整类型，含 name* / name[N] 后缀）
     Name     string      // 变量名
     Value    Expression  // 初始值（可选）
     Nullable bool        // 是否可空
     IsAuto   bool        // 是否使用 auto 推导
     IsPublic bool        // pub 修饰符
+    // 单语句内多变量声明（i64 a = 1, b = 2）时承载后续声明符：
+    // 主声明承载第一个声明符，More 按书写顺序承载其余声明符，
+    // 每个节点都复制了共享类型与语句级修饰符，可独立分析/生成。
+    More     []*VariableDeclaration
+    // BaseType 共享类型名（仅 More 非空时填写），供格式化还原书写形式；
+    // 语义分析与代码生成阶段不使用。
+    BaseType string
     Pos      Position
 }
 ```
+
+辅助方法：
+
+- `AllDeclarators() []*VariableDeclaration` — 按书写顺序返回本语句声明的全部变量（含自身）。
+
+处理约定：`sema.Analyze` 与 `codegen.Generate` 入口会先调用
+`astutil.FlattenDeclarations(program)`，把逗号分隔的声明符展开成多条独立的
+`VariableDeclaration` 语句（同时清空 `More`），因此下游的符号表、SOR、活跃期分析、
+C 代码生成等链路无需感知 `More`。只有**直接消费原始 AST** 的组件
+（formatter、dumpast、pub 符号收集）需要通过 `AllDeclarators()` / `More` 处理。
 
 ### SpendStatement
 

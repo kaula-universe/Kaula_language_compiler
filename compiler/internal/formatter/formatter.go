@@ -495,12 +495,14 @@ func (f *Formatter) formatVariableDeclaration(stmt *ast.VariableDeclaration) {
 	if stmt.IsConst {
 		f.buf.WriteString("const ")
 	}
-	if stmt.Type != "" {
-		f.buf.WriteString(stmt.Type + " ")
+	baseType := declTypeString(stmt)
+	if baseType != "" {
+		f.buf.WriteString(baseType + " ")
 	} else if stmt.IsAuto {
 		f.buf.WriteString("auto ")
 	}
 	f.buf.WriteString(stmt.Name)
+	f.buf.WriteString(declTypeSuffix(stmt.Type, baseType))
 	if stmt.Nullable {
 		f.buf.WriteString("?")
 	}
@@ -508,6 +510,46 @@ func (f *Formatter) formatVariableDeclaration(stmt *ast.VariableDeclaration) {
 		f.buf.WriteString(" = ")
 		f.formatExpression(stmt.Value)
 	}
+	// 同语句内逗号分隔的后续声明符：i64 a = 1, b = 2
+	for _, more := range stmt.More {
+		f.buf.WriteString(", ")
+		f.buf.WriteString(more.Name)
+		f.buf.WriteString(declTypeSuffix(more.Type, baseType))
+		if more.Nullable {
+			f.buf.WriteString("?")
+		}
+		if more.Value != nil {
+			f.buf.WriteString(" = ")
+			f.formatExpression(more.Value)
+		}
+	}
+}
+
+// declTypeString 返回声明语句书写用的类型名。
+// 多变量声明共享 BaseType（各声明符自身的后缀另行拼接），单变量声明用 Type。
+func declTypeString(stmt *ast.VariableDeclaration) string {
+	if len(stmt.More) > 0 && stmt.BaseType != "" {
+		return stmt.BaseType
+	}
+	return stmt.Type
+}
+
+// declTypeSuffix 返回声明符完整类型相对共享类型书写之后的后缀（"*" 或 "[N]"）。
+// 例：full="i64*" base="i64" → "*"；full="[4]i64" base="i64" → "[4]"。
+func declTypeSuffix(full, base string) string {
+	if base == "" || full == base {
+		return ""
+	}
+	if strings.HasPrefix(full, base) {
+		return full[len(base):]
+	}
+	// 数组后缀形式：[4]i64 相对 i64 书写为 name[4]
+	if strings.HasPrefix(full, "[") {
+		if i := strings.IndexByte(full, ']'); i > 0 && full[i+1:] == base {
+			return full[:i+1]
+		}
+	}
+	return ""
 }
 
 func (f *Formatter) formatReturnStatement(stmt *ast.ReturnStatement) {
