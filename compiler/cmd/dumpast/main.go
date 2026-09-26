@@ -19,6 +19,10 @@ func dump(stmts []ast.Statement, depth int) {
 		switch v := s.(type) {
 		case *ast.VariableDeclaration:
 			fmt.Printf("%*s  Name=%q Type=%q IsAuto=%v IsConst=%v\n", depth*2, "", v.Name, v.Type, v.IsAuto, v.IsConst)
+			// 同语句内逗号分隔的后续声明符：i64 a = 1, b = 2
+			for j, more := range v.More {
+				fmt.Printf("%*s  More[%d] Name=%q Type=%q\n", depth*2, "", j, more.Name, more.Type)
+			}
 		case *ast.ExpressionStatement:
 			if v.Expression == nil {
 				fmt.Printf("%*s  Expression=NIL\n", depth*2, "")

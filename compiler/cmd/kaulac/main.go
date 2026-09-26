@@ -2439,7 +2439,10 @@ func collectLocalPubVars(program *ast.Program, inputDir string) map[string]bool 
 				}
 				for _, s := range localProgram.Statements {
 					if vd, ok := s.(*ast.VariableDeclaration); ok && (vd.IsPublic || vd.IsExported) {
-						pubVars[vd.Name] = true
+						// 单语句多变量声明（pub i64 a = 1, b = 2）的每个声明符都导出
+						for _, d := range vd.AllDeclarators() {
+							pubVars[d.Name] = true
+						}
 					}
 					// export <name> 裸名导出也可能指向变量，一并注册
 					if exp, ok := s.(*ast.ExportStatement); ok && exp.Name != "" {

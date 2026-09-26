@@ -1,0 +1,28 @@
+i64 g1 = 30, g2 = 12
+
+fn main() i32 {
+ i64 a = 1, b = 2
+ if (a + b != 3) { return 1 }
+
+ i64 c, d
+ c = 10
+ d = c + b
+ if (d != 12) { return 2 }
+
+ auto p = 1, q = 200
+ if (p + q != 201) { return 3 }
+
+ const i64 x = 5, y = 6
+ if (x + y != 11) { return 4 }
+
+ if (g1 + g2 != 42) { return 5 }
+
+ i64 sum = 0, i = 0
+ while (i < 3) {
+  sum = sum + i
+  i = i + 1
+ }
+ if (sum != 3) { return 6 }
+
+ return 0
+}

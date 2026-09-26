@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"kaula/internal/ast"
+	"kaula/internal/astutil"
 	"kaula/internal/config"
 	"kaula/internal/core"
 	"kaula/internal/sema"
@@ -945,6 +946,10 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 }
 
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
+	// 单语句多变量声明（i64 a = 1, b = 2）展平为独立声明（幂等；
+	// 未经过语义阶段的直连代码生成路径也能正确输出全部声明符）
+	astutil.FlattenDeclarations(program)
+
 	cg.program = program
 	cg.usedThirdPartyLibs = make(map[string]bool)
 	cg.lambdaCounter = 0
