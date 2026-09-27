@@ -633,6 +633,20 @@
       ],
       "return": "void()"
     },
+    "kmm_v4_global_alloc": {
+      "args": [
+        "size_t"
+      ],
+      "return": "void()",
+      "description": "allocate from survivor segment (slab/paged), supports per-object free"
+    },
+    "kmm_v4_global_free": {
+      "args": [
+        "void()"
+      ],
+      "return": "bool",
+      "description": "immediately free a survivor-segment object; false if not owned by it"
+    },
     "kmm_v4_bump": {
       "args": [
         "size_t"

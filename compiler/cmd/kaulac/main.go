@@ -972,6 +972,8 @@ func main() {
 	// 初始化缓存管理器
 	cwd, _ := os.Getwd()
 	cacheDir := filepath.Join(cwd, "cache")
+	// C 工具链子进程临时目录的最后回退位置（与中间产物同盘同权限）
+	kaulaCacheDir = cacheDir
 	// F11：将影响代码生成结果的编译模式折入缓存键，
 	// 防止 kaulac test 等命中普通编译缓存、复用不含测试 runner 的旧产物
 	var cacheModeParts []string
@@ -1172,7 +1174,8 @@ func main() {
 	// Stage 2.5: SOR Ownership Analysis (--sor)
 	var sorErrors []sor.SORError
 	var sorResult map[string]interface{}
-	poolCapacity := 0 // KMM V4 池容量（0=使用默认值）
+	var escapeResult map[string]interface{} // 默认流程的轻量逃逸分析（--sor 时包含在 sorResult 内）
+	poolCapacity := 0                         // KMM V4 池容量（0=使用默认值）
 	if cfg.SOR {
 		fmt.Println(i18n.T(i18n.MsgStage25))
 		sorStart := time.Now()
@@ -1225,6 +1228,15 @@ func main() {
 					poolCapacity, float64(poolCapacity)/(1024.0*1024.0))
 			}
 		}
+		// 非 SOR 模式同样执行轻量逃逸分析（SOR EscapeAnalyzer，Pass 2.5c）：
+		// 逃逸信息是分配路径路由的前提（作用域内使用 → alloc_auto 快速路径，
+		// 逃逸 → alloc_global survivor 段）。逃逸分析是单次全程序遍历、代价很低，
+		// 不跑完整 SOR 流水线（所有权检查/内存决策/跨函数等仍仅在 --sor 下执行）。
+		escapeStart := time.Now()
+		escapeResult = sor.SerializeEscapeResult(sor.AnalyzeEscapeFromAST(program))
+		if verbose {
+			fmt.Printf("[Stage 2.5] Escape Analysis: %v\n", time.Since(escapeStart))
+		}
 	}
 
 	// Stage 3: Code Gen + C Compile (concurrent)
@@ -1239,6 +1251,10 @@ func main() {
 	}
 	if sorResult != nil {
 		cg.SetSORResult(sorResult)
+	}
+	// 默认流程：注入轻量逃逸分析结果，供分配路径路由（TLAB 快路径 / survivor 慢路径）使用
+	if escapeResult != nil {
+		cg.SetEscapeAnalysis(escapeResult)
 	}
 	cg.SetSourceFile(inputFile)
 
@@ -1400,6 +1416,19 @@ func main() {
 			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgCodegenErrors, len(cg.Errors())), errors.ColorReset)
 			for i, err := range cg.Errors() {
 				fmt.Printf("  %d. %s\n", i+1, err)
+			}
+		}
+
+		// 输出 promote 跳过诊断（拷贝大小不可静态确定 → 保持借用语义而非截断拷贝）
+		if notes := cg.PromoteSkipNotes(); len(notes) > 0 {
+			fmt.Printf("\n[SOR promote skipped] (%d)\n", len(notes))
+			seenNote := make(map[string]bool, len(notes))
+			for _, note := range notes {
+				if seenNote[note] {
+					continue
+				}
+				seenNote[note] = true
+				fmt.Printf("  - %s\n", note)
 			}
 		}
 
@@ -1907,14 +1936,16 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	}
 	kernelArgs = append(kernelArgs, cacheFile, "-o", kernelObj)
 	fmt.Printf("[Boot] Compiling kernel C -> %s\n", kernelObj)
-	if out, err := exec.Command(clangPath, kernelArgs...).CombinedOutput(); err != nil {
+	clangCmd := compilerCommand(clangPath, kernelArgs...)
+	if out, err := clangCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("kernel C compilation failed: %v\n%s", err, string(out))
 	}
 
 	// 2. 编译 boot stub
 	bootArgs := append(append([]string{}, baseArgs...), bootSrc, "-o", bootObj)
 	fmt.Printf("[Boot] Compiling boot stub -> %s\n", bootObj)
-	if out, err := exec.Command(clangPath, bootArgs...).CombinedOutput(); err != nil {
+	bootCmd := compilerCommand(clangPath, bootArgs...)
+	if out, err := bootCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("boot stub compilation failed: %v\n%s", err, string(out))
 	}
 
@@ -1946,7 +1977,8 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 			}
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			fmt.Printf("[Boot] Compiling freestanding runtime -> %s\n", runtimeObj)
-			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
+			rtCmd := compilerCommand(clangPath, runtimeArgs...)
+	if out, err := rtCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[Boot] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(runtimeObj); err == nil {
 				linkObjs = append(linkObjs, runtimeObj)
@@ -1976,7 +2008,8 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 			}
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
 			fmt.Printf("[Boot] Compiling KMM allocator -> %s\n", allocObj)
-			if out, err := exec.Command(clangPath, allocArgs...).CombinedOutput(); err != nil {
+			allocCmd := compilerCommand(clangPath, allocArgs...)
+	if out, err := allocCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[Boot] Warning: allocator compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(allocObj); err == nil {
 				linkObjs = append(linkObjs, allocObj)
@@ -1992,7 +2025,8 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 		ldArgs = append(ldArgs, "--oformat=binary")
 	}
 	fmt.Printf("[Boot] Linking -> %s\n", outputFile)
-	if out, err := exec.Command(ldPath, ldArgs...).CombinedOutput(); err != nil {
+	ldCmd := compilerCommand(ldPath, ldArgs...)
+	if out, err := ldCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("linking failed: %v\n%s", err, string(out))
 	}
 	return nil
@@ -2065,7 +2099,8 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 	}
 	progArgs = append(progArgs, cacheFile, "-o", progObj)
 	fmt.Printf("[User] Compiling program C -> %s\n", progObj)
-	if out, err := exec.Command(clangPath, progArgs...).CombinedOutput(); err != nil {
+	progCmd := compilerCommand(clangPath, progArgs...)
+	if out, err := progCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("program C compilation failed: %v\n%s", err, string(out))
 	}
 
@@ -2090,7 +2125,8 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 				runtimeArgs = append(runtimeArgs, "-D"+define)
 			}
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
-			if out, err := exec.Command(clangPath, runtimeArgs...).CombinedOutput(); err != nil {
+			rtCmd := compilerCommand(clangPath, runtimeArgs...)
+	if out, err := rtCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[User] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(runtimeObj); err == nil {
 				linkObjs = append(linkObjs, runtimeObj)
@@ -2115,7 +2151,8 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 				allocArgs = append(allocArgs, "-D"+define)
 			}
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
-			if out, err := exec.Command(clangPath, allocArgs...).CombinedOutput(); err != nil {
+			allocCmd := compilerCommand(clangPath, allocArgs...)
+	if out, err := allocCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[User] Warning: allocator compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(allocObj); err == nil {
 				linkObjs = append(linkObjs, allocObj)
@@ -2131,7 +2168,8 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 	ldArgs = append(ldArgs, linkObjs...)
 	ldArgs = append(ldArgs, "-o", outputFile)
 	fmt.Printf("[User] Linking -> %s\n", outputFile)
-	if out, err := exec.Command(ldPath, ldArgs...).CombinedOutput(); err != nil {
+	ldCmd := compilerCommand(ldPath, ldArgs...)
+	if out, err := ldCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("user program linking failed: %v\n%s", err, string(out))
 	}
 	return nil
@@ -2893,7 +2931,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		}
 	}
 	if pchNeedsRebuild && kaulaSrcPath != "" {
-		pchCmd := exec.Command(clangPath, "-x", "c-header", "-c", filepath.Join(kaulaSrcPath, "kaula.h"), "-o", pchPath, optLevel)
+		pchCmd := compilerCommand(clangPath, "-x", "c-header", "-c", filepath.Join(kaulaSrcPath, "kaula.h"), "-o", pchPath, optLevel)
 		for _, p := range validSrcPaths {
 			pchCmd.Args = append(pchCmd.Args, "-I", p)
 		}
@@ -3064,7 +3102,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				compileCmd := exec.Command(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...)
+				compileCmd := compilerCommand(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...)
 				if runtime.GOOS == "windows" {
 					compileCmd.Args = append(compileCmd.Args, "-mstack-probe-size=2147483647")
 				}
@@ -3085,7 +3123,10 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 				if output, err := compileCmd.CombinedOutput(); err != nil {
 					errMu.Lock()
-					rebuildErrors = append(rebuildErrors, fmt.Sprintf("  %s: %v", filepath.Base(cPath), string(output)))
+					// 含完整命令行 / cwd / 临时目录：std 模块是并发编译的，
+					// 缺少上下文时"unable to make temporary file"这类报错无法定位
+					rebuildErrors = append(rebuildErrors, formatCommandFailure(
+						"  "+filepath.Base(cPath), compileCmd, err, output))
 					errMu.Unlock()
 				}
 			}(ms.cPath, ms.objPath)
@@ -3126,7 +3167,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				}
 			}
 			if needsRebuild {
-				rsCmd := exec.Command(compilerCmd, append(compilerPrefix, "-c", optLevel, rsSrc, "-o", rsObj)...)
+				rsCmd := compilerCommand(compilerCmd, append(compilerPrefix, "-c", optLevel, rsSrc, "-o", rsObj)...)
 				if runtime.GOOS == "windows" {
 					rsCmd.Args = append(rsCmd.Args, "-mstack-probe-size=2147483647")
 				}
@@ -3391,7 +3432,7 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 	// ccache 集成：使用 ccache 包装 clang（如果可用）
 	mainArgs := append(compilerPrefix, clangArgs...)
-	cmd := exec.Command(compilerCmd, mainArgs...)
+	cmd := compilerCommand(compilerCmd, mainArgs...)
 
 	// 通过 stdin pipe 将 C 代码传递给 clang（内存编译，避免磁盘 I/O）
 	cSource := cCodeInMemory
@@ -3408,8 +3449,16 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	if verboseMode { fmt.Printf("[Compile] Used modules: %v\n", usedModules) }
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		os.WriteFile(filepath.Join(os.TempDir(), "kaula_gen_fail.c"), []byte(cSource), 0644)
-		return fmt.Errorf("clang compilation failed: %v, output: %s", err, string(output))
+		// 失败 C 源码落到已解析的可写目录（%TEMP% 不可写时 os.TempDir() 也会失败）
+		failDir := compilerTempDir()
+		if failDir == "" {
+			failDir = os.TempDir()
+		}
+		failPath := filepath.Join(failDir, "kaula_gen_fail.c")
+		os.WriteFile(failPath, []byte(cSource), 0644)
+		// 诊断信息含完整命令行 / cwd / 临时目录，避免"unable to make temporary file"
+		// 这类无定位信息的报错再次出现
+		return fmt.Errorf("%s\n  C source: %s", formatCommandFailure("clang compilation failed", cmd, err, output), failPath)
 	}
 	if verboseMode { fmt.Printf("[Compile] Successfully compiled: %s\n", outputFile) }
 	return nil

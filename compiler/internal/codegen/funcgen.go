@@ -276,6 +276,15 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	fg.codegen.survivorStopScope = fg.codegen.GetCurrentScope()
 	fg.codegen.EnterScope("function_" + stmt.Name)
 
+	// 根治 #1：SOR 决策按 (函数, 变量名) 解析——进入函数时切换决策上下文，
+	// 退出时恢复。变量名只在词法作用域内唯一，跨函数同名是常态；
+	// 不切换上下文会让形参命中调用方同名局部变量的决策。
+	if adapter := fg.codegen.GetSORAdapter(); adapter != nil {
+		prevSORFunc := adapter.CurrentFunc()
+		adapter.SetCurrentFunc(stmt.Name)
+		defer adapter.SetCurrentFunc(prevSORFunc)
+	}
+
 	if stmt.IsAsm {
 		return fg.generateAsmFunction(stmt)
 	}
@@ -525,6 +534,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		fg.codegen.inFunctionBody = true
 		// 注入静态分析警告
 		bodyBuilder.WriteString(fg.codegen.ReportAnalysisWarnings(stmt.Name, analysisResult))
+		// 用户显式释放的指针：所有权已转移，回收路径统一跳过（否则 double free）
+		fg.codegen.ResetUserFreedVars()
+		for name := range fg.codegen.statementGenerator.CollectUserFreedVars(stmt.Body) {
+			fg.codegen.MarkUserFreed(name)
+		}
 		// 结构化所有权基础层：使用带 liveness 的语句生成，实现提前释放（能力③）
 		bodyBuilder.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(stmt.Body, nil))
 		// 方案 A：per-object survivor 回收（在 KMM_V4_SCOPE_END 前发射）
@@ -840,6 +854,11 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	fg.codegen.funcEmitsPromote = false
 
 	var bodyBuilder strings.Builder
+	// 用户显式释放的指针：作用域末尾 per-object 回收必须跳过（否则 double free）
+	fg.codegen.ResetUserFreedVars()
+	for name := range fg.codegen.statementGenerator.CollectUserFreedVars(stmt.Body) {
+		fg.codegen.MarkUserFreed(name)
+	}
 	for _, bodyStmt := range stmt.Body {
 		if bodyStmt == nil {
 			continue

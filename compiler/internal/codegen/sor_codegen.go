@@ -33,6 +33,16 @@ type SORCodeGenAdapter struct {
 	// 都是 opaque，跨作用域 promote 会产生 Bug 2 式悬垂（内部指针未被追踪），
 	// 必须拒绝/分流而非静默浅提升。
 	externOrigins map[string]string
+
+	// 根治 #1：决策按 (函数, 变量名) 建索引。
+	// 变量名只在词法作用域内唯一，跨函数同名是常态；若只按变量名索引，
+	// 被调函数的形参会命中调用方同名局部变量的决策——历史上导致
+	// "promote arg into callee" 在形参上就地改写并生成 sizeof(*p) 截断副本，
+	// 递归调用直接越界读（btree_bench --sor 段错误）。
+	funcVarDecisions map[string]*SORVarDecision // funcName\x00varName -> 决策
+	globalDecisions  map[string]*SORVarDecision // 顶层声明（funcName == ""）varName -> 决策
+	// currentFunc 当前正在生成的函数名（""=顶层/main 之外的全局上下文）
+	currentFunc string
 }
 
 // SORFuncSig 函数参数的所有权签名（修复 #25）
@@ -46,6 +56,7 @@ type SORFuncSig struct {
 type SORVarDecision struct {
 	VarName      string // 变量名
 	ObjID        string // SOR 对象 ID
+	FuncName     string // 声明所在函数（""=顶层声明）；根治 #1 的索引键之一
 	CTypeName    string // C 类型名（如 "int64_t*", "MyStruct*"）
 	AllocKind    string // "stack", "bmppool"（arena 已收敛到 bmppool）
 	AllocKindID  int    // 修复 #23：int 值，0=Stack, 1=BumpPool, 2-4=Arena(收敛到BumpPool)
@@ -68,13 +79,16 @@ type SORScopeDecision struct {
 // 通过 sor.FullAnalysisResultSerialize() 生成，避免 codegen 对 sor 的直接依赖
 func NewSORCodeGenAdapter(result map[string]interface{}) *SORCodeGenAdapter {
 	adapter := &SORCodeGenAdapter{
-		VarDecisions:    make(map[string]*SORVarDecision),
-		ScopeDecisions:  make(map[int]*SORScopeDecision),
-		scopeNameToID:   make(map[string]int),
-		lastUses:        make(map[string]int),
-		funcSigs:        make(map[string]*SORFuncSig),
-		scopeDropPoints: make(map[int][]string),
-		externOrigins:   make(map[string]string),
+		VarDecisions:       make(map[string]*SORVarDecision),
+		ScopeDecisions:     make(map[int]*SORScopeDecision),
+		scopeNameToID:      make(map[string]int),
+		lastUses:           make(map[string]int),
+		funcSigs:           make(map[string]*SORFuncSig),
+		scopeDropPoints:    make(map[int][]string),
+		externOrigins:      make(map[string]string),
+		funcVarDecisions:   make(map[string]*SORVarDecision),
+		globalDecisions:    make(map[string]*SORVarDecision),
+		currentFunc:        "",
 	}
 	if result == nil {
 		return adapter
@@ -87,6 +101,7 @@ func NewSORCodeGenAdapter(result map[string]interface{}) *SORCodeGenAdapter {
 			if dm, ok := d.(map[string]interface{}); ok {
 				varName, _ := dm["var_name"].(string)
 				objID, _ := dm["obj_id"].(string)
+				funcName, _ := dm["func_name"].(string)
 				allocKind, _ := dm["alloc_kind"].(string)
 				dropAction, _ := dm["drop_action"].(string)
 
@@ -133,6 +148,7 @@ func NewSORCodeGenAdapter(result map[string]interface{}) *SORCodeGenAdapter {
 				decision := &SORVarDecision{
 					VarName:      varName,
 					ObjID:        objID,
+					FuncName:     funcName,
 					AllocKind:    normalizedKind,
 					AllocKindID:  allocKindID,
 					DropAction:   dropAction,
@@ -142,9 +158,15 @@ func NewSORCodeGenAdapter(result map[string]interface{}) *SORCodeGenAdapter {
 				}
 
 				// 从逃逸信息补充
+				// 逃逸表键位：sor.EscapeAnalyzer 以**变量名**为键（StmtLet.VarName），
+				// 而决策同时携带 obj_id（obj_N）。两个键都试，先 obj_id 后 var_name，
+				// 否则真实编译里 EscapeLevel 恒为空（快/慢路径路由拿不到逃逸信息）。
 				if escape, ok := result["escape"].(map[string]interface{}); ok {
-					if objID != "" {
-						if level, ok := escape[objID].(string); ok {
+					key := objID
+					if level, ok := escape[key].(string); ok {
+						decision.EscapeLevel = level
+					} else if varName != "" {
+						if level, ok := escape[varName].(string); ok {
 							decision.EscapeLevel = level
 						}
 					}
@@ -166,7 +188,26 @@ func NewSORCodeGenAdapter(result map[string]interface{}) *SORCodeGenAdapter {
 					}
 				}
 
-				adapter.VarDecisions[varName] = decision
+				// 根治 #1：决策按 (函数, 变量名) 建索引。
+				// - funcName == ""：顶层声明，任意函数可见（globalDecisions）
+				// - funcName != ""：仅该函数内部可见（funcVarDecisions）
+				// 同名多函数各自独立，不再互相覆盖。
+				if funcName == "" {
+					if _, exists := adapter.globalDecisions[varName]; !exists {
+						adapter.globalDecisions[varName] = decision
+					}
+				} else {
+					key := funcVarKey(funcName, varName)
+					if _, exists := adapter.funcVarDecisions[key]; !exists {
+						adapter.funcVarDecisions[key] = decision
+					}
+				}
+
+				// 兼容视图：按变量名的首个决策（仅供调试/无函数上下文的查询使用；
+				// 决策消费方一律走 GetVarDecision 的函数级解析）
+				if _, exists := adapter.VarDecisions[varName]; !exists {
+					adapter.VarDecisions[varName] = decision
+				}
 
 				// 构建作用域决策（按 SOR scopeID 聚合）
 				sd := adapter.ScopeDecisions[scopeID]
@@ -337,12 +378,59 @@ func (a *SORCodeGenAdapter) GetFuncParamMode(funcName string, paramIndex int) in
 	return -1
 }
 
-// GetVarDecision 获取变量的 CodeGen 决策
+// funcVarKey 生成 (函数, 变量名) 复合索引键
+func funcVarKey(funcName, varName string) string {
+	return funcName + "\x00" + varName
+}
+
+// SetCurrentFunc 设置当前正在生成的函数名（""=顶层/全局上下文）。
+// 由 CodeGen 在进入/退出函数时调用，GetVarDecision 据此做函数级决策解析。
+func (a *SORCodeGenAdapter) SetCurrentFunc(funcName string) {
+	if a == nil {
+		return
+	}
+	a.currentFunc = funcName
+}
+
+// CurrentFunc 返回当前正在生成的函数名
+func (a *SORCodeGenAdapter) CurrentFunc() string {
+	if a == nil {
+		return ""
+	}
+	return a.currentFunc
+}
+
+// GetVarDecision 获取变量的 CodeGen 决策（按当前函数解析，根治 #1）
+//
+// 解析顺序：
+//  1. (currentFunc, varName) —— 当前函数内的局部变量
+//  2. ("", varName)          —— 顶层声明（全局变量），任意位置可见
+//  3. nil                    —— 该变量不属于当前函数（形参、外来对象或
+//     非 SOR 追踪变量），调用方必须走保守路径，不得借用其它函数的同名决策。
+//
+// 第 3 条是根治 #1 的关键：变量名只在词法作用域内唯一，跨函数同名是常态。
 func (a *SORCodeGenAdapter) GetVarDecision(varName string) *SORVarDecision {
-	if a == nil || !a.IsActive {
+	if a == nil || !a.IsActive || varName == "" {
 		return nil
 	}
-	return a.VarDecisions[varName]
+	if d, ok := a.funcVarDecisions[funcVarKey(a.currentFunc, varName)]; ok {
+		return d
+	}
+	if d, ok := a.globalDecisions[varName]; ok {
+		return d
+	}
+	return nil
+}
+
+// GetVarDecisionIn 按指定函数取决策（显式版本，供无法依赖当前函数上下文的调用方使用）
+func (a *SORCodeGenAdapter) GetVarDecisionIn(funcName, varName string) *SORVarDecision {
+	if a == nil || !a.IsActive || varName == "" {
+		return nil
+	}
+	if d, ok := a.funcVarDecisions[funcVarKey(funcName, varName)]; ok {
+		return d
+	}
+	return a.globalDecisions[varName]
 }
 
 // GetScopeDecision 获取作用域的 CodeGen 决策
@@ -428,12 +516,38 @@ func (a *SORCodeGenAdapter) NeedsKMMScopeByVars(varNames []string) bool {
 	return false
 }
 
+// IsScopeLocal 判断对象是否“只在本作用域内使用”（逃逸级别 None）。
+// 满足该条件的对象可以走 kmm_v4_alloc_auto 的 per-thread TLAB 快速路径：
+// 无原子操作/无锁，内存随作用域退出的 scope_pop 按作用域整段回卷回收。
+// 注意 TLAB 耗尽时 alloc_auto 内部会回落到 kmm_v4_alloc_global（survivor 段），
+// 这种回落对象需要作用域末尾的 per-object survivor_free 精确回收——
+// 所以快速路径**不抑制** survivor_free（对 TLAB 指针它是 O(1) no-op）。
+//
+// 以下情况一律返回 false，保守走 kmm_v4_alloc_global 的 survivor 慢路径
+// （scope_pop 不回卷，生命周期跨作用域）：
+//   - 逃逸级别 Arg/Return/CrossScope/Global/Heap（对象会被外层持有）
+//   - 序列化结果缺失逃逸信息（EscapeLevel 为空，无法判定）
+//   - 对象来自 extern 函数返回值（非 KMM 分配，对 SOR 不透明）
+func (a *SORCodeGenAdapter) IsScopeLocal(d *SORVarDecision) bool {
+	if a == nil || d == nil || !d.IsSOR {
+		return false
+	}
+	if _, extern := a.IsExternOrigin(d.VarName); extern {
+		return false
+	}
+	return d.EscapeLevel == "None"
+}
+
 // GenerateSmartVarAlloc 生成智能内存分配代码
 // 根据 SOR 的大小路由和逃逸分析结果，选择最合适的分配策略
 // 修复 #15：Arena 分级已收敛到 BumpPool，统一生成 kmm_v4_alloc_auto
 // 如果提供了 initValue，生成的代码会将变量初始化为该值
+// initProvidesPointer 表示 initValue 本身已是指针值（分配调用/别名/取址/成员下标）：
+// 此时对象已由初始化表达式创建，只声明不再分配——避免"先分配后立刻覆盖"的浪费
+// （逃逸对象还会因此在 survivor 段留下一份额外占用，直到作用域末尾才回收）。
+// 与结构化所有权基础层的处理保持一致。
 // 修复：数组类型（含指针数组）使用 formatCVarDecl 做后缀搬运，避免非法 C 语法
-func (a *SORCodeGenAdapter) GenerateSmartVarAlloc(cType, varName, indent string, initValue string) string {
+func (a *SORCodeGenAdapter) GenerateSmartVarAlloc(cType, varName, indent string, initValue string, initProvidesPointer bool) string {
 	if !a.IsActive {
 		return a.defaultVarDecl(cType, varName, indent, initValue)
 	}
@@ -454,24 +568,55 @@ func (a *SORCodeGenAdapter) GenerateSmartVarAlloc(cType, varName, indent string,
 	baseType := strings.TrimRight(cType, "*")
 	// 修复 #15：所有非栈分配统一收敛到 BumpPool
 	if decision.AllocKind == "BumpPool" {
-		// 任务④：SOR 已知编译期精确大小（SizeBytes > 0）时，直接从 survivor slab 桶分配，
-		// 跳过 alloc_auto 的 TLAB 快速路径试探——避免 TLAB 被 scope_pop 回卷后
-		// 整个 per-thread 缓冲无法精确归还的问题；也让 per-object survivor_free
-		// 一定命中对应 slab bucket，避免 bump-large 区的无 header 不可精确回收。
-		useDirectSurvivor := decision.SizeBytes > 0
-		allocSizeExpr := ""
-		if useDirectSurvivor {
-			allocSizeExpr = fmt.Sprintf("%d", decision.SizeBytes)
-		} else {
-			allocSizeExpr = "sizeof(" + baseType + ")"
+		// 大小表达式：
+		//  - SOR 已知编译期精确大小（SizeBytes > 0）→ 直接用字节数
+		//  - 否则回退 sizeof(T)（由 C 编译期求值）
+		sizedExpr := "sizeof(" + baseType + ")"
+		if decision.SizeBytes > 0 {
+			sizedExpr = fmt.Sprintf("%d", decision.SizeBytes)
 		}
+		// 分配路径路由（不再“确认了对象大小就一律走 global 慢路径”）：
+		//  ① 作用域内使用（IsScopeLocal：逃逸级别 None）→ kmm_v4_alloc_auto 快速路径：
+		//     per-thread TLAB bump 分配，无原子操作，随 scope_pop 按作用域回卷回收。
+		//     TLAB 耗尽时 alloc_auto 内部仍会回落到 kmm_v4_alloc_global（survivor 段），
+		//     该回落对象在作用域末尾照常被 per-object survivor_free 精确回收，
+		//     因此这里不需要（也不应）抑制 survivor_free。
+		//  ② 逃逸对象（Arg/Return/CrossScope/Global/Heap，或逃逸信息缺失）→
+		//     kmm_v4_alloc_global 慢路径：直接从 survivor slab 桶分配（任务④），
+		//     scope_pop 不回卷，对象可被更长生命周期的持有者继续使用。
+		//
+		// 任务④：SOR 已知编译期精确大小（SizeBytes > 0）且对象逃逸时，直接从
+		// survivor slab 桶分配，让 per-object survivor_free 一定命中对应 slab
+		// bucket，避免 bump-large 区的无 header 不可精确回收。
 		allocFn := "kmm_v4_alloc_auto"
-		allocKindTag := decision.AllocKind
-		if useDirectSurvivor {
+		allocSizeExpr := sizedExpr
+		allocKindTag := "BumpPool(auto, TLAB fast path, scope-local)"
+		if a.IsScopeLocal(decision) {
+			// TLAB 内没有 slab 桶那样的“向上取整”容错余量：SOR 字节数一旦
+			// 少估（如结构体尾部 padding），相邻分配就会互相覆盖。因此快速
+			// 路径优先用 C sizeof（与真实布局严格一致）；类型不可 sizeof
+			// （void*/空类型）时才退回 SOR 的编译期字节数。
+			bt := strings.TrimSpace(baseType)
+			if bt != "" && bt != "void" {
+				allocSizeExpr = "sizeof(" + bt + ")"
+			}
+		} else if decision.SizeBytes > 0 {
 			allocFn = "kmm_v4_alloc_global"
 			allocKindTag = "BumpPool(survivor-slab, sized)"
+		} else {
+			// 无编译期大小的逃逸对象：alloc_auto(sizeof(T)) 兜底
+			//（TLAB 耗尽时内部回落到 alloc_global）
+			allocKindTag = "BumpPool(auto, escaping, unsized)"
 		}
 		if initValue != "" {
+			if initProvidesPointer {
+				// 初始化表达式已创建对象（分配调用/别名/取址/成员下标）：
+				// 只声明并用初始值初始化，不再重复分配。
+				// 分配路径由该表达式自身决定（如 kmm_v4_alloc → TLAB、
+				// kmm_v4_alloc_global → survivor），无需在声明处再选一次。
+				return fmt.Sprintf("%s%s = %s; /* sor: %s (init provides object) */\n",
+					indent, formatCVarDecl(cType, varName), initValue, decision.AllocKind)
+			}
 			// 修复 #25：指针变量初始化值直接赋给变量本身（而非 *var = init）——
 			// 旧写法对 null / 堆指针初始值生成无效 C（void* → 标量赋值）
 			return fmt.Sprintf("%s%s = (%s)%s(%s); /* sor: %s */\n%s%s = %s;\n",

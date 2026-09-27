@@ -44,6 +44,53 @@ func AnalyzeFullFromAST(program *ast.Program) *FullAnalysisResult {
 	return AnalyzeFullWithAST(adapter, program)
 }
 
+// EscapeResult 轻量逃逸分析结果
+type EscapeResult struct {
+	Escape        map[string]EscapeLevel // 变量名 → 逃逸级别
+	ExternOrigins map[string]string      // 变量名 → 来源 extern 函数
+}
+
+// AnalyzeEscapeFromAST 仅运行轻量逃逸分析（Pass 2.5c），不跑完整 SOR 流水线
+// （所有权检查 / 内存决策 / 大小路由 / 活跃性 / 跨函数）。
+//
+// 用途：默认编译流程（未开启 --sor）不产生 SOR 决策，但分配路径路由需要逃逸信息
+// ——"只在本作用域内使用"（EscNone）走 alloc_auto 的 TLAB 快速路径，
+// 逃逸对象（Arg/Return/CrossScope/Global/Heap）必须走 alloc_global 的
+// survivor 段（scope_pop 不回卷）。逃逸分析本身代价很低（全程序一次遍历），
+// 因此默认流程也执行。
+func AnalyzeEscapeFromAST(program *ast.Program) *EscapeResult {
+	if program == nil {
+		return nil
+	}
+	adapter := NewASTProgramAdapter(program)
+	ea := NewEscapeAnalyzer()
+	return &EscapeResult{
+		Escape:        ea.AnalyzeEscape(adapter.GetStmts()),
+		ExternOrigins: ea.GetExternOrigins(),
+	}
+}
+
+// SerializeEscapeResult 序列化逃逸分析结果，键位与 SerializeFullAnalysisResult 一致
+// （escape / extern_origins），供 CodeGen 侧适配器消费
+func SerializeEscapeResult(r *EscapeResult) map[string]interface{} {
+	if r == nil {
+		return nil
+	}
+	escapeMap := make(map[string]interface{}, len(r.Escape))
+	for name, level := range r.Escape {
+		escapeMap[name] = level.String()
+	}
+	out := map[string]interface{}{"escape": escapeMap}
+	if len(r.ExternOrigins) > 0 {
+		origins := make(map[string]interface{}, len(r.ExternOrigins))
+		for varName, fn := range r.ExternOrigins {
+			origins[varName] = fn
+		}
+		out["extern_origins"] = origins
+	}
+	return out
+}
+
 // RegisterStructsFromAST 遍历 AST，将所有结构体和类的字段类型注册到 TypeSizer
 // 使 SizeOf 能正确估算自定义结构体大小，从而精确路由到 KMM arena
 func RegisterStructsFromAST(program *ast.Program, ts *TypeSizer) {
@@ -175,6 +222,9 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 		}
 		_ = typeName
 		letStmt := LetStmt(stmt.Pos.Line, stmt.Name+" = ...", srcName, stmt.Type, isComposite)
+		// 记录声明所在函数（顶层声明为空串）：决策表按 (函数, 变量名) 定位，
+		// 否则函数 A 的同名局部变量会命中函数 B 的决策
+		letStmt.CallerName = *caller
 		// 初始化表达式是 extern 函数调用时，标记为外部逃逸来源
 		if fn := externCallName(stmt.Value, externFns); fn != "" {
 			letStmt.IsExternCall = true

@@ -61,6 +61,21 @@ void* kmm_v4_alloc_aligned(size_t size, size_t alignment) {
 }
 
 /* ============================================================================
+ * 幸存段（slab / 页式）分配
+ * ============================================================================ */
+
+/* 头文件在本 TU 只看到 kmm 头的 extern 声明（KMM_V4_EXTERNAL_DECLS 早于
+ * kmm 头生效），因此这里导出可链接符号：委托 kmm 头的实现。生成的 C TU 若
+ * 已展开 kmm 头，则由 memory.h 的 static inline 版本接管（热路径内联）。 */
+void* kmm_v4_global_alloc(size_t size) {
+    return kmm_v4_alloc_global(size);
+}
+
+bool kmm_v4_global_free(void* ptr) {
+    return kmm_v4_survivor_free(ptr);
+}
+
+/* ============================================================================
  * 作用域管理
  * ============================================================================ */
 

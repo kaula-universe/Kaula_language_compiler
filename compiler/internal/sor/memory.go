@@ -66,6 +66,7 @@ func (a DropAction) String() string {
 type MemoryDecision struct {
 	VarName           string          // 变量名
 	ObjID             string          // SOR 对象 ID
+	FuncName          string          // 声明所在函数（顶层声明为空串）
 	FinalState        OwnershipState  // 分析结束时的所有权状态
 	AllocKind         AllocKind       // 分配位置建议
 	DropAction        DropAction      // 释放动作
@@ -145,6 +146,7 @@ func (ma *MemoryAnalyzer) buildDecision(obj *SORObject) *MemoryDecision {
 	d := &MemoryDecision{
 		VarName:     obj.Name,
 		ObjID:       obj.ID,
+		FuncName:    obj.FuncName,
 		FinalState:  obj.State,
 		ScopeID:     obj.ScopeID,
 		IsComposite: obj.IsComposite,
@@ -711,6 +713,9 @@ func SerializeFullAnalysisResult(result *FullAnalysisResult) map[string]interfac
 		dm := map[string]interface{}{
 			"var_name":       d.VarName,
 			"obj_id":         d.ObjID,
+			// 决策所属函数：CodeGen 按 (func_name, var_name) 建索引，
+			// 避免跨函数同名局部变量互相污染决策（根治 #1）
+			"func_name":      d.FuncName,
 			"alloc_kind":     d.AllocKind.String(),
 			"alloc_kind_id":  int(d.AllocKind),
 			"drop_action":    d.DropAction.String(),

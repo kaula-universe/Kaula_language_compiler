@@ -1,0 +1,22 @@
+// 探针：SOR 模式下的分配路径路由
+//  local  : 逃逸级别 None（仅本作用域使用）→ 快速路径
+//  keep/p : 经赋值逃逸到外层变量 → 保守 survivor 慢路径
+import std.io
+import std.memory
+
+fn main() {
+    i64 acc = 0
+
+    i64* local = std.memory.kmm_v4_alloc(64)
+    local[0] = 7
+    acc = acc + local[0]
+
+    i64* keep = null
+    for i in range(3) {
+        i64* p = std.memory.kmm_v4_alloc(64)
+        p[0] = i
+        keep = p
+    }
+
+    std.io.println("acc=", acc, " keep=", keep[0])
+}

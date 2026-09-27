@@ -25,6 +25,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /* ============================================================================
  * KMM V4 核心分配函数
@@ -122,6 +123,49 @@ void* kmm_v4_strdup(const char* s);
  *   void* buf = kmm_v4_alloc_aligned(1024, 64);
  */
 void* kmm_v4_alloc_aligned(size_t size, size_t alignment);
+
+/* ============================================================================
+ * 幸存段（slab / 页式）分配
+ * ============================================================================ */
+
+/**
+ * kmm_v4_global_alloc - 从幸存段分配长寿命对象（暴露 kmm_v4_alloc_global）
+ * @size: 要分配的字节数
+ *
+ * 与 kmm_v4_alloc（bump/TLAB，作用域批量回收）不同，此路径按尺寸落 slab 桶，
+ * 支持逐对象立即释放（见 kmm_v4_global_free）。
+ *
+ * 与 kmm_v4_alloc_auto 等热路径一致：当本 TU 已展开 kmm 分配器头（生成的 C
+ * 经 kaula.h 展开）时走 static inline，slab 快路径直接内联进调用方，省掉跨
+ * TU 调用；纯 std 模块 TU 只拿到 kmm 头，保留 extern 声明，由 memory.c 提供
+ * 符号。Kaula 侧通过 stdlib.json 的签名声明调用，两种情况下都能落到实现。
+ *
+ * 返回: 分配的内存指针，失败返回 NULL
+ */
+#if defined(KMM_SCOPED_ALLOCATOR_V4_H)
+static inline void* kmm_v4_global_alloc(size_t size) {
+    return kmm_v4_alloc_global(size);
+}
+#else
+void* kmm_v4_global_alloc(size_t size);
+#endif
+
+/**
+ * kmm_v4_global_free - 立即释放幸存段对象
+ * @ptr: kmm_v4_global_alloc 返回的指针
+ *
+ * 返回: true 表示成功释放；false 表示 ptr 不属于幸存段或已释放
+ *
+ * 注意: 传入 bump 区域（kmm_v4_alloc）的指针会快速失败返回 false，
+ *       那类内存仍由作用域退出批量回收。
+ */
+#if defined(KMM_SCOPED_ALLOCATOR_V4_H)
+static inline bool kmm_v4_global_free(void* ptr) {
+    return kmm_v4_survivor_free(ptr);
+}
+#else
+bool kmm_v4_global_free(void* ptr);
+#endif
 
 /* ============================================================================
  * 作用域管理

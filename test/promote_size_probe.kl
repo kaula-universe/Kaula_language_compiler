@@ -1,0 +1,17 @@
+// 探针：跨作用域 promote 的拷贝大小是否正确
+//  块内分配 64 字节缓冲，块外变量 keep 持有它（assign-escape → promote 到 survivor）。
+//  promote 必须拷贝整个 64 字节；若退化成 sizeof(*p)=8，keep[7] 会读到垃圾。
+import std.io
+import std.memory
+
+fn main() {
+    i64* keep = null
+    for i in range(4) {
+        i64* p = std.memory.kmm_v4_alloc(64)
+        for k in range(8) {
+            p[k] = i * 10 + k
+        }
+        keep = p
+    }
+    std.io.println("keep[0]=", keep[0], " keep[7]=", keep[7], " (末轮 i=3，期望 30 / 37)")
+}
