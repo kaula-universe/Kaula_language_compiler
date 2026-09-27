@@ -365,6 +365,10 @@ func injectLocalCode(mainCode, localCode string) string {
 // verboseMode 包级开关: ninja 风格默认安静, --verbose 显示完整过程
 var verboseMode = false
 
+// kmmMaxScopeDepth 与 KMM 头文件中的 KMM_V4_MAX_SCOPE_DEPTH 保持一致，
+// 仅用于编译期诊断文案（运行期上限由 KMM 自身强制）。
+const kmmMaxScopeDepth = 1024
+
 func main() {
  // Test subcommands own their flags and must bypass compiler flag pre-scanning.
  if len(os.Args) > 1 && os.Args[1] == "test" {
@@ -1308,6 +1312,18 @@ func main() {
 	stage1Errs, stage1Warns := splitErrorsWarnings(errorCollector.Errors()[:stage1ErrorCount])
 	stage2Errs, stage2Warns := splitErrorsWarnings(errorCollector.Errors()[stage1ErrorCount:])
 	frontendWarnings := append(stage1Warns, stage2Warns...)
+	// codegen 诊断并入前端警告：递归 + 每层 KMM 作用域（嵌套深度受
+	// KMM_V4_MAX_SCOPE_DEPTH 约束，超出即运行期 FATAL abort）
+	for _, fn := range cg.RecursionScopeNotes() {
+		frontendWarnings = append(frontendWarnings, &errors.Error{
+			Type:     errors.ErrorWarning,
+			Code:     "recursion_scope_depth",
+			File:     inputFile,
+			Message:  fmt.Sprintf("函数 '%s' 递归且每层使用 KMM 作用域：嵌套深度上限 %d 层，超出即运行期 FATAL abort", fn, kmmMaxScopeDepth),
+			Suggestion: "改用循环/尾调用改写；或给该函数加 #[no_kmm]（放弃作用域托管，" +
+				"改用显式释放）；或用 -DKMM_V4_MAX_SCOPE_DEPTH=N 放宽",
+		})
+	}
 	errorCount := len(stage1Errs) + len(stage2Errs) + len(cg.Errors()) + len(sorErrors)
 	warningCount := len(frontendWarnings)
 
