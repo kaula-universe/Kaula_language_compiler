@@ -406,12 +406,20 @@ void sha512_ctx_destroy(HashSHA512Context* ctx) {
 }
 
 /* ============================================================
- * CRC-64 (ISO 3309)
- * Reflected polynomial 0xD800000000000000 (x^64 + x^4 + x^3 + x + 1)
- * init = 0xFFFFFFFFFFFFFFFF, xorout = 0xFFFFFFFFFFFFFFFF, refin/refout = true
+ * CRC-64/XZ  (ECMA-182, 亦称 CRC-64/GO-ECMA)
+ *
+ * poly    = 0x42F0E1EBA9EA3693, 反射形式 0xC96C5795D7870F42
+ * init    = 0xFFFFFFFFFFFFFFFF
+ * xorout  = 0xFFFFFFFFFFFFFFFF
+ * refin   = true, refout = true
+ *
+ * 此前这里写的是 0xD800000000000000，那是 CRC-64/ISO（poly 0x1B）的反射值，
+ * 却配着 XZ 的 init/xorout，两者拼在一起不匹配任何已发布的 CRC-64：
+ * "a" 会算成 3420000000000000，而标准值是 330284772e652b05。
+ * init/xorout 本来就是 XZ 约定，所以只把多项式换成 XZ 的那个。
  * ============================================================ */
 
-#define CRC64_POLY 0xD800000000000000ULL
+#define CRC64_POLY 0xC96C5795D7870F42ULL
 #define CRC64_INIT 0xFFFFFFFFFFFFFFFFULL
 
 u64 crc64_compute(const void* data, size_t len) {
