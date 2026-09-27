@@ -37,7 +37,7 @@ func TestSizedSurvivorAlloc_BumpPool_SizingKnown(t *testing.T) {
 		t.Fatalf("GetVarDecision(n) = nil — decisions serialization broken?")
 	}
 	t.Logf("decision: AllocKind=%q SizeBytes=%d ScopeID=%d ID=%d", dec.AllocKind, dec.SizeBytes, dec.ScopeID, dec.AllocKindID)
-	out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "0")
+	out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "0", false)
 	t.Logf("SIZED=%q", out)
 	if !strings.Contains(out, "kmm_v4_alloc_global(24)") {
 		t.Errorf("sizing-driven survivor-slab direct alloc expected kmm_v4_alloc_global(24), got %q", out)
@@ -66,10 +66,132 @@ func TestSurvivorAlloc_NoSizing_FallbackToAuto(t *testing.T) {
 		},
 		// 故意不提供 sizes map → SizeBytes 保持 0 → fallback sizeof
 	})
-	out := adapter.GenerateSmartVarAlloc("SomeStruct*", "p", "  ", "0")
+	out := adapter.GenerateSmartVarAlloc("SomeStruct*", "p", "  ", "0", false)
 	t.Logf("NOSIZE=%q", out)
 	if !strings.Contains(out, "kmm_v4_alloc_auto(sizeof(SomeStruct))") {
 		t.Errorf("fallback sizeof expected, got %q", out)
+	}
+}
+
+// --- 任务⑤：作用域内使用的对象走 alloc_auto 快速路径（不再一律 global 慢路径） ---
+func newSizedDecision(t *testing.T, escapeLevel string, size interface{}) *SORCodeGenAdapter {
+	t.Helper()
+	result := map[string]interface{}{
+		"decisions": []interface{}{
+			map[string]interface{}{
+				"var_name":       "n",
+				"obj_id":         "obj_n",
+				"alloc_kind":     "BumpPool",
+				"alloc_kind_id":  float64(1),
+				"drop_action":    "ScopeEnd",
+				"drop_action_id": float64(1),
+				"scope_id_int":   float64(0),
+				"scope_id":       "0",
+			},
+		},
+	}
+	if escapeLevel != "" {
+		result["escape"] = map[string]interface{}{"obj_n": escapeLevel}
+	}
+	if size != nil {
+		result["sizes"] = map[string]interface{}{"obj_n": size}
+	}
+	return NewSORCodeGenAdapter(result)
+}
+
+// 作用域内使用（escape=None）+ 大小已知 → TLAB 快速路径，且用 C sizeof 保证
+// 与真实布局一致（TLAB 没有 slab 桶的向上取整容错余量）
+func TestSizedAlloc_ScopeLocal_UsesAutoFastPath(t *testing.T) {
+	adapter := newSizedDecision(t, "None", float64(24))
+	out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "0", false)
+	t.Logf("SCOPELOCAL=%q", out)
+	if !strings.Contains(out, "kmm_v4_alloc_auto(sizeof(Node))") {
+		t.Errorf("scope-local sized object must take auto fast path, got %q", out)
+	}
+	if strings.Contains(out, "kmm_v4_alloc_global") {
+		t.Errorf("scope-local object must not take global slow path, got %q", out)
+	}
+}
+
+// void* 类型无法 sizeof → 快速路径退回 SOR 编译期字节数
+func TestSizedAlloc_ScopeLocalVoidPtr_UsesLiteralSize(t *testing.T) {
+	adapter := newSizedDecision(t, "None", float64(64))
+	out := adapter.GenerateSmartVarAlloc("void*", "n", "  ", "0", false)
+	t.Logf("VOIDPTR=%q", out)
+	if !strings.Contains(out, "kmm_v4_alloc_auto(64)") {
+		t.Errorf("void* scope-local object must use compile-time size, got %q", out)
+	}
+}
+
+// 逃逸对象（Arg/Return/CrossScope/Global/Heap）仍走 global 慢路径
+func TestSizedAlloc_Escaping_KeepsGlobalSlowPath(t *testing.T) {
+	for _, level := range []string{"Arg", "Return", "CrossScope", "Global", "Heap"} {
+		adapter := newSizedDecision(t, level, float64(24))
+		out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "0", false)
+		if !strings.Contains(out, "kmm_v4_alloc_global(24)") {
+			t.Errorf("escape=%s must keep global slow path, got %q", level, out)
+		}
+	}
+}
+
+// 逃逸信息缺失（无法判定）→ 保守走 global 慢路径
+func TestSizedAlloc_NoEscapeInfo_KeepsGlobalSlowPath(t *testing.T) {
+	adapter := newSizedDecision(t, "", float64(24))
+	out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "0", false)
+	t.Logf("NOESCAPE=%q", out)
+	if !strings.Contains(out, "kmm_v4_alloc_global(24)") {
+		t.Errorf("missing escape info must stay conservative (global), got %q", out)
+	}
+}
+
+func TestIsScopeLocal(t *testing.T) {
+	adapter := newSizedDecision(t, "None", float64(24))
+	d := adapter.GetVarDecision("n")
+	if !adapter.IsScopeLocal(d) {
+		t.Errorf("escape=None must be scope-local")
+	}
+	if adapter.IsScopeLocal(nil) {
+		t.Errorf("nil decision must not be scope-local")
+	}
+	// extern 来源对象即使 escape=None 也不走快速路径（非 KMM 分配）
+	adapter.externOrigins["n"] = "ext_get"
+	if adapter.IsScopeLocal(d) {
+		t.Errorf("extern-origin object must not take auto fast path")
+	}
+}
+
+// --- 任务⑥：初始值已提供对象时，声明处不再重复分配 ---
+func TestInitProvidesPointer_NoDoubleAlloc(t *testing.T) {
+	adapter := newSizedDecision(t, "None", float64(24))
+	out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "kmm_v4_alloc(24)", true)
+	t.Logf("INITPTR=%q", out)
+	if !strings.Contains(out, "Node* n = kmm_v4_alloc(24);") {
+		t.Errorf("init-provided object should be declared directly, got %q", out)
+	}
+	if strings.Contains(out, "kmm_v4_alloc_auto") || strings.Contains(out, "kmm_v4_alloc_global") {
+		t.Errorf("must not allocate again when init already provides the object, got %q", out)
+	}
+}
+
+// 初始值是指针别名（另一个指针变量）时同样不重复分配
+func TestInitPointerAlias_NoDoubleAlloc(t *testing.T) {
+	adapter := newSizedDecision(t, "None", float64(24))
+	out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "other", true)
+	if !strings.Contains(out, "Node* n = other;") || strings.Contains(out, "alloc") {
+		t.Errorf("pointer alias init should be declared directly, got %q", out)
+	}
+}
+
+// 初始值是标量（0/null）时必须保留分配——变量需要一个合法初始指针
+func TestInitScalar_KeepsAlloc(t *testing.T) {
+	adapter := newSizedDecision(t, "None", float64(24))
+	out := adapter.GenerateSmartVarAlloc("Node*", "n", "  ", "0", false)
+	t.Logf("INITSCALAR=%q", out)
+	if !strings.Contains(out, "kmm_v4_alloc_auto(sizeof(Node))") {
+		t.Errorf("scalar init must still allocate, got %q", out)
+	}
+	if !strings.Contains(out, "n = 0;") {
+		t.Errorf("scalar init must be assigned after alloc, got %q", out)
 	}
 }
 

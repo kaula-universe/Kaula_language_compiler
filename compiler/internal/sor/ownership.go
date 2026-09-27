@@ -75,12 +75,28 @@ func (t *OwnershipTracker) NewObject(
 	isComposite bool,
 	sourceLine int,
 ) string {
+	return t.NewObjectIn("", name, typeName, isComposite, sourceLine)
+}
+
+// NewObjectIn 与 NewObject 相同，但记录对象所属函数。
+//
+// funcName 是声明该变量的函数名（顶层声明为空串）。它不参与所有权语义，
+// 只用于让下游（内存决策 → CodeGen）能按 (函数, 变量名) 精确定位决策：
+// 变量名在 Kaula 里只在词法作用域内唯一，跨函数同名是常态；决策表若只按
+// 变量名索引，函数 A 的局部变量会命中函数 B 的同名局部决策
+// （历史缺陷：被调方形参被误判为"本函数的分配对象"而 promote 出截断副本）。
+func (t *OwnershipTracker) NewObjectIn(
+	funcName, name, typeName string,
+	isComposite bool,
+	sourceLine int,
+) string {
 	id := fmt.Sprintf("obj_%d", t.nextID)
 	t.nextID++
 
 	obj := &SORObject{
 		ID:          id,
 		Name:        name,
+		FuncName:    funcName,
 		State:       StateOwned, // 默认独占所有权
 		TypeName:    typeName,
 		IsComposite: isComposite,

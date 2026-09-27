@@ -764,7 +764,11 @@ typedef struct {
 } kmm_garbage_entry_t;
 
 #define KMM_V4_GARBAGE_CAP 4096   // 垃圾箱容量（槽位数），满则 flush
-#define KMM_V4_FLUSH_SMALL_N 16   // 小批量逐槽阈值（函数出口常见 1~16 槽）
+// 小批量逐槽阈值。桶满时的主动归还（见 kmm_v4_alloc_global）一次可达数百槽，
+// 逐槽清除 = 每槽一次原子 CAS；按桶聚合后 49 桶 × 4 word 即可清完，故阈值取
+// 128：函数出口 rewind 的常见 1~16 槽仍走逐槽（省掉聚合用的栈数组 memset），
+// 成百的批量走聚合并把原子操作摊到每 word 一次。
+#define KMM_V4_FLUSH_SMALL_N 128
 
 extern KMM_TLS kmm_garbage_entry_t g_kmm_garbage[KMM_V4_GARBAGE_CAP];
 extern KMM_TLS size_t              g_kmm_garbage_count;
@@ -885,8 +889,13 @@ static inline void* kmm_v4_slab_alloc_from_bucket(kmm_slab_bucket_t* bucket) {
 #else
     size_t hint = 0;
 #endif
+    // slots_count 恒为 2 的幂（动态池 256/256/8，见 kmm_v4_slab_slots_for；
+    // 静态池 KMM_V4_SLAB_SLOTS=256），掩码替代运行期取模：每次分配省一次
+    // 整数除法（x86 div 约 20-40 周期）。非 2 的幂时回退取模，保持语义一致。
+    const size_t nmask = n - 1;
+    const int use_mask = ((n & nmask) == 0);
     for (int attempt = 0; attempt < (int)n; attempt++) {
-        size_t slot = (hint + attempt) % n;
+        size_t slot = use_mask ? ((hint + attempt) & nmask) : ((hint + attempt) % n);
         size_t word = slot / 64;
         uint64_t bit = (uint64_t)1 << (slot % 64);
 #if KMM_THREAD_SAFETY_LEVEL >= 1
@@ -896,7 +905,9 @@ static inline void* kmm_v4_slab_alloc_from_bucket(kmm_slab_bucket_t* bucket) {
         uint64_t neu = old | bit;
         if (__atomic_compare_exchange_n(&bucket->bitmap[word], &old, neu, 1,
                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-            __atomic_store_n(&bucket->free_hint, (slot + 1) % n, __ATOMIC_RELAXED);
+            __atomic_store_n(&bucket->free_hint,
+                             use_mask ? ((slot + 1) & nmask) : ((slot + 1) % n),
+                             __ATOMIC_RELAXED);
             bucket->allocated++;
             return bucket->slots + slot * bucket->bucket_size;
         }
@@ -912,14 +923,29 @@ static inline void* kmm_v4_slab_alloc_from_bucket(kmm_slab_bucket_t* bucket) {
     return NULL;  // 桶满
 }
 
+// 内部：求 ptr 在桶内的槽位号；不属于该桶返回 SIZE_MAX
+// 槽位判定走「2 的幂 → 掩码 + 移位」快路径：idx<9 的 8..2048 档全是 2 的幂，
+// 也正是热点档；密档大对象（2560 以上，步长 B/4）保留一次除法。
+// 每次分配/释放省掉一次运行期整数除法（x86 div 约 20-40 周期）。
+static inline size_t kmm_v4_slab_bucket_slot_of(const kmm_slab_bucket_t* bucket, const void* ptr) {
+    if (bucket->slots == NULL) return SIZE_MAX;
+    const size_t bs = bucket->bucket_size;
+    if (KMM_V4_UNLIKELY(bs == 0)) return SIZE_MAX;
+    const size_t offset = (size_t)((const uint8_t*)ptr - bucket->slots);
+    if (offset >= bucket->slots_count * bs) return SIZE_MAX;
+    if (KMM_V4_LIKELY((bs & (bs - 1)) == 0)) {   // 2 的幂
+        const size_t bmask = bs - 1;
+        if (offset & bmask) return SIZE_MAX;      // 未落在槽位边界
+        return offset >> __builtin_ctzll((unsigned long long)bs);
+    }
+    const size_t slot = offset / bs;
+    return (slot * bs == offset) ? slot : SIZE_MAX;
+}
+
 // 内部：释放指定桶中的槽位
 static inline bool kmm_v4_slab_free_from_bucket(kmm_slab_bucket_t* bucket, void* ptr) {
-    if (bucket->slots == NULL) return false;
-    size_t n = bucket->slots_count;
-    size_t offset = (size_t)((uint8_t*)ptr - bucket->slots);
-    if (offset >= n * bucket->bucket_size) return false;
-    if (offset % bucket->bucket_size != 0) return false;
-    size_t slot = offset / bucket->bucket_size;
+    const size_t slot = kmm_v4_slab_bucket_slot_of(bucket, ptr);
+    if (KMM_V4_UNLIKELY(slot == SIZE_MAX)) return false;
     size_t word = slot / 64;
     uint64_t bit = (uint64_t)1 << (slot % 64);
 #if KMM_THREAD_SAFETY_LEVEL >= 1
@@ -1026,7 +1052,19 @@ static inline void* kmm_v4_alloc_global(size_t size) {
                     #endif
                     return p;
                 }
-                // 桶满：清缓存，落慢路径（更大档 fallback / 页式）
+                // 桶满：垃圾箱里可能已攒着本档的待归还槽位（分配-立即释放的
+                // 典型模式）。先批量归还再重试同档，避免直接升级到更大档直至
+                // 页式 malloc：全部桶槽位共 9*256+40*8=2624，小于
+                // KMM_V4_GARBAGE_CAP(4096)，不主动归还则稳态必然掉进页式慢路径。
+                if (KMM_V4_UNLIKELY(g_kmm_garbage_count > 0)) {
+                    kmm_v4_survivor_flush();
+                    p = kmm_v4_slab_alloc_from_bucket(b);
+                    if (p) {
+                        g_survivor_alloc_bucket = lb;  // 保持热桶
+                        return p;
+                    }
+                }
+                // 仍满：清缓存，落慢路径（更大档 fallback / 页式）
                 g_survivor_alloc_bucket = -1;
             }
         }
@@ -1059,6 +1097,16 @@ static inline void* kmm_v4_alloc_global(size_t size) {
             return p;
         }
 #ifndef KMM_V4_STATIC_POOL
+        // 桶满但垃圾箱非空：先归还再重试同档（见快路径注释：2624 槽位 <
+        // GARBAGE_CAP，不归还会一路升级到页式 malloc）
+        if (KMM_V4_UNLIKELY(g_kmm_garbage_count > 0)) {
+            kmm_v4_survivor_flush();
+            p = kmm_v4_slab_alloc_from_bucket(b);
+            if (p) {
+                g_survivor_alloc_bucket = idx;
+                return p;
+            }
+        }
         // 桶满：向更大档 fallback（避免高频分配直接落页式慢路径）
         for (int j = idx + 1; j < KMM_V4_SLAB_BUCKETS; j++) {
             kmm_slab_bucket_t* bj = &g_kmm_v4_survivor.buckets[j];
@@ -1162,36 +1210,31 @@ static inline bool kmm_v4_survivor_free(void* ptr) {
             return false;
         }
     }
-    // 快速路径：最近命中桶（范围 + 对齐检查后入垃圾箱，内联 push）
+    // 快速路径：最近命中桶（范围 + 槽位判定后入垃圾箱，内联 push）
     int last = g_survivor_last_bucket;
     if (KMM_V4_LIKELY(last >= 0 && last < KMM_V4_SLAB_BUCKETS)) {
         kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[last];
-        if (b->slots != NULL) {
-            size_t offset = (size_t)((uint8_t*)ptr - b->slots);
-            if (KMM_V4_LIKELY(offset < b->slots_count * b->bucket_size &&
-                              offset % b->bucket_size == 0)) {
-                if (KMM_V4_UNLIKELY(g_kmm_garbage_count >= KMM_V4_GARBAGE_CAP)) {
-                    kmm_v4_survivor_flush();
-                }
-                g_kmm_garbage[g_kmm_garbage_count].bucket = last;
-                g_kmm_garbage[g_kmm_garbage_count].slot = offset / b->bucket_size;
-                g_kmm_garbage_count++;
-                return true;
+        size_t slot = kmm_v4_slab_bucket_slot_of(b, ptr);
+        if (KMM_V4_LIKELY(slot != SIZE_MAX)) {
+            if (KMM_V4_UNLIKELY(g_kmm_garbage_count >= KMM_V4_GARBAGE_CAP)) {
+                kmm_v4_survivor_flush();
             }
+            g_kmm_garbage[g_kmm_garbage_count].bucket = last;
+            g_kmm_garbage[g_kmm_garbage_count].slot = slot;
+            g_kmm_garbage_count++;
+            return true;
         }
     }
     // 慢路径：全扫所有 slab 桶（含大对象密档）
     for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
-        kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[i];
-        if (b->slots == NULL) continue;
-        size_t offset = (size_t)((uint8_t*)ptr - b->slots);
-        if (offset < b->slots_count * b->bucket_size && offset % b->bucket_size == 0) {
+        size_t slot = kmm_v4_slab_bucket_slot_of(&g_kmm_v4_survivor.buckets[i], ptr);
+        if (slot != SIZE_MAX) {
             g_survivor_last_bucket = i;
             if (KMM_V4_UNLIKELY(g_kmm_garbage_count >= KMM_V4_GARBAGE_CAP)) {
                 kmm_v4_survivor_flush();
             }
             g_kmm_garbage[g_kmm_garbage_count].bucket = i;
-            g_kmm_garbage[g_kmm_garbage_count].slot = offset / b->bucket_size;
+            g_kmm_garbage[g_kmm_garbage_count].slot = slot;
             g_kmm_garbage_count++;
             return true;
         }

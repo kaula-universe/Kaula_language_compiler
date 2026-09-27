@@ -255,8 +255,9 @@ func (a *SORAnalyzer) executeStmt(stmt Stmt) {
 // execLet 执行变量声明语句。
 // let x = Array([1, 2, 3])  -> x 获得独占所有权
 func (a *SORAnalyzer) execLet(stmt Stmt) {
-	objID := a.tracker.NewObject(stmt.VarName, stmt.TypeName, stmt.IsComposite, stmt.Line)
-	a.log(fmt.Sprintf("  -> 创建对象 %s, 状态: %s", stmt.VarName, StateOwned))
+	// 记录声明所在函数（Stmt.CallerName），供决策按 (函数, 变量名) 定位
+	objID := a.tracker.NewObjectIn(stmt.CallerName, stmt.VarName, stmt.TypeName, stmt.IsComposite, stmt.Line)
+	a.log(fmt.Sprintf("  -> 创建对象 %s (fn=%q), 状态: %s", stmt.VarName, stmt.CallerName, StateOwned))
 
 	// 检查是否是资源类型，如果是则标记为资源
 	if resourceInfo, ok := a.resources.GetResourceInfo(stmt.TypeName); ok {

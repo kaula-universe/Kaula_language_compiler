@@ -72,6 +72,11 @@ type SORObject struct {
 	// Name 是对象的可读名称（变量名）。
 	Name string
 
+	// FuncName 是声明该对象的函数名（顶层声明为空串）。
+	// 变量名只在词法作用域内唯一，跨函数同名是常态；该字段让内存决策能按
+	// (函数, 变量名) 下传给 CodeGen，避免跨函数同名决策互相污染。
+	FuncName string
+
 	// State 是对象当前的所有权状态。
 	State OwnershipState
 

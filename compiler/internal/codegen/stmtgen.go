@@ -112,6 +112,7 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 				}
 				if len(promotes) > 0 {
 					var pb strings.Builder
+					emitted := 0
 					for _, argName := range promotes {
 						sizeExpr := ""
 						if size, ok := sg.sorPromoteSize(argName, argName); ok {
@@ -120,9 +121,17 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 							// 兜底：指针 deref 大小（String 不需要 size，会在 emitPromoteForType 内绕过）
 							sizeExpr = "sizeof(*" + argName + ")"
 						}
-						pb.WriteString(sg.emitPromoteForType(argName, sizeExpr, "promote arg into callee", argName))
+						// emitPromoteForType 在拷贝大小不可信时返回 ""（跳过 promote）：
+						// 此时不能标记 funcEmitsPromote，否则函数出口会白白放弃
+						// survivor_rewind，把本该回收的对象留在幸存段。
+						if line := sg.emitPromoteForType(argName, sizeExpr, "promote arg into callee", argName); line != "" {
+							pb.WriteString(line)
+							emitted++
+						}
 					}
-					sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote，出口跳过 survivor_rewind
+					if emitted > 0 {
+						sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote，出口跳过 survivor_rewind
+					}
 					pb.WriteString(sg.codegen.expressionGenerator.GenerateExpression(s.Expression))
 					pb.WriteString(";\n")
 					return pb.String()
@@ -149,6 +158,41 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.generateExtractStatement(s)
 	default:
 		return ""
+	}
+}
+
+// initProvidesPointer 判断声明的初始值表达式本身是否已经提供指针对象。
+//
+// 用于消除"声明处先分配、再用初始值覆盖"的重复分配：
+//   - 分配调用（kmm_v4_alloc / new / class 构造 / 返回指针的函数）→ true
+//   - 指针别名（另一个指针变量）→ true
+//   - 取址（&x）、成员访问、数组下标 → true（指针类型变量的这些形式产出指针）
+//   - 整型/浮点/字符串/布尔字面量、二元表达式等 → false
+//     （此时变量需要一个合法的初始指针，仍走分配路径）
+//
+// 未知形式一律返回 false：保守多分配一次也不会产生非法 C 代码。
+func (sg *StatementGenerator) initProvidesPointer(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case nil:
+		return false
+	case *ast.CallExpression:
+		return true
+	case *ast.PrefixCallExpression:
+		return true
+	case *ast.TypeCastExpression:
+		return sg.initProvidesPointer(e.Expression)
+	case *ast.UnaryExpression:
+		return sg.initProvidesPointer(e.Right)
+	case *ast.ParenExpression:
+		return sg.initProvidesPointer(e.Inner)
+	case *ast.Identifier:
+		return sg.isPointerTyped(e.Name) || sg.isStringTyped(e.Name)
+	case *ast.MemberAccessExpression:
+		return true
+	case *ast.IndexExpression:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -217,7 +261,9 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			}
 			// 修复 #25：登记编译期可知的堆分配常量大小（promote 回退用）
 			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
-			return adapter.GenerateSmartVarAlloc(cType, stmt.Name, "", initValue)
+			// 初始值已是指针（分配调用/别名/取址/成员下标）→ 声明处不再重复分配
+			return adapter.GenerateSmartVarAlloc(cType, stmt.Name, "", initValue,
+				sg.initProvidesPointer(stmt.Value))
 		}
 	}
 
@@ -246,10 +292,21 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
 			return promotePrefix + fmt.Sprintf("%s = %s;\n", formatCVarDecl(cType, stmt.Name), initValue)
 		}
-		// 无初始值：用 kmm_v4_alloc_auto 分配
+		// 无初始值：按逃逸分析结果选择分配路径
+		//  - 逃逸级别 None（只在本作用域内使用）→ kmm_v4_alloc_auto 的 TLAB 快速路径，
+		//    随作用域退出（scope_pop）整段回卷回收。
+		//  - 逃逸（Arg/Return/CrossScope/Global/Heap）→ kmm_v4_alloc_global 的 survivor 段，
+		//    scope_pop 不回卷，作用域末尾的 per-object kmm_v4_survivor_free 精确回收。
+		//  - 逃逸分析未覆盖该变量 → 保持既有行为（alloc_auto）。
 		sg.codegen.recordAllocSizeHint(stmt.Name, "sizeof("+baseType+")")
-		return fmt.Sprintf("%s = (%s)kmm_v4_alloc_auto(sizeof(%s)); /* structural: BumpPool alloc */\n",
-			formatCVarDecl(cType, stmt.Name), cType, baseType)
+		allocFn := "kmm_v4_alloc_auto"
+		allocTag := "structural: BumpPool alloc (TLAB fast path)"
+		if scopeLocal, known := sg.codegen.IsVarScopeLocal(stmt.Name); known && !scopeLocal {
+			allocFn = "kmm_v4_alloc_global"
+			allocTag = "structural: BumpPool alloc (survivor, escaping scope)"
+		}
+		return fmt.Sprintf("%s = (%s)%s(sizeof(%s)); /* %s */\n",
+			formatCVarDecl(cType, stmt.Name), cType, allocFn, baseType, allocTag)
 	}
 
 	// 生成属性前缀（#[volatile], #[section("...")], #[aligned(N)] 等）
@@ -550,10 +607,14 @@ func (sg *StatementGenerator) handleThreadSpawnEscape(callExpr *ast.CallExpressi
 		if size, ok := sg.sorPromoteSize(ident.Name, ident.Name); ok {
 			sizeExpr = size
 		}
-		b.WriteString(sg.emitPromoteForType(ident.Name, sizeExpr, "promote thread arg into "+fnName, ident.Name))
-		sg.codegen.MarkAssignEscaped(ident.Name) // 抑制 early free / 作用域回收 / return 回收
-		sg.codegen.MarkPromoted(ident.Name)       // reaching definition：防止 return 时重复 promote
-		promoted = true
+		// promote 被跳过（拷贝大小不可信）时不能标记逃逸/已提升：
+		// 那样会同时抑制回收又没有任何幸存副本。
+		if line := sg.emitPromoteForType(ident.Name, sizeExpr, "promote thread arg into "+fnName, ident.Name); line != "" {
+			b.WriteString(line)
+			sg.codegen.MarkAssignEscaped(ident.Name) // 抑制 early free / 作用域回收 / return 回收
+			sg.codegen.MarkPromoted(ident.Name)       // reaching definition：防止 return 时重复 promote
+			promoted = true
+		}
 	}
 	if !promoted {
 		return "", false
@@ -2046,9 +2107,13 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 			} else {
 				sizeExpr = "sizeof(*" + id.Name + ")"
 			}
-			retPromoteLine = sg.codegen.indentString() + sg.emitPromoteForType(id.Name, sizeExpr, "promote on return", id.Name)
-			promoteVarName = id.Name
-			sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+			// promote 被跳过（拷贝大小不可信）时：返回值仍指向原内存，
+			// 不能排除它的 per-object free，也不能标记 funcEmitsPromote。
+			if line := sg.emitPromoteForType(id.Name, sizeExpr, "promote on return", id.Name); line != "" {
+				retPromoteLine = sg.codegen.indentString() + line
+				promoteVarName = id.Name
+				sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+			}
 		}
 	}
 
@@ -2599,6 +2664,83 @@ func (sg *StatementGenerator) selectAliasGroupRepresentative(group []string) str
 	return rep
 }
 
+// isReleaseCallName 判断调用名是否为"释放类"函数（free / xxx_free）。
+// Kaula 侧释放入口都遵循该命名（std.memory.kmm_v4_free、kmm_v4_global_free、
+// string_free、fast_free、std_free、libc free 等）。
+func isReleaseCallName(name string) bool {
+	return name == "free" || strings.HasSuffix(name, "_free")
+}
+
+// calledFuncName 取调用表达式的最后一段函数名（std.memory.kmm_v4_free → kmm_v4_free）。
+func calledFuncName(expr ast.Expression) string {
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		return calledFuncName(e.Function)
+	case *ast.MemberAccessExpression:
+		return e.Member
+	case *ast.Identifier:
+		return e.Name
+	}
+	return ""
+}
+
+// argPointerNames 收集调用实参中的裸指针变量名（跳过 as<T>(x) 强转的包装）。
+func argPointerNames(args []ast.Expression, out map[string]bool) {
+	for _, arg := range args {
+		switch a := arg.(type) {
+		case *ast.Identifier:
+			out[a.Name] = true
+		case *ast.TypeCastExpression:
+			if id, ok := a.Expression.(*ast.Identifier); ok {
+				out[id.Name] = true
+			}
+		}
+	}
+}
+
+// collectUserFreedVars 预扫描块内语句，找出用户显式传给释放类函数的指针变量。
+// 这些指针的所有权已交给用户代码（如 std.memory.kmm_v4_global_free(p)），
+// 结构化提前释放必须跳过，否则同一指针被释放两次：
+//   - slab 路径：同一槽位被重复推入垃圾箱，flush 时 allocated 被多减，
+//     桶容量统计失真，逐步升级到更大档乃至页式分配；
+//   - libc 路径：直接 double free。
+//
+// 只统计"必然执行一次"的调用位置（语句本身、if 条件）；循环体与 if 分支内的
+// 释放是条件性的，跳过后会漏回收，故不计入（保持原有行为，不引入泄漏回归）。
+func (sg *StatementGenerator) collectUserFreedVars(stmts []ast.Statement) map[string]bool {
+	out := make(map[string]bool)
+	for _, stmt := range stmts {
+		sg.collectUserFreedVarsInStmt(stmt, out)
+	}
+	return out
+}
+
+func (sg *StatementGenerator) collectUserFreedVarsInStmt(stmt ast.Statement, out map[string]bool) {
+	if stmt == nil || out == nil {
+		return
+	}
+	switch s := stmt.(type) {
+	case *ast.ExpressionStatement:
+		if call, ok := s.Expression.(*ast.CallExpression); ok &&
+			isReleaseCallName(calledFuncName(call.Function)) {
+			argPointerNames(call.Args, out)
+		}
+	case *ast.IfStatement:
+		// if free(p) { ... }：条件必然求值一次 → 视为用户释放
+		if call, ok := s.Condition.(*ast.CallExpression); ok &&
+			isReleaseCallName(calledFuncName(call.Function)) {
+			argPointerNames(call.Args, out)
+		}
+	case *ast.VariableDeclaration:
+		// 不处理：声明处的初始化表达式不是释放点
+	}
+}
+
+// CollectUserFreedVars 供函数体生成入口预扫描：返回块内被用户显式释放的指针变量名。
+func (sg *StatementGenerator) CollectUserFreedVars(stmts []ast.Statement) map[string]bool {
+	return sg.collectUserFreedVars(stmts)
+}
+
 // generateStmtsWithLiveness 生成语句序列，并在每个变量最后一次使用后插入提前释放。
 // 这是结构化所有权基础层的 liveness 分析（从 SOR 下移的能力③）。
 // alwaysLive: 始终存活的变量集合（如循环条件中使用的变量），这些变量不会被提前释放。
@@ -2612,6 +2754,13 @@ func (sg *StatementGenerator) generateStmtsWithLiveness(stmts []ast.Statement, a
 	}
 	lastUse := sg.computeLastUseIndex(stmts, pointerVars)
 	freed := make(map[string]bool)
+	// 用户已显式释放的指针：所有权已转移，结构化提前释放与作用域回收都要跳过，
+	// 否则同一指针被释放两次（MarkEarlyFreed 同时抑制 return/scope 路径）。
+	for name := range sg.collectUserFreedVars(stmts) {
+		freed[name] = true
+		sg.codegen.MarkEarlyFreed(name)
+		sg.codegen.MarkUserFreed(name)
+	}
 
 	var b strings.Builder
 	for i, bodyStmt := range stmts {
@@ -2825,8 +2974,11 @@ func (sg *StatementGenerator) generateYieldStatement(stmt *ast.YieldStatement) s
 			} else {
 				sizeExpr = "sizeof(*" + srcCode + ")"
 			}
-			b.WriteString(sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", srcIdent.Name))
-			sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+			// promote 被跳过时保持普通所有权转移（不标记 funcEmitsPromote）
+			if line := sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", srcIdent.Name); line != "" {
+				b.WriteString(line)
+				sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+			}
 		}
 	}
 	b.WriteString(srcCode)
@@ -2941,7 +3093,14 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		sizeExpr = "sizeof(*" + srcIdent.Name + ")"
 	}
 	var b strings.Builder
-	b.WriteString(sg.emitPromoteForType(srcIdent.Name, sizeExpr, "promote assign-escape into "+dstName, srcIdent.Name))
+	// promote 被跳过（拷贝大小不可信）时：不能抑制 src 的 free，也不能标记
+	// funcEmitsPromote——否则既没有幸存副本，又关掉了函数出口的回收。
+	// 直接返回 "" 让调用方回退到普通赋值路径。
+	if line := sg.emitPromoteForType(srcIdent.Name, sizeExpr, "promote assign-escape into "+dstName, srcIdent.Name); line == "" {
+		return ""
+	} else {
+		b.WriteString(line)
+	}
 	sg.codegen.funcEmitsPromote = true          // 方案 C：函数出口跳过 survivor_rewind
 	sg.codegen.MarkAssignEscaped(srcIdent.Name) // 抑制 src 的块尾 per-object free
 	sg.codegen.MarkPromoted(srcIdent.Name)       // reaching definition：防止 return 时重复 promote
@@ -3149,8 +3308,11 @@ func (sg *StatementGenerator) generateExtractStatement(stmt *ast.ExtractStatemen
 			} else {
 				sizeExpr = "sizeof(*" + baseCode + ")"
 			}
-			b.WriteString(sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", baseIdent.Name))
-			sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+			// promote 被跳过时保持普通 extract 语义（不标记 funcEmitsPromote）
+			if line := sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", baseIdent.Name); line != "" {
+				b.WriteString(line)
+				sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+			}
 		}
 	}
 	b.WriteString(baseCode)
@@ -3231,6 +3393,14 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 		}
 		// 已被 early free 的变量跳过（防止重复释放）
 		if sg.codegen.IsEarlyFreed(name) {
+			continue
+		}
+		// 用户已显式释放的指针跳过（所有权已转移，再释放就是 double free）
+		if sg.codegen.IsUserFreed(name) {
+			b.WriteString(indent)
+			b.WriteString("/* structural: skip survivor_free for ")
+			b.WriteString(name)
+			b.WriteString(" (user-freed via *_free call) */\n")
 			continue
 		}
 		// 别名组去重：同一分配的多个别名只通过代表释放一次，
@@ -3581,9 +3751,52 @@ func (sg *StatementGenerator) emitPromoteForType(targetCVar, sizeExpr, commentTa
 			"do { abort(); } while(0);\n",
 			msg, kaulaType, targetCVar, kaulaType, targetCVar)
 	}
+	// 根治病灶 B2：sizeExpr 退化为 sizeof(*p) 时，仅当指针恰好指向"单个对象"才安全。
+	//
+	// 变量声明为指针类型（`T*`，语义上是缓冲区/别名）时，sizeof(*p) 只是**一个元素**
+	// 的字节数。典型受害场景：Node* nodes = kmm_v4_alloc(nodesCount * 16)——
+	// 真实分配大小是运行期表达式，静态推不出来，tier3 兜底给出 sizeof(K_Node)=24，
+	// 于是 1 MB 缓冲被"提升"成 24 字节副本，调用方仍指向原内存，跨作用域遍历立即越界
+	// （btree_bench --sor 段错误）。
+	//
+	// 两种选择：拷贝错误长度（静默数据损坏）或不 promote（保持借用语义：调用方的缓冲
+	// 在其作用域内存活）。必须选后者。真正需要转移所有权时，正确做法是让分配大小
+	// 在编译期可见（常量表达式）或由运行期携带（分配大小元数据）。
+	if !sg.promoteSizeIsSound(targetCVar, promotedSrc, sizeExpr) {
+		sg.codegen.AddPromoteSkipNote(fmt.Sprintf(
+			"%s: 跳过 promote '%s'（分配大小不可静态确定，%s 只覆盖一个元素；"+
+				"保持借用语义）", commentTag, targetCVar, strings.TrimSpace(sizeExpr)))
+		return ""
+	}
 	// 默认：普通 POD 指针的浅拷贝提升（scope_promote_p 原路径）
 	return fmt.Sprintf("kmm_v4_scope_promote_p((void**)&%s, %s); /* SOR: %s */\n",
 		targetCVar, sizeExpr, commentTag)
+}
+
+// promoteSizeIsSound 判断 promote 的拷贝大小表达式是否可信。
+//
+// 返回 false 的唯一情形：大小退化为 sizeof(*x)，且 x 是**指针类型变量**
+// （`T*`）。此时指针指向的是缓冲区/别名，元素大小 ≠ 分配大小，按元素大小
+// 拷贝必然截断。class/struct 实例（声明类型不带 `*`，C 侧存单对象指针）
+// 的 sizeof(*x) 才是真实对象大小，允许 promote。
+func (sg *StatementGenerator) promoteSizeIsSound(targetCVar, promotedSrc, sizeExpr string) bool {
+	size := strings.TrimSpace(sizeExpr)
+	if !strings.HasPrefix(size, "sizeof(*") {
+		return true // 常量字节数 / SOR 估算 / sorInitSizes → 真实分配大小
+	}
+	// 源变量优先（yield/extract 的 sizeExpr 基于源对象计算）
+	typeName := ""
+	for _, candidate := range []string{promotedSrc, targetCVar} {
+		if candidate == "" {
+			continue
+		}
+		if t := sg.codegen.GetSymbolType(candidate); t != "" {
+			typeName = strings.TrimSpace(t)
+			break
+		}
+	}
+	// 声明类型带 `*` → 指针/缓冲区语义，元素大小不可用于 promote
+	return !strings.HasSuffix(typeName, "*")
 }
 
 // sorPromoteSize 返回提升所需的大小表达式（三级回退）：

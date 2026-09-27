@@ -89,6 +89,17 @@ type CodeGenerator struct {
 
 	sorAdapter *SORCodeGenAdapter
 
+	// promoteSkipNotes: "拷贝大小不可安全确定 → 跳过 promote"的诊断（非致命）
+	promoteSkipNotes []string
+
+	// 默认编译流程（未开启 --sor）的轻量逃逸分析结果（SOR EscapeResult 序列化）。
+	// 键：变量名 → 逃逸级别字符串（"None"/"Arg"/"Return"/"CrossScope"/"Global"/"Heap"）。
+	// 用途：结构化所有权的分配路径路由——"只在本作用域内使用"走 alloc_auto 的
+	// TLAB 快速路径，逃逸对象走 alloc_global 的 survivor 段（scope_pop 不回卷）。
+	escapeLevels map[string]string
+	// escapeAvailable: 是否已注入逃逸分析结果（默认流程由 AnalyzeEscapeFromAST 提供）
+	escapeAvailable bool
+
 	// 修复 #25：变量声明时的堆分配常量大小登记（varName → 字节数）
 	// 供跨作用域 promote 在决策无 SizeBytes、且类型为 void* 时回退使用
 	sorInitSizes map[string]int
@@ -138,6 +149,7 @@ type CodeGenerator struct {
 	varOrigins        map[string]string
 	promotedVars      map[string]bool
 	earlyFreedVars    map[string]bool
+	userFreedVars     map[string]bool // 用户显式调用 *_free 释放的指针
 	exportedFuncNames map[string]bool
 
 	sourceMap  *SourceMap
@@ -383,6 +395,18 @@ func (cg *CodeGenerator) error(message string) {
 	cg.errors = append(cg.errors, message)
 }
 
+// AddPromoteSkipNote 记录一条"因拷贝大小不可安全确定而跳过 promote"的诊断。
+// 非致命（不阻断编译）：跳过优于拷贝错误长度。供报告层输出，
+// 避免用户面对静默的借用语义一头雾水。
+func (cg *CodeGenerator) AddPromoteSkipNote(message string) {
+	cg.promoteSkipNotes = append(cg.promoteSkipNotes, message)
+}
+
+// PromoteSkipNotes 返回 promote 跳过诊断列表
+func (cg *CodeGenerator) PromoteSkipNotes() []string {
+	return cg.promoteSkipNotes
+}
+
 func (cg *CodeGenerator) Errors() []string {
 	return cg.errors
 }
@@ -403,6 +427,53 @@ func (cg *CodeGenerator) SetSORResult(result map[string]interface{}) {
 // GetSORAdapter 获取 SOR CodeGen 适配器
 func (cg *CodeGenerator) GetSORAdapter() *SORCodeGenAdapter {
 	return cg.sorAdapter
+}
+
+// SetEscapeAnalysis 注入轻量逃逸分析结果（默认编译流程：未开启 --sor 时使用）。
+// result 键位与 sor.SerializeEscapeResult 一致：escape / extern_origins。
+// 注意：这只提供逃逸信息，不激活 SOR 决策（所有权检查/内存决策等仍仅在 --sor 下运行）。
+func (cg *CodeGenerator) SetEscapeAnalysis(result map[string]interface{}) {
+	if result == nil {
+		return
+	}
+	escape, ok := result["escape"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if cg.escapeLevels == nil {
+		cg.escapeLevels = make(map[string]string, len(escape))
+	}
+	for name, levelVal := range escape {
+		if level, ok := levelVal.(string); ok {
+			cg.escapeLevels[name] = level
+		}
+	}
+	cg.escapeAvailable = len(cg.escapeLevels) > 0
+}
+
+// HasEscapeAnalysis 报告是否已注入逃逸分析结果
+func (cg *CodeGenerator) HasEscapeAnalysis() bool {
+	return cg.escapeAvailable
+}
+
+// GetEscapeLevel 查询变量的逃逸级别。第二个返回值 ok=false 表示逃逸分析
+// 未覆盖该变量（未知），调用方应按原路径处理，不得据此改写分配策略。
+func (cg *CodeGenerator) GetEscapeLevel(varName string) (level string, ok bool) {
+	if cg == nil || varName == "" || !cg.escapeAvailable {
+		return "", false
+	}
+	level, ok = cg.escapeLevels[varName]
+	return level, ok
+}
+
+// IsVarScopeLocal 判断变量是否"只在本作用域内使用"（逃逸级别 None）。
+// ok=false 表示逃逸分析未覆盖该变量——保守起见调用方应视为可能逃逸。
+func (cg *CodeGenerator) IsVarScopeLocal(varName string) (scopeLocal bool, ok bool) {
+	level, ok := cg.GetEscapeLevel(varName)
+	if !ok {
+		return false, false
+	}
+	return level == "None", true
 }
 
 // IsInKMMScope 当前是否在 KMM 作用域内
@@ -656,6 +727,28 @@ func (cg *CodeGenerator) ResetLifetimeFlags(name string) {
 	delete(cg.promotedVars, name)
 	delete(cg.assignEscapedVars, name)
 	delete(cg.earlyFreedVars, name)
+}
+
+// ResetUserFreedVars 清空"用户已释放"集合（函数入口调用）。
+// 不挂在 ResetLifetimeFlags 上：同名变量重新声明属于新实例，但"用户显式释放"
+// 是整个函数体的属性，循环体内每次迭代都应跳过回收。
+func (cg *CodeGenerator) ResetUserFreedVars() {
+	cg.userFreedVars = make(map[string]bool)
+}
+
+// MarkUserFreed 标记变量已被用户代码显式释放（std.memory.kmm_v4_free /
+// kmm_v4_global_free / string_free / libc free 等 *_free 调用）。
+// 所有权已转移给用户代码，所有权��的回收路径（作用域末尾 per-object reclaim、
+// return 前回收、liveness 提前释放）都必须跳过，否则同一指针被释放两次。
+func (cg *CodeGenerator) MarkUserFreed(name string) {
+	if name != "" {
+		cg.userFreedVars[name] = true
+	}
+}
+
+// IsUserFreed 查询变量是否已被用户显式释放
+func (cg *CodeGenerator) IsUserFreed(name string) bool {
+	return cg.userFreedVars[name]
 }
 
 // MarkEarlyFreed 标记变量已被 early free（防止 return/块尾重复释放）
@@ -914,6 +1007,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		symbolTable:          symbolTable,
 		currentScope:         symbolTable,
 		errors:               []string{},
+		userFreedVars:        make(map[string]bool),
 		usedThirdPartyLibs:   make(map[string]bool),
 		localImportFuncs:     make(map[string]bool),
 		genericCache:         make(map[string]*GenericInstanceCache),
