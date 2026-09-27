@@ -3935,12 +3935,33 @@ func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
 
 	// 检查是否是函数调用（含泛型调用 identity<int>(42)）
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
-		return p.parseCallExpressionIterative(expr)
+		call := p.parseCallExpressionIterative(expr)
+		if call == nil {
+			return nil
+		}
+		// 调用结果后紧跟 `.` 时继续按成员访问解析，否则 X(...).y() 会被
+		// 截断成 X(...)，后面的 .y 留给调用方（表现为链式调用报
+		// undefined_function，或 .y 被当成下一个实参解析）。
+		//
+		// 这里只在紧跟 `.` 时续接，**不**把 `[` 也接进来：语句开头的
+		// `[N]Type name` 是定长数组声明的规模前缀，若在这里被当成下标，
+		// 就会把前一条语句的表达式和 `[N]Type` 粘成一个下标表达式。
+		if p.curTok.Type == lexer.TOKEN_DOT {
+			return p.parsePostfixChain(call)
+		}
+		return call
 	}
 
 	// 泛型调用：必须是 < 后跟类型名（避免与比较运算符 < 混淆）
 	if p.curTok.Type == lexer.TOKEN_LT && p.looksLikeGenericArgs() {
-		return p.parseCallExpressionIterative(expr)
+		call := p.parseCallExpressionIterative(expr)
+		if call == nil {
+			return nil
+		}
+		if p.curTok.Type == lexer.TOKEN_DOT {
+			return p.parsePostfixChain(call)
+		}
+		return call
 	}
 
 	// struct 字面量：TypeName{ .field = value, ... }

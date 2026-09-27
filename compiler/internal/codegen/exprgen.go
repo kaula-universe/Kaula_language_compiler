@@ -1506,13 +1506,44 @@ func (eg *ExpressionGenerator) inferClassType(expr ast.Expression) string {
 		}
 		return ""
 	case *ast.CallExpression:
-		// ClassName(args...) 或 ClassName_new(...)：返回调用的类名
-		if ident, ok := e.Function.(*ast.Identifier); ok {
-			name := strings.TrimSuffix(ident.Name, "_new")
-			if eg.codegen.findClassStmt(name) != nil {
-				return name
+		// 构造器调用 / 返回 class 的函数调用 / 方法调用（链式 a.b().c()）
+		name := eg.callResultTypeName(e)
+		if name == "" {
+			return ""
+		}
+		if eg.codegen.findClassStmt(name) != nil || eg.codegen.IsInterfaceType(name) {
+			return name
+		}
+		return ""
+	}
+	return ""
+}
+
+// callResultTypeName 返回调用表达式的结果类型名（Kaula 类型名）。
+// 用于链式调用 `f(...).m(...)` / `obj.m(...).n(...)` 推断接收者类型：
+// 没有它，接收者被当成未知类型，方法调用会退化成 Object_m(...) 这种
+// 不存在的 C 符号（clang: call to undeclared function）。
+// 无法判定时返回空串，调用方按各自的口径回落。
+func (eg *ExpressionGenerator) callResultTypeName(call *ast.CallExpression) string {
+	if call == nil {
+		return ""
+	}
+	switch fn := call.Function.(type) {
+	case *ast.Identifier:
+		// ClassName(...) / ClassName_new(...)：构造器
+		name := strings.TrimSuffix(fn.Name, "_new")
+		if eg.codegen.findClassStmt(name) != nil {
+			return name
+		}
+		// 顶层函数返回 class 类型：make_counter() -> Counter
+		if prog := eg.codegen.getProgram(); prog != nil {
+			if f := prog.FindFunction(fn.Name); f != nil && f.ReturnType != "" {
+				return strings.TrimSuffix(f.ReturnType, "*")
 			}
 		}
+	case *ast.MemberAccessExpression:
+		// 方法调用结果：接收者类型由被调方法所在类决定，返回类型由方法签名决定
+		return eg.memberMethodReturnType(fn)
 	}
 	return ""
 }
@@ -2347,6 +2378,11 @@ func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string 
 			if t := isKnownType(name); t != "" {
 				return t
 			}
+		}
+	case *ast.CallExpression:
+		// 链式调用的中间结果：f(...).m(...) / obj.m(...).n(...)
+		if t := isKnownType(eg.callResultTypeName(e)); t != "" {
+			return t
 		}
 	}
 	return ""
