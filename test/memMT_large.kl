@@ -55,7 +55,8 @@ fn worker(arg: void*) void* {
 fn main() {
     i64* samp = std.memory.kmm_v4_alloc(g_threads * 32 * 8)
     g_samp = samp
-    MTRes* res = std.memory.kmm_v4_alloc(g_threads * 16)
+    # sizeof(MTRes) = 24 (idx/acc/samples 三个 8 字节字段)，每线程留 32 字节余量
+    MTRes* res = std.memory.kmm_v4_alloc(g_threads * 32)
     g_res = res
     Thread* ts = std.memory.kmm_v4_alloc(g_threads * 8)
     i64 t0 = std.time.time_now_ms()

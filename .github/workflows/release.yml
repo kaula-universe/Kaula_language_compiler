@@ -50,6 +50,15 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      # Release gate: nothing gets packaged unless the whole language test
+      # corpus passes. Both allocator modes (default and --sor) are covered.
+      # Runs the full set including the slow multithreaded allocator stress
+      # tests, because a release is exactly when those must hold.
+      - name: Test
+        run: python scripts/run_tests.py
+        env:
+          PYTHONIOENCODING: utf-8
+
       - name: Package
         run: python scripts/package_release.py
         env:
