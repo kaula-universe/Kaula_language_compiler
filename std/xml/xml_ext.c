@@ -402,7 +402,7 @@ static XMLNode* parse_element(XMLParser* p) {
     return node;
 }
 
-XMLNode* xml_parse_string(const char* str) {
+XMLNode* xmlx_parse_string(const char* str) {
     XMLParser p;
     XMLNode* root = NULL;
     if (!str) return NULL;
@@ -433,7 +433,7 @@ XMLNode* xml_parse_string(const char* str) {
     return root;
 }
 
-XMLNode* xml_parse_file(const char* filename) {
+XMLNode* xmlx_parse_file(const char* filename) {
     FILE* f;
     long size;
     char* buf;
@@ -450,7 +450,7 @@ XMLNode* xml_parse_file(const char* filename) {
     if (size > 0) fread(buf, 1, size, f);
     buf[size] = '\0';
     fclose(f);
-    result = xml_parse_string(buf);
+    result = xmlx_parse_string(buf);
     kmm_v4_free(buf);
     return result;
 }
@@ -548,7 +548,7 @@ static void serialize_node(char** out, XMLNode* node, int indent) {
     append_str(out, ">\n");
 }
 
-String xml_serialize(XMLNode* root) {
+String xmlx_serialize(XMLNode* root) {
     char* result = NULL;
     if (!root) return STRING_EMPTY;
     append_str(&result, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");

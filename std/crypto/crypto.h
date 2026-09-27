@@ -55,8 +55,12 @@ extern void sha512_final(SHA512Context* ctx, u8* digest);
 extern String sha512_string(const String input);
 
 // Base64
-extern String base64_encode(const u8* data, size_t len);
-extern u8* base64_decode(const String input, size_t* out_len);
+// base64_encode / base64_decode 归 std.encoding 所有。此前 crypto.h 与
+// encoding.h 各声明一份, 参数/返回类型不同(const u8* + String vs
+// const void* + char*), 同时 import std.crypto 与 std.encoding 会直接
+// "conflicting types for 'base64_encode'"; 两个 .c 也各有一份强符号。
+// 现在统一复用 encoding 的声明。
+#include "../encoding/encoding.h"
 
 // AES-128
 typedef struct {

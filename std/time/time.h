@@ -16,15 +16,11 @@ typedef struct {
     i64 nsec;
 } TimeSpec;
 
-typedef struct {
-    i32 year;
-    i32 month;
-    i32 day;
-    i32 hour;
-    i32 minute;
-    i32 second;
-    i32 millisecond;
-} DateTime;
+// DateTime 统一由 std.datetime 定义（i64 字段 + nanosecond 精度）。
+// 此前 time.h 与 datetime.h 各有一份同名 DateTime，字段宽度与最后一个字段
+// （millisecond vs nanosecond）都不同，同时 import std.time 与 std.datetime
+// 会直接报 "typedef redefinition with different types"。
+#include "../datetime/datetime.h"
 
 extern i64 time_now_i64(void);
 extern double time_now_double(void);
