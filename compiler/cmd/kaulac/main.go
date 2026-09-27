@@ -459,6 +459,38 @@ func main() {
 	positionalArgs := []string{}
 	args := os.Args[1:]
 	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true, "test": true, "unittest": true}
+	// 需要吃掉「下一个参数当值」的旗标。漏掉任何一个都会把它的值当成输入文件
+	// （`--boot pvh` 曾让 pvh 变成 inputFile，boot 模式被静默忽略）。
+	// 名单必须与 config.loadFlags 里注册的非 bool 旗标保持一致。
+	valueFlags := map[string]bool{
+		"-o": true, "--output": true,
+		"-output-dir": true, "--output-dir": true,
+		"-template": true, "--template": true,
+		"-include": true, "--include": true,
+		"-stdlib": true, "--stdlib": true,
+		"-pkglib": true, "--pkglib": true,
+		"-source-dir": true, "--source-dir": true,
+		"-target": true, "--target": true,
+		"-opt": true, "--opt": true,
+		"-target-triple": true, "--target-triple": true,
+		"-link-script": true, "--link-script": true,
+		"-entry": true, "--entry": true,
+		"-output-format": true, "--output-format": true,
+		"-boot": true, "--boot": true,
+		"-boot-file": true, "--boot-file": true,
+		"-boot-arch": true, "--boot-arch": true,
+		"-cc": true, "--cc": true,
+		"-cflags": true, "--cflags": true,
+		"-defines": true, "--defines": true,
+		"-libs": true, "--libs": true,
+		"-queue": true, "--queue": true,
+		"-spendable": true, "--spendable": true,
+		"-memory-limit": true, "--memory-limit": true,
+		"-timeout": true, "--timeout": true,
+		"-debug-level": true, "--debug-level": true,
+		"-analyze-pkg": true, "--analyze-pkg": true,
+		"-build-pkglib": true, "--build-pkglib": true,
+	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -507,25 +539,7 @@ func main() {
 					i++
 				}
 			}
-		case arg == "-o" || arg == "--output":
-			// -o/--output 接受一个值（输出路径），需要跳过下一个参数避免误判为输入文件
-			customArgs = append(customArgs, arg)
-			if i+1 < len(args) {
-				customArgs = append(customArgs, args[i+1])
-				i++ // 跳过输出文件路径
-			}
-		case arg == "-output-dir" || arg == "--output-dir":
-			// -output-dir 接受一个值（输出目录），同样需跳过下一个参数避免误判为输入文件
-			customArgs = append(customArgs, arg)
-			if i+1 < len(args) {
-				customArgs = append(customArgs, args[i+1])
-				i++
-			}
-		case arg == "-cflags" || arg == "--cflags" ||
-			arg == "-defines" || arg == "--defines" ||
-			arg == "-libs" || arg == "--libs" ||
-			arg == "-build-pkglib" || arg == "--build-pkglib" ||
-			arg == "-analyze-pkg" || arg == "--analyze-pkg":
+		case valueFlags[arg]:
 			// 取值旗标：跳过其值，避免被误判为输入文件
 			customArgs = append(customArgs, arg)
 			if i+1 < len(args) {
