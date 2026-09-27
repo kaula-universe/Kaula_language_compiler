@@ -2,7 +2,10 @@
 #include "../base/types.h"
 #include "../memory/memory.h"
 
-typedef void (*ParallelFunc)(void* data, size_t index);
+/* 索引用 int64_t：Kaula 侧 fn f(data: void*, index: i64) 映射为 void(void*, int64_t)，
+   与本 typedef 完全一致（C 的 size_t 在 Windows 上是 unsigned long long，
+   与 Kaula 能生成的任何整数类型都不匹配，会被 clang 判为函数指针不兼容） */
+typedef void (*ParallelFunc)(void* data, int64_t index);
 typedef i64 (*ReduceFunc)(i64 left, i64 right);
 
 void parallel_for(size_t start, size_t end, ParallelFunc func, void* data);

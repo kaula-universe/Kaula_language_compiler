@@ -9,7 +9,7 @@ import std.io
 # 全局计数器 (Kaula 用户代码层不支持 int/long, 用 i32 替代)
 i32 global_sum = 0
 
-fn accumulate_index(data: void*, index: i32) {
+fn accumulate_index(data: void*, index: i64) {
     i32* arr = as<i32*>(data)
     # 原子累加：多个 worker 并发写 global_sum，普通 += 是数据竞争
     std.concurrent.kaula_atomic_add(&global_sum, arr[index])

@@ -8499,7 +8499,7 @@
       "args": [
         "size_t",
         "size_t",
-        "void(void(), size_t)void",
+        "void(void(), i64)void",
         "void()"
       ]
     },
@@ -8508,7 +8508,7 @@
         "size_t",
         "size_t",
         "size_t",
-        "void(void(), size_t)void",
+        "void(void(), i64)void",
         "void()"
       ]
     },

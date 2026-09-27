@@ -165,13 +165,25 @@ type Lexer struct {
 func NewLexer(input string) *Lexer {
 	return &Lexer{
 		input:          input,
-		pos:            0,
+		pos:            utf8BOMLen(input),
 		line:           1,
 		column:         1,
 		inputLen:       len(input),
 		errorCollector: errors.NewErrorCollector(),
 		source:         input,
 	}
+}
+
+// utf8BOMLen 返回 UTF-8 BOM（EF BB BF）占用的字节数，没有则返回 0。
+//
+// Windows 编辑器/脚本（如 PowerShell 的 Set-Content -Encoding utf8）常在文件
+// 开头写 BOM。不跳过它的话，第一个 token 会以 0xEF 开头 → "Syntax Error
+// at 1:1/1:2"，整个文件无法编译。行列号也从 BOM 之后开始算。
+func utf8BOMLen(s string) int {
+	if len(s) >= 3 && s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF {
+		return 3
+	}
+	return 0
 }
 
 // LexerState 保存词法分析器的可变状态，用于投机解析的保存/恢复
