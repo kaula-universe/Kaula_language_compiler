@@ -3,6 +3,13 @@
 #include <string.h>
 #include <stdio.h>
 
+// NOTE on String arguments: `String` is a 24-byte SSO struct (len plus a
+// ptr/sso union, see std/base/types.h), so `.ptr` is only meaningful when
+// len > STRING_SSO_CAPACITY. Reading `.ptr` directly on a short string yields
+// uninitialised memory -- string_create("abc") keeps the bytes in `.sso`.
+// Every String parameter must therefore go through string_cdata(), which is
+// SSO-aware.
+
 // MD5 实现
 #define MD5_F(x, y, z) ((x & y) | (~x & z))
 #define MD5_G(x, y, z) ((x & z) | (y & ~z))
@@ -92,7 +99,7 @@ void md5_final(MD5Context* ctx, u8* digest) {
 
 String md5_string(const String input) {
     MD5Context ctx; u8 digest[16];
-    md5_init(&ctx); md5_update(&ctx, (const u8*)input.ptr, input.len); md5_final(&ctx, digest);
+    md5_init(&ctx); md5_update(&ctx, (const u8*)string_cdata(input), input.len); md5_final(&ctx, digest);
     char* buf = (char*)kmm_v4_malloc(33);
     for (int i = 0; i < 16; i++) sprintf(buf + i*2, "%02x", digest[i]);
     buf[32] = '\0';
@@ -100,7 +107,7 @@ String md5_string(const String input) {
 }
 
 String md5_file(const String path) {
-    FILE* f = fopen(path.ptr, "rb"); if (!f) return (String){0, NULL};
+    FILE* f = fopen(string_cdata(path), "rb"); if (!f) return (String){0, NULL};
     MD5Context ctx; md5_init(&ctx); u8 buf[4096]; size_t n;
     while ((n = fread(buf, 1, 4096, f)) > 0) md5_update(&ctx, buf, n);
     fclose(f); u8 digest[16]; md5_final(&ctx, digest);
@@ -138,44 +145,86 @@ void sha256_init(SHA256Context* ctx) {
     ctx->state[6] = 0x1f83d9ab; ctx->state[7] = 0x5be0cd19;
 }
 
-void sha256_update(SHA256Context* ctx, const u8* data, size_t len) {
-    size_t index = ctx->count % 64; ctx->count += len; size_t i = 0;
-    if (index) { size_t part = 64 - index; if (len < part) { memcpy(ctx->buffer + index, data, len); return; } memcpy(ctx->buffer + index, data, part); ctx->count = ctx->count; }
-    for (; i + 64 <= len; i += 64) {
-        u32 w[64]; for (int j = 0; j < 16; j++) w[j] = (data[i+j*4] << 24) | (data[i+j*4+1] << 16) | (data[i+j*4+2] << 8) | data[i+j*4+3];
-        for (int j = 16; j < 64; j++) w[j] = SHA256_SIG1(w[j-2]) + w[j-7] + SHA256_SIG0(w[j-15]) + w[j-16];
-        u32 a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3];
-        u32 e = ctx->state[4], f = ctx->state[5], g = ctx->state[6], h = ctx->state[7];
-        for (int j = 0; j < 64; j++) {
-            u32 t1 = h + SHA256_EP1(e) + SHA256_CH(e, f, g) + sha256_k[j] + w[j];
-            u32 t2 = SHA256_EP0(a) + SHA256_MAJ(a, b, c);
-            h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
-        }
-        ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
-        ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
+// One 64-byte block compression round (FIPS 180-4 §6.2.2).
+// Extracted because the buffered path in sha256_update used to memcpy the
+// tail into ctx->buffer and return without ever compressing it, which left
+// the state at its initial value for any input that was not consumed by the
+// bulk loop.
+static void sha256_compress(SHA256Context* ctx, const u8* block) {
+    u32 w[64];
+    for (int j = 0; j < 16; j++) {
+        w[j] = ((u32)block[j*4] << 24) | ((u32)block[j*4+1] << 16)
+             | ((u32)block[j*4+2] << 8) | (u32)block[j*4+3];
     }
-    if (i < len) memcpy(ctx->buffer, data + i, len - i);
+    for (int j = 16; j < 64; j++) {
+        w[j] = SHA256_SIG1(w[j-2]) + w[j-7] + SHA256_SIG0(w[j-15]) + w[j-16];
+    }
+    u32 a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3];
+    u32 e = ctx->state[4], f = ctx->state[5], g = ctx->state[6], h = ctx->state[7];
+    for (int j = 0; j < 64; j++) {
+        u32 t1 = h + SHA256_EP1(e) + SHA256_CH(e, f, g) + sha256_k[j] + w[j];
+        u32 t2 = SHA256_EP0(a) + SHA256_MAJ(a, b, c);
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
+    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
+}
+
+void sha256_update(SHA256Context* ctx, const u8* data, size_t len) {
+    if (!data || len == 0) return;
+    size_t index = (size_t)(ctx->count % 64);
+    ctx->count += len;
+
+    // top up a partially filled block first
+    if (index) {
+        size_t part = 64 - index;
+        if (len < part) { memcpy(ctx->buffer + index, data, len); return; }
+        memcpy(ctx->buffer + index, data, part);
+        sha256_compress(ctx, ctx->buffer);
+        data += part;
+        len -= part;
+    }
+    // whole blocks straight from the input
+    while (len >= 64) {
+        sha256_compress(ctx, data);
+        data += 64;
+        len -= 64;
+    }
+    // keep the remainder for the next call / for final()
+    if (len) memcpy(ctx->buffer, data, len);
 }
 
 void sha256_final(SHA256Context* ctx, u8* digest) {
-    u8 padding[128] = { 0x80 }; u64 bits = ctx->count * 8;
-    size_t index = ctx->count % 64, pad_len = (index < 56) ? (56 - index) : (120 - index);
-    sha256_update(ctx, padding, pad_len);
-    u64 bits_big = 0; for (int i = 0; i < 8; i++) bits_big |= ((bits >> (56 - i*8)) & 0xFF) << (i*8);
-    sha256_update(ctx, (const u8*)&bits_big, 8);
-    for (int i = 0; i < 8; i++) { digest[i*4] = (ctx->state[i] >> 24) & 0xFF; digest[i*4+1] = (ctx->state[i] >> 16) & 0xFF; digest[i*4+2] = (ctx->state[i] >> 8) & 0xFF; digest[i*4+3] = ctx->state[i] & 0xFF; }
+    u64 bits = ctx->count * 8;
+    size_t index = (size_t)(ctx->count % 64);
+    u8 padding[72];
+    memset(padding, 0, sizeof(padding));
+    padding[0] = 0x80;
+    // pad up to 56 mod 64, then append the 64-bit big-endian length
+    size_t pad_len = (index < 56) ? (56 - index) : (120 - index);
+    // the length field is written big-endian by the loop below
+    for (int i = 0; i < 8; i++) {
+        padding[pad_len + i] = (u8)((bits >> (56 - i * 8)) & 0xFF);
+    }
+    sha256_update(ctx, padding, pad_len + 8);
+    for (int i = 0; i < 8; i++) {
+        digest[i*4]   = (u8)((ctx->state[i] >> 24) & 0xFF);
+        digest[i*4+1] = (u8)((ctx->state[i] >> 16) & 0xFF);
+        digest[i*4+2] = (u8)((ctx->state[i] >> 8) & 0xFF);
+        digest[i*4+3] = (u8)(ctx->state[i] & 0xFF);
+    }
 }
 
 String sha256_string(const String input) {
     SHA256Context ctx; u8 digest[32];
-    sha256_init(&ctx); sha256_update(&ctx, (const u8*)input.ptr, input.len); sha256_final(&ctx, digest);
+    sha256_init(&ctx); sha256_update(&ctx, (const u8*)string_cdata(input), input.len); sha256_final(&ctx, digest);
     char* buf = (char*)kmm_v4_malloc(65); String result;
     for (int i = 0; i < 32; i++) sprintf(buf + i*2, "%02x", digest[i]);
     buf[64] = '\0'; result = (String){.len = 64, .ptr = buf}; return result;
 }
 
 String sha256_file(const String path) {
-    FILE* f = fopen(path.ptr, "rb"); if (!f) return STRING_EMPTY;
+    FILE* f = fopen(string_cdata(path), "rb"); if (!f) return STRING_EMPTY;
     SHA256Context ctx; sha256_init(&ctx); u8 buf[4096]; size_t n;
     while ((n = fread(buf, 1, 4096, f)) > 0) sha256_update(&ctx, buf, n);
     fclose(f); u8 digest[32]; sha256_final(&ctx, digest);
@@ -184,44 +233,9 @@ String sha256_file(const String path) {
     hex[64] = '\0'; result = (String){.len = 64, .ptr = hex}; return result;
 }
 
-// Base64 实现
-static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-String base64_encode(const u8* data, size_t len) {
-    char* buf = (char*)kmm_v4_malloc((len + 2) / 3 * 4 + 1); String result;
-    size_t i = 0, j = 0;
-    while (i < len) {
-        u32 octet_a = i < len ? data[i++] : 0;
-        u32 octet_b = i < len ? data[i++] : 0;
-        u32 octet_c = i < len ? data[i++] : 0;
-        u32 triple = (octet_a << 16) | (octet_b << 8) | octet_c;
-        buf[j++] = base64_chars[(triple >> 18) & 0x3F];
-        buf[j++] = base64_chars[(triple >> 12) & 0x3F];
-        buf[j++] = base64_chars[(triple >> 6) & 0x3F];
-        buf[j++] = base64_chars[triple & 0x3F];
-    }
-    if (len % 3 == 1) { buf[j-2] = '='; buf[j-1] = '='; }
-    else if (len % 3 == 2) { buf[j-1] = '='; }
-    buf[j] = '\0'; result = (String){.len = j, .ptr = buf}; return result;
-}
-
-u8* base64_decode(const String input, size_t* out_len) {
-    size_t len = input.len; if (len % 4 != 0) return NULL;
-    size_t out_len_val = len / 4 * 3; if (len > 0 && input.ptr[len-1] == '=') out_len_val--; if (len > 1 && input.ptr[len-2] == '=') out_len_val--;
-    u8* output = (u8*)kmm_v4_malloc(out_len_val + 1); size_t i = 0, j = 0;
-    while (i < len) {
-        u32 sextet_a = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
-        u32 sextet_b = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
-        u32 sextet_c = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
-        u32 sextet_d = input.ptr[i] == '=' ? 0 : (u32)(strchr(base64_chars, input.ptr[i]) - base64_chars); i++;
-        u32 triple = (sextet_a << 18) | (sextet_b << 12) | (sextet_c << 6) | sextet_d;
-        if (j < out_len_val) output[j++] = (triple >> 16) & 0xFF;
-        if (j < out_len_val) output[j++] = (triple >> 8) & 0xFF;
-        if (j < out_len_val) output[j++] = triple & 0xFF;
-    }
-    if (out_len) *out_len = out_len_val;
-    return output;
-}
+// Base64 实现已移除: 改由 std/encoding/encoding.c 提供 (crypto.h 通过
+// #include "../encoding/encoding.h" 暴露声明)。两份实现的返回类型不同
+// (String vs char*)、参数类型也不同, 共存会造成头文件冲突与重复强符号。
 
 // AES-128 简化实现 (ECB mode)
 static const u8 aes_sbox[256] = {
