@@ -713,7 +713,7 @@ RegexMatch* regex_find(const Regex* regex, const char* str, size_t* count) {
                 if (!new_matches) {
                     size_t i;
                     for (i = 0; i < match_count; i++) {
-                        if (matches[i].text.ptr) string_free(matches[i].text);
+                        if (matches[i].text.len) string_free(matches[i].text);
                     }
                     kmm_v4_free(matches);
                     return NULL;
@@ -760,7 +760,7 @@ String regex_replace(const Regex* regex, const char* str, const char* replacemen
         if (matches) {
             size_t i;
             for (i = 0; i < match_count; i++) {
-                if (matches[i].text.ptr) string_free(matches[i].text);
+                if (matches[i].text.len) string_free(matches[i].text);
             }
             kmm_v4_free(matches);
         }
@@ -778,7 +778,7 @@ String regex_replace(const Regex* regex, const char* str, const char* replacemen
     char* result = (char*)kmm_v4_malloc(result_len + 1);
     if (!result) {
         for (i = 0; i < match_count; i++) {
-            if (matches[i].text.ptr) string_free(matches[i].text);
+            if (matches[i].text.len) string_free(matches[i].text);
         }
         kmm_v4_free(matches);
         return STRING_EMPTY;
@@ -802,7 +802,7 @@ String regex_replace(const Regex* regex, const char* str, const char* replacemen
     result[result_pos] = '\0';
     
     for (i = 0; i < match_count; i++) {
-        if (matches[i].text.ptr) string_free(matches[i].text);
+        if (matches[i].text.len) string_free(matches[i].text);
     }
     kmm_v4_free(matches);
     
@@ -824,7 +824,7 @@ String* regex_split(const Regex* regex, const char* str, size_t* count) {
         if (matches) {
             size_t i;
             for (i = 0; i < match_count; i++) {
-                if (matches[i].text.ptr) string_free(matches[i].text);
+                if (string_cdata(matches[i].text)) string_free(matches[i].text);
             }
             kmm_v4_free(matches);
         }
@@ -864,7 +864,7 @@ String* regex_split(const Regex* regex, const char* str, size_t* count) {
     
     if (matches) {
         for (i = 0; i < match_count; i++) {
-            if (matches[i].text.ptr) string_free(matches[i].text);
+            if (matches[i].text.len) string_free(matches[i].text);
         }
         kmm_v4_free(matches);
     }

@@ -56,7 +56,7 @@ TestCase* test_case_create(const String name, void (*func)(void), const String s
     if (tc) {
         tc->name = string_copy(name);
         tc->func = func;
-        tc->suite_name = suite_name.ptr ? string_copy(suite_name) : (String){0, NULL};
+        tc->suite_name = suite_name.len ? string_copy(suite_name) : (String){0, NULL};
     }
     /* 同 test_suite_create：首次调用必须先分配，否则写入 NULL 指针 */
     if (!g_all_cases) {
@@ -147,9 +147,9 @@ void test_report_print(TestReport* report) {
     for (size_t i = 0; i < report->count; i++) {
         TestResult* r = &report->results[i];
         if (r->passed) {
-            print("  [PASS] %s (%lld ms)\n", r->name.ptr, r->duration_ms);
+            print("  [PASS] %s (%lld ms)\n", string_cdata(r->name), r->duration_ms);
         } else {
-            print("  [FAIL] %s: %s (%s:%d)\n", r->name.ptr, r->message.ptr, r->file.ptr, r->line);
+            print("  [FAIL] %s: %s (%s:%d)\n", string_cdata(r->name), string_cdata(r->message), string_cdata(r->file), r->line);
         }
     }
     if (report->failed == 0) print("All tests passed!\n");

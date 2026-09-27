@@ -28,7 +28,7 @@ JsonValue* json_create_number(double value) {
 
 JsonValue* json_create_string(const String value) {
     JsonValue* val = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
-    if (val && value.ptr) {
+    if (val && value.len) {
         val->type = JSON_STRING;
         val->value.string_val = string_copy(value).ptr;
     }
@@ -127,10 +127,10 @@ void json_array_remove(JsonValue* array, size_t index) {
 }
 
 void json_object_set(JsonValue* object, const String key, JsonValue* value) {
-    if (!object || !key.ptr || !value || object->type != JSON_OBJECT) return;
+    if (!object || key.len == 0 || !value || object->type != JSON_OBJECT) return;
     JsonObject* obj = object->value.object_val;
     for (size_t i = 0; i < obj->size; i++) {
-        if (strcmp(obj->pairs[i].key.ptr, key.ptr) == 0) {
+        if (strcmp(string_cdata(obj->pairs[i].key), string_cdata(key)) == 0) {
             json_destroy(obj->pairs[i].value);
             obj->pairs[i].value = value;
             return;
@@ -146,19 +146,19 @@ void json_object_set(JsonValue* object, const String key, JsonValue* value) {
 }
 
 JsonValue* json_object_get(JsonValue* object, const String key) {
-    if (!object || !key.ptr || object->type != JSON_OBJECT) return NULL;
+    if (!object || key.len == 0 || object->type != JSON_OBJECT) return NULL;
     JsonObject* obj = object->value.object_val;
     for (size_t i = 0; i < obj->size; i++) {
-        if (strcmp(obj->pairs[i].key.ptr, key.ptr) == 0) return obj->pairs[i].value;
+        if (strcmp(string_cdata(obj->pairs[i].key), string_cdata(key)) == 0) return obj->pairs[i].value;
     }
     return NULL;
 }
 
 void json_object_remove(JsonValue* object, const String key) {
-    if (!object || !key.ptr || object->type != JSON_OBJECT) return;
+    if (!object || key.len == 0 || object->type != JSON_OBJECT) return;
     JsonObject* obj = object->value.object_val;
     for (size_t i = 0; i < obj->size; i++) {
-        if (strcmp(obj->pairs[i].key.ptr, key.ptr) == 0) {
+        if (strcmp(string_cdata(obj->pairs[i].key), string_cdata(key)) == 0) {
             string_free(obj->pairs[i].key);
             json_destroy(obj->pairs[i].value);
             memmove(&obj->pairs[i], &obj->pairs[i + 1], (obj->size - i - 1) * sizeof(JsonPair));
@@ -263,7 +263,7 @@ static JsonValue* json_parse_value(const char** text, int* error) {
     if (**text == '"') {
         String str = json_parse_string_content(text, error);
         if (*error) return NULL;
-        String unescaped = json_parse_escaped_string(str.ptr);
+        String unescaped = json_parse_escaped_string(string_cdata(str));
         string_free(str);
         JsonValue* val = json_create_string(unescaped);
         string_free(unescaped);
@@ -332,15 +332,15 @@ static JsonValue* json_parse_value(const char** text, int* error) {
 }
 
 JsonValue* json_parse(const String text) {
-    if (!text.ptr) return NULL;
+    if (text.len == 0) return NULL;
     int error = 0;
-    const char* p = text.ptr;
+    const char* p = string_cdata(text);
     JsonValue* result = json_parse_value(&p, &error);
     return error ? NULL : result;
 }
 
 JsonValue* json_parse_file(const String path) {
-    FILE* f = fopen(path.ptr, "r");
+    FILE* f = fopen(string_cdata(path), "r");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
@@ -455,20 +455,20 @@ String json_serialize_pretty(JsonValue* value, int indent_level) {
 }
 
 int json_to_file(JsonValue* value, const String path) {
-    FILE* f = fopen(path.ptr, "w");
+    FILE* f = fopen(string_cdata(path), "w");
     if (!f) return 0;
     String json = json_serialize(value);
-    fprintf(f, "%s", json.ptr);
+    fprintf(f, "%s", string_cdata(json));
     string_free(json);
     fclose(f);
     return 1;
 }
 
 int json_to_file_pretty(JsonValue* value, const String path) {
-    FILE* f = fopen(path.ptr, "w");
+    FILE* f = fopen(string_cdata(path), "w");
     if (!f) return 0;
     String json = json_serialize_pretty(value, 0);
-    fprintf(f, "%s", json.ptr);
+    fprintf(f, "%s", string_cdata(json));
     string_free(json);
     fclose(f);
     return 1;

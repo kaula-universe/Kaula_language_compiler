@@ -43,7 +43,7 @@ static void output_print(const char* fmt, ...) {
 static TestSuiteNode* find_suite(const char* name) {
     TestSuiteNode* s = g_suites;
     while (s) {
-        if (strcmp(s->name.ptr, name) == 0) return s;
+        if (strcmp(string_cdata(s->name), name) == 0) return s;
         s = s->next;
     }
     return NULL;
@@ -138,28 +138,28 @@ void test_run_suite_by_name(const char* suite_name) {
         output_print("Suite not found: %s\n", suite_name);
         return;
     }
-    output_print("=== Running suite: %s ===\n", suite->name.ptr);
+    output_print("=== Running suite: %s ===\n", string_cdata(suite->name));
     start_ms = kaula_test_now_ms();
     c = suite->cases;
     while (c) {
         bool_t failed;
-        output_print("  [ RUN      ] %s\n", c->name.ptr);
+        output_print("  [ RUN      ] %s\n", string_cdata(c->name));
         reset_expect_flag();
         g_stats.total++;
         c->func();
         failed = get_expect_flag();
         if (failed) {
             g_stats.failed++;
-            output_print("  [  FAILED  ] %s\n", c->name.ptr);
+            output_print("  [  FAILED  ] %s\n", string_cdata(c->name));
         } else {
             g_stats.passed++;
-            output_print("  [       OK ] %s\n", c->name.ptr);
+            output_print("  [       OK ] %s\n", string_cdata(c->name));
         }
         c = c->next;
     }
     g_stats.elapsed_ms += kaula_test_now_ms() - start_ms;
     output_print("=== Suite %s: %zu passed, %zu failed ===\n\n",
-                 suite->name.ptr, g_stats.passed, g_stats.failed);
+                 string_cdata(suite->name), g_stats.passed, g_stats.failed);
 }
 
 void test_run_all_suites(void) {
@@ -172,7 +172,7 @@ void test_run_all_suites(void) {
     output_print("========== Running all test suites ==========\n\n");
     while (s) {
         TestSuiteNode* next = s->next;
-        test_run_suite_by_name(s->name.ptr);
+        test_run_suite_by_name(string_cdata(s->name));
         s = next;
     }
     g_stats.elapsed_ms = kaula_test_now_ms() - start_ms;

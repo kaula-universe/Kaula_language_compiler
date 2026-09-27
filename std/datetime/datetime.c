@@ -400,7 +400,7 @@ TimeZone* timezone_create(const char* name, i64 offset_seconds, bool_t is_dst) {
 
 void timezone_destroy(TimeZone* tz) {
     if (!tz) return;
-    kmm_v4_free(tz->name.ptr);
+    if (tz->name.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(tz->name));
     kmm_v4_free(tz);
 }
 

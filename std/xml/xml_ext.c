@@ -24,7 +24,7 @@ void xml_add_attribute(XMLNode* node, const char* name, const char* value) {
     if (!node || !name || !value) return;
     existing = node->attributes;
     while (existing) {
-        if (strcmp(existing->name.ptr, name) == 0) {
+        if (strcmp(string_cdata(existing->name), name) == 0) {
             if (existing->value.len > 0) string_free(existing->value);
             existing->value = string_create(value);
             return;
@@ -58,7 +58,7 @@ const char* xml_node_get_attribute(XMLNode* node, const char* name) {
     if (!node || !name) return NULL;
     attr = node->attributes;
     while (attr) {
-        if (strcmp(attr->name.ptr, name) == 0) return attr->value.ptr;
+        if (strcmp(string_cdata(attr->name), name) == 0) return string_cdata(attr->value);
         attr = attr->next;
     }
     return NULL;
@@ -69,7 +69,7 @@ XMLNode* xml_node_get_child_by_tag(XMLNode* node, const char* tag) {
     if (!node || !tag) return NULL;
     child = node->children;
     while (child) {
-        if (child->tag.len > 0 && strcmp(child->tag.ptr, tag) == 0) return child;
+        if (child->tag.len > 0 && strcmp(string_cdata(child->tag), tag) == 0) return child;
         child = child->next;
     }
     return NULL;
@@ -100,7 +100,7 @@ static void collect_text(XMLNode* node, char** result) {
     XMLNode* child;
     if (!node) return;
     if (node->text.len > 0) {
-        append_text(result, node->text.ptr);
+        append_text(result, string_cdata(node->text));
     }
     child = node->children;
     while (child) {
@@ -381,7 +381,7 @@ static XMLNode* parse_element(XMLParser* p) {
             char* text = parse_text(p);
             if (text) {
                 if (node->text.len > 0) {
-                    char* old = node->text.ptr;
+                    const char* old = string_cdata(node->text);
                     size_t old_len = strlen(old);
                     size_t t_len = strlen(text);
                     char* new_str = (char*)kmm_v4_malloc(old_len + t_len + 1);
@@ -389,7 +389,7 @@ static XMLNode* parse_element(XMLParser* p) {
                         memcpy(new_str, old, old_len);
                         memcpy(new_str + old_len, text, t_len);
                         new_str[old_len + t_len] = '\0';
-                        kmm_v4_free(old);
+                        if (node->text.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)old);
                         kmm_v4_free(text);
                         node->text = string_wrap(new_str);
                     }
@@ -516,17 +516,17 @@ static void serialize_node(char** out, XMLNode* node, int indent) {
     if (!node || node->tag.len == 0) return;
     serialize_indent(out, indent);
     append_char(out, '<');
-    append_str(out, node->tag.ptr);
+    append_str(out, string_cdata(node->tag));
     attr = node->attributes;
     while (attr) {
         append_char(out, ' ');
-        append_str(out, attr->name.ptr);
+        append_str(out, string_cdata(attr->name));
         append_str(out, "=\"");
-        encode_append(out, attr->value.ptr);
+        encode_append(out, string_cdata(attr->value));
         append_char(out, '"');
         attr = attr->next;
     }
-    has_children = node->children != NULL || (node->text.len > 0 && strlen(node->text.ptr) > 0);
+    has_children = node->children != NULL || (node->text.len > 0 && strlen(string_cdata(node->text)) > 0);
     if (!has_children) {
         append_str(out, " />\n");
         return;
@@ -541,10 +541,10 @@ static void serialize_node(char** out, XMLNode* node, int indent) {
         }
         serialize_indent(out, indent);
     } else if (node->text.len > 0) {
-        encode_append(out, node->text.ptr);
+        encode_append(out, string_cdata(node->text));
     }
     append_str(out, "</");
-    append_str(out, node->tag.ptr);
+    append_str(out, string_cdata(node->tag));
     append_str(out, ">\n");
 }
 

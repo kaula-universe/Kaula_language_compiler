@@ -27,8 +27,8 @@ static Result result_clone(const Result* r) {
     out.ok_kind = r->ok_kind;
     out.value = r->value;
     out.err_code = r->err_code;
-    out.err_msg = r->err_msg.ptr ? string_copy(r->err_msg) : STRING_EMPTY;
-    if (out.status == RESULT_OK && out.ok_kind == RESULT_OK_STRING && out.value.ok_str.ptr) {
+    out.err_msg = r->err_msg.len ? string_copy(r->err_msg) : STRING_EMPTY;
+    if (out.status == RESULT_OK && out.ok_kind == RESULT_OK_STRING && string_cdata(out.value.ok_str)) {
         out.value.ok_str = string_copy(out.value.ok_str);
     }
     return out;
@@ -333,11 +333,11 @@ Result option_to_result(const Option* opt, int err_code, const char* err_msg) {
 
 void result_destroy(Result* r) {
     if (!r) return;
-    if (r->err_msg.ptr) {
+    if (r->err_msg.len) {
         string_free(r->err_msg);
         r->err_msg = STRING_EMPTY;
     }
-    if (r->status == RESULT_OK && r->ok_kind == RESULT_OK_STRING && r->value.ok_str.ptr) {
+    if (r->status == RESULT_OK && r->ok_kind == RESULT_OK_STRING && string_cdata(r->value.ok_str)) {
         string_free(r->value.ok_str);
         r->value.ok_str = STRING_EMPTY;
     }

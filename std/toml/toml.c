@@ -21,7 +21,7 @@ static void toml_table_set(TomlTable* table, const String key, TomlValue* val) {
 }
 
 TomlValue* toml_get(TomlTable* table, const String key) {
-    if (!table || !key.ptr) return NULL;
+    if (!table || key.len == 0) return NULL;
     for (size_t i = 0; i < table->size; i++) { if (string_equals(table->keys[i], key)) return table->values[i]; }
     return NULL;
 }
@@ -50,11 +50,11 @@ static TomlValue* toml_parse_value(const char* val_str) {
 }
 
 TomlDocument* toml_parse(const String text) {
-    if (!text.ptr || text.len == 0) return NULL;
+    if (text.len == 0) return NULL;
     TomlDocument* doc = kmm_v4_calloc(1, sizeof(TomlDocument));
     doc->root = kmm_v4_calloc(1, sizeof(TomlTable)); doc->root->capacity = 16;
     TomlTable* current = doc->root;
-    const char* p = text.ptr;
+    const char* p = string_cdata(text);
     while (*p) {
         toml_skip_whitespace(&p);
         if (!*p) break;
@@ -96,7 +96,7 @@ TomlDocument* toml_parse(const String text) {
 }
 
 TomlDocument* toml_parse_file(const String path) {
-    FILE* f = fopen(path.ptr, "r"); if (!f) return NULL;
+    FILE* f = fopen(string_cdata(path), "r"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
     char* buf = (char*)kmm_v4_malloc(len + 1); fread(buf, 1, len, f); buf[len] = '\0'; fclose(f);
     TomlDocument* doc = toml_parse(string_wrap(buf));
