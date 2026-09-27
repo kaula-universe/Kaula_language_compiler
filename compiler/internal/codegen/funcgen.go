@@ -991,103 +991,10 @@ func (fg *FunctionGenerator) kmmScopeStartNamed(kaulaFuncName string) string {
 // 互相递归。互递归的每一层同样会 push KMM 作用域，深度一样受
 // KMM_V4_MAX_SCOPE_DEPTH 约束，因此"递归 + 每层分配"诊断必须覆盖它
 // （尾调用改写只处理直接自递归，不处理互递归）。
+//
+// 调用图与强连通分量在首次调用时构建一次（见 callgraph.go），这里只查表。
 func (fg *FunctionGenerator) inRecursionCycle(funcName string) bool {
-	prog := fg.codegen.getProgram()
-	if prog == nil {
-		return false
-	}
-	self := prog.FindFunction(funcName)
-	if self == nil {
-		return false
-	}
-	visited := map[string]bool{funcName: true}
-	var reachesTarget func(target string, fn *ast.FunctionStatement) bool
-	reachesTarget = func(target string, fn *ast.FunctionStatement) bool {
-		for _, callee := range collectCalleeNames(fn) {
-			if callee == target {
-				return true
-			}
-			if visited[callee] {
-				continue
-			}
-			visited[callee] = true
-			if next := prog.FindFunction(callee); next != nil {
-				if reachesTarget(target, next) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	return reachesTarget(funcName, self)
-}
-
-// collectCalleeNames 收集函数体（不含嵌套函数定义）里调用的函数名
-func collectCalleeNames(fn *ast.FunctionStatement) []string {
-	var out []string
-	seen := make(map[string]bool)
-	add := func(e ast.Expression) {
-		if call, ok := e.(*ast.CallExpression); ok {
-			if id, ok := call.Function.(*ast.Identifier); ok && id.Name != "" && !seen[id.Name] {
-				seen[id.Name] = true
-				out = append(out, id.Name)
-			}
-		}
-	}
-	var walkExpr func(e ast.Expression)
-	var walkBody func(list []ast.Statement)
-	walkExpr = func(e ast.Expression) {
-		switch x := e.(type) {
-		case *ast.CallExpression:
-			add(x)
-			for _, a := range x.Args {
-				walkExpr(a)
-			}
-		case *ast.TypeCastExpression:
-			walkExpr(x.Expression)
-		case *ast.MemberAccessExpression:
-			walkExpr(x.Object)
-		case *ast.IndexExpression:
-			walkExpr(x.Object)
-			walkExpr(x.Index)
-		case *ast.BinaryExpression:
-			walkExpr(x.Left)
-			walkExpr(x.Right)
-		case *ast.UnaryExpression:
-			walkExpr(x.Right)
-		case *ast.ParenExpression:
-			walkExpr(x.Inner)
-		}
-	}
-	walkBody = func(list []ast.Statement) {
-		for _, s := range list {
-			switch x := s.(type) {
-			case *ast.VariableDeclaration:
-				walkExpr(x.Value)
-			case *ast.ExpressionStatement:
-				walkExpr(x.Expression)
-			case *ast.ReturnStatement:
-				walkExpr(x.Value)
-			case *ast.IfStatement:
-				walkExpr(x.Condition)
-				walkBody(x.Body)
-				if x.Else != nil {
-					walkBody(x.Else)
-				}
-			case *ast.WhileStatement:
-				walkExpr(x.Condition)
-				walkBody(x.Body)
-			case *ast.ForStatement:
-				walkBody(x.Body)
-			case *ast.ForInStatement:
-				walkBody(x.Body)
-			case *ast.BlockStatement:
-				walkBody(x.Statements)
-			}
-		}
-	}
-	walkBody(fn.Body)
-	return out
+	return fg.codegen.InRecursionCycle(funcName)
 }
 
 // voidFuncFor 判断函数是否无返回值（未声明返回类型或显式 void）
