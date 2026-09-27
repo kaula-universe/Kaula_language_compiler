@@ -58,42 +58,6 @@ FS_WEAK int strncmp(const char* a, const char* b, size_t n) {
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
-// 简易 ASCII 折叠（无 <ctype.h> 依赖）
-static inline int fs_tolower_ascii(int c) {
-    if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
-    return c;
-}
-
-FS_WEAK int strcasecmp(const char* a, const char* b) {
-    if (a == b) return 0;
-    if (a == NULL) return -1;
-    if (b == NULL) return 1;
-    while (*a != 0) {
-        int ca = fs_tolower_ascii((unsigned char)*a);
-        int cb = fs_tolower_ascii((unsigned char)*b);
-        if (ca != cb) return ca - cb;
-        a++;
-        b++;
-    }
-    return fs_tolower_ascii((unsigned char)*a) - fs_tolower_ascii((unsigned char)*b);
-}
-
-FS_WEAK int strncasecmp(const char* a, const char* b, size_t n) {
-    if (a == b || n == 0) return 0;
-    if (a == NULL) return -1;
-    if (b == NULL) return 1;
-    while (n > 0 && *a != 0) {
-        int ca = fs_tolower_ascii((unsigned char)*a);
-        int cb = fs_tolower_ascii((unsigned char)*b);
-        if (ca != cb) return ca - cb;
-        a++;
-        b++;
-        n--;
-    }
-    if (n == 0) return 0;
-    return fs_tolower_ascii((unsigned char)*a) - fs_tolower_ascii((unsigned char)*b);
-}
-
 FS_WEAK char* strcpy(char* dst, const char* src) {
     if (dst == NULL) return NULL;
     char* d = dst;
@@ -199,6 +163,47 @@ FS_WEAK void* memchr(const void* s, int c, size_t n) {
 }
 
 #endif /* KAULA_FREESTANDING */
+
+// ==================== 大小写不敏感比较 ====================
+// strcasecmp / strncasecmp 是 POSIX 名字, MSVC CRT 不提供, 因此不受"与 libc 同名
+// 会遮蔽强符号"的顾虑: 托管模式同样定义（符号仍是 FS_WEAK, ELF 目标上由 glibc 的
+// 强符号优先）。少了它们, 托管模式（Windows）调用本模块会直接链接失败。
+
+// 简易 ASCII 折叠（无 <ctype.h> 依赖）
+static inline int fs_tolower_ascii(int c) {
+    if (c >= 'A' && c <= 'Z') return c + ('a' - 'A');
+    return c;
+}
+
+FS_WEAK int strcasecmp(const char* a, const char* b) {
+    if (a == b) return 0;
+    if (a == NULL) return -1;
+    if (b == NULL) return 1;
+    while (*a != 0) {
+        int ca = fs_tolower_ascii((unsigned char)*a);
+        int cb = fs_tolower_ascii((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        a++;
+        b++;
+    }
+    return fs_tolower_ascii((unsigned char)*a) - fs_tolower_ascii((unsigned char)*b);
+}
+
+FS_WEAK int strncasecmp(const char* a, const char* b, size_t n) {
+    if (a == b || n == 0) return 0;
+    if (a == NULL) return -1;
+    if (b == NULL) return 1;
+    while (n > 0 && *a != 0) {
+        int ca = fs_tolower_ascii((unsigned char)*a);
+        int cb = fs_tolower_ascii((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        a++;
+        b++;
+        n--;
+    }
+    if (n == 0) return 0;
+    return fs_tolower_ascii((unsigned char)*a) - fs_tolower_ascii((unsigned char)*b);
+}
 
 // ==================== 字符分类与转换 ====================
 

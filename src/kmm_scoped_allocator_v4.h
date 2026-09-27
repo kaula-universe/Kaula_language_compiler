@@ -20,8 +20,20 @@ void* memcpy(void* dst, const void* src, size_t n);
 void* memmove(void* dst, const void* src, size_t n);
 int   memcmp(const void* a, const void* b, size_t n);
 size_t strlen(const char* s);
-// freestanding 无 stderr；debug 输出降级为空操作
-#define fprintf(...) (0)
+#endif
+
+// 诊断输出宏（而不是 `#define fprintf(...) (0)` 那种毒化标准符号的写法）。
+//
+// 本头文件会被代码生成器无条件包含在所有 TU 的最前面，用户代码随后 include 的
+// 头（std/io/io.h → <stdio.h>）里的 `fprintf(` 声明会被宏吃掉，展开成 `(0)` 后
+// UCRT 头直接语法报错 "expected identifier or '('" —— 报错位置落在 Windows SDK
+// 里，与真正的原因隔了十万八千里。
+//
+// freestanding 无 stderr：诊断降级为空操作（常量表达式，编译器整段消掉）。
+#if defined(KAULA_FREESTANDING) || defined(KAULA_NO_LIBC)
+#define KMM_V4_DIAGF(...) ((void)0)
+#else
+#define KMM_V4_DIAGF(...) fprintf(stderr, __VA_ARGS__)
 #endif
 
 #ifndef KAULA_FREESTANDING
@@ -718,10 +730,21 @@ extern void kmm_v4_thread_heap_invalidate(void);
 #define KMM_V4_SLAB_BUCKETS 49
 #endif
 
+// 8 字节对齐属性：32 位目标（i386）上 uint64_t 的自然对齐只有 4 字节，
+// clang 对未对齐的 8 字节原子操作不敢内联 cmpxchg8b，会 lower 成
+// __atomic_load / __atomic_compare_exchange 等 libcall —— 裸机没有 libatomic，
+// 链接期直接 undefined symbol（i386 boot 链路的阻塞点）。
+// 显式对齐后 clang 全部内联，零外部依赖。
+#if defined(__GNUC__) || defined(__clang__)
+#define KMM_V4_ALIGN64 __attribute__((aligned(8)))
+#else
+#define KMM_V4_ALIGN64
+#endif
+
 // Slab 桶：固定大小槽位数组 + bitmap（槽位数随档位递减，大档少槽控内存）
 typedef struct {
     uint8_t* slots;                       // 槽位内存（slots_count * bucket_size；NULL=未懒分配）
-    uint64_t bitmap[KMM_V4_SLAB_BITMAP_WORDS]; // 占用位图（1=已分配，用 __atomic 内建操作）
+    uint64_t bitmap[KMM_V4_SLAB_BITMAP_WORDS] KMM_V4_ALIGN64; // 占用位图（1=已分配，用 __atomic 内建操作）
     size_t free_hint;                     // 下一个可能空闲的槽位（原子操作用 __atomic 内建）
     size_t bucket_size;                   // 本桶的 size class
     size_t slots_count;                   // 本桶槽位数（≤ KMM_V4_SLAB_SLOTS）
@@ -1560,9 +1583,9 @@ static inline void kmm_v4_scope_note_owner(const char* name) {
 static inline void kmm_v4_dump_scope_backtrace(void) {
     const char* owner = g_kmm_v4_scope_owner;
     if (owner) {
-        fprintf(stderr, "  innermost managed scope: %s\n", owner);
+        KMM_V4_DIAGF("  innermost managed scope: %s\n", owner);
     } else {
-        fprintf(stderr, "  innermost managed scope: <unnamed> (legacy KMM_V4_SCOPE_START)\n");
+        KMM_V4_DIAGF("  innermost managed scope: <unnamed> (legacy KMM_V4_SCOPE_START)\n");
     }
 }
 
@@ -1575,7 +1598,7 @@ static inline void kmm_v4_scope_push(void) {
         // 低值，弹出不匹配的帧，回卷 thread heap 到错误位置——悬垂/错误回收，
         // 后果比立即终止严重得多。
         // 诊断：打印当前实际深度 + 最近一次 push 的调用点提示（见 kmm_v4_scope_push_at）。
-        fprintf(stderr,
+        KMM_V4_DIAGF(
                 "KMM FATAL: Scope stack overflow (depth %zu >= max %d), aborting\n"
                 "  该上限约束的是'使用 KMM 分配器的函数'的嵌套/递归层数；"
                 "纯计算函数不受影响。\n"
@@ -1602,7 +1625,7 @@ static inline void kmm_v4_scope_pop(void) {
         // D6 修复：下溢同样 abort。push/pop 不成对是程序逻辑 bug，
         // 静默 return 后后续 pop 会继续在 depth=0 上误判并弹出 frames[-1]，
         // 读越界后回卷 thread heap，严重 UB。
-        fprintf(stderr, "KMM FATAL: Scope stack underflow (pop without push), aborting\n");
+        KMM_V4_DIAGF("KMM FATAL: Scope stack underflow (pop without push), aborting\n");
 #ifndef KAULA_FREESTANDING
         abort();
 #else

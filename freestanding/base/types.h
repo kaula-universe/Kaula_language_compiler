@@ -51,13 +51,26 @@ typedef void* ptr;
 typedef intptr_t ssize_t;
 #endif
 
-// 带长度前缀的字符串类型（与 std/base/types.h 同定义、同保护宏）
+// 带长度前缀的字符串类型
+// 必须与 std/base/types.h 逐字一致（含 SSO 布局与保护宏）：
+// 代码生成器按 SSO 形态产出字符串字面量（(String){.len=..,.sso=".."}）并用
+// string_cdata() 解包实参；若这里是"仅指针"形态，freestanding 模式下任何用到
+// Kaula string 的程序都会编译失败（field designator 'sso' / undeclared
+// 'string_cdata'）。
 #ifndef KAULA_STRING_DEFINED
 #define KAULA_STRING_DEFINED
+#define STRING_SSO_CAPACITY 15
 typedef struct {
     size_t len;
-    char* ptr;
+    union {
+        char* ptr;       // len > 15 时使用堆指针
+        char sso[16];    // len <= 15 时使用内嵌缓冲区（15字节 + null）
+    };
 } String;
+
+// SSO 感知：获取字符串数据指针（用宏而非函数，避免按值传递导致的悬垂指针）
+#define string_data(s) ((s).len <= STRING_SSO_CAPACITY ? (char*)(s).sso : (char*)(s).ptr)
+#define string_cdata(s) ((s).len <= STRING_SSO_CAPACITY ? (const char*)(s).sso : (const char*)(s).ptr)
 #endif
 
 // 类型常量（与 std/base/types.h 保持一致）

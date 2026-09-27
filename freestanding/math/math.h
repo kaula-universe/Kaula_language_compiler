@@ -31,12 +31,12 @@ extern f64 math_abs(f64 x);
 extern f64 math_fabs(f64 x);
 
 /**
- * math_min - 取较小值
+ * math_min - 取较小值（NaN 按 fmin 语义: math_min(NaN, y) == y）
  */
 extern f64 math_min(f64 x, f64 y);
 
 /**
- * math_max - 取较大值
+ * math_max - 取较大值（NaN 按 fmax 语义: math_max(NaN, y) == y）
  */
 extern f64 math_max(f64 x, f64 y);
 
@@ -61,22 +61,24 @@ extern bool math_isinf(f64 x);
 extern bool math_isfinite(f64 x);
 
 /**
- * math_floor - 向下取整
+ * math_floor - 向下取整（|x| ≥ 2^63 时 x 本身已是整数, 原样返回）
  */
 extern f64 math_floor(f64 x);
 
 /**
- * math_ceil - 向上取整
+ * math_ceil - 向上取整（|x| ≥ 2^63 时 x 本身已是整数, 原样返回）
  */
 extern f64 math_ceil(f64 x);
 
 /**
- * math_trunc - 截断取整
+ * math_trunc - 截断取整（|x| ≥ 2^63 时 x 本身已是整数, 原样返回）
  */
 extern f64 math_trunc(f64 x);
 
 /* ============================================================================
  * 整数数学（与 std.math 同名）
+ * math_abs_i64 / math_abs_i32: INT64_MIN / INT32_MIN 的相反数无法表示,
+ * 饱和到上界（不依赖有符号溢出的未定义行为）
  * ============================================================================ */
 
 extern i64 math_abs_i64(i64 x);

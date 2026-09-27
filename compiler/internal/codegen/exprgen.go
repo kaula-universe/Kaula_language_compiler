@@ -666,6 +666,14 @@ skip_constant_fold:
 		if rightType == "s" && isNullLiteralExpr(e.Left) {
 			return right + ".ptr == NULL"
 		}
+		// char* 与 null 比较: 指针比较，绝不能落到下面的 strcmp 分支
+		// （strcmp(p, NULL) 会解引用空指针）
+		if leftType == "cstr" && isNullLiteralExpr(e.Right) {
+			return left + " == NULL"
+		}
+		if rightType == "cstr" && isNullLiteralExpr(e.Left) {
+			return right + " == NULL"
+		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
 			if leftType == "s" {
 				return "strcmp(string_cdata(" + left + "), " + right + ") == 0"
@@ -689,6 +697,13 @@ skip_constant_fold:
 		}
 		if rightType == "s" && isNullLiteralExpr(e.Left) {
 			return right + ".ptr != NULL"
+		}
+		// char* 与 null 比较: 指针比较（同 EQ 分支，strcmp(p, NULL) 会崩）
+		if leftType == "cstr" && isNullLiteralExpr(e.Right) {
+			return left + " != NULL"
+		}
+		if rightType == "cstr" && isNullLiteralExpr(e.Left) {
+			return right + " != NULL"
 		}
 		if (leftType == "cstr" && rightType == "s") || (leftType == "s" && rightType == "cstr") {
 			if leftType == "s" {
@@ -1109,9 +1124,24 @@ func normalizePtrType(t string) string {
 }
 
 // isNullLiteralExpr 判断表达式是否为 null/NULL 字面量
+//
+// 除了 null/NULL 标识符，还包括「值为 0 的整数字面量」以及「把 0 转型成指针」
+// （as<char*>(0) / as<u8*>(0)）—— FFI 返回 char* 的函数惯用后者表示"没找到"，
+// 而 codegen 把 char* 归为 cstr，若不做指针比较就会生成 strcmp(p, NULL)，
+// 直接解引用空指针（Windows 上表现为 0xC0000005 访问冲突，且崩在 libc 里，
+// 报错完全指不到 Kaula 源码那一行）。
 func isNullLiteralExpr(expr ast.Expression) bool {
-	id, ok := expr.(*ast.Identifier)
-	return ok && (id.Name == "null" || id.Name == "NULL")
+	switch v := expr.(type) {
+	case *ast.Identifier:
+		return v.Name == "null" || v.Name == "NULL"
+	case *ast.IntegerLiteral:
+		return v.Value == 0
+	case *ast.TypeCastExpression:
+		return isNullLiteralExpr(v.Expression)
+	case *ast.ParenExpression:
+		return isNullLiteralExpr(v.Inner)
+	}
+	return false
 }
 
 // generateStdlibArgs 根据函数签名生成参数列表
@@ -1153,6 +1183,9 @@ func (eg *ExpressionGenerator) generateStdlibArgs(args []ast.Expression, sig *st
 			} else {
 				code += eg.GenerateExpression(arg)
 			}
+		} else if sig.VarArgs {
+			// 变参部分（printf 风格）: string 实参需解包为 char*
+			code += eg.generateVararg(arg)
 		} else {
 			code += eg.GenerateExpression(arg)
 		}
@@ -1361,6 +1394,8 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 					}
 				}
 
+				// printf 风格可变参数（print / println / println_multi 等）的变参
+				// 实参在 generateStdlibArgs 内已按 C 变参约定生成（string → char*）
 				code := cFuncName + "(" + eg.generateStdlibArgs(args, &funcSig) + ")"
 				return code
 			}
@@ -1635,7 +1670,10 @@ func (eg *ExpressionGenerator) generateAssertCall(args []ast.Expression) string 
 	if eg.codegen.testRunnerActive {
 		return fmt.Sprintf("__kaula_test_assert((int)(%s), \"%s\", __FILE__, __LINE__)", cond, msg)
 	}
-	return fmt.Sprintf("if (!(%s)) { fprintf(stderr, \"assertion failed: (%s) at %%s:%%d\\n\", __FILE__, __LINE__); exit(1); }", cond, msg)
+	// 失败路径走 kaula_runtime.h 的 kaula_assert_failed（双环境）：
+	// 托管模式打印断言文本并 exit(1)；裸机没有 stderr/exit，改调弱钩子 + trap。
+	// 直接写 fprintf/exit 会让裸机编译期就报 "call to undeclared function 'exit'"。
+	return fmt.Sprintf("if (!(%s)) { kaula_assert_failed(\"%s\", __FILE__, __LINE__); }", cond, msg)
 }
 
 func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string {
@@ -1745,14 +1783,9 @@ func (eg *ExpressionGenerator) generatePrintlnWithFormat(args []ast.Expression) 
 
 	// 输出参数
 	for i := 1; i < len(args); i++ {
-		argType := eg.inferType(args[i])
-		argCode := eg.GenerateExpression(args[i])
 		// string 变量(String*)需要解包为 char* 才能用 %s 打印
-		if argType == "s" || argType == "cstr" {
-			argCode = eg.maybeUnwrapString(argCode, argType)
-		}
 		b.WriteString(", ")
-		b.WriteString(argCode)
+		b.WriteString(eg.generateVararg(args[i]))
 	}
 
 	b.WriteString(")")
@@ -1789,7 +1822,7 @@ func (eg *ExpressionGenerator) generatePrintCall(args []ast.Expression) string {
 			b.WriteString("\"")
 			for i := 1; i < len(args); i++ {
 				b.WriteString(", ")
-				b.WriteString(eg.GenerateExpression(args[i]))
+				b.WriteString(eg.generateVararg(args[i]))
 			}
 			b.WriteString(")")
 			return b.String()
@@ -1872,6 +1905,15 @@ func (eg *ExpressionGenerator) maybeUnwrapString(code string, typeHint string) s
 		return "string_cdata(" + code + ")"
 	}
 	return code
+}
+
+// generateVararg 实参: printf 风格可变参数的实参生成。
+// C 的 %s 约定要求 char*, 而 Kaula 的 string 是 {len, sso/ptr} 结构体,
+// 因此 string 实参必须经 string_cdata() 解包（与 println_multi 的处理一致）。
+// 裸 print(...)/println(格式串, ...) 与模块限定调用
+// （std.io.print / freestanding.io.print / freestanding.io.println）都走这里。
+func (eg *ExpressionGenerator) generateVararg(arg ast.Expression) string {
+	return eg.maybeUnwrapString(eg.GenerateExpression(arg), eg.inferType(arg))
 }
 
 // inferType 推导表达式的类型（带缓存）
@@ -1991,9 +2033,9 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 				if normalizePtrType(t) == "char*" || t == "cstring" {
 					return "cstr"
 				}
-				if strings.HasSuffix(t, "*") {
-					return "cstr"
-				}
+				// 其它指针类型（u8*/u32*/void*/...）按整数语义处理：
+				// 判成 cstr 会让 `p == q` 走 strcmp 分支, 指针被当字符串解引用。
+				// 判成 cstr 的只有 char*: 它的 ==/!= 才是字符串内容比较。
 				if t == "bool" {
 					return "d"
 				}
@@ -2020,6 +2062,24 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 		return "d"
 	case *ast.ParenExpression:
 		return eg.inferType(e.Inner)
+	case *ast.TypeCastExpression:
+		// as<T>(expr): 按目标类型推断。缺了这一支时 as<char*>(p) 会落到默认 "d",
+		// println(指针) 会按整数打印出地址 —— C 侧 %s 约定需要 cstr 判定。
+		// 注意只把 char*/cstring 判为 cstr：其它指针（u8*/u32*/void*）必须留在
+		// "d"，否则 `p == as<u8*>(0)` 这类指针比较会走进 strcmp 分支去解引用空指针。
+		tcast := strings.ToLower(strings.TrimSpace(e.TargetType))
+		switch tcast {
+		case "string", "str":
+			return "s"
+		case "float", "float64", "float32", "f32", "f64", "double", "single":
+			return "f"
+		case "cstring", "cstr":
+			return "cstr"
+		}
+		if normalizePtrType(tcast) == "char*" {
+			return "cstr"
+		}
+		return "d"
 	case *ast.MemberAccessExpression:
 		// 动态对象成员访问
 		if eg.isObjectTyped(e.Object) {

@@ -1,0 +1,66 @@
+// fs_io.kl — freestanding.io 全部 16 个函数（Kaula 层）
+//
+// 覆盖: fs_output_putchar(钩子) / fs_putchar / fs_puts / fs_putint / fs_putuint /
+//       fs_puthex / fs_puthex_noprefix / fs_putbin / print / println / println_multi /
+//       print_char / print_int / print_float / print_bool / print_hex
+//
+// 输出约定: fs_* 系列最终都走弱钩子 fs_output_putchar, 默认实现是空操作
+// （裸机覆写为 UART, 托管覆写为控制台）, 因此托管模式下它们不产生可见输出 ——
+// 本文件验证"API 可从 Kaula 正常调用 + 格式化路径正确", 字节级输出断言由
+// C 层套件完成（tests/freestanding/c/test_io.c 覆写钩子后逐字节比对,
+// 并与 libc printf 同进程对比 1000+ 组用例）。
+
+import freestanding.io
+import freestanding.string
+
+fn main() -> i32 {
+    // ---------- 弱钩子直接调用（默认空操作, 不应崩溃） ----------
+    freestanding.io.fs_output_putchar(88)
+
+    // ---------- 底层输出（托管模式无可见输出, 裸机接 UART） ----------
+    freestanding.io.fs_puts("fs_puts: hello")
+    freestanding.io.fs_putchar(10)
+    freestanding.io.fs_putint(-42)
+    freestanding.io.fs_putchar(10)
+    freestanding.io.fs_putuint(12345678901234567890)
+    freestanding.io.fs_putchar(10)
+    freestanding.io.fs_puthex(0xBEEF)
+    freestanding.io.fs_putchar(10)
+    freestanding.io.fs_puthex_noprefix(0xCAFE)
+    freestanding.io.fs_putchar(10)
+    freestanding.io.fs_putbin(5)
+    freestanding.io.fs_putchar(10)
+
+    // ---------- 与 std.io 同名的输出 ----------
+    freestanding.io.print("print: ", 42, " ", 1.5, " ", "str", 10)
+    println("println: ", -7, " ", 2.5)
+    println("println_multi: ", 1, 2.5, "x", 9)
+
+    freestanding.io.print_char(65)
+    freestanding.io.print_char(10)
+    freestanding.io.print_int(-123)
+    freestanding.io.print_char(10)
+    freestanding.io.print_float(1.5)
+    freestanding.io.print_char(10)
+    freestanding.io.print_bool(true)
+    freestanding.io.print_char(10)
+    freestanding.io.print_bool(false)
+    freestanding.io.print_char(10)
+    freestanding.io.print_hex(48879)
+    freestanding.io.print_char(10)
+
+    // ---------- 格式化覆盖（与 printf 子集一致） ----------
+    freestanding.io.print("fmt: %d|%i|%u|%x|%X|%o|%c|%s|%%\n", -1, 2, 3, 255, 255, 8, 90, "s")
+    freestanding.io.print("fmt: %5d|%-5d|%05d|\n", 42, 42, 42)
+    freestanding.io.print("fmt: %8.3f|%.2f|%e|%g\n", 3.14159, 2.5, 1234.5, 0.5)
+    freestanding.io.print("fmt: %x %s\n", 0xDEADBEEF, "tail")
+    freestanding.io.print("fmt: %-8s|%.3s|%+d|% d\n", "ab", "abcdef", 42, 42)
+
+    // ---------- 与 freestanding.string 混用（跨模块链路） ----------
+    char num[32]
+    freestanding.string.fs_itoa(20260927, as<char*>(&num[0]))
+    println("cross-module: ", as<char*>(&num[0]), " len=", as<u64>(freestanding.string.strlen(as<char*>(&num[0]))))
+
+    println("fs_io: io module OK")
+    return 0
+}

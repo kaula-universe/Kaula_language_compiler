@@ -1549,6 +1549,16 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// kmm_v4_scope_pop / kmm_v4_survivor_* / kaula_add_i64 未声明直接编译失败。
 		allIncludes.WriteString("#include \"kmm_scoped_allocator_v4.h\"\n")
 		allIncludes.WriteString("#include \"kaula_runtime.h\"\n")
+		// Windows (MSVC ABI)：使用浮点的 TU 会引用 _fltused（CRT 提供）。
+		// --freestanding 在 Windows 宿主上链接时同样不链 CRT（-nostdlib），
+		// 必须自备 stub，否则链接期 undefined symbol: _fltused。
+		// 守卫条件用 _WIN32/_WIN64 判定：真正的裸机目标（*-none-elf）不受影响。
+		allIncludes.WriteString("#if defined(_WIN32) || defined(_WIN64)\n")
+		allIncludes.WriteString("#ifndef _KAULA_FLTUSED\n")
+		allIncludes.WriteString("#define _KAULA_FLTUSED\n")
+		allIncludes.WriteString("int _fltused = 0;\n")
+		allIncludes.WriteString("#endif\n")
+		allIncludes.WriteString("#endif\n")
 	} else {
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n#include \"kaula_runtime.h\"\n")
 		// Windows (MSVC ABI / UCRT)：编译器对使用浮点的 TU 生成未定义引用 _fltused，

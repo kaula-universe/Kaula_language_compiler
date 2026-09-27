@@ -194,7 +194,7 @@ kaulac.exe --freestanding --boot pvh --target-triple x86_64-none-elf kernel.kl
 | `target_triple` | `--target-triple` | 目标三元组（决定 boot 架构与 clang 目标） |
 | `output_format` | `--output-format` | `elf`（默认）/ `bin`（raw binary） |
 
-`boot` 模式下入口固定为 `_start`（引导 stub 定义，链接脚本 ENTRY），用户代码入口为 `kaula_main`（由模板 `_kaula_entry` 调用），无需再传 `--entry`。
+`boot` 模式下入口固定为 `_start`（引导 stub 定义，链接脚本 ENTRY），用户代码入口为 `K_kaula_main`（Kaula 侧 `fn main()` 或 `fn kaula_main()`，由模板 `_kaula_entry` 调用），无需再传 `--entry`。
 
 ## 编译选项
 
@@ -233,6 +233,10 @@ kaulac.exe --freestanding --boot pvh --target-triple x86_64-none-elf kernel.kl
 - 托管模式下可通过覆写弱钩子 `fs_output_putchar` 将 freestanding I/O 重定向到控制台
 
 头文件裁剪：freestanding 模式下不包含 `<stdio.h>`/`<stdlib.h>`，仅保留 `<stdint.h>`/`<stddef.h>`/`<stdbool.h>` 等 freestanding 头文件。
+
+不带 `--boot` 时 freestanding runtime 是**单独预编译成 `.o` 再链接**的（unity 短路径包含需要 `-I freestanding` 优先于 `-I std`，否则会误命中 `std/memory/memory.c`）；它已包含 5 个模块的全部符号，此时 `cache/std-objects/fs_*.o` 会被跳过。riscv64 缺省补 `-march=rv64gc -mabi=lp64d`（clang 默认软浮点会 lower 成 libcall，裸机没有 compiler-rt）。
+
+freestanding 库的模块清单、调用约定、链接模型细节与全链路验证方式见 [`freestanding.md`](freestanding.md)。
 
 ### --target-triple
 
@@ -704,10 +708,13 @@ Kaula 在 freestanding 模式下自动链接 `kaula_freestanding_runtime.c`，�
 
 freestanding 模式使用 `freestanding.c.tmpl` 模板，提供：
 
-- `extern int kaula_main(void);` 前向声明
+- `extern int32_t K_kaula_main(void);` 前向声明
 - `_kaula_entry` 入口函数，标记 `__attribute__((noreturn))`
-- 调用 `kaula_main()` 后停机
+- 调用 `K_kaula_main()` 后停机
 - 架构自适应停机指令：x86 用 `hlt`，其他架构用 `wfi`，最后 `while(1) {}` 死循环
+
+入口 C 符号是 `K_kaula_main`：Kaula 侧写 `fn main()` 或 `fn kaula_main()`
+都会编译成这个符号（非 `main` 的用户函数统一加 `K_` 前缀）。
 
 模板占位符：
 

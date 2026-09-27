@@ -1,0 +1,187 @@
+// fs_string.kl — freestanding.string 全部 30 个函数（Kaula 层）
+//
+// 覆盖: strlen/strcmp/strncmp/strcasecmp/strncasecmp/strcpy/strncpy/strcat/strncat/
+//       strchr/strrchr/strstr/strspn/strcspn/memchr/is_*/to_*/
+//       fs_itoa/fs_utoa/fs_itoa_hex/fs_atoi/fs_atou/fs_strdup
+//
+// 注: Kaula 的 string 是带长度+指针的 String 结构, 与 C char* 不同;
+//     下面的 C 字符串测试用 char 数组 + 显式终止符, 结果通过 strlen/strcmp 校验。
+
+import freestanding.string
+import freestanding.memory
+import freestanding.io
+
+fn check(bool cond, string label) {
+    if (!cond) {
+        println("FAIL ", label)
+    }
+}
+
+fn main() -> i32 {
+    // ---------- strlen ----------
+    check(as<u64>(freestanding.string.strlen("")) == 0, "strlen(\"\") == 0")
+    check(as<u64>(freestanding.string.strlen("a")) == 1, "strlen(\"a\") == 1")
+    check(as<u64>(freestanding.string.strlen("hello")) == 5, "strlen(\"hello\") == 5")
+    check(as<u64>(freestanding.string.strlen("0123456789abcdef")) == 16, "strlen 16 chars")
+
+    // ---------- strcmp / strncmp ----------
+    check(as<i32>(freestanding.string.strcmp("abc", "abc")) == 0, "strcmp equal == 0")
+    check(as<i32>(freestanding.string.strcmp("abc", "abd")) < 0, "strcmp less < 0")
+    check(as<i32>(freestanding.string.strcmp("abd", "abc")) > 0, "strcmp greater > 0")
+    check(as<i32>(freestanding.string.strcmp("abc", "abcd")) < 0, "strcmp prefix shorter")
+    check(as<i32>(freestanding.string.strcmp("", "")) == 0, "strcmp both empty")
+    check(as<i32>(freestanding.string.strncmp("abc", "abd", 2)) == 0, "strncmp equal within n")
+    check(as<i32>(freestanding.string.strncmp("abc", "abd", 3)) < 0, "strncmp differs at n")
+    check(as<i32>(freestanding.string.strncmp("abc", "abc", 100)) == 0, "strncmp huge n equal")
+    check(as<i32>(freestanding.string.strncmp("abc", "abd", 0)) == 0, "strncmp n=0 == 0")
+
+    // ---------- 大小写不敏感比较 ----------
+    check(as<i32>(freestanding.string.strcasecmp("ABC", "abc")) == 0, "strcasecmp equal")
+    check(as<i32>(freestanding.string.strcasecmp("AbC", "aBc")) == 0, "strcasecmp mixed case")
+    check(as<i32>(freestanding.string.strcasecmp("abc", "abd")) < 0, "strcasecmp less")
+    check(as<i32>(freestanding.string.strncasecmp("ABC", "abc", 0)) == 0, "strncasecmp n=0")
+    check(as<i32>(freestanding.string.strncasecmp("ABC", "abd", 2)) == 0, "strncasecmp within n")
+    check(as<i32>(freestanding.string.strncasecmp("ABC", "abd", 3)) < 0, "strncasecmp differs")
+    check(as<i32>(freestanding.string.strncasecmp("Hello World", "HELLO WORLD", 20)) == 0,
+          "strncasecmp long equal")
+
+    // ---------- strcpy / strncpy / strcat / strncat ----------
+    char a[64]
+    char b[64]
+    freestanding.string.strcpy(as<char*>(&a[0]), "hello")
+    check(as<u64>(freestanding.string.strlen(as<char*>(&a[0]))) == 5, "strcpy copies + terminates")
+    check(as<i32>(freestanding.string.strcmp(as<char*>(&a[0]), "hello")) == 0, "strcpy content")
+
+    freestanding.string.strncpy(as<char*>(&b[0]), "ab", 8)
+    check(as<i32>(freestanding.string.strcmp(as<char*>(&b[0]), "ab")) == 0, "strncpy short content")
+    i32 zero_tail = 1
+    i32 i = 2
+    while i < 8 {
+        if (b[i] != 0) {
+            zero_tail = 0
+        }
+        i = i + 1
+    }
+    check(zero_tail == 1, "strncpy zero-fills the remainder")
+
+    freestanding.string.strcpy(as<char*>(&a[0]), "foo")
+    freestanding.string.strcat(as<char*>(&a[0]), "bar")
+    check(as<i32>(freestanding.string.strcmp(as<char*>(&a[0]), "foobar")) == 0, "strcat appends")
+    freestanding.string.strncat(as<char*>(&a[0]), "bazqux", 3)
+    check(as<i32>(freestanding.string.strcmp(as<char*>(&a[0]), "foobarbaz")) == 0, "strncat at most n")
+
+    // ---------- strchr / strrchr / strstr ----------
+    check(freestanding.string.strchr("hello", 104) != as<char*>(0), "strchr finds 'h'")
+    check(freestanding.string.strchr("hello", 122) == as<char*>(0), "strchr not found -> null")
+    check(freestanding.string.strchr("hello", 0) != as<char*>(0), "strchr finds terminator")
+    check(freestanding.string.strrchr("hello", 108) != as<char*>(0), "strrchr finds 'l'")
+    check(freestanding.string.strrchr("hello", 122) == as<char*>(0), "strrchr not found -> null")
+    check(freestanding.string.strstr("hello world", "world") != as<char*>(0), "strstr finds substring")
+    check(freestanding.string.strstr("hello", "hello") != as<char*>(0), "strstr whole string")
+    check(freestanding.string.strstr("hello", "xyz") == as<char*>(0), "strstr not found -> null")
+
+    // ---------- strspn / strcspn ----------
+    check(as<u64>(freestanding.string.strspn("abcde", "abc")) == 3, "strspn prefix 3")
+    check(as<u64>(freestanding.string.strspn("abcde", "xyz")) == 0, "strspn none match")
+    check(as<u64>(freestanding.string.strspn("aXbc", "abc")) == 1, "strspn stops at mismatch")
+    check(as<u64>(freestanding.string.strcspn("abcde", "de")) == 3, "strcspn prefix 3")
+    check(as<u64>(freestanding.string.strcspn("abcde", "xyz")) == 5, "strcspn no reject")
+    check(as<u64>(freestanding.string.strcspn("dXbc", "d")) == 0, "strcspn first char rejected")
+
+    // ---------- memchr ----------
+    u8 m[8]
+    i = 0
+    while i < 8 {
+        m[i] = as<u8>(i + 1)
+        i = i + 1
+    }
+    check(as<u8*>(freestanding.string.memchr(as<void*>(&m[0]), 4, 8)) == &m[3], "memchr finds byte")
+    check(as<u8*>(freestanding.string.memchr(as<void*>(&m[0]), 99, 8)) == as<u8*>(0),
+          "memchr not found -> null")
+    check(as<u8*>(freestanding.string.memchr(as<void*>(&m[0]), 1, 0)) == as<u8*>(0),
+          "memchr n=0 -> null")
+
+    // ---------- 字符分类 ----------
+    check(freestanding.string.is_alpha(65) == true, "is_alpha('A')")
+    check(freestanding.string.is_alpha(97) == true, "is_alpha('a')")
+    check(freestanding.string.is_alpha(48) == false, "is_alpha('0') == false")
+    check(freestanding.string.is_digit(48) == true, "is_digit('0')")
+    check(freestanding.string.is_digit(57) == true, "is_digit('9')")
+    check(freestanding.string.is_digit(97) == false, "is_digit('a') == false")
+    check(freestanding.string.is_alnum(97) == true, "is_alnum('a')")
+    check(freestanding.string.is_alnum(48) == true, "is_alnum('0')")
+    check(freestanding.string.is_alnum(32) == false, "is_alnum(' ') == false")
+    check(freestanding.string.is_space(32) == true, "is_space(' ')")
+    check(freestanding.string.is_space(9) == true, "is_space('\\t')")
+    check(freestanding.string.is_space(10) == true, "is_space('\\n')")
+    check(freestanding.string.is_space(97) == false, "is_space('a') == false")
+    check(freestanding.string.is_upper(65) == true, "is_upper('A')")
+    check(freestanding.string.is_upper(97) == false, "is_upper('a') == false")
+    check(freestanding.string.is_lower(97) == true, "is_lower('a')")
+    check(freestanding.string.is_lower(65) == false, "is_lower('A') == false")
+    check(freestanding.string.is_xdigit(102) == true, "is_xdigit('f')")
+    check(freestanding.string.is_xdigit(70) == true, "is_xdigit('F')")
+    check(freestanding.string.is_xdigit(103) == false, "is_xdigit('g') == false")
+    check(as<i32>(freestanding.string.to_upper(97)) == 65, "to_upper('a') == 'A'")
+    check(as<i32>(freestanding.string.to_upper(65)) == 65, "to_upper('A') unchanged")
+    check(as<i32>(freestanding.string.to_lower(65)) == 97, "to_lower('A') == 'a'")
+    check(as<i32>(freestanding.string.to_lower(97)) == 97, "to_lower('a') unchanged")
+
+    // ---------- 数字 <-> 字符串 ----------
+    char num[32]
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa(0, as<char*>(&num[0])), "0")) == 0, "fs_itoa(0)")
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa(12345, as<char*>(&num[0])), "12345")) == 0, "fs_itoa(12345)")
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa(-9876, as<char*>(&num[0])), "-9876")) == 0, "fs_itoa(-9876)")
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa(9223372036854775807, as<char*>(&num[0])),
+              "9223372036854775807")) == 0, "fs_itoa(INT64_MAX)")
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa(-9223372036854775807, as<char*>(&num[0])),
+              "-9223372036854775807")) == 0, "fs_itoa(INT64_MIN+1)")
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_utoa(12345678901234567890, as<char*>(&num[0])),
+              "12345678901234567890")) == 0, "fs_utoa(U64)")
+
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa_hex(51966, as<char*>(&num[0]), false), "cafe")) == 0,
+          "fs_itoa_hex lower")
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa_hex(51966, as<char*>(&num[0]), true), "CAFE")) == 0,
+          "fs_itoa_hex upper")
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa_hex(0, as<char*>(&num[0]), false), "0")) == 0,
+          "fs_itoa_hex(0)")
+
+    check(freestanding.string.fs_atoi("0") == 0, "fs_atoi(\"0\")")
+    check(freestanding.string.fs_atoi("42") == 42, "fs_atoi(\"42\")")
+    check(freestanding.string.fs_atoi("-42") == -42, "fs_atoi(\"-42\")")
+    check(freestanding.string.fs_atoi("+42") == 42, "fs_atoi(\"+42\")")
+    check(freestanding.string.fs_atoi("  7  ") == 7, "fs_atoi skips whitespace")
+    check(freestanding.string.fs_atoi("abc") == 0, "fs_atoi invalid -> 0")
+    check(freestanding.string.fs_atoi("12abc") == 12, "fs_atoi stops at non-digit")
+    check(freestanding.string.fs_atoi("9223372036854775807") == 9223372036854775807, "fs_atoi(INT64_MAX)")
+
+    check(as<u64>(freestanding.string.fs_atou("0")) == 0, "fs_atou(\"0\")")
+    check(as<u64>(freestanding.string.fs_atou("42")) == 42, "fs_atou(\"42\")")
+    check(as<u64>(freestanding.string.fs_atou("0x1F")) == 31, "fs_atou hex lower x")
+    check(as<u64>(freestanding.string.fs_atou("0XdeadBEEF")) == 3735928559, "fs_atou hex mixed case")
+    check(as<u64>(freestanding.string.fs_atou("abc")) == 0, "fs_atou invalid -> 0")
+
+    // 与 fs_itoa 往返
+    check(as<i32>(freestanding.string.strcmp(
+              freestanding.string.fs_itoa(freestanding.string.fs_atoi("-31337"), as<char*>(&num[0])),
+              "-31337")) == 0, "fs_atoi/fs_itoa roundtrip")
+
+    // ---------- fs_strdup ----------
+    freestanding.memory.fs_alloc_reset()
+    char* dup = freestanding.string.fs_strdup("hello world")
+    check(dup != as<char*>(0), "fs_strdup allocates")
+    check(as<i32>(freestanding.string.strcmp(dup, "hello world")) == 0, "fs_strdup content")
+    check(freestanding.string.fs_strdup("") != as<char*>(0), "fs_strdup(\"\") non-null")
+
+    println("fs_string: string module OK")
+    return 0
+}
