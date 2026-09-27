@@ -102,6 +102,12 @@ type CodeGenerator struct {
 	// tcoTempSeq: 尾调用改写实参临时变量的序号（保证同一函数内多次改写不重名）
 	tcoTempSeq int
 
+	// 调用图与递归环节点集合（惰性构建一次，见 callgraph.go）：
+	// 判断"函数是否处于递归环"（含互递归），供 recursion_scope_depth 诊断用
+	callGraph      map[string][]string
+	cycleNodes     map[string]bool
+	callGraphReady bool
+
 	// recursionScopeNotes: "递归 + 每层 KMM 作用域"的函数名（非致命诊断）
 	recursionScopeNotes []string
 
