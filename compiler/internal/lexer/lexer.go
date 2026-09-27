@@ -241,9 +241,11 @@ func (l *Lexer) Next() Token {
 				l.next() // 跳过 [
 
 				// 收集注解内容直到遇到 ]
-				content := ""
+				// 必须按字节收集：string(byte) 会把字节当成 Unicode 码点再编码，
+				// 导致 #[test("中文")] 里的多字节字符被二次编码成乱码。
+				var content []byte
 				for l.pos < l.inputLen && l.input[l.pos] != ']' && l.input[l.pos] != '\n' {
-					content += string(l.input[l.pos])
+					content = append(content, l.input[l.pos])
 					l.next()
 				}
 
@@ -252,7 +254,7 @@ func (l *Lexer) Next() Token {
 					l.next()
 				}
 
-				return Token{Type: TOKEN_ATTRIBUTE, Value: "#[" + content + "]", Line: startLine, Column: startColumn}
+				return Token{Type: TOKEN_ATTRIBUTE, Value: "#[" + string(content) + "]", Line: startLine, Column: startColumn}
 			} else {
 				// 注释
 				l.skipComment()
@@ -813,10 +815,10 @@ func (l *Lexer) scanCharLiteral() Token {
 		case '"':
 			charValue = "\\\""
 		default:
-			charValue = string(escapeChar)
+			charValue = string([]byte{escapeChar})
 		}
 	} else {
-		charValue = string(l.input[l.pos])
+		charValue = string([]byte{l.input[l.pos]})
 	}
 	l.pos++
 
@@ -913,13 +915,14 @@ func (l *Lexer) SetPosition(pos int) {
 
 // ScanUntilRbrace 扫描直到遇到 '}'，返回扫描的内容（不包括 '}'）
 // 用于 #[asm] 函数体的原始内容透传
+// 按字节收集，避免 string(byte) 把多字节字符二次编码成乱码
 func (l *Lexer) ScanUntilRbrace() string {
-	result := ""
+	var result []byte
 	for l.pos < l.inputLen && l.input[l.pos] != '}' {
-		result += string(l.input[l.pos])
+		result = append(result, l.input[l.pos])
 		l.next()
 	}
-	return result
+	return string(result)
 }
 
 // TokenTypeToString 将token类型转换为字符串

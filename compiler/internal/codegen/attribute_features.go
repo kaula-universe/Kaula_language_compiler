@@ -7,7 +7,7 @@ import (
 	"kaula/internal/ast"
 )
 
-// AttributeFeatures 处理 #[test]、#[build]、#[derive]、#[command] 等高级属性
+// AttributeFeatures 处理 #[test]、#[derive]、#[command] 等高级属性
 type AttributeFeatures struct {
 	cg *CodeGenerator
 }
@@ -90,7 +90,9 @@ func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string
 	sb.WriteString("}\n\n")
 
 	// 单个测试运行函数
-	sb.WriteString("static void __kaula_run_test(const char* name, void (*test_fn)(void), int ignored) {\n")
+	// should_panic：语义为「断言失败即通过」。该测试若没有触发断言失败，
+	// 说明它本应失败却通过了，此时计为 FAILED。
+	sb.WriteString("static void __kaula_run_test(const char* name, const char* desc, void (*test_fn)(void), int ignored, int should_panic) {\n")
 	sb.WriteString("    __kaula_test_count++;\n")
 	sb.WriteString("    if (ignored) {\n")
 	sb.WriteString("        __kaula_test_ignored++;\n")
@@ -100,13 +102,22 @@ func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string
 	sb.WriteString("    __kaula_current_test_name = name;\n")
 	sb.WriteString("    __kaula_current_test_failed = 0;\n")
 	sb.WriteString("    test_fn();\n")
-	sb.WriteString("    if (__kaula_current_test_failed) {\n")
+	sb.WriteString("    if (should_panic) {\n")
+	sb.WriteString("        if (__kaula_current_test_failed) {\n")
+	sb.WriteString("            __kaula_test_passed++;\n")
+	sb.WriteString("            printf(\"test %s ... ok\\n\", name);\n")
+	sb.WriteString("        } else {\n")
+	sb.WriteString("            __kaula_test_failed++;\n")
+	sb.WriteString("            printf(\"test %s ... FAILED (expected #[should_panic] to fail, but it passed)\\n\", name);\n")
+	sb.WriteString("        }\n")
+	sb.WriteString("    } else if (__kaula_current_test_failed) {\n")
 	sb.WriteString("        __kaula_test_failed++;\n")
 	sb.WriteString("        printf(\"test %s ... FAILED\\n\", name);\n")
 	sb.WriteString("    } else {\n")
 	sb.WriteString("        __kaula_test_passed++;\n")
 	sb.WriteString("        printf(\"test %s ... ok\\n\", name);\n")
 	sb.WriteString("    }\n")
+	sb.WriteString("    if (desc && desc[0] != '\\0') printf(\"  (%s)\\n\", desc);\n")
 	sb.WriteString("}\n\n")
 
 	// main 函数
@@ -116,11 +127,11 @@ func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string
 
 	// 生成测试调用
 	for _, test := range tests {
-		cName := "K_" + test.Name
+		desc := cStringLiteral(test.Description)
 		if test.Ignored {
-			sb.WriteString(fmt.Sprintf("    __kaula_run_test(\"%s\", NULL, 1);\n", test.Name))
+			sb.WriteString(fmt.Sprintf("    __kaula_run_test(\"%s\", %s, NULL, 1, %d);\n", test.Name, desc, boolToCInt(test.ShouldPanic)))
 		} else {
-			sb.WriteString(fmt.Sprintf("    __kaula_run_test(\"%s\", %s, 0);\n", test.Name, cName))
+			sb.WriteString(fmt.Sprintf("    __kaula_run_test(\"%s\", %s, K_%s, 0, %d);\n", test.Name, desc, test.Name, boolToCInt(test.ShouldPanic)))
 		}
 	}
 
@@ -142,6 +153,49 @@ func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string
 	sb.WriteString("}\n")
 
 	return sb.String()
+}
+
+// cStringLiteral 把任意字符串编码为安全的 C 字符串字面量。
+// #[test("描述")] 的描述会直接拼进生成的 C 源码，必须转义引号/反斜杠/换行，
+// 否则描述里的一个 " 就能破坏生成代码。
+func cStringLiteral(s string) string {
+	if s == "" {
+		return "NULL"
+	}
+	var sb strings.Builder
+	sb.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			sb.WriteString(`\"`)
+		case '\\':
+			sb.WriteString(`\\`)
+		case '\n':
+			sb.WriteString(`\n`)
+		case '\r':
+			sb.WriteString(`\r`)
+		case '\t':
+			sb.WriteString(`\t`)
+		default:
+			// 过滤不可打印控制字符，避免生成非法 C 源码
+			if c < 0x20 || c == 0x7f {
+				fmt.Fprintf(&sb, `\x%02x`, c)
+			} else {
+				sb.WriteByte(c)
+			}
+		}
+	}
+	sb.WriteByte('"')
+	return sb.String()
+}
+
+// boolToCInt 把 Go bool 转为 C 整数字面量
+func boolToCInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // DeriveInfo 派生宏信息
@@ -335,24 +389,6 @@ func (af *AttributeFeatures) isFloatType(t string) bool {
 		return true
 	}
 	return false
-}
-
-// BuildFunctionInfo 构建函数信息
-type BuildFunctionInfo struct {
-	Name string
-}
-
-// CollectBuildFunctions 收集所有带 #[build] 属性的函数
-func (af *AttributeFeatures) CollectBuildFunctions(program *ast.Program) []BuildFunctionInfo {
-	var builds []BuildFunctionInfo
-	program.Traverse(func(n ast.Node) {
-		if fn, ok := n.(*ast.FunctionStatement); ok {
-			if ast.HasAttribute(fn.Attributes, "build") {
-				builds = append(builds, BuildFunctionInfo{Name: fn.Name})
-			}
-		}
-	})
-	return builds
 }
 
 // CommandInfo 命令行参数信息

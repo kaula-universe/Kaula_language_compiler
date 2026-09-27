@@ -29,9 +29,18 @@ TestSuite* test_suite_create(const String name, void (*setup)(void), void (*tear
         suite->setup = setup;
         suite->teardown = teardown;
     }
+    /* g_all_suites 初始为 NULL，容量判断 (0 >= 16) 为假，
+     * 旧实现因此永远不分配数组，首次 test_suite_create 就写入 NULL 指针。 */
+    if (!g_all_suites) {
+        g_all_suites = (TestSuite**)kmm_v4_calloc(g_suite_capacity, sizeof(TestSuite*));
+        if (!g_all_suites) return suite;
+    }
     if (g_suite_count >= g_suite_capacity) {
-        g_suite_capacity *= 2;
-        g_all_suites = (TestSuite**)kmm_v4_realloc(g_all_suites, g_suite_capacity * sizeof(TestSuite*));
+        size_t newcap = g_suite_capacity * 2;
+        TestSuite** grown = (TestSuite**)kmm_v4_realloc(g_all_suites, newcap * sizeof(TestSuite*));
+        if (!grown) return suite;
+        g_all_suites = grown;
+        g_suite_capacity = newcap;
     }
     g_all_suites[g_suite_count++] = suite;
     return suite;
@@ -49,9 +58,17 @@ TestCase* test_case_create(const String name, void (*func)(void), const String s
         tc->func = func;
         tc->suite_name = suite_name.ptr ? string_copy(suite_name) : (String){0, NULL};
     }
+    /* 同 test_suite_create：首次调用必须先分配，否则写入 NULL 指针 */
+    if (!g_all_cases) {
+        g_all_cases = (TestCase**)kmm_v4_calloc(g_case_capacity, sizeof(TestCase*));
+        if (!g_all_cases) return tc;
+    }
     if (g_case_count >= g_case_capacity) {
-        g_case_capacity *= 2;
-        g_all_cases = (TestCase**)kmm_v4_realloc(g_all_cases, g_case_capacity * sizeof(TestCase*));
+        size_t newcap = g_case_capacity * 2;
+        TestCase** grown = (TestCase**)kmm_v4_realloc(g_all_cases, newcap * sizeof(TestCase*));
+        if (!grown) return tc;
+        g_all_cases = grown;
+        g_case_capacity = newcap;
     }
     g_all_cases[g_case_count++] = tc;
     return tc;
@@ -78,6 +95,24 @@ TestReport* test_run_all() {
             }
         }
         if (suite && suite->setup) suite->setup();
+
+        /* 关键顺序：必须先占好 results[count] 槽位并让 count 前移，
+         * 再执行 tc->func()。
+         *
+         * test_assert_* 通过 g_current_report->results[g_current_report->count - 1]
+         * 定位「当前正在跑的用例」。若在 func() 之后才 count++，func() 期间
+         * count 仍指向本用例的下标，count-1 会落到上一个用例上，
+         * 导致断言失败被记到错误的用例，而本用例因之后被无条件
+         * passed = true 覆盖成「通过」——测试永远不会失败。 */
+        TestResult* r = &report->results[report->count];
+        r->name = string_copy(tc->name);
+        r->passed = true;            /* 乐观默认：断言失败时由 test_assert_* 翻成 false */
+        r->message = (String){0, NULL};
+        r->file = (String){0, NULL};
+        r->line = 0;
+        r->duration_ms = 0;
+        report->count++;
+
         i64 start = 0; i64 end = 0;
         #ifdef _WIN32
         LARGE_INTEGER freq, c1, c2;
@@ -86,17 +121,14 @@ TestReport* test_run_all() {
         tc->func();
         QueryPerformanceCounter(&c2);
         end = c2.QuadPart;
-        report->results[report->count].duration_ms = (end - start) * 1000 / freq.QuadPart;
+        r->duration_ms = (end - start) * 1000 / freq.QuadPart;
         #else
         struct timespec t1, t2;
         clock_gettime(CLOCK_MONOTONIC, &t1); start = t1.tv_sec * 1000 + t1.tv_nsec / 1000000;
         tc->func();
         clock_gettime(CLOCK_MONOTONIC, &t2); end = t2.tv_sec * 1000 + t2.tv_nsec / 1000000;
-        report->results[report->count].duration_ms = end - start;
+        r->duration_ms = end - start;
         #endif
-        report->results[report->count].name = string_copy(tc->name);
-        report->results[report->count].passed = true;
-        report->count++;
         if (suite && suite->teardown) suite->teardown();
     }
     for (size_t i = 0; i < report->count; i++) {
@@ -150,10 +182,9 @@ bool_t test_assert_equals(i64 expected, i64 actual, const char* message, const c
     if (!g_current_report || g_current_report->count == 0) return false;
     TestResult* r = &g_current_report->results[g_current_report->count - 1];
     r->passed = false;
-    r->message = string_create_from_int(expected);
-    r->message = string_concat(r->message, string_create(" != "));
-    r->message = string_concat(r->message, string_create_from_int(actual));
-    string_free(r->message); r->message = string_create(message);
+    /* 此前这里先拼 "expected != actual" 再 string_free 掉并用 message 覆盖，
+     * 纯属白做功且泄漏临时串；只保留 message。 */
+    r->message = string_create(message);
     r->file = string_create(file);
     r->line = line;
     return false;
