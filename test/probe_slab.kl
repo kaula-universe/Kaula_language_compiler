@@ -1,0 +1,43 @@
+// probe_slab.kl — 只驱动 slab（幸存段）成对分配/释放这一条路径，用于隔离定位开销。
+// 与 alloc_bench.kl 的阶段 D 同构，但不 preceding 任何其他阶段，
+// 因此可与 C 探针 / alloc_bench 的 D 阶段直接对比。
+import std.io
+import std.memory
+import std.time
+
+fn main() {
+    i64 n = 200000
+    i64 freed = 0
+    i64 sink = 0
+
+    // 预热：页池/桶懒分配 + 分支预测
+    i64 w = 0
+    while w < 1000 {
+        i32* wp = as<i32*>(std.memory.kmm_v4_global_alloc(16))
+        wp[0] = 1
+        sink = sink + wp[0]
+        if std.memory.kmm_v4_global_free(wp) {
+            freed = freed + 1
+        }
+        w = w + 1
+    }
+
+    i64 t0 = std.time.time_now_ns()
+    i64 i = 0
+    while i < n {
+        i32* p = as<i32*>(std.memory.kmm_v4_global_alloc(16))
+        p[0] = 1
+        sink = sink + p[0]
+        if std.memory.kmm_v4_global_free(p) {
+            freed = freed + 1
+        }
+        i = i + 1
+    }
+    i64 t1 = std.time.time_now_ns()
+
+    std.io.println("[D-only] slab alloc+free 16B x", n, "  ", (t1 - t0) / 1000000, " ms   ",
+                   (t1 - t0) / n, " ns/pair")
+    std.io.println("[D-only] freed ", freed, " / ", n)
+    std.io.println("[D-only] usage after ", std.memory.kmm_v4_usage())
+    std.io.println("[D-only] sink ", sink)
+}
