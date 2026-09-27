@@ -433,12 +433,43 @@ BigInt bigint_multiply(const BigInt* a, const BigInt* b) {
     return r;
 }
 
+// 128/128 的商与余数。
+//
+// 为什么不用 `n / d` / `n % d`：那会降级成对 __udivti3 / __umodti3 的调用。
+// 这两个符号属于 compiler-rt，而 kaulac 的链接命令行里既没有 compiler-rt 也没有
+// libgcc，结果是任何 import std.algebra 的程序都链接失败
+// (lld-link: error: undefined symbol: __udivti3)。手工实现这两个符号也不可行：
+// clang 生成的调用约定是「128 位参数按指针传递、返回值放在 xmm0」，与
+// compiler-rt 的 3 参数 sret 形式对不上（实测会在 __udivti3 内部访问违例）。
+//
+// 这里改成逐位移减的长除法：只用到 128 位的移位 / 比较 / 减法，这三类在
+// x86-64 / AArch64 上都是内联的 64 位指令（shld/cmov/sub），不产生任何新的
+// 未定义符号。代价是固定 128 轮迭代；本函数每个 limb 调用一次，相比 bigint
+// 的乘法开销可以忽略。
+static void bigint_udivmod128(__uint128_t n, __uint128_t d,
+                              __uint128_t* q, __uint128_t* r) {
+    __uint128_t quo = 0;
+    __uint128_t rem = 0;
+    for (int i = 127; i >= 0; i--) {
+        rem = (rem << 1) | ((n >> i) & 1);
+        if (rem >= d) {
+            rem -= d;
+            quo |= (__uint128_t)1 << i;
+        }
+    }
+    *q = quo;
+    *r = rem;
+}
+
 static u64 bigint_divmod_small(BigInt* x, u64 divisor) {
     u64 rem = 0;
     for (size_t i = x->count; i-- > 0;) {
+        // 不变量: 进入本轮时 rem < divisor, 因此 cur / divisor 必然放得进 64 位
         __uint128_t cur = ((__uint128_t)rem << 64) | x->limbs[i];
-        x->limbs[i] = (u64)(cur / divisor);
-        rem = (u64)(cur % divisor);
+        __uint128_t quo, mod;
+        bigint_udivmod128(cur, (__uint128_t)divisor, &quo, &mod);
+        x->limbs[i] = (u64)quo;
+        rem = (u64)mod;
     }
     bigint_trim(x);
     return rem;
@@ -504,12 +535,27 @@ static void bigint_divmod_mag(const BigInt* num, const BigInt* den,
     const __uint128_t B = (__uint128_t)1 << 64;
     for (size_t j = m + 1; j-- > 0;) {
         __uint128_t top = ((__uint128_t)U[j + n] << 64) | U[j + n - 1];
-        u64 qhat = (u64)(top / V[n - 1]);
-        u64 rhat = (u64)(top % V[n - 1]);
+        // 同样是 128/64，除数是归一化后的最高 limb（V[n-1] 的 bit63 已置位）。
+        // Knuth 不变式 U[j+n] < V[n-1] 保证商放得进 64 位；万一不变式被破坏
+        // 导致商超过 64 位，按 Knuth 的做法把 qhat 夹到 B-1 并重算余数。
+        __uint128_t q128, r128;
+        bigint_udivmod128(top, (__uint128_t)V[n - 1], &q128, &r128);
+        u64 qhat, rhat;
+        if ((q128 >> 64) != 0) {
+            qhat = (u64)~(u64)0;
+            r128 = top - (__uint128_t)qhat * ( __uint128_t)V[n - 1];
+        } else {
+            qhat = (u64)q128;
+        }
+        rhat = (u64)r128;
         while ((__uint128_t)qhat * V[n - 2] > (((__uint128_t)rhat << 64) | U[j + n - 2])) {
             qhat--;
+            // rhat += V[n-1] 溢出 64 位时说明 rhat 回绕了（等价于 Knuth 里的
+            // rhat >= B）。注意不能写成 `rhat >= (u64)B` —— B 是 128 位量，
+            // 截断成 u64 后恒为 0，判断会永远成立从而让整个校正循环失效。
+            u64 before = rhat;
             rhat += V[n - 1];
-            if (rhat >= (u64)B) break;
+            if (rhat < before) break;   // 回绕 -> rhat 曾经 >= B
         }
         u64 borrow = 0;
         for (size_t i = 0; i < n; i++) {
