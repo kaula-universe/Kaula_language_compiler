@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"kaula/internal/ast"
+	"regexp"
 	"strings"
 )
 
@@ -412,17 +413,12 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 	// 其对顶层函数的调用会先于这些函数的原型出现，C 报 "undeclared function"。
 	// 延迟段由装配器置于 forwardDecls 与全局变量之后、普通函数体之前。
 	impl := &tg.codegen.classImplCode
-	for _, constructor := range stmt.Constructors {
-		impl.WriteString(tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor))
-	}
-
-	for _, method := range stmt.Methods {
-		impl.WriteString(tg.GenerateMethodStatement(stmt.Name, method))
-	}
 
 	// 为每个 implements 的接口生成"具体类 → 接口句柄"提升函数。
 	// 调用点把具体类对象实参（如 K_Circle*）提升为接口句柄（K_Shape），
 	// 使接口参数能拿到方法组 + 对象指针，进而在调用处走 vtbl 多态分派。
+	// 变量声明（Shape sh = Circle(2.0)）与方法返回接口（fn grow() Shape）
+	// 的装箱也会调用它，故必须排在构造器/方法体之前，否则 C99 隐式声明报错。
 	for _, ifaceName := range stmt.Implements {
 		ifaceC := kaulaStructTag(ifaceName) // K_Shape
 		classC := kaulaStructTag(stmt.Name) // K_Circle
@@ -432,6 +428,14 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 		impl.WriteString("    s.self = (void*)obj;\n")
 		impl.WriteString("    return s;\n")
 		impl.WriteString("}\n\n")
+	}
+
+	for _, constructor := range stmt.Constructors {
+		impl.WriteString(tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor))
+	}
+
+	for _, method := range stmt.Methods {
+		impl.WriteString(tg.GenerateMethodStatement(stmt.Name, method))
 	}
 
 	return code.String()
@@ -561,18 +565,41 @@ func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement)
 	return code.String()
 }
 
+// rewriteInterfaceSelfRef 把"正在生成的接口句柄类型"的 typedef 引用改写成
+// struct tag 形式。接口方法组先于接口句柄 typedef 发射，方法返回/接收接口
+// 自身（fn grow() Shape）时 K_Shape 这个 typedef 名尚不存在，clang 会报
+// "type name requires a specifier or qualifier"。函数指针声明允许不完整返回
+// 类型（struct K_Shape），而句柄 typedef 紧随其后补全。
+// 用词边界匹配，避免误伤 K_Shape_MethodGroup 这类前缀相同的名字。
+func rewriteInterfaceSelfRef(cType, ifaceName string) string {
+	if ifaceName == "" || cType == "" {
+		return cType
+	}
+	tag := kaulaStructTag(ifaceName)
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(tag) + `\b`)
+	return re.ReplaceAllString(cType, "struct "+tag)
+}
+
 func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement) string {
 	var code strings.Builder
+
+	// 先登记接口句柄类型，再生成方法组：方法组里每个成员的返回类型要经
+	// convertType 映射，方法返回接口自身（fn grow() Shape）时若此时尚未
+	// 登记，会把 Kaula 裸名 Shape 直接吐进 C，clang 报
+	// "type name requires a specifier or qualifier"。
+	tg.interfaceTypes[stmt.Name] = true
+	tg.structTypes[stmt.Name] = true
+
 	code.WriteString(fmt.Sprintf("// Interface: %s (Composition Grouping - Zero Overhead)\n", stmt.Name))
 
 	methodGroupName := stmt.Name + "_MethodGroup"
 	tg.structTypes[methodGroupName] = true
 	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(methodGroupName)))
 	for _, method := range stmt.Methods {
-		returnType := tg.convertType(method.ReturnType, false)
+		returnType := rewriteInterfaceSelfRef(tg.convertType(method.ReturnType, false), stmt.Name)
 		code.WriteString(fmt.Sprintf("    %s (*%s)(void* self", returnType, method.Name))
 		for _, param := range method.Params {
-			paramType := tg.convertType(param.Type, false)
+			paramType := rewriteInterfaceSelfRef(tg.convertType(param.Type, false), stmt.Name)
 			code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
 		}
 		code.WriteString(");\n")
@@ -583,8 +610,7 @@ func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement
 	// 使 interface 类型具备 C 映射（接口变量/接口参数），多态分派经
 	// p.vtbl.method(p.self) 走方法组，由 class implements 时生成的提升函数
 	// （K_<Iface>_from_<Class>）把具体类对象提升为接口句柄。
-	tg.interfaceTypes[stmt.Name] = true
-	tg.structTypes[stmt.Name] = true
+	// （structTypes/interfaceTypes 已在函数开头登记——方法组生成需要它。）
 	code.WriteString(fmt.Sprintf("// Interface handle: %s\n", stmt.Name))
 	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
 	code.WriteString(fmt.Sprintf("    %s vtbl;\n", kaulaStructTag(methodGroupName)))

@@ -1,0 +1,121 @@
+# stress_iface_return.kl —— 接口返回类型压力测试
+# 覆盖：方法返回接口(装箱)、接口变量声明(装箱)、接口方法组前向引用、
+#       接口多方法(可省略分号)、接口句柄链式调用(vtbl 多态链)、
+#       具体类/接口混用，以及"接口参数提升"既有能力不回归。
+import std.io
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+# 4 个方法：前 3 个不写分号（回归护栏：修复前第 2 个及之后的方法会被丢弃，
+# 导致接口体错位、后续 class 的方法被当成顶层代码）
+interface Shape {
+    fn area() f64
+    fn grow(f64 k) Shape
+    fn describe() string
+    fn scale(f64 k, string tag) Shape;
+}
+
+class Square implements Shape {
+    side: f64
+    tag: string
+
+    constructor(f64 s, string t) {
+        self.side = s
+        self.tag = t
+    }
+
+    fn area() f64 { return self.side * self.side }
+
+    # 返回接口：必须装箱成接口句柄
+    fn grow(f64 k) Shape { return Square(self.side * k, self.tag) }
+
+    fn describe() string { return self.tag }
+
+    fn scale(f64 k, string tag) Shape { return Square(self.side * k, tag) }
+}
+
+class Rect implements Shape {
+    w: f64
+    h: f64
+    tag: string
+
+    constructor(f64 w, f64 h, string t) {
+        self.w = w
+        self.h = h
+        self.tag = t
+    }
+
+    fn area() f64 { return self.w * self.h }
+    fn grow(f64 k) Shape { return Rect(self.w * k, self.h * k, self.tag) }
+    fn describe() string { return self.tag }
+    fn scale(f64 k, string tag) Shape { return Rect(self.w * k, self.h * k, tag) }
+}
+
+# 接收接口参数（既有提升能力，回归护栏）
+fn total_area(Shape a, Shape b) f64 {
+    return a.area() + b.area()
+}
+
+# 返回接口的顶层函数
+fn make_shape(f64 v) Shape {
+    return Square(v, "from-fn")
+}
+
+fn main() {
+    # 1. 接口变量声明：具体类装箱成句柄
+    Shape sh = Square(2.0, "sq")
+    check(sh.area() == 4.0, "iface var decl + box")
+
+    # 2. 具体类直接调用（不装箱路径）
+    Square sq = Square(3.0, "sq3")
+    check(sq.area() == 9.0, "concrete method direct")
+
+    # 3. 方法返回接口 → 接口变量（经过一次装箱）
+    Shape g = sq.grow(2.0)
+    check(g.area() == 36.0, "method returns iface -> var")
+
+    # 4. 接口句柄链式调用：grow() 返回接口，再 area()，走 vtbl 多态
+    f64 chained = sq.grow(2.0).area()
+    check(chained == 36.0, "iface chain grow().area()")
+
+    # 5. 两级链：scale().describe()
+    string tag = sq.scale(2.0, "scaled").describe()
+    check(tag == "scaled", "iface chain scale().describe()")
+
+    # 6. 多态：同一接口句柄位置放不同实现
+    Shape r = Rect(2.0, 3.0, "rect")
+    check(r.area() == 6.0, "rect via iface")
+    check(sq.grow(3.0).area() == 81.0, "square via iface chain")
+    check(r.grow(2.0).area() == 24.0, "rect via iface chain")
+
+    # 7. 接口参数提升（vtbl 分派，既有能力不回归）
+    check(total_area(Square(2.0, "a"), Rect(3.0, 4.0, "b")) == 16.0, "iface param mix")
+    check(total_area(sq, sq) == 18.0, "iface param same")
+
+    # 8. 顶层函数返回接口
+    Shape mf = make_shape(5.0)
+    check(mf.area() == 25.0, "fn returns iface")
+    check(make_shape(2.0).area() == 4.0, "fn returns iface chained")
+
+    # 9. 链式赋给变量后再链
+    Shape mid = sq.grow(2.0).grow(2.0)
+    check(mid.area() == 144.0, "chain assign then chain")
+
+    # 10. 接口变量在条件里参与比较
+    if sq.grow(2.0).area() == 36.0 {
+        check(true, "iface chain in condition")
+    } else {
+        check(false, "iface chain in condition")
+    }
+
+    # 11. 链式结果作为实参传给接口形参
+    check(total_area(sq.grow(2.0), Rect(1.0, 1.0, "c")) == 37.0, "iface chain as arg")
+
+    std.io.println("--- stress_iface_return done ---")
+}

@@ -2511,16 +2511,32 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 						p.nextToken()
 					}
 				}
-				// 接口方法：需要分号结尾
-				if p.curTok.Type == lexer.TOKEN_SEMICOLON {
+				// 接口方法：分号可省略（与 class 体成员一致），只要下一个 token
+				// 是新成员的开头（fn / 字段或前置返回类型的 IDENT / 类型关键字）
+				// 或接口体结尾 }。
+				//
+				// 修复前只接受 ';' 和 '}'：省略分号且该方法不是最后一个时，
+				// 整条方法声明被丢弃并逐 token 跳过，接口体随之错位——表现为
+				// 后续 class 的方法被当成顶层代码，报一堆 undefined_function /
+				// undefined_variable，且行号指向完全不相关的位置。
+				isNextMemberStart := false
+				switch p.curTok.Type {
+				case lexer.TOKEN_FUNC, lexer.TOKEN_IDENT, lexer.TOKEN_RBRACE,
+					lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
+					lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING,
+					lexer.TOKEN_TYPE_VOID:
+					isNextMemberStart = true
+				}
+				switch {
+				case p.curTok.Type == lexer.TOKEN_SEMICOLON:
 					p.nextToken()
 					stmt.Methods = append(stmt.Methods, method)
 					p.log("解析完成接口 fn 方法声明：%s", method.String())
-				} else if p.curTok.Type == lexer.TOKEN_RBRACE {
-					// 无分号，但到了接口结尾：也算合法（分号可选）
+				case isNextMemberStart:
+					// 无分号：合法，直接进入下一个成员（不消费任何 token）
 					stmt.Methods = append(stmt.Methods, method)
 					p.log("解析完成接口 fn 方法声明（无分号）：%s", method.String())
-				} else {
+				default:
 					// 失败：恢复
 					p.curTok = savedCurTok
 					p.peekTok = savedPeekTok
