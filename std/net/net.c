@@ -57,7 +57,7 @@ bool_t socket_bind(Socket* sock, const String host, u16 port) {
     if (!sock || !sock->is_valid) return false;
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    if (host.ptr) inet_pton(AF_INET, host.ptr, &addr.sin_addr);
+    if (host.len) inet_pton(AF_INET, string_cdata(host), &addr.sin_addr);
     else addr.sin_addr.s_addr = htonl(INADDR_ANY);
 #if STD_PLATFORM_WINDOWS
     return bind((SOCKET)sock->handle, (struct sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR;
@@ -102,7 +102,7 @@ bool_t socket_connect(Socket* sock, const String host, u16 port) {
     if (!sock || host.len == 0 || !sock->is_valid) return false;
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    inet_pton(AF_INET, host.ptr, &addr.sin_addr);
+    inet_pton(AF_INET, string_cdata(host), &addr.sin_addr);
 #if STD_PLATFORM_WINDOWS
     return connect((SOCKET)sock->handle, (struct sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR;
 #else
@@ -191,7 +191,7 @@ size_t udp_send_to(Socket* sock, const String host, u16 port, const u8* data, si
     if (!sock || !sock->is_valid || host.len == 0 || !data) return 0;
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    inet_pton(AF_INET, host.ptr, &addr.sin_addr);
+    inet_pton(AF_INET, string_cdata(host), &addr.sin_addr);
 #if STD_PLATFORM_WINDOWS
     int ret = sendto((SOCKET)sock->handle, (const char*)data, (int)len, 0, (struct sockaddr*)&addr, sizeof(addr));
     return ret > 0 ? ret : 0;
@@ -236,7 +236,7 @@ bool_t dns_resolve(const String hostname, String* ip_out) {
     struct addrinfo hints, *result;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
-    if (getaddrinfo(hostname.ptr, NULL, &hints, &result) != 0) return false;
+    if (getaddrinfo(string_cdata(hostname), NULL, &hints, &result) != 0) return false;
     char buf[64];
     struct sockaddr_in* ipv4 = (struct sockaddr_in*)result->ai_addr;
     inet_ntop(AF_INET, &ipv4->sin_addr, buf, sizeof(buf));
@@ -247,7 +247,7 @@ bool_t dns_resolve(const String hostname, String* ip_out) {
 
 bool_t net_is_valid_ip(const String ip) {
     if (ip.len == 0) return false;
-    struct sockaddr_in sa; return inet_pton(AF_INET, ip.ptr, &(sa.sin_addr)) == 1;
+    struct sockaddr_in sa; return inet_pton(AF_INET, string_cdata(ip), &(sa.sin_addr)) == 1;
 }
 
 String net_get_local_hostname() {

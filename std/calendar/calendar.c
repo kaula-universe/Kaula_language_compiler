@@ -52,7 +52,7 @@ Calendar* calendar_create(const char* name, i64 first_day_of_week) {
 
 void calendar_destroy(Calendar* cal) {
     if (!cal) return;
-    kmm_v4_free(cal->name.ptr);
+    if (cal->name.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(cal->name));
     kmm_v4_free(cal);
 }
 

@@ -725,7 +725,7 @@ void cli_print_help(CliApp* app) {
     size_t max_len = 0;
     if (!app) return;
 
-    printf("Usage: %s [OPTIONS]", app->program_name.len > 0 ? app->program_name.ptr : app->name);
+    printf("Usage: %s [OPTIONS]", app->program_name.len > 0 ? string_cdata(app->program_name) : app->name);
 
     for (i = 0; i < app->flag_count; i++) {
         if (app->flags[i].is_positional) {
@@ -815,7 +815,7 @@ bool_t cli_version_requested(CliApp* app) {
 const char* cli_program_name(CliApp* app) {
     if (!app) return NULL;
     if (app->program_name.len > 0) {
-        return app->program_name.ptr;
+        return string_cdata(app->program_name);
     }
     return app->name;
 }

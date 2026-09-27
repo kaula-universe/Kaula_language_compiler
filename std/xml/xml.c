@@ -6,8 +6,8 @@
 XmlDocument* xml_create(const String version, const String encoding) {
     XmlDocument* doc = (XmlDocument*)kmm_v4_calloc(1, sizeof(XmlDocument));
     if (doc) {
-        doc->version = version.ptr ? string_copy(version) : string_create("1.0");
-        doc->encoding = encoding.ptr ? string_copy(encoding) : string_create("UTF-8");
+        doc->version = version.len ? string_copy(version) : string_create("1.0");
+        doc->encoding = encoding.len ? string_copy(encoding) : string_create("UTF-8");
     }
     return doc;
 }
@@ -119,7 +119,7 @@ XmlNode* xml_find_element_by_attribute(XmlNode* node, const String attr_name, co
 XmlDocument* xml_parse(const String text) {
     if (text.len == 0) return NULL;
     XmlDocument* doc = xml_create(string_wrap("1.0"), string_wrap("UTF-8"));
-    const char* p = text.ptr;
+    const char* p = string_cdata(text);
     while (*p && *p != '<') p++;
     if (*p != '<') { xml_destroy(doc); return NULL; }
     if (strncmp(p, "<?xml", 5) == 0) {
@@ -197,7 +197,7 @@ XmlDocument* xml_parse(const String text) {
 }
 
 XmlDocument* xml_parse_file(const String path) {
-    FILE* f = fopen(path.ptr, "r"); if (!f) return NULL;
+    FILE* f = fopen(string_cdata(path), "r"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
     char* buf = (char*)kmm_v4_malloc(len + 1); fread(buf, 1, len, f); buf[len] = '\0'; fclose(f);
     XmlDocument* doc = xml_parse(string_wrap(buf));
@@ -208,13 +208,13 @@ XmlDocument* xml_parse_file(const String path) {
 static void xml_write_node(StringBuilder* sb, XmlNode* node, int indent) {
     for (int i = 0; i < indent; i++) string_builder_append_char(sb, ' ');
     string_builder_append_char(sb, '<');
-    string_builder_append(sb, node->name.ptr);
+    string_builder_append(sb, string_cdata(node->name));
     XmlAttribute* attr = node->attributes;
     while (attr) {
         string_builder_append_char(sb, ' ');
-        string_builder_append(sb, attr->name.ptr);
+        string_builder_append(sb, string_cdata(attr->name));
         string_builder_append(sb, "=\"");
-        string_builder_append(sb, attr->value.ptr);
+        string_builder_append(sb, string_cdata(attr->value));
         string_builder_append_char(sb, '"');
         attr = attr->next;
     }
@@ -223,17 +223,17 @@ static void xml_write_node(StringBuilder* sb, XmlNode* node, int indent) {
         return;
     }
     string_builder_append_char(sb, '>');
-    if (node->content.len > 0) string_builder_append(sb, node->content.ptr);
+    if (node->content.len > 0) string_builder_append(sb, string_cdata(node->content));
     string_builder_append_char(sb, '\n');
     XmlNode* child = node->first_child;
     while (child) {
         if (child->type == XML_ELEMENT) xml_write_node(sb, child, indent + 2);
-        else { string_builder_append(sb, child->content.ptr); string_builder_append_char(sb, '\n'); }
+        else { string_builder_append(sb, string_cdata(child->content)); string_builder_append_char(sb, '\n'); }
         child = child->next_sibling;
     }
     for (int i = 0; i < indent; i++) string_builder_append_char(sb, ' ');
     string_builder_append(sb, "</");
-    string_builder_append(sb, node->name.ptr);
+    string_builder_append(sb, string_cdata(node->name));
     string_builder_append(sb, ">\n");
 }
 
@@ -241,9 +241,9 @@ String xml_serialize(XmlDocument* doc) {
     if (!doc || !doc->root) return STRING_EMPTY;
     StringBuilder* sb = string_builder_create();
     string_builder_append(sb, "<?xml version=\"");
-    string_builder_append(sb, doc->version.ptr);
+    string_builder_append(sb, string_cdata(doc->version));
     string_builder_append(sb, "\" encoding=\"");
-    string_builder_append(sb, doc->encoding.ptr);
+    string_builder_append(sb, string_cdata(doc->encoding));
     string_builder_append(sb, "\"?>\n");
     xml_write_node(sb, doc->root, 0);
     String result = string_builder_to_string(sb);
@@ -253,6 +253,6 @@ String xml_serialize(XmlDocument* doc) {
 
 bool_t xml_to_file(XmlDocument* doc, const String path) {
     String s = xml_serialize(doc); if (s.len == 0) return false;
-    FILE* f = fopen(path.ptr, "w"); if (!f) { string_free(s); return false; }
-    fputs(s.ptr, f); fclose(f); string_free(s); return true;
+    FILE* f = fopen(string_cdata(path), "w"); if (!f) { string_free(s); return false; }
+    fputs(string_cdata(s), f); fclose(f); string_free(s); return true;
 }

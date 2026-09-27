@@ -16,9 +16,9 @@ SSHSession* ssh_session_create(const char* host, i64 port, const char* username,
 
 void ssh_session_destroy(SSHSession* session) {
     if (!session) return;
-    kmm_v4_free(session->host.ptr);
-    kmm_v4_free(session->username.ptr);
-    kmm_v4_free(session->password.ptr);
+    if (session->host.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(session->host));
+    if (session->username.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(session->username));
+    if (session->password.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(session->password));
     kmm_v4_free(session);
 }
 
@@ -89,7 +89,7 @@ void ssh_channel_close(SSHChannel* channel) {
 
 void ssh_channel_destroy(SSHChannel* channel) {
     if (!channel) return;
-    kmm_v4_free(channel->channel_type.ptr);
+    if (channel->channel_type.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(channel->channel_type));
     kmm_v4_free(channel);
 }
 
@@ -119,39 +119,39 @@ bool_t ssh_channel_request_shell(SSHChannel* channel) {
 bool_t ssh_sftp_stat(SSHChannel* channel, const char* path, void* stat_info) {
     (void)path;
     (void)stat_info;
-    return channel && channel->open && strcmp(channel->channel_type.ptr, "sftp") == 0;
+    return channel && channel->open && strcmp(string_cdata(channel->channel_type), "sftp") == 0;
 }
 
 bool_t ssh_sftp_list_dir(SSHChannel* channel, const char* path) {
     (void)path;
-    return channel && channel->open && strcmp(channel->channel_type.ptr, "sftp") == 0;
+    return channel && channel->open && strcmp(string_cdata(channel->channel_type), "sftp") == 0;
 }
 
 bool_t ssh_sftp_get(SSHChannel* channel, const char* remote_path, const char* local_path) {
     (void)remote_path;
     (void)local_path;
-    return channel && channel->open && strcmp(channel->channel_type.ptr, "sftp") == 0;
+    return channel && channel->open && strcmp(string_cdata(channel->channel_type), "sftp") == 0;
 }
 
 bool_t ssh_sftp_put(SSHChannel* channel, const char* local_path, const char* remote_path) {
     (void)local_path;
     (void)remote_path;
-    return channel && channel->open && strcmp(channel->channel_type.ptr, "sftp") == 0;
+    return channel && channel->open && strcmp(string_cdata(channel->channel_type), "sftp") == 0;
 }
 
 bool_t ssh_sftp_mkdir(SSHChannel* channel, const char* path) {
     (void)path;
-    return channel && channel->open && strcmp(channel->channel_type.ptr, "sftp") == 0;
+    return channel && channel->open && strcmp(string_cdata(channel->channel_type), "sftp") == 0;
 }
 
 bool_t ssh_sftp_rmdir(SSHChannel* channel, const char* path) {
     (void)path;
-    return channel && channel->open && strcmp(channel->channel_type.ptr, "sftp") == 0;
+    return channel && channel->open && strcmp(string_cdata(channel->channel_type), "sftp") == 0;
 }
 
 bool_t ssh_sftp_remove(SSHChannel* channel, const char* path) {
     (void)path;
-    return channel && channel->open && strcmp(channel->channel_type.ptr, "sftp") == 0;
+    return channel && channel->open && strcmp(string_cdata(channel->channel_type), "sftp") == 0;
 }
 
 bool_t ssh_port_forward(SSHSession* session, const char* bind_addr, i64 bind_port,

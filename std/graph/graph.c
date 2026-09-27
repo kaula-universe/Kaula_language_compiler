@@ -17,7 +17,7 @@ void graph_destroy(Graph* graph) {
     if (!graph) return;
     for (size_t i = 0; i < graph->node_count; i++) {
         GraphNode* n = graph->nodes[i];
-        kmm_v4_free(n->name.ptr);
+        if (n->name.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(n->name));
         kmm_v4_free(n->edges);
         kmm_v4_free(n);
     }
@@ -51,7 +51,7 @@ GraphNode* graph_add_node(Graph* graph, const char* name, void* data) {
 GraphNode* graph_find_node(const Graph* graph, const char* name) {
     if (!graph || !name) return NULL;
     for (size_t i = 0; i < graph->node_count; i++) {
-        if (strcmp(graph->nodes[i]->name.ptr, name) == 0) {
+        if (strcmp(string_cdata(graph->nodes[i]->name), name) == 0) {
             return graph->nodes[i];
         }
     }
@@ -425,7 +425,7 @@ void graph_topological_sort(const Graph* graph, GraphNode*** result, size_t* cou
     if (!in_deg) return;
     
     for (size_t i = 0; i < graph->node_count; i++) {
-        in_deg[i] = (i64)graph_in_degree(graph, graph->nodes[i]->name.ptr);
+        in_deg[i] = (i64)graph_in_degree(graph, string_cdata(graph->nodes[i]->name));
     }
     
     GraphNode** queue = (GraphNode**)kmm_v4_malloc(graph->node_count * sizeof(GraphNode*));
@@ -502,12 +502,12 @@ size_t graph_strongly_connected_components(const Graph* graph, GraphNode*** comp
     
     Graph* transpose = graph_create(true);
     for (size_t i = 0; i < graph->node_count; i++) {
-        graph_add_node(transpose, graph->nodes[i]->name.ptr, NULL);
+        graph_add_node(transpose, string_cdata(graph->nodes[i]->name), NULL);
     }
     for (size_t i = 0; i < graph->node_count; i++) {
         GraphNode* u = graph->nodes[i];
         for (size_t j = 0; j < u->edge_count; j++) {
-            graph_add_edge(transpose, u->edges[j].target->name.ptr, u->name.ptr, u->edges[j].weight);
+            graph_add_edge(transpose, string_cdata(u->edges[j].target->name), string_cdata(u->name), u->edges[j].weight);
         }
     }
     
@@ -536,7 +536,7 @@ size_t graph_strongly_connected_components(const Graph* graph, GraphNode*** comp
                 
                 for (size_t j = 0; j < graph->node_count; j++) {
                     if (graph->nodes[j] == curr) {
-                        GraphNode* trans_node = graph_find_node(transpose, curr->name.ptr);
+                        GraphNode* trans_node = graph_find_node(transpose, string_cdata(curr->name));
                         for (size_t k = 0; k < trans_node->edge_count; k++) {
                             GraphNode* neighbor = trans_node->edges[k].target;
                             size_t n_idx = 0;

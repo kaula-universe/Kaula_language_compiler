@@ -29,10 +29,10 @@ static void toml_free_node(TOMLNode* node) {
     if (!node) return;
     switch (node->type) {
         case TOMLX_STRING:
-            if (node->data.string_val.ptr) string_free(node->data.string_val);
+            if (node->data.string_val.len) string_free(node->data.string_val);
             break;
         case TOMLX_DATETIME:
-            if (node->data.datetime_val.ptr) string_free(node->data.datetime_val);
+            if (node->data.datetime_val.len) string_free(node->data.datetime_val);
             break;
         case TOMLX_TABLE:
             kv = node->data.table.entries;
@@ -86,7 +86,7 @@ TOMLNode* toml_node_get_table(TOMLNode* node, const char* key) {
     if (!node || node->type != TOMLX_TABLE || !key) return NULL;
     kv = node->data.table.entries;
     while (kv) {
-        if (strcmp(kv->key.ptr, key) == 0) return kv->value;
+        if (strcmp(string_cdata(kv->key), key) == 0) return kv->value;
         kv = kv->next;
     }
     return NULL;
@@ -136,7 +136,7 @@ static void table_insert(TOMLNode* table, const char* key, TOMLNode* value) {
     if (!table || !key || !value) return;
     existing = table->data.table.entries;
     while (existing) {
-        if (strcmp(existing->key.ptr, key) == 0) {
+        if (strcmp(string_cdata(existing->key), key) == 0) {
             toml_free_node(existing->value);
             existing->value = value;
             return;
@@ -734,7 +734,7 @@ static void serialize_value(char** out, TOMLNode* node, int indent) {
     if (!node) return;
     switch (node->type) {
         case TOMLX_STRING:
-            serialize_string_value(out, node->data.string_val.ptr);
+            serialize_string_value(out, string_cdata(node->data.string_val));
             break;
         case TOMLX_INTEGER:
             snprintf(buf, sizeof(buf), "%lld", (long long)node->data.int_val);
@@ -748,7 +748,7 @@ static void serialize_value(char** out, TOMLNode* node, int indent) {
             serialize_append(out, node->data.bool_val ? "true" : "false");
             break;
         case TOMLX_DATETIME:
-            serialize_append(out, node->data.datetime_val.ptr);
+            serialize_append(out, string_cdata(node->data.datetime_val));
             break;
         case TOMLX_ARRAY:
             serialize_array(out, node, indent);
@@ -775,7 +775,7 @@ static void serialize_table_entries(char** out, TOMLNode* table, char* prefix, i
             arrays_list = kv;
         } else {
             serialize_indent(out, indent);
-            serialize_append(out, kv->key.ptr);
+            serialize_append(out, string_cdata(kv->key));
             serialize_append(out, " = ");
             serialize_value(out, kv->value, indent);
             serialize_append(out, "\n");
@@ -785,16 +785,16 @@ static void serialize_table_entries(char** out, TOMLNode* table, char* prefix, i
     prefix_len = prefix ? strlen(prefix) : 0;
     while (tables_list) {
         TOMLKeyValue* next = tables_list->next;
-        size_t key_len = strlen(tables_list->key.ptr);
+        size_t key_len = strlen(string_cdata(tables_list->key));
         new_prefix = (char*)kmm_v4_malloc(prefix_len + key_len + 2);
         if (new_prefix) {
             if (prefix_len > 0) {
                 memcpy(new_prefix, prefix, prefix_len);
                 new_prefix[prefix_len] = '.';
-                memcpy(new_prefix + prefix_len + 1, tables_list->key.ptr, key_len);
+                memcpy(new_prefix + prefix_len + 1, string_cdata(tables_list->key), key_len);
                 new_prefix[prefix_len + 1 + key_len] = '\0';
             } else {
-                memcpy(new_prefix, tables_list->key.ptr, key_len);
+                memcpy(new_prefix, string_cdata(tables_list->key), key_len);
                 new_prefix[key_len] = '\0';
             }
             serialize_append(out, "\n[");
@@ -807,7 +807,7 @@ static void serialize_table_entries(char** out, TOMLNode* table, char* prefix, i
     }
     while (arrays_list) {
         TOMLKeyValue* next = arrays_list->next;
-        size_t key_len = strlen(arrays_list->key.ptr);
+        size_t key_len = strlen(string_cdata(arrays_list->key));
         TOMLNode* arr = arrays_list->value;
         size_t i;
         new_prefix = (char*)kmm_v4_malloc(prefix_len + key_len + 2);
@@ -815,10 +815,10 @@ static void serialize_table_entries(char** out, TOMLNode* table, char* prefix, i
             if (prefix_len > 0) {
                 memcpy(new_prefix, prefix, prefix_len);
                 new_prefix[prefix_len] = '.';
-                memcpy(new_prefix + prefix_len + 1, arrays_list->key.ptr, key_len);
+                memcpy(new_prefix + prefix_len + 1, string_cdata(arrays_list->key), key_len);
                 new_prefix[prefix_len + 1 + key_len] = '\0';
             } else {
-                memcpy(new_prefix, arrays_list->key.ptr, key_len);
+                memcpy(new_prefix, string_cdata(arrays_list->key), key_len);
                 new_prefix[key_len] = '\0';
             }
             for (i = 0; i < arr->data.array.count; i++) {

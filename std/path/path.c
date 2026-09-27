@@ -203,8 +203,8 @@ String path_extension(const char* path) {
     String base = path_basename(path);
     if (base.len == 0) return string_create("");
 
-    const char* dot = strrchr(base.ptr, '.');
-    if (!dot || dot == base.ptr) {
+    const char* dot = strrchr(string_cdata(base), '.');
+    if (!dot || dot == string_cdata(base)) {
         string_free(base);
         return string_create("");
     }
@@ -220,18 +220,18 @@ String path_stem(const char* path) {
     String base = path_basename(path);
     if (base.len == 0) return string_create("");
 
-    char* dot = strrchr(base.ptr, '.');
-    if (!dot || dot == base.ptr) {
+    char* dot = strrchr(string_cdata(base), '.');
+    if (!dot || dot == string_cdata(base)) {
         return base;
     }
 
-    size_t stem_len = (size_t)(dot - base.ptr);
+    size_t stem_len = (size_t)(dot - string_cdata(base));
     char* result = (char*)kmm_v4_malloc(stem_len + 1);
     if (!result) {
         string_free(base);
         return STRING_EMPTY;
     }
-    memcpy(result, base.ptr, stem_len);
+    memcpy(result, string_cdata(base), stem_len);
     result[stem_len] = '\0';
     string_free(base);
     return (String){.len = strlen(result), .ptr = result};
@@ -555,25 +555,25 @@ String path_relative(const char* base, const char* target) {
         return string_create("");
     }
 
-    size_t base_count = count_components(norm_base.ptr);
-    size_t target_count = count_components(norm_target.ptr);
+    size_t base_count = count_components(string_cdata(norm_base));
+    size_t target_count = count_components(string_cdata(norm_target));
 
     String* base_comps = NULL;
     String* target_comps = NULL;
 
     if (base_count > 0) {
         base_comps = (String*)kmm_v4_malloc(base_count * sizeof(String));
-        if (base_comps) split_components(norm_base.ptr, base_comps, base_count);
+        if (base_comps) split_components(string_cdata(norm_base), base_comps, base_count);
     }
     if (target_count > 0) {
         target_comps = (String*)kmm_v4_malloc(target_count * sizeof(String));
-        if (target_comps) split_components(norm_target.ptr, target_comps, target_count);
+        if (target_comps) split_components(string_cdata(norm_target), target_comps, target_count);
     }
 
     size_t common = 0;
     while (common < base_count && common < target_count &&
            base_comps && target_comps &&
-           strcmp(base_comps[common].ptr, target_comps[common].ptr) == 0) {
+           strcmp(string_cdata(base_comps[common]), string_cdata(target_comps[common])) == 0) {
         common++;
     }
 
@@ -595,12 +595,12 @@ String path_relative(const char* base, const char* target) {
     if (!result) {
         if (base_comps) {
             for (i = 0; i < base_count; i++)
-                if (base_comps[i].ptr) kmm_v4_free(base_comps[i].ptr);
+                if (base_comps[i].len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(base_comps[i]));
             kmm_v4_free(base_comps);
         }
         if (target_comps) {
             for (i = 0; i < target_count; i++)
-                if (target_comps[i].ptr) kmm_v4_free(target_comps[i].ptr);
+                if (target_comps[i].len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(target_comps[i]));
             kmm_v4_free(target_comps);
         }
         string_free(norm_base);
@@ -620,7 +620,7 @@ String path_relative(const char* base, const char* target) {
         if (pos > 0) result[pos++] = sep;
         if (target_comps && target_comps[i].len > 0) {
             size_t len = target_comps[i].len;
-            memcpy(result + pos, target_comps[i].ptr, len);
+            memcpy(result + pos, string_cdata(target_comps[i]), len);
             pos += len;
         }
     }
@@ -629,12 +629,12 @@ String path_relative(const char* base, const char* target) {
 
     if (base_comps) {
         for (i = 0; i < base_count; i++)
-            if (base_comps[i].ptr) kmm_v4_free(base_comps[i].ptr);
+            if (base_comps[i].len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(base_comps[i]));
         kmm_v4_free(base_comps);
     }
     if (target_comps) {
         for (i = 0; i < target_count; i++)
-            if (target_comps[i].ptr) kmm_v4_free(target_comps[i].ptr);
+            if (target_comps[i].len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(target_comps[i]));
         kmm_v4_free(target_comps);
     }
     string_free(norm_base);
@@ -654,8 +654,8 @@ bool_t path_is_subpath(const char* parent, const char* child) {
         return 0;
     }
 
-    size_t parent_len = strlen(norm_parent.ptr);
-    size_t child_len = strlen(norm_child.ptr);
+    size_t parent_len = strlen(string_cdata(norm_parent));
+    size_t child_len = strlen(string_cdata(norm_child));
 
     if (child_len <= parent_len) {
         string_free(norm_parent);
@@ -664,8 +664,8 @@ bool_t path_is_subpath(const char* parent, const char* child) {
     }
 
     bool_t result = 0;
-    if (strncmp(norm_child.ptr, norm_parent.ptr, parent_len) == 0) {
-        if (is_sep(norm_child.ptr[parent_len])) {
+    if (strncmp(string_cdata(norm_child), string_cdata(norm_parent), parent_len) == 0) {
+        if (is_sep(string_cdata(norm_child)[parent_len])) {
             result = 1;
         }
     }
@@ -685,7 +685,7 @@ String path_resolve(const char* base, const char* rel) {
     String joined = path_join(base, rel);
     if (joined.len == 0) return STRING_EMPTY;
 
-    String result = path_normalize_internal(joined.ptr);
+    String result = path_normalize_internal(string_cdata(joined));
     string_free(joined);
     return result;
 }

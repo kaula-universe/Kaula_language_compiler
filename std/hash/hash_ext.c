@@ -40,16 +40,24 @@ static void be64_write(u8* p, u64 v) {
 static String bytes_to_hex(const u8* data, size_t len) {
     static const char hexchars[] = "0123456789abcdef";
     String out = {0, NULL};
-    size_t i;
-    char* buf = (char*)kmm_v4_malloc(len * 2 + 1);
-    if (!buf) return out;
-    for (i = 0; i < len; i++) {
-        buf[i * 2]     = hexchars[(data[i] >> 4) & 0xF];
-        buf[i * 2 + 1] = hexchars[data[i] & 0xF];
+    size_t i, n = len * 2;
+    /* n <= STRING_SSO_CAPACITY 时必须写进 .sso：此时 string_cdata() 读的是
+       .sso 而非 .ptr，把堆指针塞进 .ptr 会被静默丢弃。 */
+    if (n > STRING_SSO_CAPACITY) {
+        char* buf = (char*)kmm_v4_malloc(n + 1);
+        if (!buf) return out;
+        for (i = 0; i < n; i++) {
+            buf[i] = hexchars[(data[i / 2] >> ((i & 1) ? 0 : 4)) & 0xF];
+        }
+        buf[n] = '\0';
+        out.len = n; out.ptr = buf;
+    } else {
+        for (i = 0; i < n; i++) {
+            out.sso[i] = hexchars[(data[i / 2] >> ((i & 1) ? 0 : 4)) & 0xF];
+        }
+        out.sso[n] = '\0';
+        out.len = n;
     }
-    buf[len * 2] = '\0';
-    out.ptr = buf;
-    out.len = len * 2;
     return out;
 }
 
@@ -439,9 +447,9 @@ String crc64_hex(const void* data, size_t len) {
     if (!buf) return STRING_EMPTY;
     out = (String){.len = 16, .ptr = buf};
     for (i = 0; i < 16; i++) {
-        out.ptr[i] = hexchars[(h >> (60 - i * 4)) & 0xF];
+        string_data(out)[i] = hexchars[(h >> (60 - i * 4)) & 0xF];
     }
-    out.ptr[16] = '\0';
+    string_data(out)[16] = '\0';
     return out;
 }
 

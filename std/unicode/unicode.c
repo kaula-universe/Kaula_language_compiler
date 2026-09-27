@@ -977,14 +977,14 @@ static String normalize_nfc_impl(const char* str) {
     int have_prev = 0;
     while (i < byte_len) {
         u32 cp = 0;
-        int len = unicode_decode_utf8(decomposed.ptr + i, &cp);
+        int len = unicode_decode_utf8(string_cdata(decomposed) + i, &cp);
         if (len < 1) {
             if (have_prev) {
                 int e = unicode_encode_utf8(prev_cp, buf + out);
                 if (e > 0) out += e;
                 have_prev = 0;
             }
-            buf[out++] = decomposed.ptr[i];
+            buf[out++] = string_cdata(decomposed)[i];
             i++;
             continue;
         }
@@ -998,7 +998,7 @@ static String normalize_nfc_impl(const char* str) {
                 while (i + len < byte_len) {
                     u32 next_cp = 0;
                     int next_len = unicode_decode_utf8(
-                        decomposed.ptr + i + len, &next_cp);
+                        string_cdata(decomposed) + i + len, &next_cp);
                     if (next_len < 1) break;
                     chained = find_composed(prev_cp, next_cp);
                     if (chained) {
@@ -1024,7 +1024,7 @@ static String normalize_nfc_impl(const char* str) {
         if (e > 0) out += e;
     }
     buf[out] = '\0';
-    kmm_v4_free(decomposed.ptr);
+    if (decomposed.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(decomposed));
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
         return (String){.len = out, .ptr = buf};

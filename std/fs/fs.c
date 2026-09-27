@@ -243,7 +243,7 @@ static bool_t remove_all_recursive(const char* path) {
 
         FileInfo info;
         while (fs_dir_next(it, &info)) {
-            if (strcmp(info.name.ptr, ".") == 0 || strcmp(info.name.ptr, "..") == 0)
+            if (strcmp(string_cdata(info.name), ".") == 0 || strcmp(string_cdata(info.name), "..") == 0)
                 continue;
 
             char* full = (char*)kmm_v4_malloc(strlen(path) + 1 + info.name.len + 1);
@@ -257,7 +257,7 @@ static bool_t remove_all_recursive(const char* path) {
 #else
                     '/',
 #endif
-                    info.name.ptr);
+                    string_cdata(info.name));
 
             bool_t ok = remove_all_recursive(full);
             kmm_v4_free(full);
@@ -513,7 +513,7 @@ DirIterator* fs_dir_open(const char* path) {
     memset(it, 0, sizeof(DirIterator));
 
     String base = string_create(path);
-    it->base_path = base.ptr;
+    it->base_path = string_cdata(base);
 
 #ifdef _WIN32
     size_t len = strlen(path);
@@ -602,7 +602,7 @@ bool_t fs_dir_next(DirIterator* it, FileInfo* info) {
     }
 
     struct stat st;
-    if (stat(info->path.ptr, &st) == 0) {
+    if (stat(string_cdata(info->path), &st) == 0) {
         info->is_dir = S_ISDIR(st.st_mode);
         info->is_file = S_ISREG(st.st_mode);
         info->is_symlink = S_ISLNK(st.st_mode);
@@ -740,16 +740,16 @@ static void glob_recursive(const char* pattern, const char* base_dir,
 
     FileInfo info;
     while (fs_dir_next(it, &info)) {
-        if (strcmp(info.name.ptr, ".") == 0 || strcmp(info.name.ptr, "..") == 0) {
+        if (strcmp(string_cdata(info.name), ".") == 0 || strcmp(string_cdata(info.name), "..") == 0) {
             string_free(info.path);
             string_free(info.name);
             continue;
         }
 
 #ifdef _WIN32
-        bool_t matched = glob_match(current, info.name.ptr);
+        bool_t matched = glob_match(current, string_cdata(info.name));
 #else
-        bool_t matched = (fnmatch(current, info.name.ptr, 0) == 0);
+        bool_t matched = (fnmatch(current, string_cdata(info.name), 0) == 0);
 #endif
 
         if (matched) {
@@ -771,7 +771,7 @@ static void glob_recursive(const char* pattern, const char* base_dir,
                 (*results)[*count] = string_copy(info.path);
                 (*count)++;
             } else if (info.is_dir) {
-                glob_recursive(remaining, info.path.ptr, results, count, capacity);
+                glob_recursive(remaining, string_cdata(info.path), results, count, capacity);
             }
         }
 
@@ -896,7 +896,7 @@ String fs_temp_file(const char* prefix) {
         return STRING_EMPTY;
     }
 
-    sprintf(tmpl, "%s%c%sXXXXXX", tmpdir.ptr,
+    sprintf(tmpl, "%s%c%sXXXXXX", string_cdata(tmpdir),
 #ifdef _WIN32
             '\\',
 #else
