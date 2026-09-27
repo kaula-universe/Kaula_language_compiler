@@ -509,8 +509,17 @@ _Static_assert(KMM_TLS_BUFFER_SIZE >= KMM_V4_PAGE_SIZE, "TLAB size must be at le
 #endif
 
 // 作用域栈最大深度（支持嵌套作用域）
+//
+// 该上限限制的是**会 push 作用域的嵌套层数**——即"用到 KMM 分配器的函数
+// 递归/嵌套调用"的最深层次（纯计算函数不 push，实测 2 亿层递归不受限）。
+// 原默认值 64 意味着"递归 + 分配"超过 63 层直接 FATAL abort，对递归算法
+// （树/图遍历、分治）过紧。
+//
+// 内存代价：每帧 16 字节 {base, offset}，常驻 TLS。
+//   64 帧 → 1 KB      1024 帧 → 16 KB
+// 取 1024 兼顾深层递归与 TLS 体积；可用 -DKMM_V4_MAX_SCOPE_DEPTH=N 覆盖。
 #ifndef KMM_V4_MAX_SCOPE_DEPTH
-#define KMM_V4_MAX_SCOPE_DEPTH 64
+#define KMM_V4_MAX_SCOPE_DEPTH 1024
 #endif
 
 // ==================== 前向类型声明 ====================
@@ -1539,17 +1548,41 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
 // 修复 #1/#19：scope_push/pop 只操作 per-thread heap offset，不碰全局 offset。
 // 多线程安全：每个线程有独立的 g_kmm_v4_thread_heap，scope 回退互不影响。
 
+// 当前最内层"已命名作用域"的归属（函数名），仅用于作用域栈溢出的可诊断性。
+// 常驻 TLS 一个指针，不增加每帧开销；帧仍是 16 字节 {base, offset}。
+static KMM_TLS const char* g_kmm_v4_scope_owner = NULL;
+
+static inline void kmm_v4_scope_note_owner(const char* name) {
+    g_kmm_v4_scope_owner = name;
+}
+
+// 作用域栈溢出时打印归属（最内层命名作用域 = 递归里"每层都分配"的那个函数）
+static inline void kmm_v4_dump_scope_backtrace(void) {
+    const char* owner = g_kmm_v4_scope_owner;
+    if (owner) {
+        fprintf(stderr, "  innermost managed scope: %s\n", owner);
+    } else {
+        fprintf(stderr, "  innermost managed scope: <unnamed> (legacy KMM_V4_SCOPE_START)\n");
+    }
+}
+
 static inline void kmm_v4_scope_push(void) {
     kmm_scope_stack_t* stack = &g_kmm_v4_scope_stack;
 
     if (KMM_V4_UNLIKELY(stack->depth >= KMM_V4_MAX_SCOPE_DEPTH)) {
-        // D6 修复：深度超限直接 abort。64 层嵌套深度在任何合理代码下都足够，
-        // 超限一定是程序逻辑 bug（push/pop 不成对或递归失控）。
-        // 静默 return 会导致后续对应的 pop 把 depth 减到一个错误的低值，
-        // 弹出不匹配的帧，回卷 thread heap 到错误位置——悬垂/错误回收，
+        // D6 修复：深度超限直接 abort。超限一定是程序逻辑 bug（push/pop 不成对
+        // 或递归失控）。静默 return 会导致后续对应的 pop 把 depth 减到一个错误的
+        // 低值，弹出不匹配的帧，回卷 thread heap 到错误位置——悬垂/错误回收，
         // 后果比立即终止严重得多。
-        fprintf(stderr, "KMM FATAL: Scope stack overflow (max depth: %d), aborting\n",
-                KMM_V4_MAX_SCOPE_DEPTH);
+        // 诊断：打印当前实际深度 + 最近一次 push 的调用点提示（见 kmm_v4_scope_push_at）。
+        fprintf(stderr,
+                "KMM FATAL: Scope stack overflow (depth %zu >= max %d), aborting\n"
+                "  该上限约束的是'使用 KMM 分配器的函数'的嵌套/递归层数；"
+                "纯计算函数不受影响。\n"
+                "  常见原因：递归函数每层都分配。可选处理：给该函数加 #[no_kmm] "
+                "（放弃作用域托管，改用显式释放），或用 -DKMM_V4_MAX_SCOPE_DEPTH=N 放宽。\n",
+                stack->depth, KMM_V4_MAX_SCOPE_DEPTH);
+        kmm_v4_dump_scope_backtrace();
 #ifndef KAULA_FREESTANDING
         abort();
 #else
@@ -1580,6 +1613,10 @@ static inline void kmm_v4_scope_pop(void) {
     stack->depth--;
     uint8_t* saved_base   = stack->frames[stack->depth].base;
     size_t   saved_offset = stack->frames[stack->depth].offset;
+    // 只有回到最外层才清掉归属标记：块级作用域的 pop 不能抹掉函数级的标记
+    if (stack->depth == 0) {
+        g_kmm_v4_scope_owner = NULL;
+    }
     // 修复 Bug A：若 push 后发生过 refill，当前 base != saved_base，
     // 旧 offset 指向的是已废弃的旧 TLAB，直接恢复会覆盖新 TLAB 中的存活对象。
     // 性能优化（循环内分配超线性修复）：不 invalidate TLAB，而是保留新 TLAB
@@ -1605,6 +1642,13 @@ static inline void kmm_v4_scope_pop(void) {
 // 作用域自动清理（支持嵌套，每层独立管理）
 #define KMM_V4_SCOPE_START \
     kmm_v4_scope_push(); \
+    do
+
+// 带归属标记的作用域（函数级使用）：作用域栈溢出时可打印出是哪个函数
+// 每层都在 push（"递归 + 分配"超过 KMM_V4_MAX_SCOPE_DEPTH 时定位用）
+#define KMM_V4_SCOPE_NAMED(owner) \
+    kmm_v4_scope_push(); \
+    kmm_v4_scope_note_owner(owner); \
     do
 
 #define KMM_V4_SCOPE_END \

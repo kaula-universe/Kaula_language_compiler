@@ -92,6 +92,9 @@ type CodeGenerator struct {
 	// promoteSkipNotes: "拷贝大小不可安全确定 → 跳过 promote"的诊断（非致命）
 	promoteSkipNotes []string
 
+	// recursionScopeNotes: "递归 + 每层 KMM 作用域"的函数名（非致命诊断）
+	recursionScopeNotes []string
+
 	// 默认编译流程（未开启 --sor）的轻量逃逸分析结果（SOR EscapeResult 序列化）。
 	// 键：变量名 → 逃逸级别字符串（"None"/"Arg"/"Return"/"CrossScope"/"Global"/"Heap"）。
 	// 用途：结构化所有权的分配路径路由——"只在本作用域内使用"走 alloc_auto 的
@@ -405,6 +408,24 @@ func (cg *CodeGenerator) AddPromoteSkipNote(message string) {
 // PromoteSkipNotes 返回 promote 跳过诊断列表
 func (cg *CodeGenerator) PromoteSkipNotes() []string {
 	return cg.promoteSkipNotes
+}
+
+// AddRecursionScopeNote 记录"递归 + 每层 KMM 作用域"的诊断信息。
+// 这类函数每层 push 一个 KMM 作用域，嵌套深度受 KMM_V4_MAX_SCOPE_DEPTH
+// 约束（默认 1024），超出即运行期 FATAL abort 且不可捕获——属于设计约束，
+// 提前告知用户可选方案（#[no_kmm] / 放宽上限 / 改写成循环）。
+func (cg *CodeGenerator) AddRecursionScopeNote(funcName string) {
+	for _, n := range cg.recursionScopeNotes {
+		if n == funcName {
+			return // 去重
+		}
+	}
+	cg.recursionScopeNotes = append(cg.recursionScopeNotes, funcName)
+}
+
+// RecursionScopeNotes 返回"递归 + KMM 作用域"的函数名列表
+func (cg *CodeGenerator) RecursionScopeNotes() []string {
+	return cg.recursionScopeNotes
 }
 
 func (cg *CodeGenerator) Errors() []string {

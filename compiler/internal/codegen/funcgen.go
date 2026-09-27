@@ -523,6 +523,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			// Phase 2：在生成函数体之前设置函数级 checkpoint 标志，
 			// 使循环 codegen 能检测到并降级为 offset 回收
 			fg.codegen.funcHasKMMCheckpoint = true
+			// 诊断：递归 + 每层 KMM 作用域 → 嵌套深度受 KMM_V4_MAX_SCOPE_DEPTH
+			// 约束（默认 1024 层），超出即运行期 FATAL abort。提前告知可选方案。
+			if fg.functionCallsItself(stmt.Name, stmt.Body) {
+				fg.codegen.AddRecursionScopeNote(stmt.Name)
+			}
 		}
 		// 方案 C：重置 promote 标志，body 生成期间若发射 promote_p 则置 true
 		fg.codegen.funcEmitsPromote = false
@@ -565,7 +570,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		builder.WriteString(bodyIndent)
 		builder.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
 		builder.WriteString(bodyIndent)
-		builder.WriteString("KMM_V4_SCOPE_START {\n")
+		// 命名作用域：作用域栈溢出（递归深度超过 KMM_V4_MAX_SCOPE_DEPTH）时
+		// 运行期能打印出是哪个函数每层都在分配
+		builder.WriteString(fg.kmmScopeStartNamed(stmt.Name))
 		builder.WriteString(bodyCode)
 		builder.WriteString(bodyIndent)
 		builder.WriteString("} KMM_V4_SCOPE_END;\n")
@@ -905,7 +912,7 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code.WriteString(fg.codegen.indentString())
 		code.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
 		code.WriteString(fg.codegen.indentString())
-		code.WriteString("KMM_V4_SCOPE_START {\n")
+		code.WriteString(fg.kmmScopeStartNamed(stmt.Name))
 		code.WriteString(finalBody.String())
 		code.WriteString(fg.codegen.indentString())
 		code.WriteString("} KMM_V4_SCOPE_END;\n")
@@ -936,6 +943,83 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	fg.codegen.ExitScope()
 	fg.codegen.currentFunctionReturnType = ""
 	return code.String()
+}
+
+// kmmScopeStartNamed 生成函数级的 KMM 作用域起始行（带归属标记）。
+// 归属名只在 KMM 作用域栈溢出（KMM_V4_MAX_SCOPE_DEPTH）时打印，用于定位
+// "递归且每层都分配"的函数；TLS 只多一个指针，不影响每帧布局。
+func (fg *FunctionGenerator) kmmScopeStartNamed(kaulaFuncName string) string {
+	return fmt.Sprintf("KMM_V4_SCOPE_NAMED(\"%s\") {\n", fg.codegen.UserFuncCName(kaulaFuncName))
+}
+
+// functionCallsItself 判断函数体（不含嵌套函数定义）是否调用了自己。
+// 用于"递归 + 每层都分配"诊断：这类函数的嵌套深度受 KMM_V4_MAX_SCOPE_DEPTH
+// 约束（默认 1024），超出即运行期 FATAL abort。
+func (fg *FunctionGenerator) functionCallsItself(kaulaFuncName string, stmts []ast.Statement) bool {
+	found := false
+	var walkExpr func(e ast.Expression)
+	var walkBody func(list []ast.Statement)
+	walkExpr = func(e ast.Expression) {
+		if found || e == nil {
+			return
+		}
+		switch x := e.(type) {
+		case *ast.CallExpression:
+			if id, ok := x.Function.(*ast.Identifier); ok && id.Name == kaulaFuncName {
+				found = true
+				return
+			}
+			for _, a := range x.Args {
+				walkExpr(a)
+			}
+		case *ast.TypeCastExpression:
+			walkExpr(x.Expression)
+		case *ast.MemberAccessExpression:
+			walkExpr(x.Object)
+		case *ast.IndexExpression:
+			walkExpr(x.Object)
+			walkExpr(x.Index)
+		case *ast.BinaryExpression:
+			walkExpr(x.Left)
+			walkExpr(x.Right)
+		case *ast.UnaryExpression:
+			walkExpr(x.Right)
+		case *ast.ParenExpression:
+			walkExpr(x.Inner)
+		}
+	}
+	walkBody = func(list []ast.Statement) {
+		for _, s := range list {
+			if found || s == nil {
+				continue
+			}
+			switch x := s.(type) {
+			case *ast.VariableDeclaration:
+				walkExpr(x.Value)
+			case *ast.ExpressionStatement:
+				walkExpr(x.Expression)
+			case *ast.ReturnStatement:
+				walkExpr(x.Value)
+			case *ast.IfStatement:
+				walkExpr(x.Condition)
+				walkBody(x.Body)
+				if x.Else != nil {
+					walkBody(x.Else)
+				}
+			case *ast.WhileStatement:
+				walkExpr(x.Condition)
+				walkBody(x.Body)
+			case *ast.ForStatement:
+				walkBody(x.Body)
+			case *ast.ForInStatement:
+				walkBody(x.Body)
+			case *ast.BlockStatement:
+				walkBody(x.Statements)
+			}
+		}
+	}
+	walkBody(stmts)
+	return found
 }
 
 func (fg *FunctionGenerator) mapReturnType(returnType string) string {

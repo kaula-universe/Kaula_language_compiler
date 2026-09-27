@@ -338,6 +338,8 @@ class CBuilder:
 
         self.obj_files = []
         self._obj_lock = threading.Lock()
+        # include_dirs -> 头文件指纹缓存（并发编译线程共享，只 stat 不重复 rglob）
+        self._header_stamp_cache = {}
 
     def _find_c_files(self, root_dir, skip_dirs=None):
         if skip_dirs is None:
@@ -390,6 +392,35 @@ class CBuilder:
                     pbar.update()
         return ok, fail
 
+    def _header_stamp(self, include_dirs):
+        """include 目录下全部头文件的指纹（相对路径|mtime_ns|size），按 include_dirs 缓存。
+
+        参与增量编译哈希，使头文件改动能触发 .o 重建——否则改头文件后
+        仍链接旧对象，结构体/TLS 布局变化会在运行期表现为越界写与段错误。
+        """
+        key = tuple(str(d) for d in include_dirs)
+        cached = self._header_stamp_cache.get(key)
+        if cached is not None:
+            return cached
+        parts = []
+        for d in include_dirs:
+            root = Path(d)
+            if not root.is_dir():
+                continue
+            for h in sorted(root.rglob("*.h")):
+                try:
+                    st = h.stat()
+                except OSError:
+                    continue
+                try:
+                    rel = h.relative_to(self.config.project_root)
+                except ValueError:
+                    rel = h
+                parts.append(f"{rel}|{st.st_mtime_ns}|{st.st_size}")
+        stamp = "\n".join(parts)
+        self._header_stamp_cache[key] = stamp
+        return stamp
+
     def _compile_one(self, src_file, out_obj=None, include_dirs=None):
         """编译单个 .c 文件。
 
@@ -405,10 +436,20 @@ class CBuilder:
         if include_dirs is None:
             include_dirs = self.config.include_dirs
 
-        # 增量编译:hash = sha256(src | flags | include_dirs),命中且 .o 存在则跳过
-        # 注意:include_dirs 参与哈希,保证更换 -I 顺序时会触发重建
+        # 增量编译:hash = sha256(src | flags | include_dirs | 头文件指纹)
+        # 命中且 .o 存在则跳过。
+        # 注意:include_dirs 参与哈希,保证更换 -I 顺序时会触发重建;
+        # 头文件指纹参与哈希,保证**改头文件也会让 .o 失效**。
+        # (只哈希 .c 内容时,kmm_scoped_allocator_v4.h 里 TLS 结构体尺寸变了而
+        #  .o 仍是旧尺寸 → 程序侧按新尺寸越界写 TLS → 运行期段错误。)
         hash_path = self.config.hash_dir / (rel_key + ".sha256")
-        hash_input = "\n".join(self.flags) + "\n-I\n" + "\n-I ".join(include_dirs)
+        hash_input = (
+            "\n".join(self.flags)
+            + "\n-I\n"
+            + "\n-I ".join(include_dirs)
+            + "\n-H\n"
+            + self._header_stamp(include_dirs)
+        )
         try:
             digest = hashlib.sha256(
                 src_file.read_bytes() + b"\0" + hash_input.encode()
