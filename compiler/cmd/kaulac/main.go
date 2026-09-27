@@ -389,6 +389,21 @@ func compilerBuildStamp() string {
 	return fmt.Sprintf("%d-%d", st.Size(), st.ModTime().UnixNano())
 }
 
+// hasTestFunctions 报告程序中是否存在带 #[test] 属性的函数。
+// 单元测试模式据此拦截「无测试函数」的文件，避免退化成普通 main 静默返回 0。
+func hasTestFunctions(program *ast.Program) bool {
+	found := false
+	if program == nil {
+		return false
+	}
+	program.Traverse(func(n ast.Node) {
+		if fn, ok := n.(*ast.FunctionStatement); ok && ast.HasAttribute(fn.Attributes, "test") {
+			found = true
+		}
+	})
+	return found
+}
+
 func main() {
  // Test subcommands own their flags and must bypass compiler flag pre-scanning.
  if len(os.Args) > 1 && os.Args[1] == "test" {
@@ -396,6 +411,24 @@ func main() {
  }
  if len(os.Args) > 2 && os.Args[1] == "workspace" && os.Args[2] == "test" {
   os.Exit(runTestsCLI(os.Args[3:], true))
+ }
+ // kaulac unittest：单元测试（#[test] runner）。
+ // 目标是单个已存在的 .kl 文件时走常规编译流程（下方预扫描会置 testMode）；
+ // 无参、传目录或路径不存在时进入批量模式，逐个文件以子进程复用该流程。
+ if len(os.Args) > 1 && os.Args[1] == "unittest" {
+  rest := os.Args[2:]
+  if !isSingleFileTarget(rest) {
+   root := "."
+   var extra []string
+   for _, a := range rest {
+    if strings.HasPrefix(a, "-") {
+     extra = append(extra, a)
+    } else {
+     root = a
+    }
+   }
+   os.Exit(runUnittestBatch(root, extra))
+  }
  }
  totalStart := time.Now()
 
@@ -425,7 +458,7 @@ func main() {
 	customArgs := []string{}
 	positionalArgs := []string{}
 	args := os.Args[1:]
-	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true, "test": true}
+	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true, "test": true, "unittest": true}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -506,7 +539,11 @@ func main() {
 				// 若保持原顺序，排在输入文件后的旗标（如 -output-dir）会被静默忽略
 				positionalArgs = append(positionalArgs, arg)
 				// 处理 test 子命令：kaulac test [file.kl]
-				if arg == "test" {
+				// 注意 test 已在 main() 开头被 testrunner 拦截并 return，
+				// 真正走「生成 #[test] runner」的是 unittest 子命令。
+				if arg == "test" || arg == "unittest" {
+					// 单元测试模式：编译后自动运行自动生成的 #[test] runner，
+					// runner 以失败测试数决定进程退出码。
 					testMode = true
 				} else if !knownSubcommands[arg] {
 					// 只将非 flag、非子命令的参数视为输入文件候选
@@ -1051,32 +1088,10 @@ func main() {
 		}
 	}
 
-	// 测试模式：如果没有指定输入文件，自动查找测试文件
+	// 单元测试模式未指定输入文件：走批量模式，逐个运行发现的测试文件。
+	// （`kaulac unittest` 无参已在 main() 开头进入批量；这里兜住其他潜在入口。）
 	if testMode && inputFile == "" {
-		wd, _ := os.Getwd()
-		entries, _ := os.ReadDir(wd)
-		for _, e := range entries {
-			if strings.HasSuffix(e.Name(), "_test.kl") || strings.HasSuffix(e.Name(), ".test.kl") {
-				inputFile = e.Name()
-				break
-			}
-		}
-		if inputFile == "" {
-			for _, e := range entries {
-				if strings.HasSuffix(e.Name(), ".kl") {
-					data, err := os.ReadFile(e.Name())
-					if err == nil && strings.Contains(string(data), "#[test]") {
-						inputFile = e.Name()
-						break
-					}
-				}
-			}
-		}
-		if inputFile == "" {
-			fmt.Println("No test files found.")
-			fmt.Println("Usage: kaulac test [file.kl]")
-			os.Exit(0)
-		}
+		os.Exit(runUnittestBatch(".", nil))
 	}
 
 	// 如果没有输入文件，退出
@@ -1148,6 +1163,10 @@ func main() {
 	go func() {
 		defer parallelWg.Done()
 		stdlibPath = findStdlib(cfg.StdlibPath)
+		// 把解析结果写回 cfg：codegen.NewCodeGenerator 内部会自己再查一次
+		// stdlib.json，而它的候选列表不含 exeDir（只有 cwd 相对路径），
+		// 不回传就会查不到并打印一条误导性的「标准库函数签名将不可用」警告。
+		cfg.StdlibPath = stdlibPath
 		stdlibConfig, _ = stdlib.LoadStdlibConfigWithPkglib(stdlibPath, cfg.PkglibPath)
 	}()
 
@@ -1173,6 +1192,14 @@ func main() {
 	program := p.Parse()
 	stage1Time := time.Since(stage1Start)
 	if verbose { fmt.Printf(i18n.T(i18n.MsgStage1Completed)+"\n", stage1Time) }
+
+	// 单元测试模式必须真的存在 #[test] 函数：否则 runner 不会生成，
+	// 程序会退化成普通 main 并以 0 退出，把「没跑任何测试」伪装成「全部通过」。
+	if testMode && !hasTestFunctions(program) {
+		fmt.Fprintf(os.Stderr, "Error: %s 中没有 #[test] 函数\n", inputFile)
+		fmt.Fprintln(os.Stderr, "提示: 用 fn name() { ... } 声明无参无返回值的测试函数并加上 #[test]")
+		os.Exit(1)
+	}
 
 	// 保存词法分析和语法分析的错误数量
 	stage1ErrorCount := len(errorCollector.Errors())
@@ -1526,8 +1553,11 @@ func main() {
 	// 测试模式：编译成功后自动运行测试
 	if testMode && compileResult.Error == nil {
 		fmt.Printf("\n%s===== Running Tests =====%s\n", errors.ColorGreen, errors.ColorReset)
+		// 仅在产物是裸文件名时补 "./" 让 shell 能找到它。
+		// 用 filepath.IsAbs 而非前缀判断：Windows 绝对路径形如 "C:\..."，
+		// 不以 "/" 开头，旧的 HasPrefix 检查会给它拼出非法的 "./C:\..."。
 		testBin := compileResult.OutputFile
-		if !strings.HasPrefix(testBin, "/") && !strings.HasPrefix(testBin, "./") {
+		if !filepath.IsAbs(testBin) && !strings.HasPrefix(testBin, "./") {
 			testBin = "./" + testBin
 		}
 		cmd := exec.Command(testBin)

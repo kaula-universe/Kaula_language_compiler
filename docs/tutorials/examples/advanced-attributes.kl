@@ -107,6 +107,6 @@ fn main() {
     println("")
 
     println("3. #[test] 自动测试:")
-    println("   运行: kaulac test advanced-attributes.kl")
+    println("   运行: kaulac unittest advanced-attributes.kl")
     println("   查看 4 个测试（3 个执行 + 1 个忽略）的结果")
 }

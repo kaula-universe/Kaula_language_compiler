@@ -227,7 +227,7 @@ type CodeGenerator struct {
 	// 由 Generate 尾部在 classImplCode 之前输出（修复先使用后定义问题）
 	deepPromoteCBBlock string
 
-	// 高级属性支持：#[test]、#[build]、#[derive]、#[command]
+	// 高级属性支持：#[test]、#[derive]、#[command]
 	TestMode         bool // 测试模式：生成测试 runner 而非普通 main
 	testRunnerActive bool // 测试模式且确有 #[test] 函数（runner 已生成）
 	attributeFeat    *AttributeFeatures
@@ -1054,16 +1054,34 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 
 	stdlibPath := cfg.StdlibPath
 	if stdlibPath == "" {
-		// 与 kaulac findStdlib 一致的候选: 当前目录 / compiler/ / 上级
+		// 与 kaulac.findStdlib 保持一致：先找可执行文件同级的 stdlib.json
+		// （build/bin 布局），再退回 cwd 相对路径。只查 cwd 会漏掉
+		// 从仓库根目录调用 build/bin/kaulac.exe 的场景。
+		if exePath, err := os.Executable(); err == nil {
+			exeDir := filepath.Dir(filepath.Clean(exePath))
+			for _, cand := range []string{
+				filepath.Join(exeDir, "stdlib.json"),
+				filepath.Join(exeDir, "compiler", "stdlib.json"),
+				filepath.Join(exeDir, "..", "compiler", "stdlib.json"),
+			} {
+				if _, err := os.Stat(cand); err == nil {
+					stdlibPath = cand
+					break
+				}
+			}
+		}
+	}
+	if stdlibPath == "" {
+		// cwd 相对路径
 		for _, cand := range []string{"stdlib.json", "kaula/stdlib.json", "../stdlib.json", "../../stdlib.json"} {
 			if _, err := os.Stat(cand); err == nil {
 				stdlibPath = cand
 				break
 			}
 		}
-		if stdlibPath == "" {
-			stdlibPath = "stdlib.json" // 保底: 让 LoadStdlibConfig 报真实错误
-		}
+	}
+	if stdlibPath == "" {
+		stdlibPath = "stdlib.json" // 保底: 让 LoadStdlibConfig 报真实错误
 	}
 	// 加载 stdlib 配置（失败时警告并置 nil，后续代码均有 nil 检查）
 	stdlibConfig, err := stdlib.LoadStdlibConfig(stdlibPath)
@@ -1520,13 +1538,17 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// 不包含 <stdio.h>/<stdlib.h>/<string.h>，它们在裸机下不存在
 		// memset/memcpy 等由 kaula_freestanding_runtime.c 提供
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n")
-		// freestanding 下若代码使用 KMM 分配器（std_malloc 被重写为 kmm_v4_alloc_auto
-		// 或触发作用域回收），需包含分配器头文件（kaulac 自动添加 -I <src>）
-		if strings.Contains(functionCode.String(), "kmm_v4_alloc_auto") ||
-			strings.Contains(functionCode.String(), "KMM_V4_SCOPE_START") ||
-			strings.Contains(mainCode.String(), "kmm_v4_alloc_auto") {
-			allIncludes.WriteString("#include \"kmm_scoped_allocator_v4.h\"\n")
-		}
+		// 裸机下不能包含 kaula.h（它带 <string.h>），但代码生成器在几乎所有
+		// 非平凡函数里都会用到 KMM 分配器宏/函数（作用域回收、survivor、
+		// 字符串字面量提升）与 debug 溢出检查助手，因此这两个头无条件包含:
+		//   - kmm_scoped_allocator_v4.h 自包含（KMM_V4_* 宏 + kmm_v4_* 声明），
+		//     内部用 #ifndef KAULA_FREESTANDING 屏蔽 libc 头
+		//   - kaula_runtime.h 提供 kaula_add_i64 等，且已做成双环境可用
+		// 早前这里用"代码里是否出现 kmm_v4_/KMM_V4_"来条件包含，但 includes 在
+		// 函数体生成之前拼装，扫到的代码不全，导致 KMM_V4_SCOPE_END /
+		// kmm_v4_scope_pop / kmm_v4_survivor_* / kaula_add_i64 未声明直接编译失败。
+		allIncludes.WriteString("#include \"kmm_scoped_allocator_v4.h\"\n")
+		allIncludes.WriteString("#include \"kaula_runtime.h\"\n")
 	} else {
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n#include \"kaula_runtime.h\"\n")
 		// Windows (MSVC ABI / UCRT)：编译器对使用浮点的 TU 生成未定义引用 _fltused，

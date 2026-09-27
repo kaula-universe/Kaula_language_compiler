@@ -100,15 +100,13 @@ Kaula 还提供了三个高级属性，用于自动化常见开发任务：
 
 ### `#[test]` - 自动测试
 
-标记函数为测试函数，使用 `kaulac test` 命令自动发现并运行：
+标记函数为测试函数，使用 `kaulac unittest` 命令自动发现并运行：
 
 ```kaula
 #[test]
 fn test_add() {
     i64 result = 2 + 3
-    if result != 5 {
-        println("FAIL: 2 + 3 should be 5")
-    }
+    assert(result == 5)
 }
 
 #[test]
@@ -120,10 +118,13 @@ fn test_not_ready() {
 
 运行：
 ```bash
-kaulac test my_tests.kl
+kaulac unittest my_tests.kl
 ```
 
-输出包含每个测试的通过/失败/忽略状态及汇总统计。
+输出包含每个测试的通过/失败/忽略状态及汇总统计，失败时退出码非零。
+
+> `kaulac test` 是语料库快照回归测试器，与 `#[test]` 无关，详见
+> [属性扩展](../attributes.md#test-自动测试)。
 
 ### `#[derive]` - 派生宏
 

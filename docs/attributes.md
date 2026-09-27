@@ -15,7 +15,11 @@ Kaula 支持通过 `#[attribute]` 语法为函数、结构体、字段等添加�
 
 ### 概述
 
-`#[test]` 属性标记一个函数为测试函数。使用 `kaulac test` 子命令编译时，编译器会自动收集所有测试函数，生成测试运行器（test runner），并在编译完成后自动执行。
+`#[test]` 属性标记一个函数为测试函数。使用 `kaulac unittest <file.kl>` 编译时，编译器会自动收集所有测试函数，生成测试运行器（test runner）替换掉 `main`，编译完成后自动执行。
+
+> **注意**：`kaulac test` 与 `kaulac unittest` 是两套不同的东西，不要混淆。
+> - `kaulac unittest <file.kl>` — 本节的 `#[test]` runner。
+> - `kaulac test [file.kl|dir]` — 语料库**快照回归测试**：以普通模式编译每个含顶层 `fn main()` 的 `.kl`，运行后与 `<file>.kl.stdout` 比对。与 `#[test]` 属性无关。
 
 ### 基本用法
 
@@ -28,17 +32,45 @@ fn test_addition() {
 ```
 
 断言说明：`assert(cond)` 为编译器内置，无需 import。测试模式下失败会被
-runner 记录（测试计为 FAILED，`kaulac test` 返回非零退出码）；普通模式下
+runner 记录（测试计为 FAILED，`kaulac unittest` 返回非零退出码）；普通模式下
 失败会打印断言文本并 `exit(1)`。
 
 ### 运行测试
 
 ```bash
 # 运行指定文件中的测试
-kaulac test my_tests.kl
+kaulac unittest my_tests.kl
 
-# 自动查找当前目录下的测试文件（含 *_test.kl 或包含 #[test] 的 .kl 文件）
-kaulac test
+# 批量运行目录下所有含 #[test] 的 .kl
+kaulac unittest test/
+kaulac unittest              # 等价于 kaulac unittest .
+
+# 透传编译旗标
+kaulac unittest --no-cache test/
+```
+
+若目标文件里没有任何 `#[test]` 函数，编译会直接报错退出，而不是退化成
+普通 `main` 并以 0 退出把「没跑任何测试」伪装成「全部通过」。
+
+### 批量模式
+
+指定目录（或省略参数）时进入批量模式：递归找出所有含 `#[test]` 的 `.kl`，
+逐个编译运行，最后汇总。
+
+- 目录扫描会跳过 `build/`、`cache/`、`pkglib/`、`.git/`、`node_modules/`
+- 每个文件以独立子进程运行，互不干扰；任一文件有失败测试即整体退出码非零
+- 单文件与批量两条路径共用同一套单文件编译逻辑，行为一致
+
+```
+Running 4 test file(s) under test/
+...
+===== Test Files Summary =====
+Files:  4
+Passed: 4
+Failed: 0
+==========================
+
+All test files passed.
 ```
 
 ### 测试输出示例
@@ -49,13 +81,13 @@ kaulac test
 Running Kaula tests...
 
 test test_addition ... ok
-test test_subtraction ... ok
 test test_string ... ok
+  (字符串基础操作)
 test test_ignored ... IGNORED
 
 ===== Test Summary =====
 Total:   4
-Passed:  3
+Passed:  2
 Failed:  0
 Ignored: 1
 Time:    0.001s
@@ -63,6 +95,20 @@ Time:    0.001s
 
 All tests passed.
 ```
+
+### `#[test("描述")]` 测试描述
+
+给测试附加一行说明，输出时显示在测试名下方：
+
+```kaula
+#[test("2 + 3 必须等于 5")]
+fn test_addition() {
+    assert(2 + 3 == 5)
+}
+```
+
+描述会被转义后写入生成的 C 源码，引号和反斜杠都是安全的。描述不能跨行
+（lexer 扫描 `#[...]` 内容时遇换行即止）。
 
 ### `#[ignore]` 忽略测试
 
@@ -77,12 +123,26 @@ fn test_not_ready() {
 }
 ```
 
+### `#[should_panic]` 预期失败
+
+标记「这个测试本就应该断言失败」。若该测试的断言确实失败则计为通过；
+若它反而通过了，则计为 FAILED：
+
+```kaula
+#[test]
+#[should_panic]
+fn test_known_bug() {
+    assert(buggy_value() == 3)   // 目前失败 -> 测试通过
+}
+```
+
 ### 注意事项
 
 - 测试函数签名必须是 `fn name()`，无参数无返回值
-- 测试函数不需要 `pub` 修饰符，编译器会自动识别
+- 测试函数不需要 `pub` 修饰符，编译器会自动识别（也不会报未使用警告）
 - 测试模式下，原有的 `main` 函数会被测试运行器替代
 - 测试函数中的 `println` 输出会直接显示在控制台
+- 断言失败信息会打到 stderr，并带上 `文件:行号`
 
 ---
 
@@ -287,8 +347,9 @@ fn test_config_defaults() {
 
 高级属性扩展的核心实现在 `compiler/internal/codegen/attribute_features.go`：
 
-- `CollectTestFunctions()` - 收集 `#[test]` 函数
+- `CollectTestFunctions()` - 收集 `#[test]` 函数（含 `#[ignore]`、`#[should_panic]`、`#[test("描述")]`）
 - `GenerateTestRunner()` - 生成测试运行器代码
+- `cStringLiteral()` - 把描述编码为安全的 C 字符串字面量
 - `CollectDeriveTypes()` - 收集 `#[derive]` 结构体
 - `GenerateDeriveImpls()` - 生成派生方法实现
 - `CollectCommands()` - 收集 `#[command]` 结构体
@@ -296,13 +357,26 @@ fn test_config_defaults() {
 
 ### 编译流程
 
-1. **Parser**：解析 `#[attribute]` 语法，支持连续属性（如 `#[test]#[ignore]`）
-2. **Sema**：注册派生方法和命令解析函数符号，跳过测试函数的未使用警告
-3. **Codegen**：
+1. **Lexer**：扫描 `#[...]` 原文内容（按字节收集，保留 UTF-8）
+2. **Parser**：解析 `#[attribute]` 语法，支持连续属性（如 `#[test]#[ignore]`）
+3. **Sema**：注册派生方法和命令解析函数符号，跳过测试函数的未使用警告
+4. **Codegen**：
    - 收集所有高级属性信息
    - 生成前向声明
    - 在函数代码后插入派生实现和命令解析器
    - 测试模式下用测试运行器替代 main 函数
+
+### 命令入口
+
+| 命令 | 行为 | 与 `#[test]` 的关系 |
+|------|------|-------------------|
+| `kaulac unittest <file.kl>` | 置 `testMode`，编译后自动运行 `#[test]` runner，失败数决定退出码 | **本属性由它驱动** |
+| `kaulac unittest [dir]` | 批量：递归找出含 `#[test]` 的 `.kl` 逐个运行并汇总 | 同上 |
+| `kaulac test [file.kl\|dir]` | 快照回归测试器：普通模式编译含顶层 `main` 的 `.kl`，比对 `.kl.stdout` | 无关 |
+| `kaulac compile/run/build/check` | 普通编译 | 无关 |
+
+`testMode` 一旦为真，`assert(cond)` 会绑定到 runner 的 `__kaula_test_assert`
+（记录失败而非 `exit(1)`），这是 `#[test]` 能真正判定失败的前提。
 
 ### 与已有属性的关系
 
