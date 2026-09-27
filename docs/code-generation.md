@@ -381,7 +381,29 @@ void process(void) {
 **作用域插入策略**：
 - `kmm_v4_scope_push()` 插入在函数入口（prologue 之后）
 - `kmm_v4_scope_pop()` 插入在所有退出路径（return/break/continue + 函数末尾）
-- 嵌套作用域支持最大深度 64 层（`KMM_V4_MAX_SCOPE_DEPTH`）
+- 嵌套作用域支持最大深度 1024 层（`KMM_V4_MAX_SCOPE_DEPTH`，可用 `-DKMM_V4_MAX_SCOPE_DEPTH=N` 覆盖）。
+  该上限只约束**会 push 作用域的层数**：纯计算函数 codegen 不生成作用域
+  （`shouldUseKMMScopeForFunc`），所以不受它限制。
+- 函数级作用域用 `KMM_V4_SCOPE_NAMED("K_foo")` 发射，作用域栈溢出时的 FATAL
+  信息会打印 `innermost managed scope: K_foo`（TLS 单指针记录归属，每帧仍是
+  16 字节 `{base, offset}`）。
+- 编译期对"递归且每层 push 作用域"的函数给出 `recursion_scope_depth` 警告，
+  提示深度上限与三种处理方式（改循环 / `#[no_kmm]` / 放宽宏）。
+
+**尾调用改写（TCO）**：
+- 触发条件：受作用域托管（`useKMM`）、无捕获、self-call 位于 `return f(...)`
+  返回值位置、实参个数与形参一致、实参是无副作用的简单表达式
+  （标识符/字面量/一元/二元/括号/类型转换）。
+- 改写形态：函数体被包进 `for (;;) { checkpoint; KMM_V4_SCOPE_NAMED {...} } `，
+  尾调用点发射"本层 free → `kmm_v4_survivor_rewind` → `kmm_v4_scope_pop` →
+  实参写回形参 → `goto` 循环顶部"，因此**每轮复用同一个 C 栈帧**，
+  递归深度不再受 `KMM_V4_MAX_SCOPE_DEPTH` / C 栈限制。
+- 语义等价性由"尾调用点执行与 return 完全相同的本层回收动作"保证；
+  实参若引用本帧会被回收的对象（指针/String 局部变量），生成期检测到后退回
+  真实调用（该函数仍受深度上限约束，并保留 `recursion_scope_depth` 警告）。
+- 不改写的场景：互递归、非尾递归、带捕获的嵌套函数、`#[no_kmm]`/`#[inline]`
+  函数。纯计算递归无需 Kaula 层 TCO——clang -O2 的 TailRecursionElimination
+  已经把它转成循环。
 
 ```go
 // 代码生成器中的 KMM 作用域管理

@@ -92,6 +92,16 @@ type CodeGenerator struct {
 	// promoteSkipNotes: "拷贝大小不可安全确定 → 跳过 promote"的诊断（非致命）
 	promoteSkipNotes []string
 
+	// tco: 尾调用改写状态（受 KMM 作用域托管的自递归函数），nil=未启用
+	// 背景：clang -O2 已经会对**不涉及 KMM 作用域**的递归做 TCO/TRE，但带
+	// 作用域托管的函数每层都要 scope_pop/回收，C 后端无法消除帧——递归深度
+	// 受 KMM_V4_MAX_SCOPE_DEPTH 约束。这里在 Kaula 层把
+	// "return f(...)" 改写成"回收本层 → 实参写回形参 → 跳回循环顶部"，
+	// 复用同一个 C 栈帧，深度不再随递归增长。
+	tco *tcoState
+	// tcoTempSeq: 尾调用改写实参临时变量的序号（保证同一函数内多次改写不重名）
+	tcoTempSeq int
+
 	// recursionScopeNotes: "递归 + 每层 KMM 作用域"的函数名（非致命诊断）
 	recursionScopeNotes []string
 
@@ -408,6 +418,51 @@ func (cg *CodeGenerator) AddPromoteSkipNote(message string) {
 // PromoteSkipNotes 返回 promote 跳过诊断列表
 func (cg *CodeGenerator) PromoteSkipNotes() []string {
 	return cg.promoteSkipNotes
+}
+
+// tcoState 是"每函数"的尾调用改写状态：循环标签、形参名（实参回写用）、
+// 以及登记为可改写的 self-call 节点集合。
+type tcoState struct {
+	label  string
+	params []string
+	sites  map[*ast.CallExpression]bool
+	// converted: 实际完成改写的尾调用点数（有些候选点会在生成期因实参
+	// 引用本帧会被回收的对象而退回真实调用，用于判断是否还有深度受限的递归）
+	converted int
+}
+
+// MarkTcoConverted 记录一次实际完成的尾调用改写
+func (t *tcoState) MarkTcoConverted() {
+	if t != nil {
+		t.converted++
+	}
+}
+
+// SetTCO 启用当前函数的尾调用改写（受 KMM 作用域托管的自递归函数）。
+// label 是函数内循环顶部的标签名，params 是形参名，sites 是可改写的 self-call。
+// 生成嵌套函数前应先 TakeTCO 取出并清空，避免内层函数误用外层状态。
+func (cg *CodeGenerator) SetTCO(label string, params []string, sites map[*ast.CallExpression]bool) {
+	cg.tco = &tcoState{label: label, params: params, sites: sites}
+}
+
+// TakeTCO 取出并清空当前尾调用改写状态（用于保存/恢复，避免嵌套函数继承）
+func (cg *CodeGenerator) TakeTCO() *tcoState {
+	prev := cg.tco
+	cg.tco = nil
+	return prev
+}
+
+// RestoreTCO 恢复先前取出的尾调用改写状态
+func (cg *CodeGenerator) RestoreTCO(prev *tcoState) {
+	cg.tco = prev
+}
+
+// TcoState 返回当前函数的尾调用改写状态（nil=未启用）
+func (cg *CodeGenerator) TcoState() *tcoState { return cg.tco }
+
+// IsTcoTailSite 判断该 self-call 是否应改写为尾跳转
+func (cg *CodeGenerator) IsTcoTailSite(call *ast.CallExpression) bool {
+	return cg.tco != nil && call != nil && cg.tco.sites[call]
 }
 
 // AddRecursionScopeNote 记录"递归 + 每层 KMM 作用域"的诊断信息。
