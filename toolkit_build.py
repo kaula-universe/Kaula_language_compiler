@@ -592,25 +592,26 @@ class CBuilder:
         rt_c_files = self._find_c_files(self.config.runtime_dir)
         sources.extend(rt_c_files)
 
+        # kaula_freestanding_runtime.c 是"裸机专用"TU: 它 unity-include 了整个
+        # freestanding 库, 只在 -nostdlib 的裸机流水线里由 kaulac 现场编译链接。
+        # 若把它归档进托管模式的 kaula_runtime.lib, 托管程序同时链接
+        # kaula_freestanding.lib 时, is_alpha/to_upper 等弱符号会在两个归档里
+        # 各有一份定义 —— COFF/lld-link 视之为 duplicate symbol 直接链接失败。
+        # 托管模式下这些符号本就由 kaula_freestanding.lib(弱, libc 优先) 提供。
+        sources = [s for s in sources if s.name != "kaula_freestanding_runtime.c"]
+
         if not sources:
             print("[-] 未找到运行时源文件")
             return False
 
-        print(f"[*] 找到 {len(sources)} 个运行时源文件")
+        print(f"[*] 找到 {len(sources)} 个运行时源文件（已排除裸机专用 kaula_freestanding_runtime.c）")
 
         old_objs = list(self.obj_files)
         self.obj_files = []
-        # 为每个 source 选择正确的 include_dirs:
-        # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
-        # unity-include freestanding 库,必须用 freestanding 优先的 -I 顺序,
-        # 否则会错误地包含 std/memory/memory.c(依赖 libc <string.h>)。
-        # 其他文件用默认 include_dirs(None → _compile_one 用 self.config.include_dirs)。
-        fsrt = self.config.freestanding_runtime_include_dirs
-        source_with_dirs = [
-            (src, fsrt if src.name == "kaula_freestanding_runtime.c" else None)
-            for src in sources
-        ]
-        ok, fail = self._parallel_compile(source_with_dirs, "编译运行时")
+        # 所有托管运行时源文件用默认 include_dirs(None → _compile_one 用
+        # self.config.include_dirs)。kaula_freestanding_runtime.c 已在上面排除:
+        # 裸机流水线由 kaulac 用 -I freestanding 现场编译它, 不进托管归档。
+        ok, fail = self._parallel_compile(sources, "编译运行时")
 
         if fail > 0:
             print(f"[-] 运行时编译失败: {fail} 个文件")

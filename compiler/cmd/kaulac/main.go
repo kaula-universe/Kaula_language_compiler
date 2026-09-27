@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
  "flag"
@@ -262,8 +262,13 @@ func extractFunctionDefs(cCode string) string {
 			continue
 		}
 
-		// 检测 main 函数开始（不在函数体内时）
-		if !inFunction && strings.Contains(trimmed, "int main(") {
+		// 检测入口函数开始（不在函数体内时）
+		//
+		// 不只是 int main(：裸机模板 freestanding.c.tmpl 会额外生成 _kaula_entry，
+		// 本地 import 文件用同一模板生成，把整段入口带进片段后注入主 TU，
+		// 结果是每个本地 import 都多一份 _kaula_entry → "redefinition of '_kaula_entry'"。
+		if !inFunction && (strings.Contains(trimmed, "int main(") ||
+			strings.Contains(trimmed, "void _kaula_entry(")) {
 			skipMain = true
 			inFunction = true
 			braceDepth = 0
@@ -986,6 +991,9 @@ func main() {
 	if err != nil {
 		fmt.Printf("Warning: Failed to load config: %v, using default\n", err)
 	}
+	// templates/ 必须能定位到：找不到 main.c.tmpl 时 codegen 会静默降级为
+	// "无模板"输出（裸机入口 _kaula_entry 不生成），报错点远离根因。
+	cfg.TemplatePath = resolveTemplatePath(cfg.TemplatePath)
 
 	// 让 stdlib 加载默认优先使用 --pkglib 指定的目录
 	if cfg.PkglibPath != "" {
@@ -1397,7 +1405,12 @@ func main() {
 		// 不加进键会导致 -O0/-O3 或不同池容量复用同一产物（静默吞掉参数）。
 		// 同时混入编译器自身构建标识：codegen 改动后旧的 .c 缓存必须失效，
 		// 否则重装 kaulac（版本号不变）会静默复用旧代码生成结果。
-		cacheManager.SetKeyExtra(fmt.Sprintf("%s|%d|%s", optLevel, poolCapacity, compilerBuildStamp()))
+		// freestanding/交叉编译的目标（triple/boot/arch/cflags）也必须入键：
+		// 同一份 .kl 编 x86_64 与 riscv64 走的是不同的头文件集合与模板。
+		cacheManager.SetKeyExtra(fmt.Sprintf("%s|%d|%s|%t|%s|%s|%s|%s",
+			optLevel, poolCapacity, compilerBuildStamp(),
+			cfg.Freestanding, cfg.TargetTriple, cfg.Boot, cfg.BootArch,
+			strings.Join(append(append([]string{}, cfg.CFlags...), cfg.CDefines...), ",")))
 		cacheKey := cacheManager.GetCacheKey(inputFile)
 		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
 
@@ -1690,6 +1703,35 @@ func archCodeModel(arch string) []string {
 	}
 }
 
+// archDefaultCFlags 返回裸机目标缺失时必须补上的架构参数（仅当用户没显式给）。
+//
+// riscv64：clang 的 riscv64 默认是 rv64imac + 软浮点 ABI，f64 运算会被 lower 成
+// __adddf3/__ledf2/__fixdfsi 等 libcall；裸机没有 compiler-rt，链接期必炸。
+// 固定 rv64gc + lp64d（硬件 F/D，QEMU virt 与绝大多数开发板都支持）后零 libcall。
+// 用户自己传了 -march/-mabi 就完全不干预（要软浮点内核自己加回去）。
+func archDefaultCFlags(arch string, userFlags []string) []string {
+	has := func(prefix string) bool {
+		for _, f := range userFlags {
+			if strings.HasPrefix(f, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	switch arch {
+	case "riscv64":
+		var out []string
+		if !has("-march=") {
+			out = append(out, "-march=rv64gc")
+		}
+		if !has("-mabi=") {
+			out = append(out, "-mabi=lp64d")
+		}
+		return out
+	}
+	return nil
+}
+
 // resolveBootSource 定位引导汇编源文件
 // 优先级: --boot-file > 内置模板 <templates>/boot/<arch>-<boot>.S
 func resolveBootSource(cfg *config.Config) (string, error) {
@@ -1935,6 +1977,20 @@ func findBootKaulaFreePath(workDir string) string {
 	return ""
 }
 
+// sanitizeCacheKey 把 arch/triple 变成安全的目录名（去掉路径分隔符与冒号）
+func sanitizeCacheKey(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
 // compileBootKernel 裸机引导构建流水线：
 //  1. clang -c 生成 C 代码 -> kernel.o
 //  2. clang -c 编译 boot stub -> boot.o
@@ -1971,12 +2027,20 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	workCache := filepath.Dir(cacheFile)
 	os.MkdirAll(workCache, 0755)
 	base := strings.TrimSuffix(filepath.Base(cacheFile), filepath.Ext(cacheFile))
-	kernelObj := filepath.Join(workCache, base+".o")
-	bootObj := filepath.Join(workCache, "boot.o")
-	runtimeObj := filepath.Join(workCache, "kaula_freestanding_runtime.o")
+	// kernelObj 也必须按架构分目录：cacheFile 只按 (源码, optLevel, 池容量,
+	// 编译器构建标识) 命名，不含目标三元组，同一份 .c 编 x86_64 与 riscv64
+	// 会得到同名 .o，链接期报 "xxx.o is incompatible with elf_x86_64"。
+	archCache := filepath.Join(workCache, "boot-"+sanitizeCacheKey(arch+"-"+triple))
+	os.MkdirAll(archCache, 0755)
+	kernelObj := filepath.Join(archCache, base+".o")
+	// boot.o / runtime.o / kmm.o 是与目标架构强相关（不同 arch 的 ELF 机器类型不同），
+	// 必须按 arch+triple 分目录：多架构并行构建时共用固定文件名会互相覆盖，
+	// 链接期报 "xxx.o is incompatible with elf_i386"。
+	bootObj := filepath.Join(archCache, "boot.o")
+	runtimeObj := filepath.Join(archCache, "kaula_freestanding_runtime.o")
 
 	// 公共编译参数
-	baseArgs := []string{"-target", triple, "-c", optLevel}
+	baseArgs := append([]string{"-target", triple, "-c", optLevel}, archDefaultCFlags(arch, cfg.CFlags)...)
 
 	kaulaSrcPath := findBootKaulaSrcPath(workDir)
 	kaulaStdPath := findBootKaulaStdPath(workDir)
@@ -2024,7 +2088,16 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	}
 
 	// 2. 编译 boot stub
+	// 注意：用户自定义 C 参数必须一并传给 boot stub。此前只有 kernel/runtime/alloc
+	// 三个 TU 带了 cfg.CFlags，stub 被漏掉：riscv64 上 kernel 用 -mabi=lp64d 而
+	// stub 仍是软浮点，链接期报 "cannot link object files with different floating-point ABI"。
 	bootArgs := append(append([]string{}, baseArgs...), bootSrc, "-o", bootObj)
+	for _, flag := range cfg.CFlags {
+		bootArgs = append(bootArgs, flag)
+	}
+	for _, define := range cfg.CDefines {
+		bootArgs = append(bootArgs, "-D"+define)
+	}
 	fmt.Printf("[Boot] Compiling boot stub -> %s\n", bootObj)
 	bootCmd := compilerCommand(clangPath, bootArgs...)
 	if out, err := bootCmd.CombinedOutput(); err != nil {
@@ -2044,7 +2117,12 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 		if _, err := os.Stat(runtimeSrc); err == nil {
 			runtimeArgs := append(append([]string{}, baseArgs...),
 				"-ffreestanding", "-nostdlib", "-fno-pic",
-				"-DKAULA_FREESTANDING", "-I", kaulaSrcPath,
+				// -DKMM_V4_STATIC_POOL 必须与 KMM 分配器 TU（步骤 3.5）一致：
+				// runtime 现在也 include kmm_scoped_allocator_v4.h（为 std.memory
+				// 转发 kmm_v4_alloc 等符号），KMM 配置不一致时头里的内联路径会
+				// 编出动态池专用符号（kmm_v4_survivor_paged_free / g_kmm_garbage），
+				// 而静态池的 KMM .o 里根本没有它们 → 链接期 undefined symbol。
+				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
 			)
 			if kaulaFreePath != "" {
 				runtimeArgs = append(runtimeArgs, "-I", kaulaFreePath)
@@ -2069,7 +2147,7 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 	}
 
 	// 3.5 编译 KMM V4 分配器（静态池模式，提供堆分配/作用域回收）
-	allocObj := filepath.Join(workCache, "kmm_scoped_allocator_v4.o")
+	allocObj := filepath.Join(archCache, "kmm_scoped_allocator_v4.o")
 	if kaulaSrcPath != "" {
 		allocSrc := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c")
 		if _, err := os.Stat(allocSrc); err == nil {
@@ -2138,11 +2216,14 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 	workCache := filepath.Dir(cacheFile)
 	os.MkdirAll(workCache, 0755)
 	base := strings.TrimSuffix(filepath.Base(cacheFile), filepath.Ext(cacheFile))
-	progObj := filepath.Join(workCache, base+".o")
-	runtimeObj := filepath.Join(workCache, "kaula_freestanding_runtime.o")
-	allocObj := filepath.Join(workCache, "kmm_scoped_allocator_v4.o")
+	// 同 compileBootKernel：与架构强相关的中间产物按 arch+triple 分目录
+	archCache := filepath.Join(workCache, "boot-"+sanitizeCacheKey(arch+"-"+triple))
+	os.MkdirAll(archCache, 0755)
+	progObj := filepath.Join(archCache, base+".o")
+	runtimeObj := filepath.Join(archCache, "kaula_freestanding_runtime.o")
+	allocObj := filepath.Join(archCache, "kmm_scoped_allocator_v4.o")
 
-	baseArgs := []string{"-target", triple, "-c", optLevel}
+	baseArgs := append([]string{"-target", triple, "-c", optLevel}, archDefaultCFlags(arch, cfg.CFlags)...)
 
 	kaulaSrcPath := findBootKaulaSrcPath(workDir)
 	kaulaStdPath := findBootKaulaStdPath(workDir)
@@ -2193,7 +2274,12 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 		if _, err := os.Stat(runtimeSrc); err == nil {
 			runtimeArgs := append(append([]string{}, baseArgs...),
 				"-ffreestanding", "-nostdlib", "-fno-pic",
-				"-DKAULA_FREESTANDING", "-I", kaulaSrcPath,
+				// -DKMM_V4_STATIC_POOL 必须与 KMM 分配器 TU（步骤 3.5）一致：
+				// runtime 现在也 include kmm_scoped_allocator_v4.h（为 std.memory
+				// 转发 kmm_v4_alloc 等符号），KMM 配置不一致时头里的内联路径会
+				// 编出动态池专用符号（kmm_v4_survivor_paged_free / g_kmm_garbage），
+				// 而静态池的 KMM .o 里根本没有它们 → 链接期 undefined symbol。
+				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
 			)
 			if kaulaFreePath != "" {
 				runtimeArgs = append(runtimeArgs, "-I", kaulaFreePath)
@@ -2701,6 +2787,90 @@ func findStdlib(overridePath string) string {
 	return "stdlib.json"
 }
 
+// pickKaulaRoot 在候选目录里挑 kaula 根目录，两轮匹配：
+//
+//	第 1 轮: <c>/src/kaula.h            —— 源码布局（.c 源码齐全）
+//	第 2 轮: <c>/include/kaula/kaula.h  —— 安装布局（只有头文件）
+//
+// 必须源码布局优先。仓库里 build/ 目录含 include/kaula/kaula.h，而
+// build/bin/kaulac.exe 的 exeDir/.. 正好是 build/：逐候选「先 src 再 include」
+// 的单轮匹配会选中 build/，随后 kaulaSrcPath = build/src（空目录）——
+// 裸机模式需要的 kaula_freestanding_runtime.c / kmm_scoped_allocator_v4.c
+// 全部找不到，链接期报 calloc/memcpy 一堆 undefined symbol，根因却完全
+// 不在错误信息里。
+func pickKaulaRoot(candidates []string) string {
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
+			return c
+		}
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(c, "include", "kaula", "kaula.h")); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+// resolveTemplatePath 定位 templates/ 目录（main.c.tmpl / freestanding.c.tmpl /
+// boot/*.S / linker/*.ld）。
+//
+// config 的默认值是相对路径 "templates"，只有当 cwd 恰好是 compiler/ 时才存在。
+// 从仓库根（templates 在 compiler/templates）或从 build/bin（templates 在
+// ../../compiler/templates）调用时会静默找不到模板：codegen 的 GetTemplate 失败
+// 后走"无模板"分支，裸机入口 _kaula_entry 根本不会生成，链接期才报
+// undefined symbol: _kaula_entry —— 报错点离根因极远。
+// 这里按 KAULA_HOME → 可执行文件 → cwd 的顺序补齐查找，与 findStdlib 同构。
+func resolveTemplatePath(configured string) string {
+	hasTemplate := func(dir string) bool {
+		if dir == "" {
+			return false
+		}
+		_, err := os.Stat(filepath.Join(dir, "main.c.tmpl"))
+		return err == nil
+	}
+
+	if hasTemplate(configured) {
+		return configured
+	}
+	if configured != "" {
+		fmt.Fprintf(os.Stderr, "[WARN] --template 指定的目录没有 main.c.tmpl: %s，回退到自动查找\n", configured)
+	}
+
+	var candidates []string
+	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
+		candidates = append(candidates,
+			filepath.Join(envHome, "compiler", "templates"),
+			filepath.Join(envHome, "templates"))
+	}
+	workDir, _ := os.Getwd()
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(filepath.Clean(exePath))
+		candidates = append(candidates,
+			filepath.Join(exeDir, "templates"),                        // compiler/ 布局
+			filepath.Join(exeDir, "compiler", "templates"),            // kaula 根布局
+			filepath.Join(exeDir, "..", "compiler", "templates"),      // build/bin 布局
+			filepath.Join(exeDir, "..", "templates"))
+	}
+	candidates = append(candidates,
+		filepath.Join(workDir, "compiler", "templates"),
+		filepath.Join(workDir, "templates"),
+		filepath.Join(workDir, "..", "compiler", "templates"),
+		filepath.Join(workDir, "..", "templates"))
+	for _, c := range candidates {
+		if hasTemplate(c) {
+			return c
+		}
+	}
+	return configured
+}
+
 func printErrors(ec *errors.ErrorCollector, stage string) {
 	fmt.Printf("Errors found during %s:\n", stage)
 	for _, err := range ec.Errors() {
@@ -2850,52 +3020,30 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 	// 1. 环境变量 KAULA_HOME
 	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
-		if _, err := os.Stat(filepath.Join(envHome, "src", "kaula.h")); err == nil {
-			kaulaRoot = envHome
-		} else if _, err := os.Stat(filepath.Join(envHome, "include", "kaula", "kaula.h")); err == nil {
-			kaulaRoot = envHome
-		}
+		kaulaRoot = pickKaulaRoot([]string{envHome})
 	}
 
 	// 2. 从可执行文件路径推断（kaulac 通常在 compiler/ 或 build/bin/ 下）
 	if kaulaRoot == "" {
 		if exePath, err := os.Executable(); err == nil {
 			exeDir := filepath.Dir(filepath.Clean(exePath))
-			candidates := []string{
+			kaulaRoot = pickKaulaRoot([]string{
 				filepath.Join(exeDir, ".."),       // compiler/ 的上级 = kaula 根
 				filepath.Join(exeDir, "..", ".."), // build/bin/ 的上两级 = kaula 根
 				exeDir,                            // 可执行文件所在目录就是 kaula 根
-			}
-			for _, c := range candidates {
-				if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
-					kaulaRoot = c
-					break
-				} else if _, err := os.Stat(filepath.Join(c, "include", "kaula", "kaula.h")); err == nil {
-					kaulaRoot = c
-					break
-				}
-			}
+			})
 		}
 	}
 
 	// 3. 从工作目录相对路径回溯
 	if kaulaRoot == "" {
-		candidates := []string{
+		kaulaRoot = pickKaulaRoot([]string{
 			workDir,
 			filepath.Join(workDir, ".."),
 			filepath.Join(workDir, "..", ".."),
 			filepath.Join(workDir, "..", "..", ".."),
 			filepath.Join(workDir, "..", "..", "..", "kaula"),
-		}
-		for _, c := range candidates {
-			if _, err := os.Stat(filepath.Join(c, "src", "kaula.h")); err == nil {
-				kaulaRoot = c
-				break
-			} else if _, err := os.Stat(filepath.Join(c, "include", "kaula", "kaula.h")); err == nil {
-				kaulaRoot = c
-				break
-			}
-		}
+		})
 	}
 
 	stdLibraryName, runtimeLibraryName := installedLibraryNames()
@@ -2977,6 +3125,12 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			freePaths = append(freePaths, parent)
 		}
 	}
+
+	// 裸机模式下 freestanding runtime 的 unity 编译产物（5 模块合一的 .o）
+	// 与 fsRuntimeCoversLib：该 .o 已包含全部 freestanding 模块符号，
+	// 再链接 fs_*.o 会得到 duplicate symbol。
+	var fsRuntimeObj string
+	fsRuntimeCoversLib := false
 
 	var validSrcPaths, validStdPaths, validFreePaths []string
 	for _, p := range srcPaths {
@@ -3223,8 +3377,72 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		if verboseMode { fmt.Printf("[Compile] All %d std modules cached, skipping pre-compilation\n", len(moduleSources)) }
 	}
 
+	// 裸机模式：预先单独编译 freestanding runtime（5 模块 unity build）成 .o。
+	//
+	// 必须单独编译、且 freestanding 的 -I 排在 std 之前：
+	// runtime 通过 #include "memory/memory.c" 等 unity-include freestanding 库，
+	// 而生成代码那次调用的 -I 顺序是 src → std → freestanding，short 形式的 include
+	// 会先命中 std/memory/memory.c（依赖 libc <string.h>，-nostdlib 下直接失败），
+	// std/io/io.c 还会把 <stdio.h> 拉进来（hosted 语义，裸机不存在）。
+	// boot 路径（compileBootKernel）本来就单独编译，顺序正确。
+	//
+	// 成功后 fsRuntimeCoversLib=true：下面的 moduleSources（fs_*.o）不再链接，
+	// 否则同一批 fs_* 符号会被定义两次。
+	if cfg != nil && cfg.Freestanding {
+		// 裸机默认参数（如 riscv64 的 rv64gc/lp64d，见 archDefaultCFlags）
+		clangArgs = append(clangArgs, archDefaultCFlags(resolveBootArch(cfg), cfg.CFlags)...)
+		runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
+		if _, err := os.Stat(runtimeSrc); err == nil {
+			rtObj := filepath.Join(objectCacheDir, "kaula_fs_runtime.o")
+			rtArgs := append([]string{}, compilerPrefix...)
+			rtArgs = append(rtArgs, "-c", optLevel, "-ffreestanding", "-nostdlib",
+				"-fno-pic", "-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL")
+			rtArgs = append(rtArgs, archDefaultCFlags(resolveBootArch(cfg), cfg.CFlags)...)
+			for _, p := range validSrcPaths {
+				rtArgs = append(rtArgs, "-I", p)
+			}
+			// 关键：freestanding 目录必须排在 std 之前
+			for _, p := range validFreePaths {
+				rtArgs = append(rtArgs, "-I", p)
+			}
+			for _, p := range validStdPaths {
+				rtArgs = append(rtArgs, "-I", p)
+			}
+			if poolCapacity > 0 {
+				rtArgs = append(rtArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+			}
+			for _, flag := range cfg.CFlags {
+				rtArgs = append(rtArgs, flag)
+			}
+			for _, define := range cfg.CDefines {
+				rtArgs = append(rtArgs, "-D"+define)
+			}
+			rtArgs = append(rtArgs, runtimeSrc, "-o", rtObj)
+			if runtime.GOOS == "windows" {
+				rtArgs = append(rtArgs, "-mstack-probe-size=2147483647")
+			}
+			if out, err := compilerCommand(compilerCmd, rtArgs...).CombinedOutput(); err != nil {
+				return fmt.Errorf("freestanding runtime compilation failed:\n%s", string(out))
+			}
+			fsRuntimeObj = rtObj
+			fsRuntimeCoversLib = true
+			if verboseMode { fmt.Printf("[Compile] Freestanding runtime -> %s\n", rtObj) }
+		} else {
+			return fmt.Errorf("freestanding runtime not found: %s\n"+
+				"裸机模式需要 Kaula 源码布局（含 src/ 的完整安装），当前只找到头文件布局。\n"+
+				"请设置 KAULA_HOME 指向仓库根目录，或在源码树内直接运行 kaulac。", runtimeSrc)
+		}
+	}
+
 	// 非安装模式下需要链接的运行时对象（kmm_v4：KMM 分配器；spend_call：强制消费流；allocator：fast_alloc 系列符号）
+	// 裸机模式用 _fs 后缀的独立产物：KMM 的静态池/无 libc 变体与托管版不是同一个 .o，
+	// 共用缓存路径会互相覆盖（先编裸机再跑普通程序，就会链接到没有 calloc 的版本）。
+	isFreestanding := cfg != nil && cfg.Freestanding
 	runtimeObjs := []string{"kmm_v4.o", "spend_call.o", "allocator.o"}
+	if isFreestanding {
+		// 裸机只需要 KMM（见下方循环的跳过逻辑）
+		runtimeObjs = []string{"kmm_v4_fs.o"}
+	}
 
 	// 编译 KMM V4 runtime（src/kmm_scoped_allocator_v4.c）— std 模块依赖其符号
 	// 同时编译 spend_call.c（Spend/Call 强制消费流）与 allocator.c（fast_alloc 系列符号）
@@ -3238,8 +3456,17 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			{"allocator.c", "allocator.o"},
 		}
 		for _, rs := range runtimeSources {
+			// 裸机只需要 KMM 分配器：spend_call.c / allocator.c 依赖 libc
+			//（fwrite/abort），在 -nostdlib 下必然编译失败 —— boot 路径同样不编它们。
+			if isFreestanding && rs.cName != "kmm_scoped_allocator_v4.c" {
+				continue
+			}
+			oName := rs.oName
+			if isFreestanding {
+				oName = strings.TrimSuffix(rs.oName, ".o") + "_fs.o"
+			}
 			rsSrc := filepath.Join(kaulaSrcPath, rs.cName)
-			rsObj := filepath.Join(objectCacheDir, rs.oName)
+			rsObj := filepath.Join(objectCacheDir, oName)
 			needsRebuild := true
 			if cInfo, cErr := os.Stat(rsSrc); cErr == nil {
 				if oInfo, oErr := os.Stat(rsObj); oErr == nil {
@@ -3262,13 +3489,18 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				for _, p := range validFreePaths {
 					rsCmd.Args = append(rsCmd.Args, "-I", p)
 				}
+				if isFreestanding {
+					// 静态池 + 无 libc：与 boot 路径 (compileBootKernel 3.5) 保持一致
+					rsCmd.Args = append(rsCmd.Args, "-ffreestanding", "-nostdlib", "-fno-pic",
+						"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL")
+				}
 				if poolCapacity > 0 {
 					rsCmd.Args = append(rsCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
 				}
 				if output, err := rsCmd.CombinedOutput(); err != nil {
-					fmt.Printf("[Compile] Warning: %s compilation failed: %s\n", rs.oName, string(output))
+					fmt.Printf("[Compile] Warning: %s compilation failed: %s\n", oName, string(output))
 				} else {
-					fmt.Printf("[Compile] %s compiled\n", rs.oName)
+					fmt.Printf("[Compile] %s compiled\n", oName)
 				}
 			}
 		}
@@ -3279,10 +3511,23 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// 安装模式下 std/freestanding 模块符号已在 kaula_std.lib / kaula_freestanding.lib 中，
 	// 不再单独链接 .o，否则与静态库中的同名符号产生 LNK2005 重复定义。
 	// 裸机模式下在此链接 moduleSources（下方 else 分支仅处理非裸机）
-	if len(moduleSources) > 0 && !useInstalledLibraries && cfg != nil && cfg.Freestanding {
+	if fsRuntimeCoversLib && fsRuntimeObj != "" {
+		clangArgs = append(clangArgs, "-x", "none", fsRuntimeObj)
+	} else if len(moduleSources) > 0 && !useInstalledLibraries && cfg != nil && cfg.Freestanding {
 		clangArgs = append(clangArgs, "-x", "none")
 		for _, ms := range moduleSources {
 			clangArgs = append(clangArgs, ms.objPath)
+		}
+	}
+	// KMM 分配器等运行时对象：托管模式在下方 std.lib 分支里链接，裸机模式必须在这里补上
+	// （否则 g_kmm_v4_survivor / g_kmm_v4_scope_stack / g_kmm_v4_thread_heap 无定义）。
+	if isFreestanding && !useInstalledLibraries {
+		clangArgs = append(clangArgs, "-x", "none")
+		for _, objName := range runtimeObjs {
+			runtimeObj := filepath.Join(objectCacheDir, objName)
+			if _, err := os.Stat(runtimeObj); err == nil {
+				clangArgs = append(clangArgs, runtimeObj)
+			}
 		}
 	}
 
@@ -3471,18 +3716,20 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				"-DKAULA_FREESTANDING",
 			)
 			// 链接 freestanding runtime：提供 memset/memcpy/memmove/memcmp/strlen
-			// LLVM 在 size 未知时会将对 builtin 的调用 lower 为符号调用，裸机下必须自提供
-			if kaulaSrcPath != "" {
-				runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
-				if _, err := os.Stat(runtimeSrc); err == nil {
-					clangArgs = append(clangArgs, "-x", "none", runtimeSrc)
-					if verboseMode { fmt.Printf("[Compile] Freestanding: linked runtime %s\n", runtimeSrc) }
-				} else {
-					fmt.Printf("[Warning] Freestanding runtime not found: %s\n", runtimeSrc)
-				}
-			}
+			// LLVM 在 size 未知时会将对 builtin 的调用 lower 为符号调用，裸机下必须自提供。
+			// runtime 的单独编译在下方（buildFreestandingRuntimeObj）完成：它必须早于
+			// moduleSources 的链接决策，因为二者符号完全重叠，只能链接其一。
 			// 裸机模式下禁用 Windows 系统库
 			// （已添加的需要移除，但为简单起见，freestanding 优先跳过上面的 Windows 库添加）
+			// Windows 宿主 + 交叉目标：lld-link 需要显式 subsystem 与入口符号。
+			// 生成的 freestanding 入口是 _kaula_entry（freestanding.c.tmpl），
+			// 没有它 lld-link 报 "subsystem must be defined" / "undefined symbol"。
+			if runtime.GOOS == "windows" && cfg.Boot == "" {
+				clangArgs = append(clangArgs, "-Wl,/subsystem:console")
+				if cfg.Entry == "" {
+					clangArgs = append(clangArgs, "-Wl,/entry:_kaula_entry")
+				}
+			}
 		}
 		if cfg.TargetTriple != "" {
 			clangArgs = append(clangArgs, "-target", cfg.TargetTriple)
@@ -3524,6 +3771,17 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			return fmt.Errorf("failed to read C source file %s: %v", cFile, err)
 		}
 		cSource = string(data)
+	}
+
+	// 调试辅助：KAULA_DUMP_C=<path> 时把生成的 C 落盘。
+	// 生成的 C 默认只经 stdin 传给 clang，崩溃类问题（access violation）没有任何
+	// 可读现场，定位只能靠反复二分 .kl 源码。
+	if dump := os.Getenv("KAULA_DUMP_C"); dump != "" {
+		if err := os.WriteFile(dump, []byte(cSource), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "[WARN] KAULA_DUMP_C 写入失败: %v\n", err)
+		} else if verboseMode {
+			fmt.Printf("[Compile] C source dumped: %s\n", dump)
+		}
 	}
 
 	cmd.Stdin = strings.NewReader(cSource)

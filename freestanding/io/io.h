@@ -12,6 +12,8 @@
 
 #include <stdarg.h>
 #include "../base/types.h"
+#include "../string/string.h"   /* fs_itoa / fs_utoa / fs_itoa_hex 来自字符串模块 */
+#include "../math/math.h"       /* math_isnan / math_isinf / math_signbit 来自数学模块 */
 
 /* ============================================================================
  * 输出钩子（weak，可覆写）

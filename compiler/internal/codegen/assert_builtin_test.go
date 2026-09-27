@@ -44,7 +44,9 @@ fn main() {
 	cfg := config.DefaultConfig()
 	cg := NewCodeGenerator(cfg)
 	out := cg.Generate(prog)
-	if !strings.Contains(out, "exit(1)") || !strings.Contains(out, "assertion failed") {
-		t.Errorf("normal-mode assert must abort with exit(1) on failure, generated:\n%s", out)
+	// 失败路径走 kaula_assert_failed（双环境：托管 exit(1)，裸机弱钩子 + trap），
+	// 不能在生成代码里直接写 fprintf/exit —— 裸机下二者都不存在。
+	if !strings.Contains(out, "kaula_assert_failed") {
+		t.Errorf("normal-mode assert must abort via kaula_assert_failed, generated:\n%s", out)
 	}
 }

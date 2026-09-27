@@ -330,4 +330,69 @@ FS_WEAK size_t fs_alloc_capacity(void) {
     return sizeof(g_fs_pool);
 }
 
+// ==================== 编译器运行时助手（compiler-rt lite） ====================
+// 32 位目标（i386 等）没有 64 位除法/取模指令，LLVM 会把 u64/i64 的除法与取模
+// lower 成对 __udivdi3 / __umoddi3 / __sdivdi3 / __smoddi3 的调用。裸机环境没有
+// compiler-rt / libgcc，这些符号会直接导致链接失败，因此本库自带这四个助手，
+// 维持"零外部依赖"。符号标记 FS_WEAK：目标若自带 compiler-rt/libgcc，
+// 其强符号优先，不影响既有行为。
+//
+// 语义与 compiler-rt 一致：除数为 0 时返回未定义值（调用方 UB）；
+// 有符号版本取余结果与被除数同号。
+// 算法用移位/比较/减法（32 位目标全都有原生指令），不使用 64 位除法。
+
+static unsigned long long fs_udivmod64(unsigned long long n, unsigned long long d,
+                                       unsigned long long* rem) {
+    if (d == 0) {
+        if (rem) *rem = 0;
+        return 0xFFFFFFFFFFFFFFFFULL;   /* 与 compiler-rt 一致：未定义值 */
+    }
+    unsigned long long q = 0;
+    unsigned long long r = 0;
+    for (int i = 63; i >= 0; i--) {
+        r = (r << 1) | ((n >> i) & 1ULL);
+        q <<= 1;
+        if (r >= d) {
+            r -= d;
+            q |= 1ULL;
+        }
+    }
+    if (rem) *rem = r;
+    return q;
+}
+
+FS_WEAK unsigned long long __udivdi3(unsigned long long n, unsigned long long d) {
+    return fs_udivmod64(n, d, NULL);
+}
+
+FS_WEAK unsigned long long __umoddi3(unsigned long long n, unsigned long long d) {
+    unsigned long long r = 0;
+    fs_udivmod64(n, d, &r);
+    return r;
+}
+
+FS_WEAK long long __sdivdi3(long long a, long long b) {
+    int neg = 0;
+    unsigned long long ua, ub, q;
+    if (a < 0) { ua = (unsigned long long)0 - (unsigned long long)a; neg ^= 1; }
+    else ua = (unsigned long long)a;
+    if (b < 0) { ub = (unsigned long long)0 - (unsigned long long)b; neg ^= 1; }
+    else ub = (unsigned long long)b;
+    q = fs_udivmod64(ua, ub, NULL);
+    if (neg) return (long long)((unsigned long long)0 - q);
+    return (long long)q;
+}
+
+FS_WEAK long long __smoddi3(long long a, long long b) {
+    int neg = 0;
+    unsigned long long ua, ub, r = 0;
+    if (a < 0) { ua = (unsigned long long)0 - (unsigned long long)a; neg = 1; }
+    else ua = (unsigned long long)a;
+    if (b < 0) { ub = (unsigned long long)0 - (unsigned long long)b; }
+    else ub = (unsigned long long)b;
+    fs_udivmod64(ua, ub, &r);
+    if (neg) return (long long)((unsigned long long)0 - r);
+    return (long long)r;
+}
+
 #endif /* KAULA_FREESTANDING_MEMORY_C */

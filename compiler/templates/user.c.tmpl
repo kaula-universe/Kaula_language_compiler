@@ -16,10 +16,11 @@ typedef struct {
 {{global_vars}}
 {{function_code}}
 
-// 用户态入口：调用 kaula_main，结束后通过 syscall 1 (exit) 退出
+// 用户态入口：调用裸机入口 Kaula 函数（fn main 或 fn kaula_main 都编译为 K_kaula_main），
+// 结束后通过 syscall 1 (exit) 退出
 __attribute__((noreturn))
 void user_start(void) {
-    int rc = kaula_main();
+    int rc = K_kaula_main();
     __asm__ __volatile__("movq $1, %%rax; movq %0, %%rdi; int $0x80"
         :: "r"((uint64_t)(int64_t)rc) : "rax", "rdi", "memory");
     for (;;) { __asm__ __volatile__("hlt"); }

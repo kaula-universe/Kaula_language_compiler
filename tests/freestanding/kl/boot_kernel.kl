@@ -1,0 +1,184 @@
+// boot_kernel.kl — freestanding 模式 boot 全链路自检内核
+//
+// 用途: 让 --freestanding --boot <pvh|multiboot> 的完整流水线（codegen →
+//       clang -nostdlib → boot stub → ld.lld → 可引导 ELF）在每个目标架构上
+//       都真正编译并链接 freestanding 库的代码路径, 而不只是一个空壳 main。
+//
+// 本文件刻意不直接访问 UART: 串口地址随架构而异（x86 COM1 0x3F8 /
+//       riscv64 16550 @0x10000000 / aarch64 PL011 @0x09000000）, 跨架构无法
+//       统一表达。QEMU 串口验证请用 docs/bare-metal.md 的 hello_serial.kl。
+//       这里改为让 kaula_main 返回自检结果（0 = 全通过）, 便于人工/脚本核对。
+//
+// 覆盖: 5 个模块全部被真实调用（这些调用都进 kernel.o, 无法被链接器丢弃）
+
+import freestanding.base
+import freestanding.memory
+import freestanding.string
+import freestanding.math
+import freestanding.io
+
+// 检查累计器: 失败时记录"首个失败的检查编号"（cur 非 0 时保持不变）
+fn chk(id: i32, ok: bool, cur: i32) -> i32 {
+    if (!ok && cur == 0) {
+        return id
+    }
+    return cur
+}
+
+fn kaula_main() -> i32 {
+    i32 r = 0
+
+    // ---------- freestanding.base ----------
+    r = chk(1, freestanding.base.to_i8(128) == 127, r)
+    r = chk(2, freestanding.base.to_i8(-129) == -128, r)
+    r = chk(3, freestanding.base.to_i16(32768) == 32767, r)
+    r = chk(4, freestanding.base.to_i32(2147483648) == 2147483647, r)
+    r = chk(5, freestanding.base.to_u8(256) == 255, r)
+    r = chk(6, freestanding.base.to_u16(65536) == 65535, r)
+    r = chk(7, freestanding.base.to_u32(4294967296) == 4294967295, r)
+    r = chk(8, freestanding.base.to_i64(9223372036854775807) == 9223372036854775807, r)
+    r = chk(9, freestanding.base.to_f64(1.5) == 1.5, r)
+    r = chk(10, freestanding.base.to_bool(0) == false, r)
+    r = chk(11, as<i64>(freestanding.base.to_char(321)) == 65, r)
+    r = chk(12, freestanding.base.compare_i64(9223372036854775807, -9223372036854775807) > 0, r)
+    r = chk(13, freestanding.base.compare_u64(18446744073709551615, 0) > 0, r)
+    r = chk(14, freestanding.base.compare_f64(1.0, 2.0) < 0, r)
+    r = chk(15, freestanding.base.compare_char(97, 98) < 0, r)
+    r = chk(16, freestanding.base.is_integer(1) == true, r)
+    r = chk(17, freestanding.base.is_float(1.0) == true, r)
+    r = chk(18, freestanding.base.is_bool(true) == true, r)
+    r = chk(19, freestanding.base.is_char(120) == true, r)
+
+    // ---------- freestanding.memory ----------
+    u8 buf[64]
+    i32 i = 0
+    while i < 64 {
+        buf[i] = 0
+        i = i + 1
+    }
+    freestanding.memory.memset(as<void*>(&buf[0]), 0xAB, 33)
+    i32 mem_ok = 1
+    i = 0
+    while i < 33 {
+        if (buf[i] != 0xAB) {
+            mem_ok = 0
+        }
+        i = i + 1
+    }
+    r = chk(30, mem_ok == 1, r)
+    r = chk(31, buf[33] == 0, r)            // memset 未越界
+
+    u8 src[32]
+    i = 0
+    while i < 32 {
+        src[i] = as<u8>(i)
+        i = i + 1
+    }
+    freestanding.memory.memcpy(as<void*>(&buf[0]), as<void*>(&src[0]), 32)
+    r = chk(32, as<i32>(freestanding.memory.memcmp(as<void*>(&buf[0]), as<void*>(&src[0]), 32)) == 0, r)
+    r = chk(33, as<i32>(freestanding.memory.memcmp(as<void*>(&buf[0]), as<void*>(&src[0]), 0)) == 0, r)
+
+    freestanding.memory.memmove(as<void*>(&buf[4]), as<void*>(&buf[0]), 20)
+    i32 mv_ok = 1
+    i = 0
+    while i < 20 {
+        if (buf[4 + i] != as<u8>(i)) {
+            mv_ok = 0
+        }
+        i = i + 1
+    }
+    r = chk(34, mv_ok == 1, r)               // 重叠拷贝正确
+
+    freestanding.memory.fs_alloc_reset()
+    u32* pool = as<u32*>(freestanding.memory.fs_calloc(8, 4))
+    r = chk(35, pool != as<u32*>(0), r)
+    r = chk(36, pool[0] == 0 && pool[7] == 0, r)
+    r = chk(37, as<u64>(freestanding.memory.fs_alloc_capacity()) == 65536, r)
+    r = chk(38, as<u64>(freestanding.memory.fs_alloc_usage()) == 32, r)
+    freestanding.memory.fs_free(as<void*>(pool))
+    freestanding.memory.fs_alloc_reset()
+    r = chk(39, as<u64>(freestanding.memory.fs_alloc_usage()) == 0, r)
+
+    // ---------- freestanding.string ----------
+    char text[48]
+    freestanding.string.strcpy(as<char*>(&text[0]), "Kaula")
+    freestanding.string.strcat(as<char*>(&text[0]), "-FS")
+    r = chk(50, as<u64>(freestanding.string.strlen(as<char*>(&text[0]))) == 8, r)
+    r = chk(51, as<i32>(freestanding.string.strcmp(as<char*>(&text[0]), "Kaula-FS")) == 0, r)
+    r = chk(52, as<i32>(freestanding.string.strncmp("abc", "abd", 2)) == 0, r)
+    r = chk(53, as<i32>(freestanding.string.strcasecmp("ABC", "abc")) == 0, r)
+    r = chk(54, as<i32>(freestanding.string.strncasecmp("ABC", "abc", 3)) == 0, r)
+    r = chk(55, freestanding.string.strstr(as<char*>(&text[0]), "-FS") != as<char*>(0), r)
+    r = chk(56, as<u64>(freestanding.string.strspn("abcd", "abc")) == 3, r)
+    r = chk(57, as<u64>(freestanding.string.strcspn("abcde", "de")) == 3, r)
+    r = chk(58, as<u8*>(freestanding.string.memchr(as<void*>(&src[0]), 5, 32)) == &src[5], r)
+    r = chk(59, freestanding.string.is_alpha('K') == true, r)
+    r = chk(60, freestanding.string.is_digit('7') == true, r)
+    r = chk(61, freestanding.string.is_space(32) == true, r)
+    r = chk(62, freestanding.string.is_xdigit('F') == true, r)
+    r = chk(63, as<i32>(freestanding.string.to_lower('K')) == 107, r)
+    r = chk(64, as<i32>(freestanding.string.to_upper(107)) == 75, r)
+
+    char num[32]
+    freestanding.string.fs_itoa(-31337, as<char*>(&num[0]))
+    r = chk(65, as<i32>(freestanding.string.strcmp(as<char*>(&num[0]), "-31337")) == 0, r)
+    freestanding.string.fs_itoa_hex(0xBEEF, as<char*>(&num[0]), true)
+    r = chk(66, as<i32>(freestanding.string.strcmp(as<char*>(&num[0]), "BEEF")) == 0, r)
+    freestanding.string.fs_utoa(12345678901234567890, as<char*>(&num[0]))
+    r = chk(67, as<u64>(freestanding.string.strlen(as<char*>(&num[0]))) == 20, r)
+    r = chk(68, freestanding.string.fs_atoi("  -42abc") == -42, r)
+    r = chk(69, as<u64>(freestanding.string.fs_atou("0x10")) == 16, r)
+    char* dup = freestanding.string.fs_strdup("dup")
+    r = chk(70, dup != as<char*>(0), r)
+    r = chk(71, as<i32>(freestanding.string.strcmp(dup, "dup")) == 0, r)
+
+    // ---------- freestanding.math ----------
+    r = chk(80, freestanding.math.math_floor(-1.5) == -2.0, r)
+    r = chk(81, freestanding.math.math_ceil(1.5) == 2.0, r)
+    r = chk(82, freestanding.math.math_trunc(-1.9) == -1.0, r)
+    r = chk(83, freestanding.math.math_floor(1e19) == 1e19, r)
+    r = chk(84, freestanding.math.math_abs(-3.5) == 3.5, r)
+    r = chk(85, freestanding.math.math_min(1.0, 2.0) == 1.0, r)
+    r = chk(86, freestanding.math.math_max(-5.0, 5.0) == 5.0, r)
+    r = chk(87, freestanding.math.math_signbit(-1.0) == 1, r)
+    r = chk(88, freestanding.math.math_isnan(0.0 / 0.0) == true, r)
+    r = chk(89, freestanding.math.math_isinf(1e308 * 10.0) == true, r)
+    r = chk(90, freestanding.math.math_isfinite(1.0) == true, r)
+    r = chk(91, freestanding.math.math_abs_i64(-5) == 5, r)
+    r = chk(92, freestanding.math.math_min_i64(3, 9) == 3, r)
+    r = chk(93, freestanding.math.math_max_u32(3, 9) == 9, r)
+    r = chk(94, as<u64>(freestanding.math.math_clz(1)) == 63, r)
+    r = chk(95, as<u64>(freestanding.math.math_ctz(256)) == 8, r)
+    r = chk(96, as<u64>(freestanding.math.math_popcount(255)) == 8, r)
+    r = chk(97, freestanding.math.math_is_pow2(1024) == true, r)
+    r = chk(98, freestanding.math.math_round_up(17, 16) == 32, r)
+    r = chk(99, freestanding.math.math_round_down(17, 16) == 16, r)
+    r = chk(100, freestanding.math.math_div_round_up(10, 3) == 4, r)
+    r = chk(101, freestanding.math.math_gcd(48, 36) == 12, r)
+    freestanding.math.math_srand(2026)
+    r = chk(102, freestanding.math.math_rand() >= 0, r)
+    f64 rf = freestanding.math.math_randf()
+    r = chk(103, rf >= 0.0 && rf < 1.0, r)
+    r = chk(104, freestanding.math.math_deg_to_rad(180.0) > 3.14, r)
+
+    // ---------- freestanding.io（走弱钩子, 裸机由用户覆写为 UART） ----------
+    freestanding.io.fs_puts("KAULA FS SELFTEST")
+    freestanding.io.fs_putchar(10)
+    freestanding.io.fs_putint(r)
+    freestanding.io.fs_putuint(12345678901234567890)
+    freestanding.io.fs_puthex(0xBEEF)
+    freestanding.io.fs_puthex_noprefix(0xCAFE)
+    freestanding.io.fs_putbin(5)
+    freestanding.io.fs_putchar(10)
+    freestanding.io.print("fmt %d %s %x\n", 42, as<char*>(&text[0]), 255)
+    freestanding.io.println("greeting: ", as<char*>(&text[0]))
+    println("println_multi ", 1, 2.5, as<char*>(&text[0]))
+    freestanding.io.print_char(75)
+    freestanding.io.print_int(r)
+    freestanding.io.print_float(1.5)
+    freestanding.io.print_bool(true)
+    freestanding.io.print_hex(255)
+    freestanding.io.fs_output_putchar(10)
+
+    return r
+}

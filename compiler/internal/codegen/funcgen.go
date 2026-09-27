@@ -879,7 +879,13 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 
 	funcName := "main"
 	if fg.codegen.config != nil && fg.codegen.config.Freestanding {
-		funcName = "kaula_main"
+		// 裸机入口符号名必须与 freestanding.c.tmpl / user.c.tmpl 里的前向声明一致。
+		// 两种写法都要落到同一个 C 符号上：
+		//   fn main()       → 直接重命名为裸机入口（不能叫 main，裸机无 CRT 启动代码）
+		//   fn kaula_main() → UserFuncCName 规则给出 K_ 前缀，本身就是 K_kaula_main
+		// 此前这里用无前缀的 "kaula_main"，而用户写 fn kaula_main() 时实际符号是
+		// K_kaula_main，模板按 K_kaula_main 声明 → 链接期 undefined symbol。
+		funcName = "K_kaula_main"
 	}
 	code.WriteString("int " + funcName + "() {\n")
 	fg.codegen.indent++

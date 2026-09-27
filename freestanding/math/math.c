@@ -69,34 +69,57 @@ FS_WEAK bool math_isfinite(f64 x) {
     return (b.u & FS_F64_EXP_MASK) != FS_F64_EXP_MASK;
 }
 
+/* 安全的 f64 → i64 转换: |x| 超出 int64 范围时转换是 UB, 返回 false
+ * (此时 x 本身已是整数, floor/ceil/trunc 的结果都等于 x)
+ */
+static bool fs_f64_to_i64(f64 x, i64* out) {
+    if (!(x > -9223372036854775808.0 && x < 9223372036854775808.0)) return false;
+    *out = (i64)x;
+    return true;
+}
+
 FS_WEAK f64 math_trunc(f64 x) {
     if (!math_isfinite(x) || x == 0) return x;
-    if (x > 0) return (f64)(int64_t)x;
-    return (f64)(int64_t)x; // 向零截断
+    i64 t;
+    if (!fs_f64_to_i64(x, &t)) return x;   /* 超出 int64 → 本身即整数 */
+    return (f64)t;                         // 向零截断
 }
 
 FS_WEAK f64 math_floor(f64 x) {
     if (!math_isfinite(x) || x == 0) return x;
-    f64 t = (f64)(int64_t)x;
-    if (t > x) t -= 1.0; // 负数时 int64 截断偏大，回退 1
-    return t;
+    i64 t;
+    if (!fs_f64_to_i64(x, &t)) return x;
+    f64 r = (f64)t;
+    if (r > x) r -= 1.0; // 负数时 int64 截断偏大，回退 1
+    return r;
 }
 
 FS_WEAK f64 math_ceil(f64 x) {
     if (!math_isfinite(x) || x == 0) return x;
-    f64 t = (f64)(int64_t)x;
-    if (t < x) t += 1.0;
-    return t;
+    i64 t;
+    if (!fs_f64_to_i64(x, &t)) return x;
+    f64 r = (f64)t;
+    if (r < x) r += 1.0;
+    return r;
 }
 
 // ==================== 整数数学 ====================
 
+// 取绝对值: INT64_MIN / INT32_MIN 的相反数无法表示, 饱和到上界
 FS_WEAK i64 math_abs_i64(i64 x) {
-    return x < 0 ? -x : x;
+    if (x < 0) {
+        u64 mag = (u64)0 - (u64)x;
+        return mag > (u64)INT64_MAX ? INT64_MAX : (i64)mag;
+    }
+    return x;
 }
 
 FS_WEAK i32 math_abs_i32(i32 x) {
-    return x < 0 ? -x : x;
+    if (x < 0) {
+        u32 mag = (u32)0 - (u32)x;
+        return mag > (u32)INT32_MAX ? INT32_MAX : (i32)mag;
+    }
+    return x;
 }
 
 FS_WEAK i64 math_min_i64(i64 x, i64 y) {

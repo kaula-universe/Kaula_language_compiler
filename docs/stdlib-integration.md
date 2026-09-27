@@ -309,6 +309,11 @@ fn main() {
 
 ### 导入 freestanding 无依赖库（`--freestanding` 模式）
 
+> 注意：库函数必须写**模块限定名**（`freestanding.memory.fs_alloc(...)`）。
+> 裸写 `fs_alloc(...)` / `math_gcd(...)` 目前不会解析 —— import 只负责引入
+> 头文件与链接单元，不把函数名注入当前命名空间（语言级限制，非本库特有）。
+> 只有内建（`println` / `print` / `assert`）可以裸调用。
+
 ```kaula
 import freestanding.base
 import freestanding.memory
@@ -318,26 +323,29 @@ import freestanding.io
 
 fn main() {
     // 内存
-    char* buf = as<char*>(fs_alloc(64))
-    memset(buf, 65, 8)
-    fs_free(buf)
-    
-    // 字符串
-    char* s = fs_strdup("hello")
+    char* buf = as<char*>(freestanding.memory.fs_alloc(64))
+    freestanding.memory.memset(buf, 65, 8)
+    freestanding.memory.fs_free(buf)
+
+    // 字符串（Kaula 的 char* 与 C 字符串不同：需要显式取数组首元素地址）
+    char* s = freestanding.string.fs_strdup("hello")
     char numbuf[32]
-    fs_itoa(-9876, numbuf)
-    fs_itoa_hex(0xCAFE, numbuf, true)
-    
+    freestanding.string.fs_itoa(-9876, as<char*>(&numbuf[0]))
+    freestanding.string.fs_itoa_hex(0xCAFE, as<char*>(&numbuf[0]), true)
+
     // 数学
-    math_gcd(48, 36)
-    math_is_pow2(256)
-    
+    freestanding.math.math_gcd(48, 36)
+    freestanding.math.math_is_pow2(256)
+
     // I/O（托管模式需覆写 fs_output_putchar）
     println("Hello freestanding!")
-    print_int(2026)
-    print("printf: %d %s\n", 42, "test")
+    freestanding.io.print_int(2026)
+    freestanding.io.print("printf: %d %s\n", 42, as<char*>(&numbuf[0]))
 }
 ```
+
+`freestanding.io` 的输出最终走弱钩子 `fs_output_putchar`：托管模式默认落到
+`putchar`，裸机由用户覆写为串口/LED 输出。
 
 ### 使用第三方库
 

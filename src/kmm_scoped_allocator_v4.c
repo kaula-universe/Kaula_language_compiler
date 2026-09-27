@@ -741,6 +741,11 @@ static size_t pool_fit_offset(size_t offset, size_t size) {
 //     摘除瞬间遍历段链（use-after-free 窗口），故不触发。
 //  5. LEVEL>=1 下抢 g_grow_flag 与 grow 互斥段链修改；抢不到（grow
 //     进行中）直接放弃本次归还（归还仅为优化，下次回卷重试）。
+//
+// 静态池（KMM_V4_STATIC_POOL，即裸机 freestanding 模式）下头文件已把
+// kmm_v4_pool_trim_tail 定义为 static inline no-op（无扩展段可归还），
+// 此处必须跳过定义，否则与头文件的内联定义重复 → 编译失败。
+#ifndef KMM_V4_STATIC_POOL
 __attribute__((used))
 void kmm_v4_pool_trim_tail(size_t watermark) {
     if (g_extra_head == NULL) return;
@@ -790,6 +795,7 @@ void kmm_v4_pool_trim_tail(size_t watermark) {
     KMM_ATOMIC_STORE(g_grow_flag, 0);
 #endif
 }
+#endif /* !KMM_V4_STATIC_POOL */
 
 // ==================== Per-Thread Heap 机制（修复 #1） ====================
 // 每个线程从全局池批量获取一块内存，后续分配在 TLS 内完成，无原子操作
@@ -1105,12 +1111,16 @@ void kmm_v4_destroy_pool(void) {
 size_t kmm_v4_total_usage(void) {
     size_t t = kmm_v4_usage();
     t += kmm_v4_survivor_usage();
+    // 页式超大对象只在非静态池构建里存在（静态池没有 >1MB 路径，
+    // 相关全局与增删计数都在 #ifndef KMM_V4_STATIC_POOL 块内）。
+#ifndef KMM_V4_STATIC_POOL
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     t += (size_t)KMM_ATOMIC_LOAD(g_kmm_v4_paged_bytes);
     t += (size_t)KMM_ATOMIC_LOAD(g_paged_pool_bytes);  // 池内块仍被分配器持有
 #else
     t += g_kmm_v4_paged_bytes;
     t += g_paged_pool_bytes;
+#endif
 #endif
     return t;
 }
