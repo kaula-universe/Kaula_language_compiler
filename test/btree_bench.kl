@@ -1,0 +1,117 @@
+// btree_bench.kl — 深度 16 完全二叉树：反复创建 + 遍历 100 遍基准
+// 与 test/btree_bench.cpp 逐阶段等价对比（同为 arena 连续分配 + 下标子节点）。
+//
+// 阶段 A：100 轮「重建深度 16 完全二叉树 + 中序遍历一次」
+// 阶段 B：建树 1 次，中序遍历 100 遍
+// 阶段 C：单次建树 / 单次遍历耗时
+// 阶段 D：阶段 A 重复 100 次（共 10000 轮），用于稳定计时
+//
+// 深度 16 的完全二叉树节点数 = 2^16 - 1 = 65535；下标 i 的子节点为 2i+1 / 2i+2，
+// -1 表示空。中序 checksum = sum(0..65534) = 2147385345。
+import std.io
+import std.memory
+import std.time
+
+// 节点 16 字节：i32 left + i32 right + i64 value（无填充）
+struct Node {
+    left: i32
+    right: i32
+    value: i64
+}
+
+// 以 idx 为根、自 depth 层向下递归建树（完全二叉树，满 maxDepth 层）
+fn build(Node* nodes, i32 idx, i32 depth, i32 maxDepth) {
+    nodes[idx].left = -1
+    nodes[idx].right = -1
+    nodes[idx].value = as<i64>(idx)
+    if depth < maxDepth {
+        i32 li = idx * 2 + 1
+        i32 ri = idx * 2 + 2
+        nodes[idx].left = li
+        nodes[idx].right = ri
+        build(nodes, li, depth + 1, maxDepth)
+        build(nodes, ri, depth + 1, maxDepth)
+    }
+}
+
+// 中序遍历求和（返回值先绑到局部变量再 return，规避 return 路径回收缺陷）
+fn inorder(Node* nodes, i32 idx) i64 {
+    if idx < 0 {
+        return 0
+    }
+    i64 leftSum = inorder(nodes, nodes[idx].left)
+    i64 mid = nodes[idx].value
+    i64 rightSum = inorder(nodes, nodes[idx].right)
+    i64 total = leftSum + mid + rightSum
+    return total
+}
+
+fn main() {
+    i32 depth = 16
+    i64 nodesCount = 65535
+    i64 rounds = 100
+    i64 expect = 2147385345
+
+    std.io.println("=== Kaula btree_bench (depth=16, nodes=65535, rounds=100) ===")
+
+    // 单块 arena，全部阶段复用（与 C++ 版一致，隔离分配开销、只测建树+遍历）
+    Node* nodes = std.memory.kmm_v4_alloc(nodesCount * 16)
+
+    // ---- 阶段 A：100 轮 重建 + 遍历 ----
+    i64 checksumA = 0
+    i64 t0 = std.time.time_now_ms()
+    i64 r = 0
+    while r < rounds {
+        build(nodes, 0, 1, depth)
+        checksumA = checksumA + inorder(nodes, 0)
+        r = r + 1
+    }
+    i64 t1 = std.time.time_now_ms()
+    std.io.println("[A] rebuild+traverse x100   ", t1 - t0, " ms   checksum=", checksumA)
+
+    // ---- 阶段 B：建树 1 次，遍历 100 遍 ----
+    build(nodes, 0, 1, depth)
+    i64 checksumB = 0
+    i64 t2 = std.time.time_now_ms()
+    r = 0
+    while r < rounds {
+        checksumB = checksumB + inorder(nodes, 0)
+        r = r + 1
+    }
+    i64 t3 = std.time.time_now_ms()
+    std.io.println("[B] traverse x100           ", t3 - t2, " ms   checksum=", checksumB)
+
+    // ---- 阶段 C：单次建树 / 单次遍历 ----
+    i64 t4 = std.time.time_now_ms()
+    build(nodes, 0, 1, depth)
+    i64 t5 = std.time.time_now_ms()
+    i64 one = inorder(nodes, 0)
+    i64 t6 = std.time.time_now_ms()
+    std.io.println("[C] build x1                ", t5 - t4, " ms")
+    std.io.println("[C] traverse x1             ", t6 - t5, " ms   checksum=", one)
+
+    // ---- 阶段 D：阶段 A 重复 100 次（共 10000 轮），稳定计时 ----
+    i64 repeats = 100
+    i64 checksumD = 0
+    i64 t7 = std.time.time_now_ms()
+    i64 rep = 0
+    while rep < repeats {
+        r = 0
+        while r < rounds {
+            build(nodes, 0, 1, depth)
+            checksumD = checksumD + inorder(nodes, 0)
+            r = r + 1
+        }
+        rep = rep + 1
+    }
+    i64 t8 = std.time.time_now_ms()
+    i64 perRoundNs = (t8 - t7) * 100  // (t8-t7) ms / 10000 轮，换算成 ns/轮
+    std.io.println("[D] rebuild+traverse x10000 ", t8 - t7, " ms   checksum=", checksumD)
+    std.io.println("[D] per-round               ", perRoundNs, " ns (build+traverse, 65535 nodes)")
+
+    // 一致性校验
+    i64 okA = checksumA - rounds * expect
+    i64 okB = checksumB - rounds * expect
+    i64 okD = checksumD - repeats * rounds * expect
+    std.io.println("[V] verify A/B/D delta      ", okA, " ", okB, " ", okD)
+}
