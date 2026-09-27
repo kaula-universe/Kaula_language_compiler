@@ -506,6 +506,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	}()
 
 	shouldUseKMM := !stmt.NoKMM && !stmt.Inline
+	// 尾调用改写状态是"每函数"的：先取出外层（可能来自嵌套调用栈）的状态清空，
+	// 生成完本函数后再恢复，避免内层函数误用外层的尾调用标签。
+	prevTCO := fg.codegen.TakeTCO()
+	// 尾调用改写方案（受作用域托管时才计算；诊断在函数体生成后据此判定）
+	plan := tcoPlan{}
 	// 静态分析：在函数体生成前运行全部6个pass
 	analysisResult := fg.codegen.RunStaticAnalysis(stmt.Name, stmt.Body, stmt.Params, stmt.ParamTypes)
 	// 将分析结果暴露给语句生成器（liveness 提前释放/回收路径的别名感知）
@@ -523,10 +528,14 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			// Phase 2：在生成函数体之前设置函数级 checkpoint 标志，
 			// 使循环 codegen 能检测到并降级为 offset 回收
 			fg.codegen.funcHasKMMCheckpoint = true
-			// 诊断：递归 + 每层 KMM 作用域 → 嵌套深度受 KMM_V4_MAX_SCOPE_DEPTH
-			// 约束（默认 1024 层），超出即运行期 FATAL abort。提前告知可选方案。
-			if fg.functionCallsItself(stmt.Name, stmt.Body) {
-				fg.codegen.AddRecursionScopeNote(stmt.Name)
+			// 尾调用改写（TCO）：受作用域托管的自递归函数，把 `return f(...)`
+			// 变成"回收本层 → 实参写回形参 → 跳回循环顶部"，复用同一 C 栈帧，
+			// 使递归深度不再受 KMM_V4_MAX_SCOPE_DEPTH / C 栈限制。
+			// 嵌套函数（含捕获）不参与：形参回写无法覆盖捕获指针参数。
+			plan = fg.tcoTailCandidates(stmt)
+			if len(captures) == 0 && len(plan.sites) > 0 {
+				fg.codegen.SetTCO("__kaula_tco_"+fg.codegen.UserFuncCName(stmt.Name), stmt.Params, plan.sites)
+				defer fg.codegen.RestoreTCO(prevTCO)
 			}
 		}
 		// 方案 C：重置 promote 标志，body 生成期间若发射 promote_p 则置 true
@@ -560,27 +569,53 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 
 		bodyCode := bodyBuilder.String()
 
-		if useKMM {
-		// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
-		// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
-		// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
-		// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
-		// 方案 C：函数入口 checkpoint，出口 rewind（仅对不向外 promote 的函数）
-		fg.codegen.funcHasKMMCheckpoint = true
-		builder.WriteString(bodyIndent)
-		builder.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
-		builder.WriteString(bodyIndent)
-		// 命名作用域：作用域栈溢出（递归深度超过 KMM_V4_MAX_SCOPE_DEPTH）时
-		// 运行期能打印出是哪个函数每层都在分配
-		builder.WriteString(fg.kmmScopeStartNamed(stmt.Name))
-		builder.WriteString(bodyCode)
-		builder.WriteString(bodyIndent)
-		builder.WriteString("} KMM_V4_SCOPE_END;\n")
-		if !fg.codegen.funcEmitsPromote {
-			builder.WriteString(bodyIndent)
-			builder.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
+		// 诊断：递归 + 每层 KMM 作用域 → 嵌套深度受 KMM_V4_MAX_SCOPE_DEPTH
+		// 约束（默认 1024 层），超出即运行期 FATAL abort。
+		// 判定在函数体生成之后：需要知道实际改写了多少个尾调用点（实参引用本帧
+		// 会被回收的对象时会在生成期退回真实调用），以及是否处于互递归环
+		// （互递归每层同样 push 作用域，深度一样受限）。
+		if plan.selfCalls > 0 || fg.inRecursionCycle(stmt.Name) {
+			tco := fg.codegen.TcoState()
+			if tco == nil || tco.converted < plan.selfCalls {
+				fg.codegen.AddRecursionScopeNote(stmt.Name)
+			}
 		}
-	} else {
+
+		if useKMM {
+			// 修复 #20：删除批量 bump 优化路径（_batch_ptr 空转问题）
+			// per-thread heap 已实现单次 CAS 批量获取的效果，无需额外优化
+			// 修复 #22：使用 SCOPE_START/END，scope_pop 在 do-while(0) 后执行
+			// 提前退出（return/break/continue）的修复在 stmtgen.go 中处理
+			// 方案 C：函数入口 checkpoint，出口 rewind（仅对不向外 promote 的函数）
+			fg.codegen.funcHasKMMCheckpoint = true
+			// 尾调用改写：把"每轮一帧"变成"复用同一帧"——作用域包裹放进
+			// for(;;) 循环，尾调用点回收本层后 goto 回到循环顶部重新 push。
+			// 没有尾调用落到循环底部 → break 退出（与改写前的顺序语义一致）。
+			tco := fg.codegen.TcoState()
+			if tco != nil {
+				builder.WriteString(bodyIndent)
+				builder.WriteString(tco.label + ": /* tco: 每轮复用同一栈帧 */\n")
+				builder.WriteString(bodyIndent)
+				builder.WriteString("for (;;) {\n")
+			}
+			builder.WriteString(bodyIndent + "    ")
+			builder.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
+			builder.WriteString(bodyIndent + "    ")
+			// 命名作用域：作用域栈溢出（递归深度超过 KMM_V4_MAX_SCOPE_DEPTH）时
+			// 运行期能打印出是哪个函数每层都在分配
+			builder.WriteString(fg.kmmScopeStartNamed(stmt.Name))
+			builder.WriteString(bodyCode)
+			builder.WriteString(bodyIndent + "    ")
+			builder.WriteString("} KMM_V4_SCOPE_END;\n")
+			if !fg.codegen.funcEmitsPromote {
+				builder.WriteString(bodyIndent + "    ")
+				builder.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
+			}
+			if tco != nil {
+				builder.WriteString(bodyIndent + "    break;\n")
+				builder.WriteString(bodyIndent + "}\n")
+			}
+		} else {
 		fg.codegen.funcHasKMMCheckpoint = false
 		builder.WriteString(bodyCode)
 	}
@@ -952,23 +987,59 @@ func (fg *FunctionGenerator) kmmScopeStartNamed(kaulaFuncName string) string {
 	return fmt.Sprintf("KMM_V4_SCOPE_NAMED(\"%s\") {\n", fg.codegen.UserFuncCName(kaulaFuncName))
 }
 
-// functionCallsItself 判断函数体（不含嵌套函数定义）是否调用了自己。
-// 用于"递归 + 每层都分配"诊断：这类函数的嵌套深度受 KMM_V4_MAX_SCOPE_DEPTH
-// 约束（默认 1024），超出即运行期 FATAL abort。
-func (fg *FunctionGenerator) functionCallsItself(kaulaFuncName string, stmts []ast.Statement) bool {
-	found := false
+// inRecursionCycle 判断函数是否处于递归环中：直接自递归，或经由其他函数
+// 互相递归。互递归的每一层同样会 push KMM 作用域，深度一样受
+// KMM_V4_MAX_SCOPE_DEPTH 约束，因此"递归 + 每层分配"诊断必须覆盖它
+// （尾调用改写只处理直接自递归，不处理互递归）。
+func (fg *FunctionGenerator) inRecursionCycle(funcName string) bool {
+	prog := fg.codegen.getProgram()
+	if prog == nil {
+		return false
+	}
+	self := prog.FindFunction(funcName)
+	if self == nil {
+		return false
+	}
+	visited := map[string]bool{funcName: true}
+	var reachesTarget func(target string, fn *ast.FunctionStatement) bool
+	reachesTarget = func(target string, fn *ast.FunctionStatement) bool {
+		for _, callee := range collectCalleeNames(fn) {
+			if callee == target {
+				return true
+			}
+			if visited[callee] {
+				continue
+			}
+			visited[callee] = true
+			if next := prog.FindFunction(callee); next != nil {
+				if reachesTarget(target, next) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return reachesTarget(funcName, self)
+}
+
+// collectCalleeNames 收集函数体（不含嵌套函数定义）里调用的函数名
+func collectCalleeNames(fn *ast.FunctionStatement) []string {
+	var out []string
+	seen := make(map[string]bool)
+	add := func(e ast.Expression) {
+		if call, ok := e.(*ast.CallExpression); ok {
+			if id, ok := call.Function.(*ast.Identifier); ok && id.Name != "" && !seen[id.Name] {
+				seen[id.Name] = true
+				out = append(out, id.Name)
+			}
+		}
+	}
 	var walkExpr func(e ast.Expression)
 	var walkBody func(list []ast.Statement)
 	walkExpr = func(e ast.Expression) {
-		if found || e == nil {
-			return
-		}
 		switch x := e.(type) {
 		case *ast.CallExpression:
-			if id, ok := x.Function.(*ast.Identifier); ok && id.Name == kaulaFuncName {
-				found = true
-				return
-			}
+			add(x)
 			for _, a := range x.Args {
 				walkExpr(a)
 			}
@@ -990,9 +1061,6 @@ func (fg *FunctionGenerator) functionCallsItself(kaulaFuncName string, stmts []a
 	}
 	walkBody = func(list []ast.Statement) {
 		for _, s := range list {
-			if found || s == nil {
-				continue
-			}
 			switch x := s.(type) {
 			case *ast.VariableDeclaration:
 				walkExpr(x.Value)
@@ -1018,8 +1086,164 @@ func (fg *FunctionGenerator) functionCallsItself(kaulaFuncName string, stmts []a
 			}
 		}
 	}
-	walkBody(stmts)
-	return found
+	walkBody(fn.Body)
+	return out
+}
+
+// voidFuncFor 判断函数是否无返回值（未声明返回类型或显式 void）
+func voidFuncFor(stmt *ast.FunctionStatement) bool {
+	return stmt.ReturnType == "" || isVoidType(stmt.ReturnType)
+}
+
+// tcoPlan 是一个函数的尾调用改写方案：可改写的 self-call 站点 + 函数体内
+// self-call 总数（用于判断"是否全部改写完"——只要还剩一个真实递归调用，递归
+// 深度就仍然受 KMM_V4_MAX_SCOPE_DEPTH 约束，诊断告警照旧）。
+type tcoPlan struct {
+	sites     map[*ast.CallExpression]bool
+	selfCalls int
+}
+
+// tcoTailCandidates 找出可以改写成尾跳转的 self-call（仅"受 KMM 作用域托管的
+// 自递归函数"才成立：这类函数每层都要 scope_pop，C 后端无法做 TCO）。
+//
+// 判定条件：
+//   - 位于 `return f(...)` 的返回值位置，实参个数与形参一致；
+//   - 实参是**无副作用的简单表达式**（标识符/字面量/一元/二元/括号/类型转换）。
+//     改写后实参在本层回收**之后**才求值写回形参，所以不能含函数调用；
+//     下标/成员访问同样排除（可能读已被本层回收的对象）。
+//
+// 含指针/字符串局部变量的实参留给生成期再校验（见 generateReturnStatement 的
+// 尾调用分支）：那时符号表已建立，能识别本帧会被 survivor_free 的对象。
+func (fg *FunctionGenerator) tcoTailCandidates(stmt *ast.FunctionStatement) tcoPlan {
+	plan := tcoPlan{sites: make(map[*ast.CallExpression]bool)}
+	if len(stmt.Params) == 0 {
+		return plan
+	}
+	// 无返回类型（""）与显式 void 都算无返回值——与 generateReturnStatement
+	// 里的 isVoid 判定保持一致（isVoidType 只认显式 "void"/"Void"）
+	voidFunc := voidFuncFor(stmt)
+	var simple func(e ast.Expression) bool
+	simple = func(e ast.Expression) bool {
+		switch x := e.(type) {
+		case *ast.Identifier, *ast.IntegerLiteral, *ast.FloatLiteral,
+			*ast.BooleanLiteral, *ast.CharLiteral:
+			return true
+		case *ast.UnaryExpression:
+			return simple(x.Right)
+		case *ast.ParenExpression:
+			return simple(x.Inner)
+		case *ast.TypeCastExpression:
+			return simple(x.Expression)
+		case *ast.BinaryExpression:
+			return simple(x.Left) && simple(x.Right)
+		}
+		return false
+	}
+	var walkExpr func(e ast.Expression)
+	var walkBody func(list []ast.Statement)
+	walkExpr = func(e ast.Expression) {
+		// 遍历嵌套调用：统计 self-call 总数（尾调用点本身在 Return 分支处理）
+		switch x := e.(type) {
+		case *ast.CallExpression:
+			if id, ok := x.Function.(*ast.Identifier); ok && id.Name == stmt.Name {
+				plan.selfCalls++
+			}
+			for _, a := range x.Args {
+				walkExpr(a)
+			}
+		case *ast.TypeCastExpression:
+			walkExpr(x.Expression)
+		case *ast.MemberAccessExpression:
+			walkExpr(x.Object)
+		case *ast.IndexExpression:
+			walkExpr(x.Object)
+			walkExpr(x.Index)
+		case *ast.BinaryExpression:
+			walkExpr(x.Left)
+			walkExpr(x.Right)
+		case *ast.UnaryExpression:
+			walkExpr(x.Right)
+		case *ast.ParenExpression:
+			walkExpr(x.Inner)
+		}
+	}
+	walkBody = func(list []ast.Statement) {
+		for _, s := range list {
+			switch x := s.(type) {
+			case *ast.VariableDeclaration:
+				walkExpr(x.Value)
+			case *ast.ExpressionStatement:
+				// void 函数的 `f(...)` 语句形式就是尾调用（无返回值可求值）。
+				// 非 void 函数不处理：语句形式的调用会丢弃返回值，后续代码
+				// 仍会执行，不构成尾位置。
+				tailCall := false
+				if voidFunc {
+					if call, ok := x.Expression.(*ast.CallExpression); ok {
+						if id, ok := call.Function.(*ast.Identifier); ok &&
+							id.Name == stmt.Name && len(call.Args) == len(stmt.Params) {
+							allSimple := true
+							for _, a := range call.Args {
+								if !simple(a) {
+									allSimple = false
+									break
+								}
+							}
+							if allSimple {
+								plan.selfCalls++
+								plan.sites[call] = true
+								tailCall = true
+							}
+						}
+					}
+				}
+				if !tailCall {
+					walkExpr(x.Expression)
+				}
+			case *ast.ReturnStatement:
+				// 尾调用点：self-call 计数与改写判定都在这里完成，
+				// 因此不能再交给 walkExpr（否则同一个调用会被重复计数）
+				if call, ok := x.Value.(*ast.CallExpression); ok {
+					if id, ok := call.Function.(*ast.Identifier); ok && id.Name == stmt.Name {
+						plan.selfCalls++
+						if len(call.Args) == len(stmt.Params) {
+							allSimple := true
+							for _, a := range call.Args {
+								if !simple(a) {
+									allSimple = false
+									break
+								}
+							}
+							if allSimple {
+								plan.sites[call] = true
+							}
+						}
+					}
+					for _, a := range call.Args {
+						walkExpr(a)
+					}
+				} else {
+					walkExpr(x.Value)
+				}
+			case *ast.IfStatement:
+				walkExpr(x.Condition)
+				walkBody(x.Body)
+				if x.Else != nil {
+					walkBody(x.Else)
+				}
+			case *ast.WhileStatement:
+				walkExpr(x.Condition)
+				walkBody(x.Body)
+			case *ast.ForStatement:
+				walkBody(x.Body)
+			case *ast.ForInStatement:
+				walkBody(x.Body)
+			case *ast.BlockStatement:
+				walkBody(x.Statements)
+			}
+		}
+	}
+	walkBody(stmt.Body)
+	return plan
 }
 
 func (fg *FunctionGenerator) mapReturnType(returnType string) string {

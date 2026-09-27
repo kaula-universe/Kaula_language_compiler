@@ -369,6 +369,26 @@ var verboseMode = false
 // 仅用于编译期诊断文案（运行期上限由 KMM 自身强制）。
 const kmmMaxScopeDepth = 1024
 
+// compilerBuildStamp 返回编译器自身的构建标识，用于让代码生成缓存随
+// kaulac 二进制变化而失效。
+//
+// 之前缓存键只含源文件路径/模式/优化等级/池容量，**不含编译器版本**：改了
+// codegen 重新构建 kaulac 后，同一份源码仍会命中旧 .c 缓存（版本号是硬编码的
+// "0.1.0-alpha"），生成结果静默停留在旧代码上——开发时表现为"改了没效果"。
+// 取可执行文件的 size+mtime_ns 作为构建标识：无需改构建脚本重新打戳，
+// 重新构建二进制必然改变它。
+func compilerBuildStamp() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "unknown"
+	}
+	st, err := os.Stat(exe)
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d-%d", st.Size(), st.ModTime().UnixNano())
+}
+
 func main() {
  // Test subcommands own their flags and must bypass compiler flag pre-scanning.
  if len(os.Args) > 1 && os.Args[1] == "test" {
@@ -1334,7 +1354,9 @@ func main() {
 	if cacheManager != nil && !cfg.NoCache {
 		// 编译参数混入缓存键：optLevel 与 KMM 池容量都会改变产物，
 		// 不加进键会导致 -O0/-O3 或不同池容量复用同一产物（静默吞掉参数）。
-		cacheManager.SetKeyExtra(fmt.Sprintf("%s|%d", optLevel, poolCapacity))
+		// 同时混入编译器自身构建标识：codegen 改动后旧的 .c 缓存必须失效，
+		// 否则重装 kaulac（版本号不变）会静默复用旧代码生成结果。
+		cacheManager.SetKeyExtra(fmt.Sprintf("%s|%d|%s", optLevel, poolCapacity, compilerBuildStamp()))
 		cacheKey := cacheManager.GetCacheKey(inputFile)
 		cacheFile = filepath.Join(cacheDir, cacheKey+".c")
 

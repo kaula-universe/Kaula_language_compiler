@@ -92,6 +92,13 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		if prefixCall, ok := s.Expression.(*ast.PrefixCallExpression); ok {
 			return sg.generatePrefixCallBody(prefixCall)
 		}
+		// void 尾调用改写：`f(...)` 语句形式（无返回值函数的递归自然写法）
+		// → 回收本层 → 实参写回形参 → 跳回循环顶部
+		if call, ok := s.Expression.(*ast.CallExpression); ok && sg.codegen.IsTcoTailSite(call) {
+			if code := sg.generateVoidTcoTailCall(call); code != "" {
+				return code
+			}
+		}
 		// 安全地进行类型断言
 		callExpr, isCall := interface{}(s.Expression).(*ast.CallExpression)
 		if isCall && callExpr != nil && callExpr.Function != nil {
@@ -2100,6 +2107,18 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 
 	var b strings.Builder
 
+	// 尾调用改写（TCO）判定：受 KMM 作用域托管的自递归函数，把 `return f(...)`
+	// 换成"回收本层 → 实参写回形参 → 跳回循环顶部"，复用同一个 C 栈帧。
+	// 必须在返回值表达式求值**之前**判定：尾调用路径根本不求值该表达式
+	// （若求值就等于又做了一次真实递归调用，TCO 形同虚设）。
+	tcoCall := (*ast.CallExpression)(nil)
+	if call, ok := stmt.Value.(*ast.CallExpression); ok && sg.codegen.IsTcoTailSite(call) {
+		if sg.tcoTailEligible(call) {
+			tcoCall = call
+		}
+		// 实参引用了本帧会被回收的对象 → 退回真实尾调用（tcoCall 保持 nil）
+	}
+
 	// 修复 #25：return 前跨作用域提升返回值（必须在本函数作用域 pop 之前拷贝，
 	// 否则返回值指针在 kmm_v4_scope_pop 回卷后悬垂）
 	retPromoteLine := ""
@@ -2144,7 +2163,7 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 	// 已知边界：表达式自身分配 >=2KB survivor 大对象且触发 rewind 时，
 	// 提升会使回卷回收表达式产物——此类返回值应走 promote 路径。
 	exprCode := ""
-	if !isVoid {
+	if !isVoid && tcoCall == nil {
 		if stmt.Value != nil {
 			exprCode = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 		} else {
@@ -2152,7 +2171,7 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 		}
 	}
 	hoistTemp := ""
-	if !isVoid && stmt.Value != nil && (len(freedNames) > 0 || rewindOnReturn) {
+	if !isVoid && tcoCall == nil && stmt.Value != nil && (len(freedNames) > 0 || rewindOnReturn) {
 		sg.codegen.retHoistSeq++
 		hoistTemp = fmt.Sprintf("__kaula_ret%d", sg.codegen.retHoistSeq)
 		b.WriteString(sg.codegen.indentString())
@@ -2185,6 +2204,15 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 			b.WriteString(indent)
 			b.WriteString("kmm_v4_scope_pop();\n")
 		}
+	}
+
+	// 尾调用改写：到这一步 free / rewind / scope_pop 已按 return 路径发射完毕，
+	// 正是尾跳转需要的前置动作（本层对象已释放、作用域已回收）。剩下的只是
+	// 把实参写回形参并跳回循环顶部——不调用、不返回。
+	if tcoCall != nil {
+		sg.emitTcoRebindAndGoto(&b, tcoCall)
+		sg.codegen.TcoState().MarkTcoConverted()
+		return b.String()
 	}
 
 	if isVoid {
@@ -3680,6 +3708,134 @@ func (sg *StatementGenerator) isStringTyped(name string) bool {
 		}
 	}
 	return false
+}
+
+// tcoTailEligible 判断尾调用点能否改写：形参个数匹配 + 实参在本层回收之后
+// 求值仍然安全（不引用本帧会被 survivor_free 的对象）。
+func (sg *StatementGenerator) tcoTailEligible(call *ast.CallExpression) bool {
+	tco := sg.codegen.TcoState()
+	if tco == nil || call == nil || len(call.Args) != len(tco.params) {
+		return false
+	}
+	return sg.tcoArgsSurviveFree(call.Args, tco.params)
+}
+
+// emitTcoRebindAndGoto 发射"实参写回形参 + 跳回循环顶部"。
+// 前置的 free/rewind/scope_pop 由调用方按各自路径发射。
+//
+// 关键细节：多实参时必须**先全部求值到临时变量再统一写回**。顺序赋值会踩坑——
+// 写回第 1 个形参后，后续实参表达式若引用该形参，读到的已经是新值
+// （`n = n-1; acc = acc + n` 会少加一次 n）。这与 C 里函数实参先求值再传参的
+// 语义必须一致。
+func (sg *StatementGenerator) emitTcoRebindAndGoto(b *strings.Builder, call *ast.CallExpression) {
+	tco := sg.codegen.TcoState()
+	indent := sg.codegen.indentString()
+	sg.codegen.tcoTempSeq++
+	base := sg.codegen.tcoTempSeq
+	if len(call.Args) > 1 {
+		for i, arg := range call.Args {
+			sg.codegen.tcoTempSeq++
+			b.WriteString(indent)
+			b.WriteString("__typeof__(")
+			b.WriteString(tco.params[i])
+			b.WriteString(") __kaula_tco")
+			b.WriteString(strconv.Itoa(sg.codegen.tcoTempSeq))
+			b.WriteString(" = ")
+			b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(arg))
+			b.WriteString("; /* tco: capture arg */\n")
+		}
+		for i := range call.Args {
+			b.WriteString(indent)
+			b.WriteString(tco.params[i])
+			b.WriteString(" = __kaula_tco")
+			b.WriteString(strconv.Itoa(base + i + 1))
+			b.WriteString("; /* tco: rebind */\n")
+		}
+	} else {
+		for i, arg := range call.Args {
+			b.WriteString(indent)
+			b.WriteString(tco.params[i])
+			b.WriteString(" = ")
+			b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(arg))
+			b.WriteString("; /* tco: rebind */\n")
+		}
+	}
+	b.WriteString(indent)
+	b.WriteString("goto " + tco.label + "; /* tco: tail call, same frame */\n")
+}
+
+// generateVoidTcoTailCall 处理 void 函数的 `f(...)` 语句式尾调用：
+// 发射与 return 路径完全相同的本层回收动作，再回写形参跳回循环顶部。
+// 返回空串表示不适合改写，调用方退回真实调用。
+func (sg *StatementGenerator) generateVoidTcoTailCall(call *ast.CallExpression) string {
+	if !sg.tcoTailEligible(call) {
+		return ""
+	}
+	var b strings.Builder
+	freeCode, _ := sg.generateSurvivorFreeForReturn("")
+	b.WriteString(freeCode)
+	if sg.codegen.kmmScopeDepth > 0 && !sg.codegen.funcEmitsPromote && sg.codegen.funcHasKMMCheckpoint {
+		b.WriteString(sg.codegen.indentString())
+		b.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* tco: reclaim this frame */\n")
+	}
+	for i := 0; i < sg.codegen.kmmScopeDepth; i++ {
+		b.WriteString(sg.codegen.indentString())
+		b.WriteString("kmm_v4_scope_pop();\n")
+	}
+	sg.emitTcoRebindAndGoto(&b, call)
+	sg.codegen.TcoState().MarkTcoConverted()
+	return b.String()
+}
+
+// tcoArgsSurviveFree 判断尾调用实参在"本层回收之后"求值是否仍然安全。
+//
+// 尾调用改写把求值时机移到了本帧 per-object free 之后，因此实参不能引用
+// 本帧会被 survivor_free / 回收的对象。形参是从调用方借用的（从不释放），
+// 标量局部也不受影响；一旦实参引用了本帧的指针/String 局部变量就退回真实调用。
+func (sg *StatementGenerator) tcoArgsSurviveFree(args []ast.Expression, params []string) bool {
+	for _, name := range collectIdentifiers(args) {
+		if containsStr(params, name) {
+			continue // 形参：borrowed from caller，本帧不释放
+		}
+		if sg.isPointerTyped(name) || sg.isStringTyped(name) {
+			return false
+		}
+	}
+	return true
+}
+
+// collectIdentifiers 收集表达式树中出现的全部标识符名
+func collectIdentifiers(exprs []ast.Expression) []string {
+	var out []string
+	var walk func(e ast.Expression)
+	walk = func(e ast.Expression) {
+		switch x := e.(type) {
+		case *ast.Identifier:
+			out = append(out, x.Name)
+		case *ast.UnaryExpression:
+			walk(x.Right)
+		case *ast.ParenExpression:
+			walk(x.Inner)
+		case *ast.TypeCastExpression:
+			walk(x.Expression)
+		case *ast.BinaryExpression:
+			walk(x.Left)
+			walk(x.Right)
+		case *ast.IndexExpression:
+			walk(x.Object)
+			walk(x.Index)
+		case *ast.MemberAccessExpression:
+			walk(x.Object)
+		case *ast.CallExpression:
+			for _, a := range x.Args {
+				walk(a)
+			}
+		}
+	}
+	for _, e := range exprs {
+		walk(e)
+	}
+	return out
 }
 
 // isPromotableAggregate 判断是否是"需要深提升回调的聚合类型"（任务②正解入口）。
