@@ -274,6 +274,10 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			var initValue string
 			if stmt.Value != nil {
 				initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+				// 声明类型是 interface 而初始值是具体类对象 → 装箱成接口句柄。
+				// SOR 路径绕过了基础层的 liftInterfaceValue 调用点（见下方 else 分支），
+				// 不在这里装箱会生成 K_Shape sh = Square_new(...) → C 类型不匹配。
+				initValue = sg.codegen.expressionGenerator.liftInterfaceValue(stmt.Type, initValue, stmt.Value)
 			}
 			// 修复 #25：登记编译期可知的堆分配常量大小（promote 回退用）
 			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
@@ -381,7 +385,10 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			builder.WriteString("}")
 		} else {
 			builder.WriteString(" = ")
-			builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Value))
+			valueCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			// 声明类型是 interface 而初始值是具体类对象 → 装箱成接口句柄
+			valueCode = sg.codegen.expressionGenerator.liftInterfaceValue(stmt.Type, valueCode, stmt.Value)
+			builder.WriteString(valueCode)
 		}
 		return promotePrefix + builder.String() + ";\n"
 	} else if stmt.Nullable {
@@ -2166,6 +2173,9 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
 	if !isVoid && tcoCall == nil {
 		if stmt.Value != nil {
 			exprCode = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			// 返回类型是 interface 而返回值是具体类对象 → 装箱成接口句柄
+			// （fn grow() Shape { return Circle(...) }）
+			exprCode = sg.codegen.expressionGenerator.liftInterfaceValue(retType, exprCode, stmt.Value)
 		} else {
 			exprCode = "0"
 		}

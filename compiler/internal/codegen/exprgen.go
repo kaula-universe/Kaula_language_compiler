@@ -1006,6 +1006,43 @@ func (eg *ExpressionGenerator) liftInterfaceArgsIfNeeded(funcName string, args [
 	return code, true
 }
 
+// liftInterfaceValue 把具体类对象装箱成接口句柄：目标类型是 interface、
+// 值是可推断的具体类实例、且该类确实 implements 目标接口时，生成
+// K_<Iface>_from_<Class>(value)。提升函数由 typegen 在 class implements 时生成。
+// 任何条件不满足时原样返回 value（不制造假的提升调用）。
+//
+// 覆盖两处装箱需求：
+//   - 变量声明：Shape sh = Circle(2.0)
+//   - 方法返回接口：fn grow() Shape { return Circle(...) }
+// 二者在 C 侧都必须是 K_<Iface> 句柄（方法组 + 对象指针），直接赋/返回
+// 具体类指针会报 incompatible type。
+func (eg *ExpressionGenerator) liftInterfaceValue(targetType, value string, valueAST ast.Expression) string {
+	iface := strings.TrimSuffix(strings.TrimSpace(targetType), "*")
+	if iface == "" || value == "" || !eg.codegen.IsInterfaceType(iface) {
+		return value
+	}
+	cls := eg.inferClassType(valueAST)
+	if cls == "" || eg.codegen.IsInterfaceType(cls) {
+		return value
+	}
+	classStmt := eg.codegen.findClassStmt(cls)
+	if classStmt == nil {
+		return value
+	}
+	implements := false
+	for _, name := range classStmt.Implements {
+		if strings.TrimSuffix(name, "*") == iface {
+			implements = true
+			break
+		}
+	}
+	if !implements {
+		// 未实现该接口：不装箱，让 C 侧的类型错误暴露真实问题
+		return value
+	}
+	return kaulaStructTag(iface) + "_from_" + cls + "(" + value + ")"
+}
+
 // findUserFunctionParamTypes 在程序 AST 中（含嵌套函数）查找名为 name 的函数形参类型。
 // 顶层函数经 FindFunction 可查；嵌套函数（定义在其它函数体内的 fn）需递归遍历。
 func findUserFunctionParamTypes(prog *ast.Program, name string) []string {
