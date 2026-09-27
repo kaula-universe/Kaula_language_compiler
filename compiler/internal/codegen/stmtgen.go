@@ -253,9 +253,16 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	var builder strings.Builder
 	builder.Grow(128)
 
+	// 固定大小数组（cType 形如 "int32_t[10]"）不走 SOR 分配路由：
+	// 1) 数组是栈/聚合声明，本来就不需要堆分配（SOR 侧最终也只是 stackVarDecl）；
+	// 2) 数组字面量必须生成 **brace 初始化器**（C 不允许用复合字面量初始化
+	//    固定数组），该处理在下面的基础层路径里，直接走 SOR 会生成
+	//    "int arr[10] = ((int64_t[]){...})" → clang 报类型不匹配。
+	isArray := strings.Contains(cType, "[") && strings.HasSuffix(cType, "]")
+
 	// SOR 智能分配路由
 	adapter := sg.codegen.GetSORAdapter()
-	if adapter != nil && adapter.IsActive {
+	if adapter != nil && adapter.IsActive && !isArray {
 		if decision := adapter.GetVarDecision(stmt.Name); decision != nil {
 			var initValue string
 			if stmt.Value != nil {
@@ -273,7 +280,6 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	// 指针类型变量用 kmm_v4_alloc_auto 分配（BumpPool），非指针用栈分配。
 	// 数组类型（含指针数组）走栈声明，不做 alloc_auto。
 	// 有初始值时直接用初始值初始化（尊重用户意图，避免先分配再覆盖导致泄漏）。
-	isArray := strings.Contains(cType, "[") && strings.HasSuffix(cType, "]")
 	isPointer := strings.HasSuffix(cType, "*")
 	if isPointer && !isArray && !stmt.IsStatic && !stmt.IsExported {
 		baseType := strings.TrimRight(cType, "*")

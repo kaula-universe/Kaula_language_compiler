@@ -94,10 +94,22 @@ bool thread_equal(Thread t1, Thread t2) {
 }
 
 // 互斥锁实现
+//
+// Windows：使用 SRWLOCK（而不是 CreateMutex 的 HANDLE）
+//   1) SRWLOCK 是**非递归**的：同一线程重复加锁会失败/阻塞，
+//      与 mutex_trylock 的语义（已持有则失败）一致；而 Win32 互斥体对
+//      持有者是递归的，trylock 会意外成功。
+//   2) SRWLOCK 正是 SleepConditionVariableSRW 的配对原语。原先用
+//      CreateMutex 的 HANDLE，却把它强转成 CRITICAL_SECTION* 传给
+//      SleepConditionVariableCS —— 类型不匹配，解引用野指针直接段错误
+//      （线程池 worker 一进入 condition_wait 就崩）。
 Mutex mutex_create() {
 #ifdef _WIN32
-    HANDLE mutex = CreateMutex(NULL, FALSE, NULL);
-    return (Mutex)mutex;
+    SRWLOCK* lock = (SRWLOCK*)kmm_v4_malloc(sizeof(SRWLOCK));
+    if (lock) {
+        InitializeSRWLock(lock);
+    }
+    return (Mutex)lock;
 #else
     pthread_mutex_t* mutex = (pthread_mutex_t*)kmm_v4_malloc(sizeof(pthread_mutex_t));
     if (mutex) {
@@ -109,7 +121,7 @@ Mutex mutex_create() {
 
 void mutex_destroy(Mutex mutex) {
 #ifdef _WIN32
-    CloseHandle((HANDLE)mutex);
+    (void)mutex; /* SRWLOCK 无需销毁 */
 #else
     if (mutex) {
         pthread_mutex_destroy((pthread_mutex_t*)mutex);
@@ -120,7 +132,7 @@ void mutex_destroy(Mutex mutex) {
 
 void mutex_lock(Mutex mutex) {
 #ifdef _WIN32
-    WaitForSingleObject((HANDLE)mutex, INFINITE);
+    AcquireSRWLockExclusive((PSRWLOCK)mutex);
 #else
     if (mutex) {
         pthread_mutex_lock((pthread_mutex_t*)mutex);
@@ -130,7 +142,7 @@ void mutex_lock(Mutex mutex) {
 
 void mutex_unlock(Mutex mutex) {
 #ifdef _WIN32
-    ReleaseMutex((HANDLE)mutex);
+    ReleaseSRWLockExclusive((PSRWLOCK)mutex);
 #else
     if (mutex) {
         pthread_mutex_unlock((pthread_mutex_t*)mutex);
@@ -140,7 +152,9 @@ void mutex_unlock(Mutex mutex) {
 
 bool mutex_trylock(Mutex mutex) {
 #ifdef _WIN32
-    return WaitForSingleObject((HANDLE)mutex, 0) == WAIT_OBJECT_0;
+    if (!mutex) return false;
+    /* SRWLOCK 非递归：已持有（含同线程）时返回 FALSE */
+    return TryAcquireSRWLockExclusive((PSRWLOCK)mutex) != FALSE;
 #else
     if (!mutex) return false;
     return pthread_mutex_trylock((pthread_mutex_t*)mutex) == 0;
@@ -186,7 +200,8 @@ void condition_wait(Condition condition, Mutex mutex) {
 #ifdef _WIN32
     if (!condition || !mutex) return;
     ConditionImpl* impl = (ConditionImpl*)condition;
-    SleepConditionVariableCS(&impl->cond, (CRITICAL_SECTION*)mutex, INFINITE);
+    /* Mutex 在 Windows 上是 SRWLOCK，配对原语必须是 SRW 版本的等待 */
+    SleepConditionVariableSRW(&impl->cond, (PSRWLOCK)mutex, INFINITE, 0);
 #else
     if (condition && mutex) {
         pthread_cond_wait((pthread_cond_t*)condition, (pthread_mutex_t*)mutex);
@@ -198,7 +213,8 @@ bool condition_timedwait(Condition condition, Mutex mutex, uint64_t timeout_ms) 
 #ifdef _WIN32
     if (!condition || !mutex) return false;
     ConditionImpl* impl = (ConditionImpl*)condition;
-    return SleepConditionVariableCS(&impl->cond, (CRITICAL_SECTION*)mutex, (DWORD)timeout_ms) != FALSE;
+    /* 返回 FALSE 仅表示超时；被唤醒（含虚假唤醒）时返回 TRUE */
+    return SleepConditionVariableSRW(&impl->cond, (PSRWLOCK)mutex, (DWORD)timeout_ms, 0) != FALSE;
 #else
     if (!condition || !mutex) return false;
     struct timespec ts;
@@ -238,10 +254,31 @@ void condition_broadcast(Condition condition) {
 }
 
 // 信号量实现
+//
+// Windows：Win32 信号量没有查询当前计数的 API（get_value 原本是返回 0 的
+// 桩实现），因此用一层薄封装 {HANDLE, 原子计数}：wait/post 成功后同步维护
+// 计数，供 semaphore_get_value 返回。
+#ifdef _WIN32
+typedef struct {
+    HANDLE handle;
+    volatile LONG count; /* 当前可用资源数（与 handle 的计数同步维护） */
+} SemaphoreImpl;
+#endif
+
 Semaphore semaphore_create(uint32_t initial_value) {
 #ifdef _WIN32
-    HANDLE semaphore = CreateSemaphore(NULL, initial_value, UINT32_MAX, NULL);
-    return (Semaphore)semaphore;
+    /* lMaximumCount 是有符号 LONG：传 UINT32_MAX 会被解释成 -1，
+       小于 lInitialCount → CreateSemaphore 失败(ERROR_INVALID_PARAMETER=87)，
+       返回 NULL，后续 wait/trywait 全部失败。这里用 LONG_MAX 级别的上界。 */
+    SemaphoreImpl* s = (SemaphoreImpl*)kmm_v4_malloc(sizeof(SemaphoreImpl));
+    if (s) {
+        s->handle = CreateSemaphore(NULL, (LONG)initial_value, 0x7FFFFFFFL, NULL);
+        if (!s->handle) {
+            return NULL; /* KMM 管理内存，无需手动释放 */
+        }
+        s->count = (LONG)initial_value;
+    }
+    return (Semaphore)s;
 #else
     sem_t* semaphore = (sem_t*)kmm_v4_malloc(sizeof(sem_t));
     if (semaphore) {
@@ -253,7 +290,11 @@ Semaphore semaphore_create(uint32_t initial_value) {
 
 void semaphore_destroy(Semaphore semaphore) {
 #ifdef _WIN32
-    CloseHandle((HANDLE)semaphore);
+    if (semaphore) {
+        SemaphoreImpl* s = (SemaphoreImpl*)semaphore;
+        if (s->handle) CloseHandle(s->handle);
+        // KMM 管理内存，无需手动释放
+    }
 #else
     if (semaphore) {
         sem_destroy((sem_t*)semaphore);
@@ -264,7 +305,11 @@ void semaphore_destroy(Semaphore semaphore) {
 
 void semaphore_wait(Semaphore semaphore) {
 #ifdef _WIN32
-    WaitForSingleObject((HANDLE)semaphore, INFINITE);
+    if (!semaphore) return;
+    SemaphoreImpl* s = (SemaphoreImpl*)semaphore;
+    if (WaitForSingleObject(s->handle, INFINITE) == WAIT_OBJECT_0) {
+        InterlockedDecrement(&s->count);
+    }
 #else
     if (semaphore) {
         sem_wait((sem_t*)semaphore);
@@ -274,7 +319,13 @@ void semaphore_wait(Semaphore semaphore) {
 
 bool semaphore_trywait(Semaphore semaphore) {
 #ifdef _WIN32
-    return WaitForSingleObject((HANDLE)semaphore, 0) == WAIT_OBJECT_0;
+    if (!semaphore) return false;
+    SemaphoreImpl* s = (SemaphoreImpl*)semaphore;
+    if (WaitForSingleObject(s->handle, 0) == WAIT_OBJECT_0) {
+        InterlockedDecrement(&s->count);
+        return true;
+    }
+    return false;
 #else
     if (!semaphore) return false;
     return sem_trywait((sem_t*)semaphore) == 0;
@@ -283,7 +334,13 @@ bool semaphore_trywait(Semaphore semaphore) {
 
 bool semaphore_timedwait(Semaphore semaphore, uint64_t timeout_ms) {
 #ifdef _WIN32
-    return WaitForSingleObject((HANDLE)semaphore, (DWORD)timeout_ms) == WAIT_OBJECT_0;
+    if (!semaphore) return false;
+    SemaphoreImpl* s = (SemaphoreImpl*)semaphore;
+    if (WaitForSingleObject(s->handle, (DWORD)timeout_ms) == WAIT_OBJECT_0) {
+        InterlockedDecrement(&s->count);
+        return true;
+    }
+    return false;
 #elif defined(__APPLE__)
     /* macOS 无 sem_timedwait，用 sem_trywait + nanosleep 轮询至超时 */
     if (!semaphore) return false;
@@ -323,7 +380,11 @@ bool semaphore_timedwait(Semaphore semaphore, uint64_t timeout_ms) {
 
 void semaphore_post(Semaphore semaphore) {
 #ifdef _WIN32
-    ReleaseSemaphore((HANDLE)semaphore, 1, NULL);
+    if (!semaphore) return;
+    SemaphoreImpl* s = (SemaphoreImpl*)semaphore;
+    if (ReleaseSemaphore(s->handle, 1, NULL)) {
+        InterlockedIncrement(&s->count);
+    }
 #else
     if (semaphore) {
         sem_post((sem_t*)semaphore);
@@ -333,8 +394,12 @@ void semaphore_post(Semaphore semaphore) {
 
 uint32_t semaphore_get_value(Semaphore semaphore) {
 #ifdef _WIN32
-    // Windows没有直接获取信号量值的API，这里返回0作为占位符
-    return 0;
+    /* Win32 没有查询信号量计数的 API：返回封装里原子维护的计数
+       （每次 wait 成功 -1、post 成功 +1）。原先固定返回 0。 */
+    if (!semaphore) return 0;
+    SemaphoreImpl* s = (SemaphoreImpl*)semaphore;
+    LONG v = InterlockedCompareExchange(&s->count, 0, 0);
+    return v > 0 ? (uint32_t)v : 0u;
 #else
     if (!semaphore) return 0;
     int value;
@@ -440,9 +505,13 @@ bool rwlock_try_write_lock(ReadWriteLock rwlock) {
 }
 
 // 原子操作实现
+//
+// 返回值语义与 POSIX 分支（__atomic_fetch_*）保持一致：**返回原值**。
+// InterlockedAdd 返回的是**新值**，直接用它会让 kaula_atomic_add/sub 的
+// 返回值语义在两个平台不一致（Windows 上拿到的是加/减后的值）。
 int kaula_atomic_add(volatile int* ptr, int value) {
 #ifdef _WIN32
-    return InterlockedAdd((LONG*)ptr, value);
+    return (int)InterlockedExchangeAdd((volatile LONG*)ptr, (LONG)value);
 #else
     return __atomic_fetch_add(ptr, value, __ATOMIC_SEQ_CST);
 #endif
@@ -450,7 +519,7 @@ int kaula_atomic_add(volatile int* ptr, int value) {
 
 int kaula_atomic_sub(volatile int* ptr, int value) {
 #ifdef _WIN32
-    return InterlockedAdd((LONG*)ptr, -value);
+    return (int)InterlockedExchangeAdd((volatile LONG*)ptr, -(LONG)value);
 #else
     return __atomic_fetch_sub(ptr, value, __ATOMIC_SEQ_CST);
 #endif

@@ -45,7 +45,7 @@ typedef struct {
 static void parallel_for_worker(void* arg) {
     ParallelForCtx* ctx = (ParallelForCtx*)arg;
     for (size_t i = ctx->chunk_start; i < ctx->chunk_end; i++) {
-        ctx->func(ctx->data, i);
+        ctx->func(ctx->data, (int64_t)i); /* size_t → int64_t：与 ParallelFunc 的 int64_t 索引一致 */
     }
 }
 
