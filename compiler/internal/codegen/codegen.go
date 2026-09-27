@@ -1998,14 +1998,29 @@ func prependVersionBanner(code string, cfg *config.Config) string {
 }
 
 func (cg *CodeGenerator) generateStatement(stmt ast.Statement) string {
-	// 嵌套函数（位于某函数体内）不生成在所在位置：提升为文件级定义
-	// （C 不允许函数内嵌定义；嵌套在块/if 内的嵌套函数同样入队）
-	if fn, ok := stmt.(*ast.FunctionStatement); ok && cg.inFunctionBody {
-		cg.pendingNestedFuncs = append(cg.pendingNestedFuncs,
-			cg.functionGenerator.GenerateFunctionStatement(fn))
+	return cg.statementGenerator.GenerateStatement(stmt)
+}
+
+// generateNestedFunctionStatement 生成函数定义语句：位于函数体**内部**的嵌套函数
+// 必须提升为文件级定义（C 不允许函数内嵌定义），排队在外层函数定义之后输出；
+// 调用点先于定义出现的问题由文件头部的原型声明（nestedFuncPrototypes）解决。
+// 位于顶层的函数定义照常就地生成。
+//
+// pendingNestedFuncs 按"层"隔离：生成本层嵌套函数时收集它内部更深层的嵌套
+// 函数，避免内层把外层已排队的定义连同自己的一起清空/错位输出。
+func (cg *CodeGenerator) generateNestedFunctionStatement(fn *ast.FunctionStatement) string {
+	if fn == nil {
 		return ""
 	}
-	return cg.statementGenerator.GenerateStatement(stmt)
+	if !cg.inFunctionBody {
+		return cg.functionGenerator.GenerateFunctionStatement(fn)
+	}
+	saved := cg.pendingNestedFuncs
+	cg.pendingNestedFuncs = nil
+	code := cg.functionGenerator.GenerateFunctionStatement(fn)
+	hoisted := append([]string{code}, cg.pendingNestedFuncs...)
+	cg.pendingNestedFuncs = append(saved, hoisted...)
+	return ""
 }
 
 // generateStatementFromStmts 从多个语句生成代码（类构造函数/方法体使用）

@@ -2201,22 +2201,69 @@ func (eg *ExpressionGenerator) memberFieldKaulaType(e *ast.MemberAccessExpressio
 
 // memberMethodReturnType 返回类方法的 Kaula 返回类型名。
 // 找不到类/方法时返回空串。支持 self.method() / 类变量.method()。
+//
+// 接口接收者同样要能查到：形参类型是 interface（多态句柄）时，方法签名
+// 声明在 interface 语句里（p.vtbl.method(p.self) 的返回类型由它决定）。
+// 查不到会被 inferType 回落成 "d"（整数），导致 f64 接口方法参与算术时被
+// 包进 kaula_add_i64 截断——症状是接口多态的浮点结果全错。
 func (eg *ExpressionGenerator) memberMethodReturnType(e *ast.MemberAccessExpression) string {
 	if eg.codegen.program == nil {
 		return ""
 	}
 	className := eg.memberObjectClassName(e.Object)
 	if className == "" {
-		return ""
-	}
-	classStmt := eg.codegen.program.FindClass(className)
-	if classStmt == nil {
-		return ""
-	}
-	for _, m := range classStmt.Methods {
-		if m != nil && m.Name == e.Member {
-			return m.ReturnType
+		// 接口接收者：memberObjectClassName 只认 class/struct，这里按声明类型
+		// 找接口方法签名（p.vtbl.method(p.self) 的返回类型由接口声明决定）
+		if ifaceName := eg.receiverInterfaceName(e.Object); ifaceName != "" {
+			if ifaceStmt := eg.codegen.program.FindInterface(ifaceName); ifaceStmt != nil {
+				for _, m := range ifaceStmt.Methods {
+					if m != nil && m.Name == e.Member {
+						return m.ReturnType
+					}
+				}
+			}
 		}
+		return ""
+	}
+	if classStmt := eg.codegen.program.FindClass(className); classStmt != nil {
+		for _, m := range classStmt.Methods {
+			if m != nil && m.Name == e.Member {
+				return m.ReturnType
+			}
+		}
+	}
+	return ""
+}
+
+// receiverInterfaceName 返回接收者表达式声明的接口类型名（非接口返回空串）。
+// 形参/局部变量的接口类型（interface Shape { fn area() f64 }）需要按接口声明
+// 解析方法签名，否则 inferType 回落成整数（"d"）。
+func (eg *ExpressionGenerator) receiverInterfaceName(obj ast.Expression) string {
+	name := ""
+	switch o := obj.(type) {
+	case *ast.Identifier:
+		if o.Name == "self" {
+			if eg.codegen.currentClassName != "" {
+				name = eg.codegen.currentClassName
+			} else if eg.codegen.currentScope != nil {
+				if sym := eg.codegen.currentScope.GetSymbol("self"); sym != nil {
+					name = sym.Type
+				}
+			}
+		} else if eg.codegen.currentScope != nil {
+			if sym := eg.codegen.currentScope.GetSymbol(o.Name); sym != nil {
+				name = sym.Type
+			}
+		}
+	case *ast.MemberAccessExpression:
+		name = eg.memberFieldKaulaType(o)
+	}
+	if name == "" {
+		return ""
+	}
+	name = strings.TrimSuffix(strings.TrimSpace(name), "*")
+	if eg.codegen.typeGenerator != nil && eg.codegen.typeGenerator.interfaceTypes[name] {
+		return name
 	}
 	return ""
 }

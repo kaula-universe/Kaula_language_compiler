@@ -43,7 +43,9 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	case *ast.ObjectStatement:
 		return sg.generateObjectStatement(s)
 	case *ast.FunctionStatement:
-		return sg.codegen.functionGenerator.GenerateFunctionStatement(s)
+		// 函数体内的嵌套函数必须提升为文件级定义（C 不允许函数内嵌定义），
+		// 交由 CodeGenerator 统一排队（generateNestedFunctionStatement）
+		return sg.codegen.generateNestedFunctionStatement(s)
 	case *ast.ClassStatement:
 		return sg.codegen.typeGenerator.GenerateClassStatement(s)
 	case *ast.InterfaceStatement:

@@ -859,6 +859,11 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	for name := range fg.codegen.statementGenerator.CollectUserFreedVars(stmt.Body) {
 		fg.codegen.MarkUserFreed(name)
 	}
+	// main 的函数体同样处于"函数体内"：函数体内的嵌套函数必须提升为文件级
+	// 定义（C 不允许函数内嵌定义），否则生成 "function definition is not
+	// allowed here" + 调用点隐式声明错误（历史上只在普通函数路径设置了该标志）
+	prevInFuncBody := fg.codegen.inFunctionBody
+	fg.codegen.inFunctionBody = true
 	for _, bodyStmt := range stmt.Body {
 		if bodyStmt == nil {
 			continue
@@ -866,6 +871,7 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		bodyBuilder.WriteString(fg.codegen.indentString())
 		bodyBuilder.WriteString(fg.codegen.generateStatement(bodyStmt))
 	}
+	fg.codegen.inFunctionBody = prevInFuncBody
 	// 方案 A：per-object survivor 回收（在 KMM_V4_SCOPE_END 前发射）
 	// 若末尾是 return，return 中已通过 generateSurvivorFreeForReturn 释放，此处为死代码，跳过
 	if !lastStmtIsReturn(stmt.Body) {
@@ -919,6 +925,13 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	}
 	fg.codegen.indent--
 	code.WriteString("}\n")
+
+	// 提升后的嵌套函数定义排在本函数定义**闭合之后**输出
+	// （C 不允许函数内嵌定义；调用点先于定义出现由文件头部的原型声明解决）
+	for _, nestedCode := range fg.codegen.pendingNestedFuncs {
+		code.WriteString(nestedCode)
+	}
+	fg.codegen.pendingNestedFuncs = nil
 
 	fg.codegen.ExitScope()
 	fg.codegen.currentFunctionReturnType = ""
