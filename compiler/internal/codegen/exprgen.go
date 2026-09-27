@@ -1947,6 +1947,28 @@ func (eg *ExpressionGenerator) qualifiedRegisteredInferType(fn ast.Expression) (
 		return "", false
 	}
 	short := parts[len(parts)-1]
+
+	// stdlib.json 的函数键是 C 符号名（string_create），而 Kaula 侧写作
+	// std.string.create —— 少了 modlast_ 前缀。必须走与 codegen 生成调用点
+	// 时同一套解析（ResolveChainedFunction），否则查不到签名。
+	//
+	// 此前这里只拿末端名 short 去全模块搜 Functions[short]，"create" 匹配不到
+	// "string_create"，返回类型推断静默失败（ok=false）。后果不只是推断不出
+	// 类型：generateStdlibArgs 靠 inferType(arg)=="s" 决定要不要把实参包进
+	// string_cdata()，推断失败就不解包，于是生成
+	//     unicode_normalize(string_create("abc"), 0)
+	// 把 String 结构体直接传给 const char* 形参，clang 报
+	// "passing 'String' to parameter of incompatible type 'const char *'"。
+	// 只要实参是「返回 String 的函数调用」而不是 String 变量就会踩中，
+	// 而这恰恰是 stdlib 里最常见的写法。
+	moduleKey := parts[0] + "." + parts[1]
+	if sig, _, ok := eg.codegen.stdlibConfig.ResolveChainedFunction(moduleKey, parts[2:]); ok && sig.Return != "" {
+		if t, hit := registeredReturnInferType(sig.Return); hit {
+			return t, true
+		}
+		return "d", true
+	}
+
 	for _, mod := range eg.codegen.stdlibConfig.Modules {
 		if sig, ok := mod.Functions[short]; ok && sig.Return != "" {
 			if t, hit := registeredReturnInferType(sig.Return); hit {
