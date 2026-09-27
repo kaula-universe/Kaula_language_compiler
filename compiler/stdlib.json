@@ -2006,7 +2006,8 @@
     "task_queue_enqueue": {
       "args": [
         "TaskQueue*",
-        "Task"
+        "void(*)(void())",
+        "void()"
       ]
     },
     "task_queue_dequeue": {
@@ -3746,18 +3747,6 @@
         "UrlParts*"
       ]
     },
-    "url_encode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "char*"
-    },
-    "url_decode": {
-      "args": [
-        "const char*"
-      ],
-      "return": "char*"
-    },
     "http_method_to_string": {
       "args": [
         "int"
@@ -3892,7 +3881,7 @@
     "json_object_has": {
       "args": [
         "JsonValue*",
-        "const char*"
+        "String"
       ],
       "return": "bool"
     },
@@ -3904,7 +3893,7 @@
     },
     "json_parse_file": {
       "args": [
-        "const char*"
+        "String"
       ],
       "return": "JsonValue*"
     },
@@ -3926,34 +3915,27 @@
     "header": "std/crypto/crypto.h",
     "md5_string": {
       "args": [
-        "const char*"
+        "String"
       ],
-      "return": "char*"
+      "return": "String"
     },
     "md5_file": {
       "args": [
-        "const char*"
+        "String"
       ],
-      "return": "char*"
+      "return": "String"
     },
     "sha256_string": {
       "args": [
-        "const char*"
+        "String"
       ],
-      "return": "char*"
+      "return": "String"
     },
     "sha256_file": {
       "args": [
-        "const char*"
+        "String"
       ],
-      "return": "char*"
-    },
-    "base64_encode": {
-      "args": [
-        "const u8*",
-        "size_t"
-      ],
-      "return": "char*"
+      "return": "String"
     },
     "crc32": {
       "args": [
@@ -3969,7 +3951,7 @@
         "const u8*",
         "size_t"
       ],
-      "return": "char*"
+      "return": "String"
     },
     "csprng_bytes": {
       "args": [
@@ -4138,7 +4120,7 @@
     },
     "tcp_server_create": {
       "args": [
-        "const char*",
+        "String",
         "u16"
       ],
       "return": "Socket*"
@@ -4150,7 +4132,7 @@
     "tcp_connect": {
       "args": [
         "Socket*",
-        "const char*",
+        "String",
         "u16"
       ],
       "return": "bool"
@@ -4178,7 +4160,7 @@
     "udp_send_to": {
       "args": [
         "Socket*",
-        "const char*",
+        "String",
         "u16",
         "const u8*",
         "size_t"
@@ -4188,7 +4170,7 @@
     "udp_receive_from": {
       "args": [
         "Socket*",
-        "char**",
+        "String*",
         "u16*",
         "u8*",
         "size_t"
@@ -4197,18 +4179,18 @@
     },
     "dns_resolve": {
       "args": [
-        "const char*",
-        "char**"
+        "String",
+        "String*"
       ],
       "return": "bool"
     },
     "net_get_local_hostname": {
       "args": [],
-      "return": "char*"
+      "return": "String"
     },
     "net_get_local_ip": {
       "args": [],
-      "return": "char*"
+      "return": "String"
     }
   },
   "std.obj": {
@@ -4572,7 +4554,7 @@
     "logger_set_file": {
       "args": [
         "Logger*",
-        "const char*"
+        "String"
       ]
     },
     "logger_enable_console": {
@@ -4597,50 +4579,50 @@
       "args": [
         "Logger*",
         "LogLevel",
-        "const char*",
-        "const char*",
+        "String",
+        "String",
         "int",
-        "const char*"
+        "String"
       ],
       "varargs": true
     },
     "logger_debug": {
       "args": [
         "Logger*",
-        "const char*",
-        "const char*"
+        "String",
+        "String"
       ],
       "varargs": true
     },
     "logger_info": {
       "args": [
         "Logger*",
-        "const char*",
-        "const char*"
+        "String",
+        "String"
       ],
       "varargs": true
     },
     "logger_warn": {
       "args": [
         "Logger*",
-        "const char*",
-        "const char*"
+        "String",
+        "String"
       ],
       "varargs": true
     },
     "logger_error": {
       "args": [
         "Logger*",
-        "const char*",
-        "const char*"
+        "String",
+        "String"
       ],
       "varargs": true
     },
     "logger_fatal": {
       "args": [
         "Logger*",
-        "const char*",
-        "const char*"
+        "String",
+        "String"
       ],
       "varargs": true
     },
@@ -4648,11 +4630,11 @@
       "args": [
         "LogLevel"
       ],
-      "return": "const char*"
+      "return": "String"
     },
     "log_level_from_string": {
       "args": [
-        "const char*"
+        "String"
       ],
       "return": "LogLevel"
     },
@@ -4677,7 +4659,7 @@
     },
     "test_suite_create": {
       "args": [
-        "const char*",
+        "String",
         "void(*)(void)",
         "void(*)(void)"
       ],
@@ -4690,9 +4672,9 @@
     },
     "test_case_create": {
       "args": [
-        "const char*",
+        "String",
         "void(*)(void)",
-        "const char*"
+        "String"
       ],
       "return": "TestCase*"
     },
@@ -5928,37 +5910,34 @@
       "args": [
         "const void()",
         "size_t",
-        "void()",
-        "size_t"
+        "size_t*"
       ],
-      "return": "size_t"
+      "return": "void()"
     },
     "rle_decompress": {
       "args": [
         "const void()",
         "size_t",
-        "void()",
-        "size_t"
+        "size_t*"
       ],
-      "return": "size_t"
+      "return": "void()"
     },
     "lz77_compress": {
       "args": [
         "const void()",
         "size_t",
-        "void()",
-        "size_t"
+        "size_t*",
+        "int"
       ],
-      "return": "size_t"
+      "return": "void()"
     },
     "lz77_decompress": {
       "args": [
         "const void()",
         "size_t",
-        "void()",
-        "size_t"
+        "size_t*"
       ],
-      "return": "size_t"
+      "return": "void()"
     },
     "compress_bound": {
       "args": [
@@ -6602,8 +6581,9 @@
     "header": "container/container_ext.h",
     "hashset_create": {
       "args": [
+        "size_t",
         "HashFunc",
-        "EqualFunc"
+        "HashEqualFunc"
       ],
       "return": "HashSet*"
     },
@@ -6773,7 +6753,9 @@
     "header": "testing/testing_ext.h",
     "test_suite_create": {
       "args": [
-        "const char*"
+        "String",
+        "void(*)(void)",
+        "void(*)(void)"
       ],
       "return": "TestSuite*"
     },
@@ -6858,12 +6840,11 @@
       ],
       "return": "TomlValue*"
     },
-    "toml_parse_file": {
+    "tomlx_parse_file": {
       "args": [
-        "const char*",
-        "char**"
+        "const char*"
       ],
-      "return": "TomlValue*"
+      "return": "TOMLNode*"
     },
     "toml_free": {
       "args": [
@@ -6954,12 +6935,11 @@
       ],
       "return": "XmlDoc*"
     },
-    "xml_parse_file": {
+    "xmlx_parse_file": {
       "args": [
-        "const char*",
-        "char**"
+        "const char*"
       ],
-      "return": "XmlDoc*"
+      "return": "XMLNode*"
     },
     "xml_doc_free": {
       "args": [
@@ -7339,46 +7319,46 @@
     },
     "sha1_ctx_create": {
       "args": [],
-      "return": "SHA1Context*"
+      "return": "HashSHA1Context*"
     },
     "sha1_ctx_update": {
       "args": [
-        "SHA1Context*",
+        "HashSHA1Context*",
         "const void()",
         "size_t"
       ]
     },
     "sha1_ctx_final": {
       "args": [
-        "SHA1Context*"
+        "HashSHA1Context*"
       ],
       "return": "SHA1Digest"
     },
     "sha1_ctx_destroy": {
       "args": [
-        "SHA1Context*"
+        "HashSHA1Context*"
       ]
     },
     "sha512_ctx_create": {
       "args": [],
-      "return": "SHA512Context*"
+      "return": "HashSHA512Context*"
     },
     "sha512_ctx_update": {
       "args": [
-        "SHA512Context*",
+        "HashSHA512Context*",
         "const void()",
         "size_t"
       ]
     },
     "sha512_ctx_final": {
       "args": [
-        "SHA512Context*"
+        "HashSHA512Context*"
       ],
       "return": "SHA512Digest"
     },
     "sha512_ctx_destroy": {
       "args": [
-        "SHA512Context*"
+        "HashSHA512Context*"
       ]
     },
     "hash_compute": {
