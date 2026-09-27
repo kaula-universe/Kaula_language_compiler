@@ -14,6 +14,11 @@
 #endif
 
 #include "../base/types.h"
+// url_encode / url_decode 归 std.encoding 所有（返回 String）。此前 web.h 与
+// encoding.h 各声明一份且返回类型不同（char* vs String），同时 import 这两个
+// 模块就会 "conflicting types for 'url_encode'"，而且 web.c 与 encoding.c 各
+// 定义了一份强符号。这里改为直接复用 encoding 的声明。
+#include "../encoding/encoding.h"
 
 // 跨平台socket支持
 #if STD_PLATFORM_WINDOWS
@@ -170,8 +175,8 @@ typedef struct {
 
 extern UrlParts* url_parse(const char* url);
 extern void url_destroy(UrlParts* parts);
-extern char* url_encode(const char* str);
-extern char* url_decode(const char* str);
+// url_encode / url_decode 见上方 ../encoding/encoding.h（返回 String，
+// 释放用 string_free）。此处不再重复声明，以免与 encoding 冲突。
 
 // ==================== 工具函数 ====================
 

@@ -161,27 +161,27 @@ String sha1_hex(const void* data, size_t len) {
     return bytes_to_hex(d.digest, 20);
 }
 
-struct SHA1Context {
+struct HashSHA1Context {
     u32 state[5];
     u64 bit_count;
     u8  buffer[64];
     size_t buf_len;
 };
 
-SHA1Context* sha1_ctx_create(void) {
-    SHA1Context* ctx = (SHA1Context*)kmm_v4_malloc(sizeof(SHA1Context));
+HashSHA1Context* sha1_ctx_create(void) {
+    HashSHA1Context* ctx = (HashSHA1Context*)kmm_v4_malloc(sizeof(HashSHA1Context));
     if (!ctx) return NULL;
     sha1_init(ctx->state, &ctx->bit_count);
     ctx->buf_len = 0;
     return ctx;
 }
 
-void sha1_ctx_update(SHA1Context* ctx, const void* data, size_t len) {
+void sha1_ctx_update(HashSHA1Context* ctx, const void* data, size_t len) {
     if (!ctx || !data || len == 0) return;
     sha1_update_core(ctx->state, &ctx->bit_count, ctx->buffer, &ctx->buf_len, data, len);
 }
 
-SHA1Digest sha1_ctx_final(SHA1Context* ctx) {
+SHA1Digest sha1_ctx_final(HashSHA1Context* ctx) {
     SHA1Digest result;
     if (!ctx) {
         memset(&result, 0, sizeof(result));
@@ -191,9 +191,9 @@ SHA1Digest sha1_ctx_final(SHA1Context* ctx) {
     return result;
 }
 
-void sha1_ctx_destroy(SHA1Context* ctx) {
+void sha1_ctx_destroy(HashSHA1Context* ctx) {
     if (!ctx) return;
-    memset(ctx, 0, sizeof(SHA1Context));
+    memset(ctx, 0, sizeof(HashSHA1Context));
     kmm_v4_free(ctx);
 }
 
@@ -361,27 +361,27 @@ String sha512_hex(const void* data, size_t len) {
     return bytes_to_hex(d.digest, 64);
 }
 
-struct SHA512Context {
+struct HashSHA512Context {
     u64 state[8];
     u64 bit_count;
     u8  buffer[128];
     size_t buf_len;
 };
 
-SHA512Context* sha512_ctx_create(void) {
-    SHA512Context* ctx = (SHA512Context*)kmm_v4_malloc(sizeof(SHA512Context));
+HashSHA512Context* sha512_ctx_create(void) {
+    HashSHA512Context* ctx = (HashSHA512Context*)kmm_v4_malloc(sizeof(HashSHA512Context));
     if (!ctx) return NULL;
     sha512_init(ctx->state, &ctx->bit_count, 0);
     ctx->buf_len = 0;
     return ctx;
 }
 
-void sha512_ctx_update(SHA512Context* ctx, const void* data, size_t len) {
+void sha512_ctx_update(HashSHA512Context* ctx, const void* data, size_t len) {
     if (!ctx || !data || len == 0) return;
     sha512_update_core(ctx->state, &ctx->bit_count, ctx->buffer, &ctx->buf_len, data, len);
 }
 
-SHA512Digest sha512_ctx_final(SHA512Context* ctx) {
+SHA512Digest sha512_ctx_final(HashSHA512Context* ctx) {
     SHA512Digest result;
     if (!ctx) {
         memset(&result, 0, sizeof(result));
@@ -391,9 +391,9 @@ SHA512Digest sha512_ctx_final(SHA512Context* ctx) {
     return result;
 }
 
-void sha512_ctx_destroy(SHA512Context* ctx) {
+void sha512_ctx_destroy(HashSHA512Context* ctx) {
     if (!ctx) return;
-    memset(ctx, 0, sizeof(SHA512Context));
+    memset(ctx, 0, sizeof(HashSHA512Context));
     kmm_v4_free(ctx);
 }
 
@@ -460,7 +460,7 @@ void hmac_sha512(const void* key, size_t key_len,
     u8 k_opad[SHA512_BLOCK_SIZE];
     u8 inner[64];
     SHA512Digest tmp;
-    SHA512Context* ctx;
+    HashSHA512Context* ctx;
     int i;
 
     memset(k, 0, SHA512_BLOCK_SIZE);

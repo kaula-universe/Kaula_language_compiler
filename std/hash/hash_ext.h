@@ -47,19 +47,24 @@ void  pbkdf2_sha512(const void* password, size_t pw_len,
                     const void* salt, size_t salt_len,
                     int iterations, u8* out, size_t out_len);
 
-// Hash context for streaming
-typedef struct SHA1Context SHA1Context;
-typedef struct SHA512Context SHA512Context;
+// Hash context for streaming.
+// The streaming contexts are named HashSHA1Context / HashSHA512Context on
+// purpose: crypto.h already typedefs SHA1Context / SHA512Context to its own
+// (differently laid out) anonymous structs, so sharing the names made
+// "import std.hash" + "import std.crypto" fail with
+// "typedef redefinition with different types".
+typedef struct HashSHA1Context HashSHA1Context;
+typedef struct HashSHA512Context HashSHA512Context;
 
-SHA1Context*  sha1_ctx_create(void);
-void          sha1_ctx_update(SHA1Context* ctx, const void* data, size_t len);
-SHA1Digest    sha1_ctx_final(SHA1Context* ctx);
-void          sha1_ctx_destroy(SHA1Context* ctx);
+HashSHA1Context*  sha1_ctx_create(void);
+void          sha1_ctx_update(HashSHA1Context* ctx, const void* data, size_t len);
+SHA1Digest    sha1_ctx_final(HashSHA1Context* ctx);
+void          sha1_ctx_destroy(HashSHA1Context* ctx);
 
-SHA512Context* sha512_ctx_create(void);
-void           sha512_ctx_update(SHA512Context* ctx, const void* data, size_t len);
-SHA512Digest   sha512_ctx_final(SHA512Context* ctx);
-void           sha512_ctx_destroy(SHA512Context* ctx);
+HashSHA512Context* sha512_ctx_create(void);
+void           sha512_ctx_update(HashSHA512Context* ctx, const void* data, size_t len);
+SHA512Digest   sha512_ctx_final(HashSHA512Context* ctx);
+void           sha512_ctx_destroy(HashSHA512Context* ctx);
 
 // Generic hash dispatch
 String hash_compute(const char* algorithm, const void* data, size_t len);

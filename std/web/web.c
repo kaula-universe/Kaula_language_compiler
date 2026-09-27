@@ -965,49 +965,11 @@ void url_destroy(UrlParts* parts) {
     // KMM 管理内存，无需手动释放
 }
 
-char* url_encode(const char* str) {
-    if (!str) return NULL;
-    char* result = (char*)kmm_v4_malloc(strlen(str) * 3 + 1);
-    if (!result) return NULL;
-
-    const char* p = str;
-    char* q = result;
-    while (*p) {
-        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
-            *p == '-' || *p == '_' || *p == '.' || *p == '~') {
-            *q++ = *p;
-        } else {
-            snprintf(q, 4, "%%%02X", (unsigned char)*p);
-            q += 3;
-        }
-        p++;
-    }
-    *q = '\0';
-    return result;
-}
-
-char* url_decode(const char* str) {
-    if (!str) return NULL;
-    char* result = (char*)kmm_v4_malloc(strlen(str) + 1);
-    if (!result) return NULL;
-
-    const char* p = str;
-    char* q = result;
-    while (*p) {
-        if (*p == '%' && p[1] && p[2]) {
-            char hex[3] = {p[1], p[2], '\0'};
-            *q++ = (char)strtol(hex, NULL, 16);
-            p += 3;
-        } else if (*p == '+') {
-            *q++ = ' ';
-            p++;
-        } else {
-            *q++ = *p++;
-        }
-    }
-    *q = '\0';
-    return result;
-}
+// url_encode / url_decode 已移除: 这两个实现与 std/encoding/encoding.c 的同名
+// 函数重复, 且返回类型不同(char* vs String)。两个 .c 同时提供强符号时, 一旦某个
+// 程序同时用到 std.encoding 与 std.web, 链接器取到哪个取决于归档成员顺序,
+// 行为不确定; 头文件层面则直接编译失败("conflicting types")。
+// 统一由 encoding 提供, web.h 通过 #include "../encoding/encoding.h" 暴露声明。
 
 // ==================== 工具函数实现 ====================
 

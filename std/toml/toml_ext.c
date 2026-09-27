@@ -28,13 +28,13 @@ static void toml_free_node(TOMLNode* node) {
     size_t i;
     if (!node) return;
     switch (node->type) {
-        case TOML_STRING:
+        case TOMLX_STRING:
             if (node->data.string_val.ptr) string_free(node->data.string_val);
             break;
-        case TOML_DATETIME:
+        case TOMLX_DATETIME:
             if (node->data.datetime_val.ptr) string_free(node->data.datetime_val);
             break;
-        case TOML_TABLE:
+        case TOMLX_TABLE:
             kv = node->data.table.entries;
             while (kv) {
                 next_kv = kv->next;
@@ -44,7 +44,7 @@ static void toml_free_node(TOMLNode* node) {
                 kv = next_kv;
             }
             break;
-        case TOML_ARRAY:
+        case TOMLX_ARRAY:
             for (i = 0; i < node->data.array.count; i++) {
                 toml_free_node(node->data.array.items[i]);
             }
@@ -61,29 +61,29 @@ void toml_free(TOMLNode* root) {
 }
 
 TOMLValueType toml_node_type(TOMLNode* node) {
-    if (!node) return TOML_TABLE;
+    if (!node) return TOMLX_TABLE;
     return node->type;
 }
 
 size_t toml_array_size(TOMLNode* node) {
-    if (!node || node->type != TOML_ARRAY) return 0;
+    if (!node || node->type != TOMLX_ARRAY) return 0;
     return node->data.array.count;
 }
 
 size_t toml_table_size(TOMLNode* node) {
-    if (!node || node->type != TOML_TABLE) return 0;
+    if (!node || node->type != TOMLX_TABLE) return 0;
     return node->data.table.count;
 }
 
 TOMLNode* toml_node_get_array(TOMLNode* node, size_t index) {
-    if (!node || node->type != TOML_ARRAY) return NULL;
+    if (!node || node->type != TOMLX_ARRAY) return NULL;
     if (index >= node->data.array.count) return NULL;
     return node->data.array.items[index];
 }
 
 TOMLNode* toml_node_get_table(TOMLNode* node, const char* key) {
     TOMLKeyValue* kv;
-    if (!node || node->type != TOML_TABLE || !key) return NULL;
+    if (!node || node->type != TOMLX_TABLE || !key) return NULL;
     kv = node->data.table.entries;
     while (kv) {
         if (strcmp(kv->key.ptr, key) == 0) return kv->value;
@@ -93,18 +93,18 @@ TOMLNode* toml_node_get_table(TOMLNode* node, const char* key) {
 }
 
 bool_t toml_node_get_bool(TOMLNode* node, bool_t* out) {
-    if (!node || node->type != TOML_BOOLEAN || !out) return false;
+    if (!node || node->type != TOMLX_BOOLEAN || !out) return false;
     *out = node->data.bool_val;
     return true;
 }
 
 bool_t toml_node_get_int(TOMLNode* node, int64_t* out) {
     if (!node || !out) return false;
-    if (node->type == TOML_INTEGER) {
+    if (node->type == TOMLX_INTEGER) {
         *out = node->data.int_val;
         return true;
     }
-    if (node->type == TOML_FLOAT) {
+    if (node->type == TOMLX_FLOAT) {
         *out = (int64_t)node->data.float_val;
         return true;
     }
@@ -113,11 +113,11 @@ bool_t toml_node_get_int(TOMLNode* node, int64_t* out) {
 
 bool_t toml_node_get_float(TOMLNode* node, double* out) {
     if (!node || !out) return false;
-    if (node->type == TOML_FLOAT) {
+    if (node->type == TOMLX_FLOAT) {
         *out = node->data.float_val;
         return true;
     }
-    if (node->type == TOML_INTEGER) {
+    if (node->type == TOMLX_INTEGER) {
         *out = (double)node->data.int_val;
         return true;
     }
@@ -125,7 +125,7 @@ bool_t toml_node_get_float(TOMLNode* node, double* out) {
 }
 
 bool_t toml_node_get_string(TOMLNode* node, const char** out) {
-    if (!node || node->type != TOML_STRING || !out) return false;
+    if (!node || node->type != TOMLX_STRING || !out) return false;
     *out = node->data.string_val.ptr;
     return true;
 }
@@ -158,10 +158,10 @@ static TOMLNode* find_or_create_table(TOMLNode* root, char** parts, size_t num_p
     for (i = 0; i < num_parts; i++) {
         TOMLNode* child = toml_node_get_table(current, parts[i]);
         if (!child) {
-            child = create_node(TOML_TABLE);
+            child = create_node(TOMLX_TABLE);
             if (!child) return NULL;
             table_insert(current, parts[i], child);
-        } else if (child->type != TOML_TABLE) {
+        } else if (child->type != TOMLX_TABLE) {
             return NULL;
         }
         current = child;
@@ -320,7 +320,7 @@ static bool_t array_append(TOMLNode* arr, TOMLNode* item) {
 }
 
 static TOMLNode* parse_array(TOMLParser* p) {
-    TOMLNode* arr = create_node(TOML_ARRAY);
+    TOMLNode* arr = create_node(TOMLX_ARRAY);
     if (!arr) return NULL;
     parser_advance(p, 1);
     while (1) {
@@ -356,7 +356,7 @@ static TOMLNode* parse_value(TOMLParser* p) {
         char* s;
         TOMLNode* n;
         if (!parse_basic_string(p, &s)) return NULL;
-        n = create_node(TOML_STRING);
+        n = create_node(TOMLX_STRING);
         if (!n) { kmm_v4_free(s); return NULL; }
         n->data.string_val = string_wrap(s);
         return n;
@@ -365,7 +365,7 @@ static TOMLNode* parse_value(TOMLParser* p) {
         char* s;
         TOMLNode* n;
         if (!parse_literal_string(p, &s)) return NULL;
-        n = create_node(TOML_STRING);
+        n = create_node(TOMLX_STRING);
         if (!n) { kmm_v4_free(s); return NULL; }
         n->data.string_val = string_wrap(s);
         return n;
@@ -376,14 +376,14 @@ static TOMLNode* parse_value(TOMLParser* p) {
     if (c == 't' || c == 'f') {
         const char* rest = p->input + p->pos;
         if (strncmp(rest, "true", 4) == 0) {
-            TOMLNode* n = create_node(TOML_BOOLEAN);
+            TOMLNode* n = create_node(TOMLX_BOOLEAN);
             if (!n) return NULL;
             n->data.bool_val = true;
             parser_advance(p, 4);
             return n;
         }
         if (strncmp(rest, "false", 5) == 0) {
-            TOMLNode* n = create_node(TOML_BOOLEAN);
+            TOMLNode* n = create_node(TOMLX_BOOLEAN);
             if (!n) return NULL;
             n->data.bool_val = false;
             parser_advance(p, 5);
@@ -425,11 +425,11 @@ static TOMLNode* parse_value(TOMLParser* p) {
             }
             buf[j] = '\0';
             if (is_float) {
-                n = create_node(TOML_FLOAT);
+                n = create_node(TOMLX_FLOAT);
                 if (!n) { kmm_v4_free(buf); return NULL; }
                 n->data.float_val = strtod(buf, &endptr);
             } else {
-                n = create_node(TOML_INTEGER);
+                n = create_node(TOMLX_INTEGER);
                 if (!n) { kmm_v4_free(buf); return NULL; }
                 n->data.int_val = strtoll(buf, &endptr, 10);
             }
@@ -519,10 +519,10 @@ static void parse_key_value(TOMLParser* p, TOMLNode* current_table) {
     for (i = 0; i < num_parts - 1; i++) {
         TOMLNode* child = toml_node_get_table(parent_table, key_parts[i]);
         if (!child) {
-            child = create_node(TOML_TABLE);
+            child = create_node(TOMLX_TABLE);
             if (child) table_insert(parent_table, key_parts[i], child);
         }
-        if (!child || child->type != TOML_TABLE) {
+        if (!child || child->type != TOMLX_TABLE) {
             toml_free_node(value);
             free_key_parts(key_parts, num_parts);
             return;
@@ -543,7 +543,7 @@ static TOMLNode* toml_parse_internal(const char* str) {
     p.len = strlen(str);
     p.line = 1;
     p.col = 1;
-    root = create_node(TOML_TABLE);
+    root = create_node(TOMLX_TABLE);
     if (!root) return NULL;
     current_table = root;
     while (p.pos < p.len) {
@@ -583,29 +583,29 @@ static TOMLNode* toml_parse_internal(const char* str) {
             for (i = 0; i < num_parts - 1; i++) {
                 TOMLNode* child = toml_node_get_table(parent_table, key_parts[i]);
                 if (!child) {
-                    child = create_node(TOML_TABLE);
+                    child = create_node(TOMLX_TABLE);
                     if (child) table_insert(parent_table, key_parts[i], child);
                 }
-                if (!child || child->type != TOML_TABLE) break;
+                if (!child || child->type != TOMLX_TABLE) break;
                 parent_table = child;
             }
             if (is_array_of_tables) {
                 array_node = toml_node_get_table(parent_table, key_parts[num_parts - 1]);
-                if (!array_node || array_node->type != TOML_ARRAY) {
-                    array_node = create_node(TOML_ARRAY);
+                if (!array_node || array_node->type != TOMLX_ARRAY) {
+                    array_node = create_node(TOMLX_ARRAY);
                     if (array_node) table_insert(parent_table, key_parts[num_parts - 1], array_node);
                 }
-                new_table = create_node(TOML_TABLE);
-                if (new_table && array_node && array_node->type == TOML_ARRAY) {
+                new_table = create_node(TOMLX_TABLE);
+                if (new_table && array_node && array_node->type == TOMLX_ARRAY) {
                     array_append(array_node, new_table);
                 }
                 current_table = new_table;
             } else {
                 TOMLNode* existing = toml_node_get_table(parent_table, key_parts[num_parts - 1]);
-                if (existing && existing->type == TOML_TABLE) {
+                if (existing && existing->type == TOMLX_TABLE) {
                     current_table = existing;
                 } else {
-                    new_table = create_node(TOML_TABLE);
+                    new_table = create_node(TOMLX_TABLE);
                     if (new_table) table_insert(parent_table, key_parts[num_parts - 1], new_table);
                     current_table = new_table;
                 }
@@ -626,11 +626,11 @@ static TOMLNode* toml_parse_internal(const char* str) {
     return root;
 }
 
-TOMLNode* toml_parse_string(const char* str) {
+TOMLNode* tomlx_parse_string(const char* str) {
     return toml_parse_internal(str);
 }
 
-TOMLNode* toml_parse_file(const char* filename) {
+TOMLNode* tomlx_parse_file(const char* filename) {
     FILE* f;
     long size;
     char* buf;
@@ -733,27 +733,27 @@ static void serialize_value(char** out, TOMLNode* node, int indent) {
     char buf[64];
     if (!node) return;
     switch (node->type) {
-        case TOML_STRING:
+        case TOMLX_STRING:
             serialize_string_value(out, node->data.string_val.ptr);
             break;
-        case TOML_INTEGER:
+        case TOMLX_INTEGER:
             snprintf(buf, sizeof(buf), "%lld", (long long)node->data.int_val);
             serialize_append(out, buf);
             break;
-        case TOML_FLOAT:
+        case TOMLX_FLOAT:
             snprintf(buf, sizeof(buf), "%g", node->data.float_val);
             serialize_append(out, buf);
             break;
-        case TOML_BOOLEAN:
+        case TOMLX_BOOLEAN:
             serialize_append(out, node->data.bool_val ? "true" : "false");
             break;
-        case TOML_DATETIME:
+        case TOMLX_DATETIME:
             serialize_append(out, node->data.datetime_val.ptr);
             break;
-        case TOML_ARRAY:
+        case TOMLX_ARRAY:
             serialize_array(out, node, indent);
             break;
-        case TOML_TABLE:
+        case TOMLX_TABLE:
             break;
     }
 }
@@ -766,11 +766,11 @@ static void serialize_table_entries(char** out, TOMLNode* table, char* prefix, i
     size_t prefix_len;
     while (kv) {
         TOMLKeyValue* next = kv->next;
-        if (kv->value && kv->value->type == TOML_TABLE) {
+        if (kv->value && kv->value->type == TOMLX_TABLE) {
             kv->next = tables_list;
             tables_list = kv;
-        } else if (kv->value && kv->value->type == TOML_ARRAY && kv->value->data.array.count > 0 &&
-                   kv->value->data.array.items[0]->type == TOML_TABLE) {
+        } else if (kv->value && kv->value->type == TOMLX_ARRAY && kv->value->data.array.count > 0 &&
+                   kv->value->data.array.items[0]->type == TOMLX_TABLE) {
             kv->next = arrays_list;
             arrays_list = kv;
         } else {
@@ -833,9 +833,9 @@ static void serialize_table_entries(char** out, TOMLNode* table, char* prefix, i
     }
 }
 
-String toml_serialize(TOMLNode* root) {
+String tomlx_serialize(TOMLNode* root) {
     char* result = NULL;
-    if (!root || root->type != TOML_TABLE) return STRING_EMPTY;
+    if (!root || root->type != TOMLX_TABLE) return STRING_EMPTY;
     result = strdup_safe("");
     serialize_table_entries(&result, root, NULL, 0);
     return string_create(result);

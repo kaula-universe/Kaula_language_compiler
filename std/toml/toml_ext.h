@@ -2,14 +2,22 @@
 #include "../base/types.h"
 #include "../string/string.h"
 
+// This module is the second TOML implementation in the tree (the
+// TOMLNode/Table/Array view), alongside std/toml. Its enumerators and entry
+// points carry `TOMLX_` / `tomlx_` prefixes because they used to be spelled
+// exactly like std/toml's, which made "import std.toml" + "import std.toml.ext"
+// fail with redefinition of every TOML_* enumerator plus "conflicting types"
+// for toml_parse_file / toml_serialize, and left two strong definitions of
+// each of those symbols in kaula_std.lib.
+
 typedef enum TOMLValueType {
-    TOML_TABLE,
-    TOML_ARRAY,
-    TOML_STRING,
-    TOML_INTEGER,
-    TOML_FLOAT,
-    TOML_BOOLEAN,
-    TOML_DATETIME
+    TOMLX_TABLE,
+    TOMLX_ARRAY,
+    TOMLX_STRING,
+    TOMLX_INTEGER,
+    TOMLX_FLOAT,
+    TOMLX_BOOLEAN,
+    TOMLX_DATETIME
 } TOMLValueType;
 
 typedef struct TOMLNode TOMLNode;
@@ -44,10 +52,10 @@ struct TOMLNode {
     } data;
 };
 
-TOMLNode* toml_parse_file(const char* filename);
-TOMLNode* toml_parse_string(const char* str);
+TOMLNode* tomlx_parse_file(const char* filename);
+TOMLNode* tomlx_parse_string(const char* str);
 
-String toml_serialize(TOMLNode* root);
+String tomlx_serialize(TOMLNode* root);
 
 TOMLValueType toml_node_type(TOMLNode* node);
 

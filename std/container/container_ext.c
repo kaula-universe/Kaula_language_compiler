@@ -3,7 +3,6 @@
 
 #define HASHSET_INITIAL_CAPACITY 16
 #define HASHSET_LOAD_FACTOR 0.75
-#define DEQUE_INITIAL_CAPACITY 8
 #define PQ_INITIAL_CAPACITY 16
 
 typedef struct HashNode {
@@ -18,14 +17,6 @@ struct HashSet {
     size_t elem_size;
     HashFunc hash_func;
     HashEqualFunc equal_func;
-};
-
-struct Deque {
-    unsigned char* buffer;
-    size_t capacity;
-    size_t elem_size;
-    size_t front;
-    size_t size;
 };
 
 struct PriorityQueue {
@@ -276,129 +267,13 @@ bool_t hashset_remove_string(HashSet* set, const char* str) {
     return false;
 }
 
-Deque* deque_create(size_t elem_size) {
-    Deque* deque;
-    if (elem_size == 0) return NULL;
-    deque = (Deque*)kmm_v4_malloc(sizeof(Deque));
-    if (!deque) return NULL;
-    deque->buffer = (unsigned char*)kmm_v4_malloc(DEQUE_INITIAL_CAPACITY * elem_size);
-    if (!deque->buffer) {
-        kmm_v4_free(deque);
-        return NULL;
-    }
-    deque->capacity = DEQUE_INITIAL_CAPACITY;
-    deque->elem_size = elem_size;
-    deque->front = 0;
-    deque->size = 0;
-    return deque;
-}
-
-void deque_destroy(Deque* deque) {
-    if (!deque) return;
-    kmm_v4_free(deque->buffer);
-    kmm_v4_free(deque);
-}
-
-static bool_t deque_grow(Deque* deque) {
-    size_t new_cap;
-    unsigned char* new_buf;
-    size_t i;
-    if (!deque) return false;
-    new_cap = deque->capacity * 2;
-    new_buf = (unsigned char*)kmm_v4_malloc(new_cap * deque->elem_size);
-    if (!new_buf) return false;
-    for (i = 0; i < deque->size; i++) {
-        size_t src_idx = (deque->front + i) % deque->capacity;
-        memcpy(new_buf + i * deque->elem_size, deque->buffer + src_idx * deque->elem_size, deque->elem_size);
-    }
-    kmm_v4_free(deque->buffer);
-    deque->buffer = new_buf;
-    deque->capacity = new_cap;
-    deque->front = 0;
-    return true;
-}
-
-bool_t deque_push_front(Deque* deque, const void* elem) {
-    size_t new_front;
-    if (!deque || !elem) return false;
-    if (deque->size >= deque->capacity) {
-        if (!deque_grow(deque)) return false;
-    }
-    new_front = (deque->front == 0) ? deque->capacity - 1 : deque->front - 1;
-    memcpy(deque->buffer + new_front * deque->elem_size, elem, deque->elem_size);
-    deque->front = new_front;
-    deque->size++;
-    return true;
-}
-
-bool_t deque_push_back(Deque* deque, const void* elem) {
-    size_t back_idx;
-    if (!deque || !elem) return false;
-    if (deque->size >= deque->capacity) {
-        if (!deque_grow(deque)) return false;
-    }
-    back_idx = (deque->front + deque->size) % deque->capacity;
-    memcpy(deque->buffer + back_idx * deque->elem_size, elem, deque->elem_size);
-    deque->size++;
-    return true;
-}
-
-bool_t deque_pop_front(Deque* deque, void* out) {
-    if (!deque || deque->size == 0) return false;
-    if (out) {
-        memcpy(out, deque->buffer + deque->front * deque->elem_size, deque->elem_size);
-    }
-    deque->front = (deque->front + 1) % deque->capacity;
-    deque->size--;
-    return true;
-}
-
-bool_t deque_pop_back(Deque* deque, void* out) {
-    size_t back_idx;
-    if (!deque || deque->size == 0) return false;
-    back_idx = (deque->front + deque->size - 1) % deque->capacity;
-    if (out) {
-        memcpy(out, deque->buffer + back_idx * deque->elem_size, deque->elem_size);
-    }
-    deque->size--;
-    return true;
-}
-
-void* deque_front(const Deque* deque) {
-    if (!deque || deque->size == 0) return NULL;
-    return deque->buffer + deque->front * deque->elem_size;
-}
-
-void* deque_back(const Deque* deque) {
-    size_t back_idx;
-    if (!deque || deque->size == 0) return NULL;
-    back_idx = (deque->front + deque->size - 1) % deque->capacity;
-    return deque->buffer + back_idx * deque->elem_size;
-}
-
-void* deque_at(const Deque* deque, size_t index) {
-    size_t idx;
-    if (!deque || index >= deque->size) return NULL;
-    idx = (deque->front + index) % deque->capacity;
-    return deque->buffer + idx * deque->elem_size;
-}
-
-size_t deque_size(const Deque* deque) {
-    if (!deque) return 0;
-    return deque->size;
-}
-
-bool_t deque_is_empty(const Deque* deque) {
-    if (!deque) return true;
-    return deque->size == 0;
-}
-
-void deque_clear(Deque* deque) {
-    if (!deque) return;
-    deque->front = 0;
-    deque->size = 0;
-}
-
+// deque_* implementation removed: std/deque/deque.h is the real Deque API. This
+// file carried a second copy whose push_front/push_back even disagreed on the
+// return type (void vs bool_t), so including both container_ext.h and deque.h
+// produced "conflicting types", and container_ext.c / deque.c each defined a
+// strong deque_* (the linker picked one by archive member order).
+// stdlib.json only registers deque_* under std.deque and no std source calls
+// this copy, so the whole block goes away; include ../deque/deque.h instead.
 static void pq_swap(unsigned char* data, size_t i, size_t j, size_t elem_size) {
     unsigned char* pa = data + i * elem_size;
     unsigned char* pb = data + j * elem_size;

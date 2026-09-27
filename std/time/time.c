@@ -192,7 +192,7 @@ DateTime time_to_datetime(i64 timestamp) {
     remaining = remaining % 3600;
     dt.minute = remaining / 60;
     dt.second = remaining % 60;
-    dt.millisecond = ms;
+    dt.nanosecond = (i64)ms * 1000000;   // DateTime 统一为纳秒精度
 
     i32 year = 1970;
     i32 days_left = days;
@@ -225,7 +225,7 @@ DateTime time_to_datetime(i64 timestamp) {
 i64 time_from_datetime(DateTime dt) {
     i32 days = _get_days_since_epoch(dt.year, dt.month, dt.day);
     i64 timestamp = (i64)days * 86400 + (i64)dt.hour * 3600 + (i64)dt.minute * 60 + (i64)dt.second;
-    return timestamp * 1000 + dt.millisecond;
+    return timestamp * 1000 + dt.nanosecond / 1000000;   // DateTime 统一为纳秒精度
 }
 
 char* time_format_string(i64 timestamp, const char* format) {
@@ -262,7 +262,8 @@ char* time_format_string(i64 timestamp, const char* format) {
                     written = snprintf(p, remaining, "%02d", dt.second);
                     break;
                 case 'f':
-                    written = snprintf(p, remaining, "%03d", dt.millisecond);
+                    written = snprintf(p, remaining, "%03d",
+                                       (int)(dt.nanosecond / 1000000));
                     break;
                 default:
                     // 未知格式符：原样输出 % 和字符
@@ -343,7 +344,7 @@ i64 time_parse_string(const char* str, const char* format) {
                     s += 2;
                     break;
                 case 'f':
-                    dt.millisecond = _parse_int(s, 3);
+                    dt.nanosecond = (i64)_parse_int(s, 3) * 1000000;   // DateTime 统一为纳秒精度
                     s += 3;
                     break;
                 default:
