@@ -46,7 +46,12 @@ typedef struct JsonValue {
         // 内联标量值（无额外分配）
         int     bool_val;
         double  number_val;
-        char*   string_val;
+        // 必须是 String 而不是 char*：String 是 SSO 结构体（len + ptr/sso 联合体，
+        // 见 std/base/types.h），短串（len <= 15）的数据在 .sso 里、.ptr 未初始化。
+        // 存成 char* 会在 json_create_string 里丢掉 SSO 信息——原来是
+        //     val->value.string_val = string_copy(value).ptr;
+        // 短串取到的 .ptr 是未初始化内存，随后 json_get_string 的 strlen 直接踩内存。
+        String  string_val;
         // 复合类型（需要额外分配）
         JsonArray*  array_val;
         JsonObject* object_val;

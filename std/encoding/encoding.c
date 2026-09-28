@@ -397,7 +397,7 @@ String hex_encode(const void* data, size_t len) {
         out[i * 2 + 1] = hex_lower[p[i] & 0x0F];
     }
     out[len * 2] = '\0';
-    return (String){.len = len * 2, .ptr = out};
+    return string_wrap_n(out, len * 2);
 }
 
 String hex_encode_upper(const void* data, size_t len) {
@@ -412,7 +412,7 @@ String hex_encode_upper(const void* data, size_t len) {
         out[i * 2 + 1] = hex_upper[p[i] & 0x0F];
     }
     out[len * 2] = '\0';
-    return (String){.len = len * 2, .ptr = out};
+    return string_wrap_n(out, len * 2);
 }
 
 void* hex_decode(const char* hex, size_t* out_len) {
@@ -481,7 +481,7 @@ String base32_encode(const void* data, size_t len) {
         i += (size_t)n;
     }
     out[o] = '\0';
-    return (String){.len = o, .ptr = out};
+    return string_wrap_n(out, o);
 }
 
 void* base32_decode(const char* encoded, size_t* out_len) {
@@ -561,7 +561,7 @@ String base64_encode(const void* data, size_t len) {
         out[o++] = '=';
     }
     out[o] = '\0';
-    return (String){.len = o, .ptr = out};
+    return string_wrap_n(out, o);
 }
 
 void* base64_decode(const char* encoded, size_t* out_len) {
@@ -642,7 +642,7 @@ static String url_encode_internal(const char* str, int component) {
         }
     }
     out[o] = '\0';
-    return (String){.len = o, .ptr = out};
+    return string_wrap_n(out, o);
 }
 
 String url_encode(const char* str) {
@@ -675,7 +675,7 @@ static String url_decode_internal(const char* str) {
         out[o++] = str[i];
     }
     out[o] = '\0';
-    return (String){.len = o, .ptr = out};
+    return string_wrap_n(out, o);
 }
 
 String url_decode(const char* str) {
@@ -721,7 +721,7 @@ String percent_encode(const char* str, const char* reserved_chars) {
         }
     }
     out[o] = '\0';
-    return (String){.len = o, .ptr = out};
+    return string_wrap_n(out, o);
 }
 
 String percent_decode(const char* str) {
@@ -812,7 +812,7 @@ String qp_encode(const char* str) {
         i++;
     }
     out[o] = '\0';
-    return (String){.len = o, .ptr = out};
+    return string_wrap_n(out, o);
 }
 
 String qp_decode(const char* str) {
@@ -855,7 +855,7 @@ String qp_decode(const char* str) {
         }
     }
     out[o] = '\0';
-    return (String){.len = o, .ptr = out};
+    return string_wrap_n(out, o);
 }
 
 /* ============================================================
@@ -899,7 +899,7 @@ String pascal_encode(const char* str) {
     out[d] = ':';
     memcpy(out + prefix_len, str, len);
     out[prefix_len + len] = '\0';
-    return (String){.len = prefix_len + len, .ptr = out};
+    return string_wrap_n(out, prefix_len + len);
 }
 
 String pascal_decode(const char* encoded) {
@@ -922,5 +922,5 @@ String pascal_decode(const char* encoded) {
     if (!out) return STRING_EMPTY;
     memcpy(out, payload, n);
     out[n] = '\0';
-    return (String){.len = n, .ptr = out};
+    return string_wrap_n(out, n);
 }

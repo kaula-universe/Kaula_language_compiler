@@ -453,7 +453,7 @@ String crc64_hex(const void* data, size_t len) {
     int i;
     char* buf = (char*)kmm_v4_malloc(17);
     if (!buf) return STRING_EMPTY;
-    out = (String){.len = 16, .ptr = buf};
+    out = string_wrap_n(buf, 16);
     for (i = 0; i < 16; i++) {
         string_data(out)[i] = hexchars[(h >> (60 - i * 4)) & 0xF];
     }
