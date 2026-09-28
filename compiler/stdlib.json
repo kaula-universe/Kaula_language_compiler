@@ -647,24 +647,6 @@
       "return": "bool",
       "description": "immediately free a survivor-segment object; false if not owned by it"
     },
-    "kmm_v4_bump": {
-      "args": [
-        "size_t"
-      ],
-      "return": "void()",
-      "description": "batch allocate total_size bytes with single atomic op"
-    },
-    "kmm_v4_offset_save": {
-      "args": [],
-      "return": "size_t",
-      "description": "save current allocation offset"
-    },
-    "kmm_v4_offset_restore": {
-      "args": [
-        "size_t"
-      ],
-      "description": "restore offset directly, bypass scope stack"
-    },
     "kmm_v4_scope_enter": {
       "args": []
     },
@@ -1984,17 +1966,9 @@
   },
   "std.task": {
     "header": "std/task/task.h",
-    "task_create": {
-      "args": [
-        "void()",
-        "void()",
-        "int"
-      ],
-      "return": "Task"
-    },
     "task_queue_create": {
       "args": [
-        "int"
+        "i32"
       ],
       "return": "TaskQueue*"
     },
@@ -2008,25 +1982,20 @@
         "TaskQueue*",
         "void(*)(void())",
         "void()"
-      ]
+      ],
+      "return": "void"
     },
     "task_queue_dequeue": {
       "args": [
         "TaskQueue*"
       ],
-      "return": "Task*"
+      "return": "void()"
     },
     "task_queue_is_empty": {
       "args": [
         "TaskQueue*"
       ],
-      "return": "bool"
-    },
-    "task_queue_is_full": {
-      "args": [
-        "TaskQueue*"
-      ],
-      "return": "bool"
+      "return": "i32"
     },
     "task_queue_size": {
       "args": [
@@ -2048,19 +2017,23 @@
     "priority_task_queue_add": {
       "args": [
         "PriorityTaskQueue*",
-        "Task"
+        "void(*)(void())",
+        "void()",
+        "int"
       ]
     },
     "priority_task_queue_execute_next": {
       "args": [
         "PriorityTaskQueue*"
       ],
-      "return": "Task*"
+      "return": "void()"
     },
     "priority_task_queue_batch_add": {
       "args": [
         "PriorityTaskQueue*",
-        "Task*",
+        "void(*)(void())",
+        "void()*",
+        "int",
         "int"
       ],
       "return": "int"
@@ -2076,43 +2049,13 @@
       "args": [
         "PriorityTaskQueue*"
       ],
-      "return": "bool"
+      "return": "int"
     },
     "priority_task_queue_size": {
       "args": [
         "PriorityTaskQueue*"
       ],
       "return": "int"
-    },
-    "simple_queue_create": {
-      "args": [
-        "int"
-      ],
-      "return": "SimpleQueue*"
-    },
-    "simple_queue_is_empty": {
-      "args": [
-        "SimpleQueue*"
-      ],
-      "return": "int"
-    },
-    "simple_queue_is_full": {
-      "args": [
-        "SimpleQueue*"
-      ],
-      "return": "int"
-    },
-    "simple_queue_enqueue": {
-      "args": [
-        "SimpleQueue*",
-        "Task"
-      ]
-    },
-    "simple_queue_dequeue": {
-      "args": [
-        "SimpleQueue*"
-      ],
-      "return": "Task*"
     },
     "priority_queue_create": {
       "args": [
@@ -2867,412 +2810,8 @@
         "char"
       ],
       "return": "bool"
-    }
-  },
-  "std.syscall": {
-    "system_syscall_open": {
-      "args": [
-        "const char*",
-        "int",
-        "int"
-      ],
-      "return": "int"
     },
-    "system_syscall_close": {
-      "args": [
-        "int"
-      ],
-      "return": "int"
-    },
-    "system_syscall_read": {
-      "args": [
-        "int",
-        "void()",
-        "size_t"
-      ],
-      "return": "ssize_t"
-    },
-    "system_syscall_write": {
-      "args": [
-        "int",
-        "const void()",
-        "size_t"
-      ],
-      "return": "ssize_t"
-    },
-    "system_syscall_lseek": {
-      "args": [
-        "int",
-        "off_t",
-        "int"
-      ],
-      "return": "off_t"
-    },
-    "system_syscall_fork": {
-      "args": [],
-      "return": "int"
-    },
-    "system_syscall_execve": {
-      "args": [
-        "const char*",
-        "char* const[]",
-        "char* const[]"
-      ],
-      "return": "int"
-    },
-    "system_syscall_waitpid": {
-      "args": [
-        "int",
-        "int*",
-        "int"
-      ],
-      "return": "int"
-    },
-    "system_syscall_kill": {
-      "args": [
-        "int",
-        "int"
-      ],
-      "return": "int"
-    },
-    "system_syscall_malloc": {
-      "args": [
-        "size_t"
-      ],
-      "return": "void()"
-    },
-    "system_syscall_free": {
-      "args": [
-        "void()"
-      ],
-      "return": "void"
-    },
-    "system_syscall_realloc": {
-      "args": [
-        "void()",
-        "size_t"
-      ],
-      "return": "void()"
-    },
-    "system_syscall_calloc": {
-      "args": [
-        "size_t",
-        "size_t"
-      ],
-      "return": "void()"
-    },
-    "header": "syscall/syscall.h",
-    "sys_open": {
-      "args": [
-        "char*",
-        "int",
-        "int"
-      ],
-      "return": "sys_fd_t"
-    },
-    "sys_close": {
-      "args": [
-        "sys_fd_t"
-      ],
-      "return": "int"
-    },
-    "sys_read": {
-      "args": [
-        "sys_fd_t",
-        "void()",
-        "size_t"
-      ],
-      "return": "i64"
-    },
-    "sys_write": {
-      "args": [
-        "sys_fd_t",
-        "const void()",
-        "size_t"
-      ],
-      "return": "i64"
-    },
-    "sys_lseek": {
-      "args": [
-        "sys_fd_t",
-        "i64",
-        "int"
-      ],
-      "return": "i64"
-    },
-    "sys_fsync": {
-      "args": [
-        "sys_fd_t"
-      ],
-      "return": "int"
-    },
-    "sys_fdatasync": {
-      "args": [
-        "sys_fd_t"
-      ],
-      "return": "int"
-    },
-    "sys_truncate": {
-      "args": [
-        "char*",
-        "i64"
-      ],
-      "return": "int"
-    },
-    "sys_ftruncate": {
-      "args": [
-        "sys_fd_t",
-        "i64"
-      ],
-      "return": "int"
-    },
-    "sys_unlink": {
-      "args": [
-        "char*"
-      ],
-      "return": "int"
-    },
-    "sys_rename": {
-      "args": [
-        "char*",
-        "char*"
-      ],
-      "return": "int"
-    },
-    "sys_link": {
-      "args": [
-        "char*",
-        "char*"
-      ],
-      "return": "int"
-    },
-    "sys_symlink": {
-      "args": [
-        "char*",
-        "char*"
-      ],
-      "return": "int"
-    },
-    "sys_readlink": {
-      "args": [
-        "char*",
-        "char*",
-        "size_t"
-      ],
-      "return": "int"
-    },
-    "sys_mkdir": {
-      "args": [
-        "char*",
-        "int"
-      ],
-      "return": "int"
-    },
-    "sys_rmdir": {
-      "args": [
-        "char*"
-      ],
-      "return": "int"
-    },
-    "sys_stat": {
-      "args": [
-        "char*",
-        "struct stat*"
-      ],
-      "return": "int"
-    },
-    "sys_fstat": {
-      "args": [
-        "sys_fd_t",
-        "struct stat*"
-      ],
-      "return": "int"
-    },
-    "sys_lstat": {
-      "args": [
-        "char*",
-        "struct stat*"
-      ],
-      "return": "int"
-    },
-    "sys_chmod": {
-      "args": [
-        "char*",
-        "int"
-      ],
-      "return": "int"
-    },
-    "sys_chown": {
-      "args": [
-        "char*",
-        "int",
-        "int"
-      ],
-      "return": "int"
-    },
-    "sys_utime": {
-      "args": [
-        "char*",
-        "i64",
-        "i64"
-      ],
-      "return": "int"
-    },
-    "sys_access": {
-      "args": [
-        "char*",
-        "int"
-      ],
-      "return": "int"
-    },
-    "sys_fork": {
-      "args": [],
-      "return": "pid_t"
-    },
-    "sys_wait": {
-      "args": [
-        "int*"
-      ],
-      "return": "pid_t"
-    },
-    "sys_waitpid": {
-      "args": [
-        "pid_t",
-        "int*",
-        "int"
-      ],
-      "return": "pid_t"
-    },
-    "sys_execve": {
-      "args": [
-        "char*",
-        "char* const[]",
-        "char* const[]"
-      ],
-      "return": "int"
-    },
-    "sys_execvp": {
-      "args": [
-        "char*",
-        "char* const[]"
-      ],
-      "return": "int"
-    },
-    "sys_kill": {
-      "args": [
-        "pid_t",
-        "int"
-      ],
-      "return": "int"
-    },
-    "sys_pause": {
-      "args": [],
-      "return": "int"
-    },
-    "sys_sleep": {
-      "args": [
-        "unsigned int"
-      ],
-      "return": "unsigned int"
-    },
-    "sys_usleep": {
-      "args": [
-        "unsigned int"
-      ],
-      "return": "int"
-    },
-    "sys_getpid": {
-      "args": [],
-      "return": "pid_t"
-    },
-    "sys_getppid": {
-      "args": [],
-      "return": "pid_t"
-    },
-    "sys_getuid": {
-      "args": [],
-      "return": "uid_t"
-    },
-    "sys_getgid": {
-      "args": [],
-      "return": "gid_t"
-    },
-    "sys_chdir": {
-      "args": [
-        "char*"
-      ],
-      "return": "int"
-    },
-    "sys_getcwd": {
-      "args": [
-        "char*",
-        "size_t"
-      ],
-      "return": "char*"
-    },
-    "sys_errno": {
-      "args": [],
-      "return": "int"
-    },
-    "sys_strerror": {
-      "args": [
-        "int"
-      ],
-      "return": "const char*"
-    },
-    "sys_mmap": {
-      "args": [
-        "void()",
-        "size_t",
-        "int",
-        "int",
-        "sys_fd_t",
-        "i64"
-      ],
-      "return": "void()"
-    },
-    "sys_munmap": {
-      "args": [
-        "void()",
-        "size_t"
-      ],
-      "return": "int"
-    },
-    "sys_mprotect": {
-      "args": [
-        "void()",
-        "size_t",
-        "int"
-      ],
-      "return": "int"
-    },
-    "sys_pipe": {
-      "args": [
-        "int[2]"
-      ],
-      "return": "sys_fd_t"
-    },
-    "sys_dup": {
-      "args": [
-        "sys_fd_t"
-      ],
-      "return": "sys_fd_t"
-    },
-    "sys_dup2": {
-      "args": [
-        "sys_fd_t",
-        "sys_fd_t"
-      ],
-      "return": "sys_fd_t"
-    },
-    "sys_ioctl": {
-      "args": [
-        "sys_fd_t",
-        "unsigned long",
-        "void()"
-      ],
-      "return": "int"
-    }
+    "header": "base/types.h"
   },
   "std.async": {
     "header": "std/async/async.h",
@@ -3953,149 +3492,20 @@
       ],
       "return": "String"
     },
-    "csprng_bytes": {
-      "args": [
-        "void()",
-        "size_t"
-      ],
-      "return": "bool_t"
-    },
-    "csprng_u64": {
-      "args": [],
-      "return": "u64"
-    },
-    "csprng_u32": {
-      "args": [],
-      "return": "u32"
-    },
-    "csprng_range": {
-      "args": [
-        "u64",
-        "u64"
-      ],
-      "return": "u64"
-    },
-    "csprng_hex": {
-      "args": [
-        "size_t"
-      ],
-      "return": "String"
-    },
-    "csprng_base64": {
-      "args": [
-        "size_t"
-      ],
-      "return": "String"
-    },
-    "password_hash": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "password_verify": {
-      "args": [
-        "const char*",
-        "const char*"
-      ],
-      "return": "bool_t"
-    },
-    "aes256_init": {
-      "args": [
-        "AESContext*",
-        "const u8[32]"
-      ]
-    },
-    "aes256_encrypt_block": {
-      "args": [
-        "const AESContext*",
-        "const u8[16]",
-        "u8[16]"
-      ]
-    },
-    "aes256_decrypt_block": {
-      "args": [
-        "const AESContext*",
-        "const u8[16]",
-        "u8[16]"
-      ]
-    },
-    "aes256_cbc_encrypt": {
-      "args": [
-        "const AESContext*",
-        "const u8[16]",
-        "const u8*",
-        "size_t",
-        "u8*"
-      ]
-    },
-    "aes256_cbc_decrypt": {
-      "args": [
-        "const AESContext*",
-        "const u8[16]",
-        "const u8*",
-        "size_t",
-        "u8*"
-      ]
-    },
-    "sha256_ctx_create": {
-      "args": [],
-      "return": "SHA256Context*"
-    },
-    "sha256_ctx_update": {
+    "sha256_update": {
       "args": [
         "SHA256Context*",
-        "const void()",
+        "const u8*",
         "size_t"
-      ]
+      ],
+      "return": "void"
     },
-    "sha256_ctx_final": {
+    "sha256_final": {
       "args": [
         "SHA256Context*",
-        "u8[32]"
-      ]
-    },
-    "sha256_ctx_destroy": {
-      "args": [
-        "SHA256Context*"
-      ]
-    },
-    "sha256_hash": {
-      "args": [
-        "const void()",
-        "size_t",
-        "u8[32]"
-      ]
-    },
-    "sha256_hex": {
-      "args": [
-        "const void()",
-        "size_t"
+        "u8*"
       ],
-      "return": "String"
-    },
-    "hmac_sha256_hex": {
-      "args": [
-        "const void()",
-        "size_t",
-        "const void()",
-        "size_t"
-      ],
-      "return": "String"
-    },
-    "crypto_constant_time_compare": {
-      "args": [
-        "const void()",
-        "const void()",
-        "size_t"
-      ],
-      "return": "bool_t"
-    },
-    "crypto_secure_zero": {
-      "args": [
-        "void()",
-        "size_t"
-      ]
+      "return": "void"
     }
   },
   "std.net": {
@@ -4535,118 +3945,6 @@
         ]
       },
       "Logger": {}
-    },
-    "logger_create": {
-      "args": [],
-      "return": "Logger*"
-    },
-    "logger_destroy": {
-      "args": [
-        "Logger*"
-      ]
-    },
-    "logger_set_level": {
-      "args": [
-        "Logger*",
-        "LogLevel"
-      ]
-    },
-    "logger_set_file": {
-      "args": [
-        "Logger*",
-        "String"
-      ]
-    },
-    "logger_enable_console": {
-      "args": [
-        "Logger*",
-        "bool"
-      ]
-    },
-    "logger_enable_file": {
-      "args": [
-        "Logger*",
-        "bool"
-      ]
-    },
-    "logger_enable_color": {
-      "args": [
-        "Logger*",
-        "bool"
-      ]
-    },
-    "logger_log": {
-      "args": [
-        "Logger*",
-        "LogLevel",
-        "String",
-        "String",
-        "int",
-        "String"
-      ],
-      "varargs": true
-    },
-    "logger_debug": {
-      "args": [
-        "Logger*",
-        "String",
-        "String"
-      ],
-      "varargs": true
-    },
-    "logger_info": {
-      "args": [
-        "Logger*",
-        "String",
-        "String"
-      ],
-      "varargs": true
-    },
-    "logger_warn": {
-      "args": [
-        "Logger*",
-        "String",
-        "String"
-      ],
-      "varargs": true
-    },
-    "logger_error": {
-      "args": [
-        "Logger*",
-        "String",
-        "String"
-      ],
-      "varargs": true
-    },
-    "logger_fatal": {
-      "args": [
-        "Logger*",
-        "String",
-        "String"
-      ],
-      "varargs": true
-    },
-    "log_level_to_string": {
-      "args": [
-        "LogLevel"
-      ],
-      "return": "String"
-    },
-    "log_level_from_string": {
-      "args": [
-        "String"
-      ],
-      "return": "LogLevel"
-    },
-    "log_global_logger": {
-      "args": [],
-      "return": "Logger*"
-    },
-    "log_init": {
-      "args": []
-    },
-    "log_shutdown": {
-      "args": []
     }
   },
   "std.testing": {
@@ -4680,14 +3978,6 @@
     },
     "test_run_all": {
       "args": [],
-      "return": "TestReport*"
-    },
-    "test_run_suite": {
-      "args": [
-        "TestSuite*",
-        "TestCase**",
-        "size_t"
-      ],
       "return": "TestReport*"
     },
     "test_report_print": {
@@ -5872,7 +5162,7 @@
         "size_t",
         "const void()",
         "size_t",
-        "u8[64]"
+        "u8*"
       ]
     },
     "hmac_sha512_hex": {
@@ -5938,200 +5228,10 @@
         "size_t*"
       ],
       "return": "void()"
-    },
-    "compress_bound": {
-      "args": [
-        "size_t",
-        "CompressLevel"
-      ],
-      "return": "size_t"
-    },
-    "compress_stream_init": {
-      "args": [
-        "CompressStream*",
-        "CompressLevel"
-      ],
-      "return": "bool_t"
-    },
-    "compress_stream_reset": {
-      "args": [
-        "CompressStream*"
-      ]
-    },
-    "compress_stream_process": {
-      "args": [
-        "CompressStream*",
-        "const void()",
-        "size_t",
-        "void()",
-        "size_t",
-        "bool_t"
-      ],
-      "return": "size_t"
-    },
-    "compress_stream_free": {
-      "args": [
-        "CompressStream*"
-      ]
     }
   },
   "std.serialize": {
-    "header": "serialize/serialize.h",
-    "serialize_create": {
-      "args": [],
-      "return": "Serializer*"
-    },
-    "serialize_destroy": {
-      "args": [
-        "Serializer*"
-      ]
-    },
-    "serialize_write_nil": {
-      "args": [
-        "Serializer*"
-      ]
-    },
-    "serialize_write_bool": {
-      "args": [
-        "Serializer*",
-        "bool_t"
-      ]
-    },
-    "serialize_write_int": {
-      "args": [
-        "Serializer*",
-        "i64"
-      ]
-    },
-    "serialize_write_float": {
-      "args": [
-        "Serializer*",
-        "f64"
-      ]
-    },
-    "serialize_write_str": {
-      "args": [
-        "Serializer*",
-        "const char*",
-        "size_t"
-      ]
-    },
-    "serialize_write_bin": {
-      "args": [
-        "Serializer*",
-        "const void()",
-        "size_t"
-      ]
-    },
-    "serialize_write_array_header": {
-      "args": [
-        "Serializer*",
-        "u32"
-      ]
-    },
-    "serialize_write_map_header": {
-      "args": [
-        "Serializer*",
-        "u32"
-      ]
-    },
-    "serialize_data": {
-      "args": [
-        "Serializer*"
-      ],
-      "return": "const u8*"
-    },
-    "serialize_size": {
-      "args": [
-        "Serializer*"
-      ],
-      "return": "size_t"
-    },
-    "serialize_to_string": {
-      "args": [
-        "Serializer*"
-      ],
-      "return": "String"
-    },
-    "deserialize_create": {
-      "args": [
-        "const u8*",
-        "size_t"
-      ],
-      "return": "Deserializer*"
-    },
-    "deserialize_destroy": {
-      "args": [
-        "Deserializer*"
-      ]
-    },
-    "deserialize_peek_type": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "SerializeType"
-    },
-    "deserialize_read_nil": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "bool_t"
-    },
-    "deserialize_read_bool": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "bool_t"
-    },
-    "deserialize_read_int": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "i64"
-    },
-    "deserialize_read_float": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "f64"
-    },
-    "deserialize_read_str": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "String"
-    },
-    "deserialize_read_bin": {
-      "args": [
-        "Deserializer*",
-        "size_t*"
-      ],
-      "return": "void()"
-    },
-    "deserialize_read_array_header": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "u32"
-    },
-    "deserialize_read_map_header": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "u32"
-    },
-    "deserialize_has_more": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "bool_t"
-    },
-    "deserialize_error": {
-      "args": [
-        "Deserializer*"
-      ],
-      "return": "const char*"
-    }
+    "header": "serialize/serialize.h"
   },
   "std.option": {
     "header": "option/option.h",
@@ -6413,38 +5513,6 @@
   },
   "std.unicode": {
     "header": "unicode/unicode.h",
-    "utf8_char_len": {
-      "args": [
-        "const char*"
-      ],
-      "return": "int"
-    },
-    "utf8_decode": {
-      "args": [
-        "const char*",
-        "int*"
-      ],
-      "return": "u32"
-    },
-    "utf8_encode": {
-      "args": [
-        "u32",
-        "char*"
-      ],
-      "return": "int"
-    },
-    "utf8_strlen": {
-      "args": [
-        "const char*"
-      ],
-      "return": "size_t"
-    },
-    "utf8_valid": {
-      "args": [
-        "const char*"
-      ],
-      "return": "bool_t"
-    },
     "unicode_to_upper": {
       "args": [
         "u32"
@@ -6462,18 +5530,6 @@
         "u32"
       ],
       "return": "u32"
-    },
-    "utf8_to_upper": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
-    },
-    "utf8_to_lower": {
-      "args": [
-        "const char*"
-      ],
-      "return": "String"
     },
     "unicode_category": {
       "args": [
@@ -6499,12 +5555,6 @@
       ],
       "return": "bool_t"
     },
-    "unicode_is_whitespace": {
-      "args": [
-        "u32"
-      ],
-      "return": "bool_t"
-    },
     "unicode_normalize": {
       "args": [
         "const char*",
@@ -6512,17 +5562,47 @@
       ],
       "return": "String"
     },
-    "utf8_reverse": {
+    "unicode_utf8_seq_len": {
+      "args": [
+        "u8"
+      ],
+      "return": "int"
+    },
+    "unicode_decode_utf8": {
+      "args": [
+        "const char*",
+        "u32*"
+      ],
+      "return": "int"
+    },
+    "unicode_encode_utf8": {
+      "args": [
+        "u32",
+        "char*"
+      ],
+      "return": "int"
+    },
+    "unicode_strlen": {
+      "args": [
+        "const char*"
+      ],
+      "return": "size_t"
+    },
+    "unicode_is_valid": {
+      "args": [
+        "const char*"
+      ],
+      "return": "bool_t"
+    },
+    "unicode_str_to_upper": {
       "args": [
         "const char*"
       ],
       "return": "String"
     },
-    "utf8_substr": {
+    "unicode_str_to_lower": {
       "args": [
-        "const char*",
-        "size_t",
-        "size_t"
+        "const char*"
       ],
       "return": "String"
     }
@@ -6619,96 +5699,6 @@
       ],
       "return": "size_t"
     },
-    "treemap_create": {
-      "args": [
-        "CompareFunc"
-      ],
-      "return": "TreeMap*"
-    },
-    "treemap_destroy": {
-      "args": [
-        "TreeMap*"
-      ]
-    },
-    "treemap_insert": {
-      "args": [
-        "TreeMap*",
-        "void()",
-        "void()"
-      ],
-      "return": "bool_t"
-    },
-    "treemap_remove": {
-      "args": [
-        "TreeMap*",
-        "const void()"
-      ],
-      "return": "bool_t"
-    },
-    "treemap_get": {
-      "args": [
-        "TreeMap*",
-        "const void()"
-      ],
-      "return": "void()"
-    },
-    "treemap_size": {
-      "args": [
-        "TreeMap*"
-      ],
-      "return": "size_t"
-    },
-    "ringbuf_create": {
-      "args": [
-        "size_t",
-        "size_t"
-      ],
-      "return": "RingBuffer*"
-    },
-    "ringbuf_destroy": {
-      "args": [
-        "RingBuffer*"
-      ]
-    },
-    "ringbuf_push": {
-      "args": [
-        "RingBuffer*",
-        "const void()"
-      ],
-      "return": "bool_t"
-    },
-    "ringbuf_pop": {
-      "args": [
-        "RingBuffer*",
-        "void()"
-      ],
-      "return": "bool_t"
-    },
-    "ringbuf_peek": {
-      "args": [
-        "RingBuffer*",
-        "void()"
-      ],
-      "return": "bool_t"
-    },
-    "ringbuf_size": {
-      "args": [
-        "RingBuffer*"
-      ],
-      "return": "size_t"
-    },
-    "ringbuf_full": {
-      "args": [
-        "RingBuffer*"
-      ],
-      "return": "bool_t"
-    },
-    "ringbuf_empty": {
-      "args": [
-        "RingBuffer*"
-      ],
-      "return": "bool_t"
-    },
     "pq_create": {
       "args": [
         "CompareFunc",
@@ -6729,13 +5719,6 @@
       "return": "bool_t"
     },
     "pq_pop": {
-      "args": [
-        "PriorityQueue*",
-        "void()"
-      ],
-      "return": "bool_t"
-    },
-    "pq_peek": {
       "args": [
         "PriorityQueue*",
         "void()"
@@ -6763,83 +5746,10 @@
       "args": [
         "TestSuite*"
       ]
-    },
-    "test_suite_add": {
-      "args": [
-        "TestSuite*",
-        "const char*",
-        "TestFunc"
-      ]
-    },
-    "test_suite_run": {
-      "args": [
-        "TestSuite*"
-      ],
-      "return": "TestResult"
-    },
-    "test_suite_run_all": {
-      "args": [
-        "TestSuite**",
-        "size_t"
-      ],
-      "return": "TestResult"
-    },
-    "test_assert_int_eq": {
-      "args": [
-        "const char*",
-        "int",
-        "i64",
-        "i64"
-      ]
-    },
-    "test_assert_str_eq": {
-      "args": [
-        "const char*",
-        "int",
-        "const char*",
-        "const char*"
-      ]
-    },
-    "test_assert_true": {
-      "args": [
-        "const char*",
-        "int",
-        "bool_t",
-        "const char*"
-      ]
-    },
-    "test_assert_null": {
-      "args": [
-        "const char*",
-        "int",
-        "const void()"
-      ]
-    },
-    "test_assert_not_null": {
-      "args": [
-        "const char*",
-        "int",
-        "const void()"
-      ]
-    },
-    "test_fail": {
-      "args": [
-        "const char*",
-        "int",
-        "const char*"
-      ],
-      "varargs": true
     }
   },
   "std.toml.ext": {
     "header": "toml/toml_ext.h",
-    "toml_parse": {
-      "args": [
-        "const char*",
-        "char**"
-      ],
-      "return": "TomlValue*"
-    },
     "tomlx_parse_file": {
       "args": [
         "const char*"
@@ -6851,183 +5761,20 @@
         "TomlValue*"
       ]
     },
-    "toml_type": {
-      "args": [
-        "const TomlValue*"
-      ],
-      "return": "TomlType"
-    },
-    "toml_get_table": {
-      "args": [
-        "TomlValue*"
-      ],
-      "return": "TomlTable*"
-    },
-    "toml_get_array": {
-      "args": [
-        "TomlValue*"
-      ],
-      "return": "TomlArray*"
-    },
-    "toml_get_string": {
-      "args": [
-        "TomlValue*"
-      ],
-      "return": "const char*"
-    },
-    "toml_get_int": {
-      "args": [
-        "TomlValue*"
-      ],
-      "return": "i64"
-    },
-    "toml_get_float": {
-      "args": [
-        "TomlValue*"
-      ],
-      "return": "f64"
-    },
-    "toml_get_bool": {
-      "args": [
-        "TomlValue*"
-      ],
-      "return": "bool_t"
-    },
-    "toml_table_get": {
-      "args": [
-        "TomlTable*",
-        "const char*"
-      ],
-      "return": "TomlValue*"
-    },
     "toml_table_size": {
       "args": [
         "TomlTable*"
       ],
       "return": "size_t"
-    },
-    "toml_array_len": {
-      "args": [
-        "TomlArray*"
-      ],
-      "return": "size_t"
-    },
-    "toml_array_get": {
-      "args": [
-        "TomlArray*",
-        "size_t"
-      ],
-      "return": "TomlValue*"
-    },
-    "toml_dump": {
-      "args": [
-        "const TomlValue*"
-      ],
-      "return": "String"
     }
   },
   "std.xml.ext": {
     "header": "xml/xml_ext.h",
-    "xml_parse": {
-      "args": [
-        "const char*",
-        "char**"
-      ],
-      "return": "XmlDoc*"
-    },
     "xmlx_parse_file": {
       "args": [
         "const char*"
       ],
       "return": "XMLNode*"
-    },
-    "xml_doc_free": {
-      "args": [
-        "XmlDoc*"
-      ]
-    },
-    "xml_root": {
-      "args": [
-        "XmlDoc*"
-      ],
-      "return": "XmlNode*"
-    },
-    "xml_node_name": {
-      "args": [
-        "XmlNode*"
-      ],
-      "return": "const char*"
-    },
-    "xml_node_text": {
-      "args": [
-        "XmlNode*"
-      ],
-      "return": "const char*"
-    },
-    "xml_node_type": {
-      "args": [
-        "XmlNode*"
-      ],
-      "return": "XmlNodeType"
-    },
-    "xml_first_child": {
-      "args": [
-        "XmlNode*"
-      ],
-      "return": "XmlNode*"
-    },
-    "xml_next_sibling": {
-      "args": [
-        "XmlNode*"
-      ],
-      "return": "XmlNode*"
-    },
-    "xml_first_child_elem": {
-      "args": [
-        "XmlNode*",
-        "const char*"
-      ],
-      "return": "XmlNode*"
-    },
-    "xml_attr_count": {
-      "args": [
-        "XmlNode*"
-      ],
-      "return": "size_t"
-    },
-    "xml_attr_name": {
-      "args": [
-        "XmlNode*",
-        "size_t"
-      ],
-      "return": "const char*"
-    },
-    "xml_attr_value": {
-      "args": [
-        "XmlNode*",
-        "size_t"
-      ],
-      "return": "const char*"
-    },
-    "xml_get_attr": {
-      "args": [
-        "XmlNode*",
-        "const char*"
-      ],
-      "return": "const char*"
-    },
-    "xml_find_path": {
-      "args": [
-        "XmlNode*",
-        "const char*"
-      ],
-      "return": "XmlNode*"
-    },
-    "xml_dump": {
-      "args": [
-        "XmlDoc*"
-      ],
-      "return": "String"
     }
   },
   "std.toml": {
@@ -7102,6 +5849,12 @@
         "TomlDocument*"
       ],
       "return": "String"
+    },
+    "toml_root": {
+      "args": [
+        "TomlDocument*"
+      ],
+      "return": "TomlTable*"
     }
   },
   "std.xml": {
@@ -8158,13 +6911,6 @@
         "const char*"
       ]
     },
-    "pb_write_bytes": {
-      "args": [
-        "PBWriter*",
-        "const byte*",
-        "size_t"
-      ]
-    },
     "pb_write_field_varint": {
       "args": [
         "PBWriter*",
@@ -8254,14 +7000,6 @@
       ],
       "return": "bool_t"
     },
-    "pb_read_bytes": {
-      "args": [
-        "PBReader*",
-        "byte**",
-        "size_t*"
-      ],
-      "return": "bool_t"
-    },
     "pb_read_field": {
       "args": [
         "PBReader*",
@@ -8348,13 +7086,6 @@
         "const char*"
       ]
     },
-    "mp_write_bytes": {
-      "args": [
-        "MPWriter*",
-        "const byte*",
-        "size_t"
-      ]
-    },
     "mp_write_array_header": {
       "args": [
         "MPWriter*",
@@ -8438,14 +7169,6 @@
       "args": [
         "MPReader*",
         "String*"
-      ],
-      "return": "bool_t"
-    },
-    "mp_read_bytes": {
-      "args": [
-        "MPReader*",
-        "byte**",
-        "size_t*"
       ],
       "return": "bool_t"
     },

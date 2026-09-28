@@ -35,4 +35,22 @@ void* task_queue_dequeue(TaskQueue* queue);
 int task_queue_is_empty(TaskQueue* queue);
 int task_queue_size(TaskQueue* queue);
 
+// 优先级任务队列
+// 这些函数在 task.c 里有实现，但此前 task.h 里既没有 PriorityTaskQueue 的
+// 类型声明、也没有任何原型，于是 stdlib.json 登记的签名长期与真实原型脱节
+// （add 的第 2 参被写成 Task 结构体、execute_next 被写成返回 Task*、
+// is_empty 被写成返回 bool）。这里按 task.c 的原型补齐。
+typedef struct PriorityTaskQueue PriorityTaskQueue;
+
+PriorityTaskQueue* priority_task_queue_create(int capacity_per_queue);
+void priority_task_queue_destroy(PriorityTaskQueue* pq);
+void priority_task_queue_add(PriorityTaskQueue* pq, void* (*func)(void*),
+                             void* arg, int priority);
+void* priority_task_queue_execute_next(PriorityTaskQueue* pq);
+int priority_task_queue_batch_add(PriorityTaskQueue* pq, void* (*func)(void*),
+                                  void** args, int count, int priority);
+int priority_task_queue_batch_execute(PriorityTaskQueue* pq, int max_tasks);
+int priority_task_queue_is_empty(PriorityTaskQueue* pq);
+int priority_task_queue_size(PriorityTaskQueue* pq);
+
 #endif // STD_TASK_TASK_H
