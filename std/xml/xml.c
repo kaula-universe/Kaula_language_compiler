@@ -237,6 +237,17 @@ static void xml_write_node(StringBuilder* sb, XmlNode* node, int indent) {
     string_builder_append(sb, ">\n");
 }
 
+void xml_set_root(XmlDocument* doc, XmlNode* root) {
+    // 此前 xml_create 只给出版本/编码，doc->root 永远是 NULL，而 xml_serialize
+    // 第一行就是 `if (!doc || !doc->root) return STRING_EMPTY;` —— 也就是
+    // 程序化构造的文档根本没法序列化。补上这个入口后
+    //   xml_create -> xml_create_element -> xml_set_root -> xml_serialize
+    // 这条链才通。parent 保持 NULL：root 的父级是文档而不是节点，
+    // 而 XmlNode::parent 的类型是 XmlNode*，装不下 XmlDocument*。
+    if (!doc) return;
+    doc->root = root;
+}
+
 String xml_serialize(XmlDocument* doc) {
     if (!doc || !doc->root) return STRING_EMPTY;
     StringBuilder* sb = string_builder_create();

@@ -36,6 +36,9 @@ typedef struct XmlDocument {
 } XmlDocument;
 
 extern XmlDocument* xml_create(const String version, const String encoding);
+// 挂上根节点。缺这个函数的话 xml_create 造出的文档 root 恒为 NULL，
+// 而 xml_serialize 见到 NULL 直接返回空串——程序化构造的文档无法序列化。
+extern void xml_set_root(XmlDocument* doc, XmlNode* root);
 extern void xml_destroy(XmlDocument* doc);
 extern XmlNode* xml_create_element(const String name);
 extern void xml_destroy_element(XmlNode* node);
