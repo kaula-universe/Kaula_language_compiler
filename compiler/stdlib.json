@@ -5936,6 +5936,13 @@
         "String"
       ],
       "return": "bool_t"
+    },
+    "xml_set_root": {
+      "args": [
+        "XmlDocument*",
+        "XmlNode*"
+      ],
+      "return": "void"
     }
   },
   "std.hash": {
