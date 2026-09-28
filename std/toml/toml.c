@@ -12,7 +12,9 @@ TomlValue* toml_create_string(String val) { TomlValue* v = kmm_v4_calloc(1, size
 TomlValue* toml_create_int(i64 val) { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_INTEGER; v->int_val = val; return v; }
 TomlValue* toml_create_float(f64 val) { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_FLOAT; v->float_val = val; return v; }
 TomlValue* toml_create_bool(bool_t val) { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_BOOLEAN; v->bool_val = val; return v; }
-TomlValue* toml_create_table() { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_TABLE; v->table_val = kmm_v4_calloc(1, sizeof(TomlTable)); v->table_val->capacity = 8; return v; }
+TomlValue* toml_create_table() { TomlValue* v = kmm_v4_calloc(1, sizeof(TomlValue)); v->type = TOML_TABLE; v->table_val = kmm_v4_calloc(1, sizeof(TomlTable)); v->table_val->capacity = 8; v->table_val->keys = kmm_v4_calloc(v->table_val->capacity, sizeof(String)); v->table_val->values = kmm_v4_calloc(v->table_val->capacity, sizeof(TomlValue*)); return v; }
+
+TomlTable* toml_root(TomlDocument* doc) { return doc ? doc->root : NULL; }
 
 static void toml_table_set(TomlTable* table, const String key, TomlValue* val) {
     for (size_t i = 0; i < table->size; i++) { if (string_equals(table->keys[i], key)) { table->values[i] = val; return; } }
@@ -52,7 +54,14 @@ static TomlValue* toml_parse_value(const char* val_str) {
 TomlDocument* toml_parse(const String text) {
     if (text.len == 0) return NULL;
     TomlDocument* doc = kmm_v4_calloc(1, sizeof(TomlDocument));
-    doc->root = kmm_v4_calloc(1, sizeof(TomlTable)); doc->root->capacity = 16;
+    doc->root = kmm_v4_calloc(1, sizeof(TomlTable));
+    doc->root->capacity = 16;
+    // capacity 必须和 keys/values 的实际分配一起设置：toml_table_set 的扩容条件是
+    // `size >= capacity`，只设 capacity 而不分配数组的话首次写入就是往 NULL 上写
+    // （kmm_v4_realloc(NULL, n) 那条分支根本不会走到），toml_parse 任何非空输入
+    // 都会立刻访问违例。
+    doc->root->keys = kmm_v4_calloc(doc->root->capacity, sizeof(String));
+    doc->root->values = kmm_v4_calloc(doc->root->capacity, sizeof(TomlValue*));
     TomlTable* current = doc->root;
     const char* p = string_cdata(text);
     while (*p) {
