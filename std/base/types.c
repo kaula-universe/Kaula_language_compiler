@@ -4,44 +4,44 @@
 #include <limits.h>
 
 // 类型转换函数
-i8 to_i8(ssize_t value) {
+i8 to_i8(int64_t value) {
     if (value < INT8_MIN) return INT8_MIN;
     if (value > INT8_MAX) return INT8_MAX;
     return (i8)value;
 }
 
-i16 to_i16(ssize_t value) {
+i16 to_i16(int64_t value) {
     if (value < INT16_MIN) return INT16_MIN;
     if (value > INT16_MAX) return INT16_MAX;
     return (i16)value;
 }
 
-i32 to_i32(ssize_t value) {
+i32 to_i32(int64_t value) {
     if (value < INT32_MIN) return INT32_MIN;
     if (value > INT32_MAX) return INT32_MAX;
     return (i32)value;
 }
 
-i64 to_i64(ssize_t value) {
+i64 to_i64(int64_t value) {
     return (i64)value;
 }
 
-u8 to_u8(size_t value) {
+u8 to_u8(uint64_t value) {
     if (value > UINT8_MAX) return UINT8_MAX;
     return (u8)value;
 }
 
-u16 to_u16(size_t value) {
+u16 to_u16(uint64_t value) {
     if (value > UINT16_MAX) return UINT16_MAX;
     return (u16)value;
 }
 
-u32 to_u32(size_t value) {
+u32 to_u32(uint64_t value) {
     if (value > UINT32_MAX) return UINT32_MAX;
     return (u32)value;
 }
 
-u64 to_u64(size_t value) {
+u64 to_u64(uint64_t value) {
     return (u64)value;
 }
 

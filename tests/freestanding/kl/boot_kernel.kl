@@ -29,6 +29,10 @@ fn kaula_main() -> i32 {
     i32 r = 0
 
     // ---------- freestanding.base ----------
+    //
+    // to_* 的入参是定宽 int64_t/uint64_t（不是 ssize_t/size_t），所以跨 64 位
+    // 边界的饱和语义在 32 位目标上同样成立 —— 这些断言在 i386/riscv64/aarch64
+    // 上都必须通过。
     r = chk(1, freestanding.base.to_i8(128) == 127, r)
     r = chk(2, freestanding.base.to_i8(-129) == -128, r)
     r = chk(3, freestanding.base.to_i16(32768) == 32767, r)
@@ -179,6 +183,13 @@ fn kaula_main() -> i32 {
     freestanding.io.print_bool(true)
     freestanding.io.print_hex(255)
     freestanding.io.fs_output_putchar(10)
+
+    // 机器可解析的结论行：L7 层（QEMU 实机引导）在串口输出里匹配
+    // "SELFTEST-RESULT=<n>"，n=0 表示全部通过。放在最后是因为前面的 fmt/
+    // println 输出都来自同一批 freestanding.io 函数，这一行同时验证了它们。
+    freestanding.io.fs_puts("SELFTEST-RESULT=")
+    freestanding.io.fs_putuint(as<u64>(r))
+    freestanding.io.fs_putchar(10)
 
     return r
 }
