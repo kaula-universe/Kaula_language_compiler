@@ -1995,6 +1995,18 @@ func (eg *ExpressionGenerator) qualifiedRegisteredInferType(fn ast.Expression) (
 
 // registeredReturnInferType 把 stdlib/pkglib 注册的返回类型映射为
 // inferType 类型码；忽略大小写以兼容 stdlib.json 的 "String" 真实形态。
+//
+// 关于指针返回类型（如 "JsonValue*"）：这里刻意不单独映射，让它落到调用方的
+// 兜底 "d"（整数）。理由是 inferType 的类型码只驱动三件事——printf 的格式
+// 选 %s 还是 %d、实参要不要包 string_cdata、比较运算符走 strcmp 还是直接比：
+//   - char* 走 "cstr" 才有 %s + string_cdata 解包；
+//   - 其它指针（u8*/void*/T*）若判成 "cstr"，`p == q` 会落到 strcmp 分支去
+//     解引用指针，必须避免；
+//   - 判成 "d" 时三者都安全：不解包、直接整数比较、%d 打印。
+// 代价是直接把裸指针传给 println 会按整数格式化，但那是外观问题；把指针
+// 提升成独立类型码需要改动所有打印/比较路径，收益远小于风险。
+// 已验证：指针返回的 stdlib 调用在 auto 绑定、null 比较、传给指针形参、
+// 布尔上下文这四种用法下都正确。
 func registeredReturnInferType(rt string) (string, bool) {
 	switch strings.ToLower(rt) {
 	case "string", "str":
