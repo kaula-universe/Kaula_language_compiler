@@ -2863,36 +2863,94 @@ func findStdlib(overridePath string) string {
 		fmt.Fprintf(os.Stderr, "[WARN] --stdlib 指定的路径不存在: %s，回退到自动查找\n", overridePath)
 	}
 
-	// 1. KAULA_HOME 环境变量
-	if envHome := os.Getenv("KAULA_HOME"); envHome != "" {
-		p := filepath.Join(envHome, "compiler", "stdlib.json")
-		if _, err := os.Stat(p); err == nil {
-			return p
+	// 收集候选路径。按「谁最可能指对」排序：KAULA_HOME > exe 目录 > 工作目录。
+	// 三处都要覆盖多种实际布局：
+	//   仓库内开发：<root>/compiler/stdlib.json
+	//   构建输出：  <root>/build/bin/{kaulac.exe,stdlib.json}（与 exe 同目录）
+	//   安装布局：  <prefix>/bin/kaulac.exe + <prefix>/lib|share/kaula/stdlib.json
+	//   就地运行：  cwd 下有 compiler/stdlib.json 或 stdlib.json
+	//
+	// 原先的列表漏掉了 KAULA_HOME 下的 bin/ 与 share/、exe 上溯两级、
+	// 以及 cwd 下的 ./compiler/stdlib.json——把 kaulac.exe 单独拷到别处
+	// （模拟安装、或 CI 里只缓存二进制）就完全找不到 stdlib.json。
+	var candidates []string
+	add := func(base string, subs ...string) {
+		if base == "" {
+			return
+		}
+		for _, s := range subs {
+			candidates = append(candidates, filepath.Join(base, filepath.FromSlash(s)))
 		}
 	}
 
-	// 2. 可执行文件路径
+	// 1. KAULA_HOME 环境变量
+	add(os.Getenv("KAULA_HOME"),
+		"compiler/stdlib.json", // 仓库根
+		"stdlib.json",          // KAULA_HOME 直接指向 stdlib.json 所在目录
+		"bin/stdlib.json",
+		"lib/stdlib.json",
+		"share/kaula/stdlib.json",
+		"../compiler/stdlib.json",
+	)
+
+	// 2. 可执行文件目录（及其上溯两级）
+	exeDir := ""
 	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(filepath.Clean(exePath))
-		candidates := []string{
-			filepath.Join(exeDir, "stdlib.json"),
-			filepath.Join(exeDir, "compiler", "stdlib.json"),
-			filepath.Join(exeDir, "..", "compiler", "stdlib.json"),
-		}
-		for _, p := range candidates {
-			if _, err := os.Stat(p); err == nil {
-				return p
-			}
-		}
+		exeDir = filepath.Dir(filepath.Clean(exePath))
 	}
+	add(exeDir, "stdlib.json", "compiler/stdlib.json")
+	add(filepath.Dir(exeDir), // <root>/build
+		"stdlib.json", "compiler/stdlib.json", "bin/stdlib.json", "lib/stdlib.json")
+	add(filepath.Join(filepath.Dir(exeDir), ".."), // <root>
+		"compiler/stdlib.json", "stdlib.json", "bin/stdlib.json",
+		"lib/stdlib.json", "share/kaula/stdlib.json")
 
 	// 3. 工作目录相对路径
-	paths := []string{"stdlib.json", "kaula/stdlib.json", "../stdlib.json", "../../compiler/stdlib.json"}
-	for _, p := range paths {
+	add(".",
+		"stdlib.json", "compiler/stdlib.json", "kaula/stdlib.json",
+		"kaula/compiler/stdlib.json", "build/bin/stdlib.json")
+	add("..", "stdlib.json", "compiler/stdlib.json")
+	add(filepath.Join("..", ".."), "compiler/stdlib.json", "stdlib.json")
+
+	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
+
+	// 一个都没找到：明确说出来。找不到时 LoadStdlibConfigWithPkglib 静默返回
+	// 空配置，用户看到的报错是 "cannot deduce type for variable 'x'"，
+	// 与真实原因（标准库签名表没加载）毫无关系。
+	// 诊断里用绝对路径并去重，否则同一路径会重复出现好几次。
+	seen := make(map[string]bool, len(candidates))
+	var tried []string
+	for _, p := range candidates {
+		abs := p
+		if a, err := filepath.Abs(p); err == nil {
+			abs = a
+		}
+		if !seen[abs] {
+			seen[abs] = true
+			tried = append(tried, abs)
+		}
+	}
+	cwd := "(未知)"
+	if d, err := os.Getwd(); err == nil {
+		cwd = d
+	}
+	if exeDir == "" {
+		exeDir = "(未知)"
+	}
+	fmt.Fprintf(os.Stderr, "[ERROR] 找不到 stdlib.json（标准库函数签名表），标准库函数将不可用。\n")
+	fmt.Fprintf(os.Stderr, "        已尝试以下 %d 个路径：\n", len(tried))
+	for _, p := range tried {
+		fmt.Fprintf(os.Stderr, "          %s\n", p)
+	}
+	fmt.Fprintf(os.Stderr,
+		"        KAULA_HOME=%q\n        可执行文件目录=%s\n        工作目录=%s\n"+
+			"        请用 --stdlib <路径> 显式指定，或把 KAULA_HOME 设为包含 stdlib.json 的目录。\n",
+		os.Getenv("KAULA_HOME"), exeDir, cwd)
+
 	return "stdlib.json"
 }
 
