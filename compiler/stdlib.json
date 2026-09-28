@@ -2684,49 +2684,49 @@
   "std.base": {
     "to_i8": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i8"
     },
     "to_i16": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i16"
     },
     "to_i32": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i32"
     },
     "to_i64": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i64"
     },
     "to_u8": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u8"
     },
     "to_u16": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u16"
     },
     "to_u32": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u32"
     },
     "to_u64": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u64"
     },
@@ -8911,49 +8911,49 @@
     "header": "freestanding/base/types.h",
     "to_i8": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i8"
     },
     "to_i16": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i16"
     },
     "to_i32": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i32"
     },
     "to_i64": {
       "args": [
-        "ssize_t"
+        "int64_t"
       ],
       "return": "i64"
     },
     "to_u8": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u8"
     },
     "to_u16": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u16"
     },
     "to_u32": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u32"
     },
     "to_u64": {
       "args": [
-        "size_t"
+        "uint64_t"
       ],
       "return": "u64"
     },

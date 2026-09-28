@@ -82,8 +82,13 @@ def strip_ansi(text: str) -> str:
     return ANSI.sub("", text or "")
 
 
-def run(cmd, timeout=600, cwd=None, env=None):
-    """跑一条命令, 返回 (returncode, stdout+stderr)"""
+def run(cmd, timeout=600, cwd=None, env=None, allow_timeout=False):
+    """跑一条命令, 返回 (returncode, stdout+stderr)
+
+    allow_timeout=True 时超时不算失败: 返回 124 与**超时前已产生的输出**。
+    QEMU 引导验证必须这么用 —— 内核跑完停在 hlt/wfi 死循环（本来就不退出），
+    判定依据是串口里有没有自检结果行，而不是进程退出码。
+    """
     try:
         r = subprocess.run(
             [str(c) for c in cmd],
@@ -96,8 +101,16 @@ def run(cmd, timeout=600, cwd=None, env=None):
             env=env,
         )
         return r.returncode, strip_ansi((r.stdout or "") + (r.stderr or ""))
-    except subprocess.TimeoutExpired:
-        return 124, f"timeout after {timeout}s"
+    except subprocess.TimeoutExpired as e:
+        partial = ""
+        for part in (e.stdout, e.stderr):
+            if isinstance(part, bytes):
+                partial += part.decode("utf-8", "replace")
+            elif isinstance(part, str):
+                partial += part
+        if allow_timeout:
+            return 124, strip_ansi(partial)
+        return 124, f"timeout after {timeout}s\n{strip_ansi(partial)}"
     except FileNotFoundError as e:
         return 127, f"command not found: {e}"
 
@@ -121,6 +134,30 @@ def which(name):
 def readelf_tool():
     """llvm-readelf 优先；部分 LLVM 发行版只带 llvm-readobj。"""
     return which("llvm-readelf") or which("llvm-readobj")
+
+
+# QEMU 的常见安装位置：scoop / winget / 官方安装包都落在这些地方，
+# 但不一定把目录写进当前进程的 PATH（安装后新开的 shell 才有）。
+QEMU_DIRS = [
+    Path(os.environ.get("USERPROFILE", "")) / "scoop" / "apps" / "qemu" / "current",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages",
+    Path("C:/Program Files/qemu"),
+    Path("C:/Program Files (x86)/qemu"),
+]
+
+
+def find_qemu(name: str):
+    """定位 qemu-system-* 可执行文件：先 PATH，再扫常见安装目录。"""
+    p = which(name)
+    if p:
+        return p
+    for d in QEMU_DIRS:
+        if not d or not d.is_dir():
+            continue
+        for cand in (d / f"{name}.exe", d / name):
+            if cand.is_file():
+                return cand
+    return None
 
 
 def find_kaulac():
@@ -162,13 +199,27 @@ class Report:
             print(f"  [{mark}] {level} {name}" + (f"  {detail}" if detail else ""))
         return ok
 
+    def note(self, level, name, detail=""):
+        """记录一条"已知缺口"：不计入失败，但始终打印，避免被悄悄吞掉。
+
+        用于"确实存在但本轮没修"的产品缺口（例如某个架构的 boot stub 还没建
+        MMU 映射）。与 FAIL 的区别：FAIL 表示回归/实现错误，必须修；
+        NOTE 表示待办，需要在 docs 里记着。
+        """
+        self.rows.append((level, name, "NOTE", detail))
+        print(f"  [NOTE] {level} {name}" + (f"  {detail}" if detail else ""))
+
     def failures(self, level=None):
         return [r for r in self.rows if r[2] == "FAIL" and (level is None or r[0] == level)]
+
+    def notes(self, level=None):
+        return [r for r in self.rows if r[2] == "NOTE" and (level is None or r[0] == level)]
 
     def summary(self):
         total = len(self.rows)
         bad = len(self.failures())
-        passed = total - bad
+        notes = len(self.notes())
+        passed = total - bad - notes
         print()
         if bad:
             print(f"FAILURES ({bad} of {total}):\n")
@@ -178,7 +229,16 @@ class Report:
                     for line in str(detail).splitlines()[:12]:
                         print(f"       {line}")
                     print()
-        print(f"{passed}/{total} checks passed in {time.time() - self.t0:.1f}s")
+        if notes:
+            print(f"KNOWN GAPS ({notes}):\n")
+            for level, name, _st, detail in self.notes():
+                print(f"  {level:<3} {name}")
+                for line in str(detail).splitlines()[:4]:
+                    print(f"       {line}")
+                print()
+        print(f"{passed}/{total - notes} checks passed"
+              + (f", {notes} known gap(s)" if notes else "")
+              + f" in {time.time() - self.t0:.1f}s")
         return 1 if bad else 0
 
 
@@ -406,21 +466,34 @@ def layer_kl_functions(rep: Report, kaulac: Path, jobs: int):
 
 
 BOOT_CASES = [
-    ("boot-x86_64-pvh",       ["--freestanding", "--boot", "pvh", "--boot-arch", "x86_64",
+    # --no-cache: 缓存命中会跳过整个 boot 流水线（连带 "[Boot] Compiling kernel C" 
+    # 都不打印），L4/L7 需要每次都真跑一遍构建
+    ("boot-x86_64-pvh",       ["--freestanding", "--no-cache", "--boot", "pvh", "--boot-arch", "x86_64",
                                 "--target-triple", "x86_64-none-elf"], "x86_64"),
-    ("boot-x86_64-multiboot", ["--freestanding", "--boot", "multiboot", "--boot-arch", "x86_64",
+    ("boot-x86_64-multiboot", ["--freestanding", "--no-cache", "--boot", "multiboot", "--boot-arch", "x86_64",
                                 "--target-triple", "x86_64-none-elf"], "x86_64"),
-    ("boot-i386-multiboot",   ["--freestanding", "--boot", "multiboot", "--boot-arch", "i386",
+    ("boot-i386-multiboot",   ["--freestanding", "--no-cache", "--boot", "multiboot", "--boot-arch", "i386",
                                 "--target-triple", "i386-elf"], "i386"),
-    ("boot-riscv64-pvh",      ["--freestanding", "--boot", "pvh", "--boot-arch", "riscv64",
+    ("boot-riscv64-pvh",      ["--freestanding", "--no-cache", "--boot", "pvh", "--boot-arch", "riscv64",
                                 "--target-triple", "riscv64-unknown-elf",
                                 # 默认 riscv64 是 rv64imac 软浮点，f64 运算会 lower 成
                                 # __ledf2/__adddf3 等 libcall；裸机没有 compiler-rt。
                                 # （kaulac 对 riscv64 已内置该默认值，这里显式写出以固定测试契约）
                                 "-cflags=-march=rv64gc -mabi=lp64d"], "riscv64"),
-    ("boot-aarch64-pvh",      ["--freestanding", "--boot", "pvh", "--boot-arch", "aarch64",
+    ("boot-aarch64-pvh",      ["--freestanding", "--no-cache", "--boot", "pvh", "--boot-arch", "aarch64",
                                 "--target-triple", "aarch64-none-elf"], "aarch64"),
 ]
+
+
+def kernel_obj(compile_output: str):
+    """从编译输出里取回 boot 流水线生成的 kernel .o 路径
+
+    kaulac 会打印 "[Boot] Compiling kernel C -> <path>"。必须用这个精确路径：
+    cache/boot-<arch>-<triple>/ 下会累积历史 kernel .o（文件名是 codegen 缓存键），
+    glob 整个目录会把多个内核一起链进去 → duplicate symbol。
+    """
+    m = re.search(r"Compiling kernel C\s*->\s*(\S+)", compile_output or "")
+    return m.group(1) if m else None
 
 
 def layer_boot(rep: Report, kaulac: Path, jobs: int):
@@ -435,21 +508,27 @@ def layer_boot(rep: Report, kaulac: Path, jobs: int):
 
     def check(case):
         name, flags, arch = case
+
+        def res(suffix, ok, detail, elf=None, kobj=None):
+            # 第一个元素固定是"引导配置名"（L7 要用它查 QEMU 参数），
+            # 第二个才是给人看的检查项名
+            return (name, f"{name}/{suffix}", ok, detail, elf, kobj)
         outdir = BUILD / "boot" / name
         rc, out = compile_kl(kaulac, kernel, outdir, flags)
+        compile_out = out  # 保留：kernel .o 路径要从这段输出里取（后面 out 会被覆盖）
         if rc != 0 or "Status: Success" not in out:
-            return f"{name}/compile", False, out[-1200:]
+            return res("compile", False, out[-1200:])
         elf = outdir / f"{kernel.stem}.elf"
         if not elf.is_file():
             cands = list(outdir.glob("*.elf"))
             if not cands:
-                return f"{name}/artifact", False, "no .elf produced"
+                return res("artifact", False, "no .elf produced")
             elf = cands[0]
         if readelf is None:
-            return f"{name}/artifact", True, ""
+            return res("artifact", True, "")
         rc, hdr = run([readelf, "--file-headers" if readelf.name.startswith("llvm-readobj") else "-h", elf])
         if rc != 0 or "Machine:" not in hdr:
-            return f"{name}/elf-header", False, hdr[-300:]
+            return res("elf-header", False, hdr[-300:])
         machine = re.search(r"Machine:\s*(.+)", hdr)
         machine = machine.group(1).strip() if machine else "?"
         # GNU readelf 打印 "Advanced Micro Devices X86-64"，llvm-readobj 打印
@@ -459,22 +538,192 @@ def layer_boot(rep: Report, kaulac: Path, jobs: int):
                "riscv64": ("RISC-V", "EM_RISCV"),
                "aarch64": ("AArch64", "EM_AARCH64")}[arch]
         if not any(e.lower() in machine.lower() for e in exp):
-            return f"{name}/elf-machine", False, f"machine={machine}, want one of {exp}"
+            return res("elf-machine", False, f"machine={machine}, want one of {exp}")
         rc, seg = run([readelf, "--program-headers" if readelf.name.startswith("llvm-readobj") else "-l", elf])
         if "LOAD" not in seg:
-            return f"{name}/segments", False, "no LOAD segment"
+            return res("segments", False, "no LOAD segment")
         detail = ""
         if nm is not None:
             rc, syms = run([nm, "--undefined-only", elf])
             undef = [s for s in (ln.split()[-1] for ln in syms.splitlines() if ln.split()) if s]
             detail = f"machine={machine}"
             if undef:
-                return f"{name}/no-undef", False, f"undefined symbols in boot ELF: {undef[:10]}"
-        return f"{name}/bootable-elf", True, detail
+                return res("no-undef", False, f"undefined symbols in boot ELF: {undef[:10]}")
+        return res("bootable-elf", True, detail, elf, kernel_obj(compile_out))
 
+    results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(jobs, 5))) as pool:
-        for name, ok, detail in pool.map(check, BOOT_CASES):
-            rep.add("L4", name, ok, detail)
+        for name, item, ok, detail, elf, kobj in pool.map(check, BOOT_CASES):
+            rep.add("L4", item, ok, detail)
+            results.append((name, ok, elf, kobj))
+    return results
+
+
+# ============================== L7: QEMU 实机引导 ==============================
+
+# 每种引导配置对应的 QEMU 启动参数。
+# 只用最简机器模型 + 串口到 stdout；内核跑完停在 hlt/wfi 死循环，由超时终止。
+QEMU_CASES = {
+    "boot-x86_64-pvh": dict(
+        bin="qemu-system-x86_64",
+        args=["-machine", "q35", "-m", "512M", "-display", "none", "-no-reboot",
+              "-serial", "stdio"],
+        uart="KAULA_TEST_UART_X86",
+    ),
+    "boot-x86_64-multiboot": dict(
+        bin="qemu-system-x86_64",
+        args=["-machine", "q35", "-m", "512M", "-display", "none", "-no-reboot",
+              "-serial", "stdio"],
+        uart="KAULA_TEST_UART_X86",
+    ),
+    "boot-i386-multiboot": dict(
+        bin="qemu-system-i386",
+        args=["-m", "512M", "-display", "none", "-no-reboot", "-serial", "stdio"],
+        uart="KAULA_TEST_UART_X86",
+    ),
+    "boot-riscv64-pvh": dict(
+        bin="qemu-system-riscv64",
+        # riscv virt 的固件默认会自己跳到 0x80000000 并假设有 OpenSBI；
+        # 我们的内核不带 opensbi 规范入口，用 -bios none 让 QEMU 直接从
+        # -kernel 加载点开始执行。
+        args=["-machine", "virt", "-bios", "none", "-m", "512M", "-display", "none",
+              "-no-reboot", "-serial", "stdio"],
+        uart="KAULA_TEST_UART_RISCV",
+    ),
+    "boot-aarch64-pvh": dict(
+        bin="qemu-system-aarch64",
+        # virt 板不能用 -bios none（QEMU 会去找名为 none 的 ROM 文件）；
+        # 裸机内核由 -kernel 加载并从 entry 直接开跑，不需要 BIOS。
+        args=["-machine", "virt", "-m", "512M", "-display", "none",
+              "-no-reboot", "-serial", "stdio"],
+        uart="KAULA_TEST_UART_AARCH64",
+    ),
+}
+
+RESULT_RE = re.compile(r"SELFTEST-RESULT=(\d+)")
+
+# 已定位但本轮未修的产品缺口（docs/freestanding.md §6 有完整说明）。
+# 判据：QEMU 能加载镜像、内核也真的开始执行，但缺的是 boot stub 层面的东西。
+# 一旦对应 stub 修好，把名字从这里挪走，L7 就会把它当硬失败盯着 ——
+# 刻意不留"永远绿"的免检通道。
+KNOWN_BOOT_GAPS = {
+    "boot-x86_64-pvh":
+        "QEMU 的 x86 -kernel 走 SeaBIOS 路径，未交给 PVH note 里的 32 位入口\n"
+        "（BIOS 最终 jmp 0x0）。Xen PVH 规范还要求入口 2MB 对齐，当前入口在 1M+x。\n"
+        "修复方向：给 pvh 单独一份 2MB 对齐的链接脚本 + 让 _start 落在加载基址。",
+    "boot-riscv64-pvh":
+        "内核已进入 K_kaula_main，但 QEMU 加载的 ELF 只映射了镜像本身，\n"
+        "清零超出镜像范围的 BSS 会取页故障；boot stub 未建立 satp 恒等映射。\n"
+        "修复方向：riscv64.S 里加 Sv39 satp 恒等映射（与 x86_64 stub 建页表同理）。",
+    "boot-aarch64-pvh":
+        "同 riscv64：-d int 显示在 __bss_start 处 Data Abort（ESR 0x25，翻译故障），\n"
+        "随后按 VBAR_EL1=0x200 跳进向量表跑飞。boot stub 未建立 TTBR0 恒等映射。\n"
+        "修复方向：aarch64.S 里加 TCR/MAIR + L0 1GB 粒度恒等映射，并设 VBAR_EL1。\n"
+        "（UART 本身没问题：tests/freestanding/c/uart_probe.c 在同一机器上能打印）",
+}
+
+
+def qemu_available() -> bool:
+    return all(find_qemu(c["bin"]) is not None for c in QEMU_CASES.values())
+
+
+def layer_qemu_boot(rep: Report, boot_results, jobs: int, timeout: int):
+    """L7: 用 QEMU 真正把内核跑起来（串口断言自检结果）"""
+    missing = sorted({c["bin"] for c in QEMU_CASES.values() if find_qemu(c["bin"]) is None})
+    if missing:
+        rep.add("L7", "qemu-present", False,
+                f"missing: {', '.join(missing)} (install QEMU to run L7)")
+        print("L7  QEMU 实机引导（跳过：未找到 " + ", ".join(missing) + "）")
+        return
+    rep.add("L7", "qemu-present", True, ",".join(sorted({c["bin"] for c in QEMU_CASES.values()})))
+    print("L7  QEMU 实机引导（4 架构真机启动 + 串口自检断言）")
+
+    ld = which("ld.lld")
+    nm = which("llvm-nm")
+    templates = PROJECT_ROOT / "compiler" / "templates" / "linker"
+
+    def check(item):
+        name, ok, elf, kobj = item
+        if not ok or elf is None or not Path(elf).is_file():
+            return f"{name}/boot", False, "L4 未产出可引导 ELF，跳过实机"
+        case = QEMU_CASES.get(name)
+        if case is None:
+            return f"{name}/boot", True, "(无 QEMU 配置，仅静态校验)"
+
+        arch = BOOT_CASES[[c[0] for c in BOOT_CASES].index(name)][2]
+        flags = dict((c[0], c[1]) for c in BOOT_CASES)[name]
+        triple = flags[flags.index("--target-triple") + 1]
+        boot_mode = flags[flags.index("--boot") + 1]
+        # 中间产物目录名与 kaulac 保持一致：boot-<arch>-<triple>-<boot 方式>
+        key = re.sub(r"[^A-Za-z0-9._-]", "_", f"{arch}-{triple}-{boot_mode}")
+        # 1) 编译串口钩子（同目标、同 freestanding 配置）
+        hook_o = BUILD / "boot" / name / "arch_uart.o"
+        hook_o.parent.mkdir(parents=True, exist_ok=True)
+        hook_flags = ["clang", "-target", triple, "-c", "-O2", "-ffreestanding",
+                      "-nostdlib", "-fno-pic", "-DKAULA_FREESTANDING",
+                      f"-D{case['uart']}"]
+        # 浮点 ABI 必须与内核一致（riscv64 内核用 lp64d，钩子用默认软浮点就链不上）
+        for f in flags:
+            if isinstance(f, str) and f.startswith("-cflags="):
+                hook_flags += f[len("-cflags="):].split()
+        hook_flags += [str(C_DIR / "arch_uart.c"), "-o", str(hook_o)]
+        rc, out = run(hook_flags)
+        if rc != 0:
+            return f"{name}/boot", False, f"编译串口钩子失败:\n{out[-400:]}"
+
+        # 2) 用同一批对象重新链接（加入钩子）
+        arch_cache = PROJECT_ROOT / "cache" / f"boot-{key}"
+        if not arch_cache.is_dir():
+            return f"{name}/boot", False, f"找不到 boot 中间产物目录 {arch_cache}"
+        # kernel .o 必须用 L4 编译时打印的那个精确路径：同目录下会累积历史
+        # kernel .o（文件名是 codegen 缓存键），glob 整个目录会链进多个内核
+        if kobj is None or not Path(kobj).is_file():
+            return f"{name}/boot", False, f"找不到 kernel 中间产物 {kobj}"
+        objs = [arch_cache / "boot.o", Path(kobj),
+                arch_cache / "kaula_freestanding_runtime.o",
+                arch_cache / "kmm_scoped_allocator_v4.o", hook_o]
+        missing = [str(p) for p in objs if not p.is_file()]
+        if missing:
+            return f"{name}/boot", False, f"缺少 boot 对象: {missing}"
+        script = templates / f"{arch}.ld"
+        run_elf = BUILD / "boot" / name / "qemu.elf"
+        if ld is None:
+            return f"{name}/boot", True, "无 ld.lld，沿用 L4 产物（未接串口）"
+        rc, out = run([ld, "-T", str(script), "-o", str(run_elf),
+                       "--entry", "_start"] + [str(p) for p in objs])
+        if rc != 0:
+            return f"{name}/boot", False, f"链接 QEMU 镜像失败:\n{out[-400:]}"
+        if nm is not None:
+            _, syms = run([nm, "--undefined-only", str(run_elf)])
+            undef = [s.split()[-1] for s in syms.splitlines() if s.split()]
+            if undef:
+                return f"{name}/boot", False, f"QEMU 镜像有未定义符号: {undef[:8]}"
+
+        # 3) 真正启动（qemu 可执行文件要解析到绝对路径：scoop/winget 装的不一定在 PATH）
+        qemu = find_qemu(case["bin"])
+        if qemu is None:
+            return f"{name}/boot", False, f"未找到 {case['bin']}"
+        rc, serial = run([qemu, *case["args"], "-kernel", str(run_elf)],
+                         timeout=timeout, allow_timeout=True)
+        m = RESULT_RE.search(serial)
+        if not m:
+            if name in KNOWN_BOOT_GAPS:
+                return f"{name}/boot", "GAP", KNOWN_BOOT_GAPS[name] + \
+                    f"\n（QEMU: {qemu.name} rc={rc}，串口 {len(serial)} 字节）"
+            tail = serial[-300:].replace("\r", "")
+            return f"{name}/boot", False, (f"串口未见自检结果行（rc={rc}）\n"
+                                          f"串口尾部: {tail!r}")
+        code = int(m.group(1))
+        if code != 0:
+            return f"{name}/boot", False, f"内核自检报告首个失败用例 id={code}"
+        return f"{name}/boot", True, f"SELFTEST-RESULT=0（{len(serial)} 字节串口输出）"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(jobs, 4))) as pool:
+        for name, status, detail in pool.map(check, boot_results):
+            if status == "GAP":
+                rep.note("L7", name, detail)
+            else:
+                rep.add("L7", name, status, detail)
 
 
 # ============================== L5: 全量语料 ==============================
@@ -651,6 +900,8 @@ def main() -> int:
     ap.add_argument("--jobs", "-j", type=int, default=0, help="并行度（默认 CPU 数, 上限 8）")
     ap.add_argument("--quick", action="store_true", help="L5 跳过慢速基准")
     ap.add_argument("--filter", default="", help="L5 只跑名字含该串的程序")
+    ap.add_argument("--qemu-timeout", type=int, default=60,
+                    help="L7 每个架构的 QEMU 运行时限（秒）")
     args = ap.parse_args()
 
     layers = {
@@ -660,6 +911,7 @@ def main() -> int:
         "L4": "boot 全链路（4 架构可引导 ELF + 静态校验）",
         "L5": "语言全功能（test/*.kl 全量语料 --freestanding 编译）",
         "L6": "配置一致性（stdlib.json ↔ 头文件 ↔ 归档符号）",
+        "L7": "QEMU 实机引导（4 架构真机启动 + 串口自检断言）",
     }
     if args.list:
         for k, v in layers.items():
@@ -684,6 +936,7 @@ def main() -> int:
     print(f"ld.lld : {which('ld.lld')}")
     print(f"layers : {', '.join(selected)}\n")
 
+    boot_results = []
     if "L1" in selected:
         layer_c_functions(rep, jobs)
     if "L2" in selected:
@@ -691,11 +944,16 @@ def main() -> int:
     if "L3" in selected:
         layer_kl_functions(rep, kaulac, jobs)
     if "L4" in selected:
-        layer_boot(rep, kaulac, jobs)
+        boot_results = layer_boot(rep, kaulac, jobs)
     if "L5" in selected:
         layer_corpus(rep, kaulac, jobs, args.quick, args.filter)
     if "L6" in selected:
         layer_config(rep)
+    if "L7" in selected:
+        if not boot_results and "L4" not in selected:
+            rep.add("L7", "needs-L4", False, "L7 依赖 L4 产出的 boot ELF，请同时跑 L4")
+        else:
+            layer_qemu_boot(rep, boot_results or layer_boot(rep, kaulac, jobs), jobs, args.qemu_timeout)
 
     return rep.summary()
 

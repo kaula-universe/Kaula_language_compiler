@@ -130,14 +130,17 @@ typedef struct {
 #define MAX_U64 UINT64_MAX
 
 // 类型转换函数
-extern i8   to_i8(ssize_t value);
-extern i16  to_i16(ssize_t value);
-extern i32  to_i32(ssize_t value);
-extern i64  to_i64(ssize_t value);
-extern u8   to_u8(size_t value);
-extern u16  to_u16(size_t value);
-extern u32  to_u32(size_t value);
-extern u64  to_u64(size_t value);
+// 入参用定宽 64 位（int64_t / uint64_t）而非 ssize_t / size_t：后者在 32 位
+// 目标上只有 32 位宽，实参传递时就截断了，饱和转换形同虚设。
+// 与 freestanding/base/types.h 保持一致。
+extern i8   to_i8(int64_t value);
+extern i16  to_i16(int64_t value);
+extern i32  to_i32(int64_t value);
+extern i64  to_i64(int64_t value);
+extern u8   to_u8(uint64_t value);
+extern u16  to_u16(uint64_t value);
+extern u32  to_u32(uint64_t value);
+extern u64  to_u64(uint64_t value);
 extern f32  to_f32(double value);
 extern f64  to_f64(double value);
 extern bool to_bool(int value);

@@ -26,6 +26,16 @@ _start:
     cli
     cld
 
+    # 启用 SSE：CR4.OSFXSR(bit 9) + CR4.OSXMMEXCPT(bit 10)
+    #
+    # x86_64 的 boot stub 一直有这一步，i386 的 stub 漏了 —— 而 freestanding
+    # 库与生成的代码都会用 SSE 指令（print_float / fs_itoa 的 f64 转换 / math_*），
+    # 没开 SSE 时第一条 SSE 指令就 #UD，内核当场死掉且没有任何输出，
+    # 现象是"QEMU 静默退出"。x87 不需要这一步，但 clang 默认用 SSE 做 f64。
+    movl %cr4, %eax
+    orl  $0x600, %eax
+    movl %eax, %cr4
+
     # 清零 BSS（__bss_start..__bss_end，含栈；随后设置栈）
     movl $__bss_start, %edi
     movl $__bss_end, %ecx

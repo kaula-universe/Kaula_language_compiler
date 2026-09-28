@@ -120,14 +120,20 @@ typedef struct {
 #endif
 
 // 类型转换函数（实现见 types.c，弱符号，托管模式下由 std.base 的强符号覆盖）
-extern i8   to_i8(ssize_t value);
-extern i16  to_i16(ssize_t value);
-extern i32  to_i32(ssize_t value);
-extern i64  to_i64(ssize_t value);
-extern u8   to_u8(size_t value);
-extern u16  to_u16(size_t value);
-extern u32  to_u32(size_t value);
-extern u64  to_u64(size_t value);
+//
+// 入参一律用**定宽 64 位**（int64_t / uint64_t），不用 ssize_t / size_t：
+// ssize_t/size_t 在 32 位目标上本身就是 32 位，to_i32(2147483648) 这类调用
+// 在 i386 上会在**实参传递时**就被截断，饱和逻辑根本看不到原值
+// （表现为"函数存在但饱和不生效"，i386 内核自检里就踩到过）。
+// 定宽入参让这组函数在 32/64 位目标上语义一致。
+extern i8   to_i8(int64_t value);
+extern i16  to_i16(int64_t value);
+extern i32  to_i32(int64_t value);
+extern i64  to_i64(int64_t value);
+extern u8   to_u8(uint64_t value);
+extern u16  to_u16(uint64_t value);
+extern u32  to_u32(uint64_t value);
+extern u64  to_u64(uint64_t value);
 extern f32  to_f32(double value);
 extern f64  to_f64(double value);
 extern bool to_bool(int value);

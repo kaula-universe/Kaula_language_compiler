@@ -234,9 +234,9 @@ kaulac.exe --freestanding --boot pvh --target-triple x86_64-none-elf kernel.kl
 
 头文件裁剪：freestanding 模式下不包含 `<stdio.h>`/`<stdlib.h>`，仅保留 `<stdint.h>`/`<stddef.h>`/`<stdbool.h>` 等 freestanding 头文件。
 
-不带 `--boot` 时 freestanding runtime 是**单独预编译成 `.o` 再链接**的（unity 短路径包含需要 `-I freestanding` 优先于 `-I std`，否则会误命中 `std/memory/memory.c`）；它已包含 5 个模块的全部符号，此时 `cache/std-objects/fs_*.o` 会被跳过。riscv64 缺省补 `-march=rv64gc -mabi=lp64d`（clang 默认软浮点会 lower 成 libcall，裸机没有 compiler-rt）。
+不带 `--boot` 时 freestanding runtime 是**单独预编译成 `.o` 再链接**的（unity 短路径包含需要 `-I freestanding` 优先于 `-I std`，否则会误命中 `std/memory/memory.c`）；它已包含 5 个模块的全部符号，此时 `cache/std-objects/fs_*.o` 会被跳过，托管模块（`std.*`）在裸机下一律不编译不链接。目标三元组按 boot 架构推导（默认 `<arch>-none-elf`），产物是真正的裸机 ELF，链接由 `ld.lld` 直连完成（交叉到 `*-none-elf` 时 clang 会挑 gcc 当链接驱动，宿主机上没有就失败）。riscv64 缺省补 `-march=rv64gc -mabi=lp64d`（clang 默认软浮点会 lower 成 libcall，裸机没有 compiler-rt）。
 
-freestanding 库的模块清单、调用约定、链接模型细节与全链路验证方式见 [`freestanding.md`](freestanding.md)。
+freestanding 库的模块清单、调用约定、链接模型细节、QEMU 实机引导验证与已知缺口见 [`freestanding.md`](freestanding.md)。
 
 ### --target-triple
 
