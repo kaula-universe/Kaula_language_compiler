@@ -3347,7 +3347,12 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// 共用一个目录时，交叉编译会静默复用上一个目标的 .o，报错要等到链接期
 	// 才以 "xxx.o is incompatible with elf_i386" 的形式出现。
 	objectCacheDir := filepath.Join(workDir, "cache", "std-objects", cacheTargetKey(cfg, optLevel, poolCapacity))
-	os.MkdirAll(objectCacheDir, 0755)
+	// 错误不再丢弃：目录建不出来的话，后面每个模块编译都会报
+	// "unable to open output file ...: no such file or directory"，
+	// 而真正的原因（这里是哪个）被完全掩盖。
+	if err := os.MkdirAll(objectCacheDir, 0755); err != nil {
+		return fmt.Errorf("创建 std 模块对象缓存目录失败 (%s): %w", objectCacheDir, err)
+	}
 
 	// 预编译头文件 (PCH)：将 kaula.h 预编译为 .gch，加速 clang 头文件解析
 	// .gch 文件有缓存机制：仅在 kaula.h 变化时重新生成
@@ -3547,48 +3552,70 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				defer wg.Done()
 				defer func() { <-sem }()
 
-				compileCmd := compilerCommand(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...)
-				if runtime.GOOS == "windows" {
-					compileCmd.Args = append(compileCmd.Args, "-mstack-probe-size=2147483647")
-				}
-				// 裸机：模块 .o 必须与最终链接同目标（机器类型 / 浮点 ABI /
-				// 静态池宏）。少了 -target 就会编出 COFF 目标文件，链接 ELF 时报
-				// "xxx.o is incompatible with elf_x86_64"。
-				if isFreestanding {
-					compileCmd.Args = append(compileCmd.Args,
-						"-target", effectiveTargetTriple(cfg),
-						"-ffreestanding", "-fno-pic",
-						"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL")
-					compileCmd.Args = append(compileCmd.Args, archCodeModel(resolveBootArch(cfg))...)
-					compileCmd.Args = append(compileCmd.Args, archDefaultCFlags(resolveBootArch(cfg), cfg.CFlags)...)
-					for _, flag := range cfg.CFlags {
-						compileCmd.Args = append(compileCmd.Args, flag)
+				// 缓存目录是跨进程共享的。缓存刚失效时（本文件头刚改、目标指纹刚变），
+				// N 个并行构建进程会同时重建全部 ~70 个 std 模块，也就是同一时刻
+				// 有 N×70 个 clang 往同一个目录写。Windows 上偶发
+				//     error: unable to open output file '<dir>/xxx.o': no such file or directory
+				// 单独重跑又好了。这里做两件事把这一类瞬时失败吃掉：
+				//   1) 每次编译前确保目录还在（开头只 MkdirAll 过一次）
+				//   2) 失败后退避重试两次
+				output, err := func() (string, error) {
+					var lastOut string
+					var lastErr error
+					for attempt := 0; attempt < 3; attempt++ {
+						if attempt > 0 {
+							_ = os.MkdirAll(filepath.Dir(objPath), 0755)
+							time.Sleep(time.Duration(attempt) * 150 * time.Millisecond)
+						}
+						cmd := compilerCommand(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...)
+						if runtime.GOOS == "windows" {
+							cmd.Args = append(cmd.Args, "-mstack-probe-size=2147483647")
+						}
+						// 裸机：模块 .o 必须与最终链接同目标（机器类型 / 浮点 ABI /
+						// 静态池宏）。少了 -target 就会编出 COFF 目标文件，链接 ELF 时报
+						// "xxx.o is incompatible with elf_x86_64"。
+						if isFreestanding {
+							cmd.Args = append(cmd.Args,
+								"-target", effectiveTargetTriple(cfg),
+								"-ffreestanding", "-fno-pic",
+								"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL")
+							cmd.Args = append(cmd.Args, archCodeModel(resolveBootArch(cfg))...)
+							cmd.Args = append(cmd.Args, archDefaultCFlags(resolveBootArch(cfg), cfg.CFlags)...)
+							for _, flag := range cfg.CFlags {
+								cmd.Args = append(cmd.Args, flag)
+							}
+							for _, define := range cfg.CDefines {
+								cmd.Args = append(cmd.Args, "-D"+define)
+							}
+						}
+						for _, p := range validSrcPaths {
+							cmd.Args = append(cmd.Args, "-I", p)
+						}
+						for _, p := range validStdPaths {
+							cmd.Args = append(cmd.Args, "-I", p)
+						}
+						for _, p := range validFreePaths {
+							cmd.Args = append(cmd.Args, "-I", p)
+						}
+						if kaulaSrcPath != "" {
+							cmd.Args = append(cmd.Args, "-I", objectCacheDir)
+						}
+						if poolCapacity > 0 {
+							cmd.Args = append(cmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+						}
+						lastOut, lastErr = compileToObjectAtomic(cmd, objPath)
+						if lastErr == nil {
+							return lastOut, nil
+						}
 					}
-					for _, define := range cfg.CDefines {
-						compileCmd.Args = append(compileCmd.Args, "-D"+define)
-					}
-				}
-				for _, p := range validSrcPaths {
-					compileCmd.Args = append(compileCmd.Args, "-I", p)
-				}
-				for _, p := range validStdPaths {
-					compileCmd.Args = append(compileCmd.Args, "-I", p)
-				}
-				for _, p := range validFreePaths {
-					compileCmd.Args = append(compileCmd.Args, "-I", p)
-				}
-				if kaulaSrcPath != "" {
-					compileCmd.Args = append(compileCmd.Args, "-I", objectCacheDir)
-				}
-				if poolCapacity > 0 {
-					compileCmd.Args = append(compileCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-				}
-				if output, err := compileToObjectAtomic(compileCmd, objPath); err != nil {
+					return lastOut, lastErr
+				}()
+				if err != nil {
 					errMu.Lock()
 					// 含完整命令行 / cwd / 临时目录：std 模块是并发编译的，
 					// 缺少上下文时"unable to make temporary file"这类报错无法定位
 					rebuildErrors = append(rebuildErrors, formatCommandFailure(
-						"  "+filepath.Base(cPath), compileCmd, err, []byte(output)))
+						"  "+filepath.Base(cPath), compilerCommand(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...), err, []byte(output)))
 					errMu.Unlock()
 				}
 			}(ms.cPath, ms.objPath)
