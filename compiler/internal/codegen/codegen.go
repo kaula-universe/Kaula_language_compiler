@@ -1342,6 +1342,15 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			// 注册全局变量到 codegen 符号表 (成员访问/方法调用需要)
 			cg.AddSymbol(varDecl.Name, varDecl.Type, varDecl.Nullable, "global", varDecl.Pos.Line, varDecl.Pos.Column)
 			initValue := cg.generateExpression(varDecl.Value)
+		// char g[16] = "global";
+		// generateExpression 对字符串字面量一律生成 String 结构体字面量，而定长
+		// char 数组的初始化器必须是 C 字符串字面量。原先只有下面那句
+		//     if isArray && !strings.HasPrefix(initValue, "\"") { initValue = "{0}" }
+		// 兜底，它假设 initValue 已经是 C 字面量——实际永远不是，于是全局 char
+		// 数组一律被降级成 {0}，字符全为 0。
+		if strLit, ok := varDecl.Value.(*ast.StringLiteral); ok && isCharArrayDecl(cType) {
+			initValue = "\"" + escapeCString(strLit.Value) + "\""
+		}
 			if varDecl.IsAuto && varDecl.Type == "" {
 				// 顶层 auto 无法由语义阶段推导类型时回退：若已有推导类型则直接使用
 				cType = "auto"
