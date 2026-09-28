@@ -680,6 +680,10 @@
         "void()"
       ],
       "return": "void()"
+    },
+    "kmm_v4_total_usage": {
+      "args": [],
+      "return": "size_t"
     }
   },
   "std.format": {
@@ -1923,47 +1927,6 @@
       "return": "int"
     }
   },
-  "std.prefix": {
-    "header": "std/prefix/prefix.h",
-    "prefix_system_create": {
-      "args": [],
-      "return": "PrefixSystem*"
-    },
-    "prefix_system_destroy": {
-      "args": [
-        "PrefixSystem*"
-      ]
-    },
-    "prefix_enter": {
-      "args": [
-        "const char*"
-      ],
-      "return": "int"
-    },
-    "prefix_leave": {
-      "args": [],
-      "return": "int"
-    },
-    "prefix_set_data": {
-      "args": [
-        "void()"
-      ]
-    },
-    "prefix_get_data": {
-      "args": [],
-      "return": "void()"
-    },
-    "prefix_find": {
-      "args": [
-        "const char*"
-      ],
-      "return": "PrefixNode*"
-    },
-    "prefix_system_get": {
-      "args": [],
-      "return": "PrefixSystem*"
-    }
-  },
   "std.task": {
     "header": "std/task/task.h",
     "task_queue_create": {
@@ -3089,6 +3052,14 @@
         "const char*"
       ],
       "return": "String"
+    },
+    "enc_init": {
+      "args": [],
+      "return": "void"
+    },
+    "enc_setup_console": {
+      "args": [],
+      "return": "void"
     }
   },
   "std.web": {

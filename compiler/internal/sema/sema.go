@@ -3420,10 +3420,24 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 				}
 			}
 			return
+		} else {
+			// std.<mod>.<fn> 形式，但解析不到这个函数。必须在语义阶段报错。
+			//
+			// 此前这里没有任何 else：解析失败就当普通调用继续往下走，codegen 照
+			// 原样生成 C 调用，问题一路漏到 clang 才炸：
+			//     error: call to undeclared function 'sha1_hex'
+			// 用户看到的是 C 编译错误，完全无法判断是 Kaula 侧的模块名/函数名写
+			// 错了，还是这个函数其实属于另一个模块。例如 sha1_hex 只登记在
+			// std.hash，写成 std.crypto.sha1_hex 就会撞上这条路径。
+			sa.reportUnresolvedStdlibCall(expr, modKey, segs)
+			for _, arg := range expr.Args {
+				sa.analyzeExpression(arg)
+			}
+			return
 		}
 	}
 
-	// adopt() / unwrap() / range() 内置运算符：编译期处理，不做函数符号检查
+// adopt() / unwrap() / range() 内置运算符：编译期处理，不做函数符号检查
 	if ident, ok := expr.Function.(*ast.Identifier); ok {
 		if ident.Name == "adopt" || ident.Name == "unwrap" || ident.Name == "range" {
 			for _, arg := range expr.Args {
@@ -3507,6 +3521,154 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		}
 	}
 }
+
+// reportUnresolvedStdlibCall 报告「std.<mod>.<fn> 解析不到」的情况。
+//
+// 分三种：
+//  1. 模块本身不存在          -> unknown_stdlib_module
+//  2. 模块存在但没这个函数     -> unknown_stdlib_function，并列出同模块里名字
+//     相近的候选，以及真正拥有该函数的模块（跨模块写错是最常见的原因）
+//  3. 候选都找不到            -> 只说明该模块没有这个函数
+func (sa *SemanticAnalyzer) reportUnresolvedStdlibCall(expr *ast.CallExpression, modKey string, segs []string) {
+	pos := expr.Pos
+	if ma, isMA := expr.Function.(*ast.MemberAccessExpression); isMA {
+		pos = ma.Pos
+	}
+	called := strings.Join(segs, ".")
+
+	mod, modExists := sa.stdlibConfig.Modules[modKey]
+	if !modExists {
+		// 最接近的模块名
+		var names []string
+		for k := range sa.stdlibConfig.Modules {
+			names = append(names, k)
+		}
+		sug := closestNames(modKey, names, 3)
+		msg := fmt.Sprintf("模块 '%s' 不存在（未在 stdlib.json 中登记）", modKey)
+		if len(sug) > 0 {
+			msg += "；是否想用: " + strings.Join(sug, ", ")
+		}
+		sa.errorCollector.AddSemanticError(msg, pos.Line, pos.Column,
+			"unknown_stdlib_module",
+			"检查模块名拼写，或确认该模块已在 stdlib.json 中登记")
+		return
+	}
+
+	// 同模块内名字相近的候选
+	var modFns []string
+	for name := range mod.Functions {
+		modFns = append(modFns, name)
+	}
+	sug := closestNames(called, modFns, 3)
+
+	// 真正拥有这个函数的其它模块
+	var owners []string
+	for other, om := range sa.stdlibConfig.Modules {
+		if other == modKey {
+			continue
+		}
+		if _, ok := om.Functions[called]; ok {
+			owners = append(owners, other)
+		}
+	}
+
+	msg := fmt.Sprintf("模块 '%s' 中没有函数 '%s'", modKey, called)
+	var hints []string
+	if len(sug) > 0 {
+		hints = append(hints, "是否想用: "+strings.Join(sug, ", "))
+	}
+	if len(owners) > 0 {
+		sort.Strings(owners)
+		hints = append(hints, "该函数登记在: "+strings.Join(owners, ", "))
+	}
+	if len(hints) > 0 {
+		msg += "；" + strings.Join(hints, "；")
+	}
+	sa.errorCollector.AddSemanticError(msg, pos.Line, pos.Column,
+		"unknown_stdlib_function",
+		"确认函数名与所属模块；stdlib.json 里每个模块的可用函数见其 \"functions\" 段")
+}
+
+// closestNames 从 candidates 里挑出与 name 最相近的 n 个（编辑距离 + 公共前缀启发式）
+func closestNames(name string, candidates []string, n int) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	type scored struct {
+		name string
+		sim  float64
+	}
+	var list []scored
+	for _, c := range candidates {
+		list = append(list, scored{c, nameSimilarity(name, c)})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].sim != list[j].sim {
+			return list[i].sim > list[j].sim
+		}
+		return list[i].name < list[j].name
+	})
+	var out []string
+	for i := 0; i < len(list) && i < n; i++ {
+		if list[i].sim < 0.6 {
+			break
+		}
+		out = append(out, list[i].name)
+	}
+	return out
+}
+
+// nameSimilarity 0..1 的名字相似度：1 - 归一化编辑距离，再叠加公共前缀奖励
+func nameSimilarity(a, b string) float64 {
+	if a == b {
+		return 1
+	}
+	la, lb := len(a), len(b)
+	if la == 0 || lb == 0 {
+		return 0
+	}
+	// Levenshtein（滚动数组）
+	prev := make([]int, lb+1)
+	cur := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		cur[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			m := prev[j] + 1
+			if cur[j-1]+1 < m {
+				m = cur[j-1] + 1
+			}
+			if prev[j-1]+cost < m {
+				m = prev[j-1] + cost
+			}
+			cur[j] = m
+		}
+		prev, cur = cur, prev
+	}
+	dist := float64(prev[lb])
+	maxLen := float64(la)
+	if float64(lb) > maxLen {
+		maxLen = float64(lb)
+	}
+	sim := 1 - dist/maxLen
+	// 公共前缀加分（sha1_hex vs sha1_string 这类前缀相同但差异较大的情况）
+	p := 0
+	for p < la && p < lb && a[p] == b[p] {
+		p++
+	}
+	sim += 0.15 * float64(p) / maxLen
+	if sim > 1 {
+		sim = 1
+	}
+	return sim
+}
+
 
 // checkLocalModuleCall 检查本地 import 模块的限定调用 lib.fn:
 //
