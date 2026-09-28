@@ -485,7 +485,12 @@ static void bigint_divmod_mag(const BigInt* num, const BigInt* den,
     size_t n = den->count;
     if (n == 1) {
         BigInt q = bigint_copy(num);
-        u32 rem = bigint_divmod_small(&q, den->limbs[0]);
+        // 必须是 u64：bigint_divmod_small 返回的是完整的 64 位余数。原先这里写成
+        // u32，40 位以上的余数会被静默截断——例如
+        //     98765432109876543210 % 1234567890123 == 900036543210
+        // 截断后变成 2388378346。bigint_gcd 的欧几里得循环因此拿到错误的中间量，
+        // gcd(1234567890123, 98765432109876543210) 得出 1（正确值 10623）。
+        u64 rem = bigint_divmod_small(&q, den->limbs[0]);
         *q_out = q;
         *r_out = bigint_from_u64(rem);
         return;
@@ -624,8 +629,13 @@ void bigint_divmod(const BigInt* a, const BigInt* b, BigInt* q, BigInt* r) {
     bool_t r_neg = a->negative;
     BigInt mq, mr;
     bigint_divmod_mag(a, b, &mq, &mr);
-    if (q_neg) mq.negative = true;
-    if (r_neg) mr.negative = true;
+    // 必须无条件覆盖两个符号。bigint_divmod_mag 是按绝对值工作的函数，但它有
+    // 两条提前返回路径（|num| < |den| 与单 limb 除数）是用 bigint_copy(num)
+    // 构造结果的，会把 num 的负号一起带出来。此前只在符号为真时置位，于是
+    // (-48) / (-18) 的商继承了 a 的负号得到 -2（正确值 +2）。
+    // bigint_trim 会把零规范成非负，所以这里直接赋值即可。
+    mq.negative = q_neg;
+    mr.negative = r_neg;
     bigint_trim(&mq);
     bigint_trim(&mr);
     *q = mq;
