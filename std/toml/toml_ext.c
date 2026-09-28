@@ -126,7 +126,7 @@ bool_t toml_node_get_float(TOMLNode* node, double* out) {
 
 bool_t toml_node_get_string(TOMLNode* node, const char** out) {
     if (!node || node->type != TOMLX_STRING || !out) return false;
-    *out = node->data.string_val.ptr;
+    *out = string_cdata(node->data.string_val);
     return true;
 }
 

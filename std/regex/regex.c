@@ -806,7 +806,7 @@ String regex_replace(const Regex* regex, const char* str, const char* replacemen
     }
     kmm_v4_free(matches);
     
-    return (String){.len = result_pos, .ptr = result};
+    return string_wrap_n(result, result_pos);
 }
 
 String* regex_split(const Regex* regex, const char* str, size_t* count) {
@@ -840,7 +840,7 @@ String* regex_split(const Regex* regex, const char* str, size_t* count) {
             if (part_buf) {
                 memcpy(part_buf, str + pos, part_len);
                 part_buf[part_len] = '\0';
-                parts[part_count] = (String){.len = part_len, .ptr = part_buf};
+                parts[part_count] = string_wrap_n(part_buf, part_len);
             } else {
                 parts[part_count] = STRING_EMPTY;
             }
@@ -855,7 +855,7 @@ String* regex_split(const Regex* regex, const char* str, size_t* count) {
         if (part_buf) {
             memcpy(part_buf, str + pos, part_len);
             part_buf[part_len] = '\0';
-            parts[part_count] = (String){.len = part_len, .ptr = part_buf};
+            parts[part_count] = string_wrap_n(part_buf, part_len);
         } else {
             parts[part_count] = STRING_EMPTY;
         }
@@ -898,7 +898,7 @@ RegexMatch* regex_capture_groups(const Regex* regex, const char* str, size_t* co
             if (text_buf) {
                 memcpy(text_buf, str + result.groups[i].start, glen);
                 text_buf[glen] = '\0';
-                groups[i].text = (String){.len = glen, .ptr = text_buf};
+                groups[i].text = string_wrap_n(text_buf, glen);
             } else {
                 groups[i].text = STRING_EMPTY;
             }

@@ -462,7 +462,7 @@ String* fs_read_lines(const char* path, size_t* out_count) {
             if (line_buf) {
                 memcpy(line_buf, content + line_start, line_len);
                 line_buf[line_len] = '\0';
-                lines[count] = (String){.len = line_len, .ptr = line_buf};
+                lines[count] = string_wrap_n(line_buf, line_len);
             } else {
                 lines[count] = STRING_EMPTY;
             }
@@ -564,7 +564,7 @@ bool_t fs_dir_next(DirIterator* it, FileInfo* info) {
     char* path_buf = (char*)kmm_v4_malloc(base_len + 1 + name_len + 1);
     if (path_buf) {
         sprintf(path_buf, "%s\\%s", it->base_path, it->find_data.cFileName);
-        info->path = (String){.len = base_len + 1 + name_len, .ptr = path_buf};
+        info->path = string_wrap_n(path_buf, base_len + 1 + name_len);
     } else {
         info->path = STRING_EMPTY;
     }
@@ -596,7 +596,7 @@ bool_t fs_dir_next(DirIterator* it, FileInfo* info) {
     char* path_buf = (char*)kmm_v4_malloc(base_len + 1 + name_len + 1);
     if (path_buf) {
         sprintf(path_buf, "%s/%s", it->base_path, entry->d_name);
-        info->path = (String){.len = base_len + 1 + name_len, .ptr = path_buf};
+        info->path = string_wrap_n(path_buf, base_len + 1 + name_len);
     } else {
         info->path = STRING_EMPTY;
     }

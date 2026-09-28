@@ -23,6 +23,31 @@ static inline String string_wrap(const char* str) {
     return s;
 }
 
+// 从「已按 len 长度填好、并写入了 str[len] = '\0'」的缓冲区创建 String。
+// 与 string_wrap 的唯一区别是显式给定长度，因此缓冲区中间含 '\0' 也正确。
+//
+// 存在的理由：标准库里大量函数按固定长度往堆缓冲区里写，最后用
+//     return (String){.len = len, .ptr = buf};
+// 构造返回值。这种写法在 len <= STRING_SSO_CAPACITY 时是错的——String 落在
+// SSO 区，string_cdata() 读的是从未初始化的 .sso，于是
+//     unicode_str_to_upper("abc")   -> 空串
+//     unicode_str_to_lower("ABC")   -> "0"
+// 同时堆指针被丢弃。必须由本函数按长度分流到 .sso / .ptr。
+//
+// 所有权：与 string_wrap 一致，长串直接接管 str，短串拷贝后不释放
+// （KMM 作用域分配器在作用域结束时统一回收）。
+static inline String string_wrap_n(char* str, size_t len) {
+    if (!str) return STRING_EMPTY;
+    String s;
+    s.len = len;
+    if (len <= STRING_SSO_CAPACITY) {
+        memcpy(s.sso, str, len + 1);
+    } else {
+        s.ptr = str;
+    }
+    return s;
+}
+
 // 字符串创建函数
 extern String string_create(const char* str);
 extern String string_create_from_char(char c);

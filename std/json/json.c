@@ -30,7 +30,7 @@ JsonValue* json_create_string(const String value) {
     JsonValue* val = (JsonValue*)kmm_v4_calloc(1, sizeof(JsonValue));
     if (val && value.len) {
         val->type = JSON_STRING;
-        val->value.string_val = string_copy(value).ptr;
+        val->value.string_val = string_copy(value);
     }
     return val;
 }
@@ -65,7 +65,7 @@ void json_destroy(JsonValue* value) {
     if (!value) return;
     switch (value->type) {
         case JSON_STRING:
-            /* string_val is char*; kmm_v4_free is a no-op (bump allocator) */
+            /* string_val is a String (SSO); memory is scope-reclaimed, nothing to do */
             break;
         case JSON_ARRAY:
             if (value->value.array_val) {
@@ -206,7 +206,7 @@ double json_get_number(JsonValue* value) {
 
 String json_get_string(JsonValue* value) {
     if (!value || value->type != JSON_STRING) return STRING_EMPTY;
-    return string_create(value->value.string_val);
+    return string_copy(value->value.string_val);
 }
 
 static void json_skip_whitespace(const char** text) {
@@ -228,7 +228,7 @@ static String json_parse_string_content(const char** text, int* error) {
     memcpy(result, start, len);
     result[len] = '\0';
     (*text)++;
-    return (String){.len = len, .ptr = result};
+    return string_wrap_n(result, len);
 }
 
 static String json_parse_escaped_string(const char* str) {
@@ -255,7 +255,7 @@ static String json_parse_escaped_string(const char* str) {
         }
     }
     result[j] = '\0';
-    return (String){.len = j, .ptr = result};
+    return string_wrap_n(result, j);
 }
 
 static JsonValue* json_parse_value(const char** text, int* error) {
@@ -350,7 +350,7 @@ JsonValue* json_parse_file(const String path) {
     fread(buffer, 1, len, f);
     buffer[len] = '\0';
     fclose(f);
-    JsonValue* result = json_parse((String){.len = (size_t)len, .ptr = buffer});
+    JsonValue* result = json_parse(string_wrap_n(buffer, (size_t)len));
     kmm_v4_free(buffer);
     return result;
 }
@@ -371,8 +371,7 @@ static String json_serialize_value(JsonValue* value, int indent_level, int prett
             return string_create(buf);
         }
         case JSON_STRING: {
-            const char* src = value->value.string_val;
-            if (!src) return string_create("\"\"");
+            const char* src = string_cdata(value->value.string_val);
             size_t len = strlen(src);
             size_t buf_size = len * 2 + 3;
             char* buf = (char*)kmm_v4_malloc(buf_size);

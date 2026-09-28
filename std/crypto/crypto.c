@@ -220,7 +220,7 @@ String sha256_string(const String input) {
     sha256_init(&ctx); sha256_update(&ctx, (const u8*)string_cdata(input), input.len); sha256_final(&ctx, digest);
     char* buf = (char*)kmm_v4_malloc(65); String result;
     for (int i = 0; i < 32; i++) sprintf(buf + i*2, "%02x", digest[i]);
-    buf[64] = '\0'; result = (String){.len = 64, .ptr = buf}; return result;
+    buf[64] = '\0'; result = string_wrap_n(buf, 64); return result;
 }
 
 String sha256_file(const String path) {
@@ -230,7 +230,7 @@ String sha256_file(const String path) {
     fclose(f); u8 digest[32]; sha256_final(&ctx, digest);
     char* hex = (char*)kmm_v4_malloc(65); String result;
     for (int i = 0; i < 32; i++) sprintf(hex + i*2, "%02x", digest[i]);
-    hex[64] = '\0'; result = (String){.len = 64, .ptr = hex}; return result;
+    hex[64] = '\0'; result = string_wrap_n(hex, 64); return result;
 }
 
 // Base64 实现已移除: 改由 std/encoding/encoding.c 提供 (crypto.h 通过
@@ -327,7 +327,7 @@ String hmac_sha256(const u8* key, size_t key_len, const u8* data, size_t data_le
     sha256_init(&ctx); sha256_update(&ctx, opad, 64); sha256_update(&ctx, hash, 32); sha256_final(&ctx, hash);
     char* buf = (char*)kmm_v4_malloc(65); String result;
     for (int i = 0; i < 32; i++) sprintf(buf + i*2, "%02x", hash[i]);
-    buf[64] = '\0'; result = (String){.len = 64, .ptr = buf}; return result;
+    buf[64] = '\0'; result = string_wrap_n(buf, 64); return result;
 }
 
 // CRC32

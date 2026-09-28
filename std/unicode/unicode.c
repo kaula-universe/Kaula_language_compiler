@@ -620,7 +620,7 @@ String unicode_reverse(const char* str) {
         memcpy(result + out_pos, str + i, len);
         i += len;
     }
-    return (String){.len = byte_len, .ptr = result};
+    return string_wrap_n(result, byte_len);
 }
 
 /* ============================================================
@@ -657,11 +657,11 @@ static String str_case_convert(const char* str,
     /* Shrink to fit */
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        return (String){.len = out, .ptr = buf};
+        return string_wrap_n(buf, out);
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return (String){.len = out, .ptr = result};
+    return string_wrap_n(result, out);
 }
 
 String unicode_str_to_upper(const char* str) {
@@ -709,11 +709,11 @@ String unicode_str_to_title(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        return (String){.len = out, .ptr = buf};
+        return string_wrap_n(buf, out);
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return (String){.len = out, .ptr = result};
+    return string_wrap_n(result, out);
 }
 
 String unicode_str_swapcase(const char* str) {
@@ -750,11 +750,11 @@ String unicode_str_swapcase(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        return (String){.len = out, .ptr = buf};
+        return string_wrap_n(buf, out);
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return (String){.len = out, .ptr = result};
+    return string_wrap_n(result, out);
 }
 
 String unicode_str_capitalize(const char* str) {
@@ -792,11 +792,11 @@ String unicode_str_capitalize(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        return (String){.len = out, .ptr = buf};
+        return string_wrap_n(buf, out);
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return (String){.len = out, .ptr = result};
+    return string_wrap_n(result, out);
 }
 
 /* ============================================================
@@ -951,11 +951,11 @@ static String normalize_nfd_impl(const char* str) {
     buf[out] = '\0';
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        return (String){.len = out, .ptr = buf};
+        return string_wrap_n(buf, out);
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return (String){.len = out, .ptr = result};
+    return string_wrap_n(result, out);
 }
 
 /* ============================================================
@@ -1027,11 +1027,11 @@ static String normalize_nfc_impl(const char* str) {
     if (decomposed.len > STRING_SSO_CAPACITY) kmm_v4_free((void*)string_data(decomposed));
     char* result = (char*)kmm_v4_malloc(out + 1);
     if (!result) {
-        return (String){.len = out, .ptr = buf};
+        return string_wrap_n(buf, out);
     }
     memcpy(result, buf, out + 1);
     kmm_v4_free(buf);
-    return (String){.len = out, .ptr = result};
+    return string_wrap_n(result, out);
 }
 
 String unicode_normalize(const char* str, UnicodeNormalization form) {

@@ -70,7 +70,7 @@ String path_join(const char* path1, const char* path2) {
     memcpy(result + pos, path2, len2);
     result[pos + len2] = '\0';
 
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_join_n(const char** parts, size_t count) {
@@ -108,7 +108,7 @@ String path_join_n(const char** parts, size_t count) {
     }
     result[pos] = '\0';
 
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_dirname(const char* path) {
@@ -134,7 +134,7 @@ String path_dirname(const char* path) {
         result[0] = path[0];
         result[1] = ':';
         result[2] = '\0';
-        return (String){.len = strlen(result), .ptr = result};
+        return string_wrap_n(result, strlen(result));
     }
 #endif
 
@@ -146,7 +146,7 @@ String path_dirname(const char* path) {
         if (!result) return STRING_EMPTY;
         result[0] = path[0];
         result[1] = '\0';
-        return (String){.len = strlen(result), .ptr = result};
+        return string_wrap_n(result, strlen(result));
     }
 #else
     if (slash == path) {
@@ -161,7 +161,7 @@ String path_dirname(const char* path) {
     if (!result) return STRING_EMPTY;
     memcpy(result, path, dir_len);
     result[dir_len] = '\0';
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_basename(const char* path) {
@@ -194,7 +194,7 @@ String path_basename(const char* path) {
     if (!result) return STRING_EMPTY;
     memcpy(result, start, base_len);
     result[base_len] = '\0';
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_extension(const char* path) {
@@ -234,7 +234,7 @@ String path_stem(const char* path) {
     memcpy(result, string_cdata(base), stem_len);
     result[stem_len] = '\0';
     string_free(base);
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_absolute(const char* path) {
@@ -357,7 +357,7 @@ static String path_normalize_internal(const char* path) {
     }
     memcpy(result, buf, write_pos + 1);
     kmm_v4_free(buf);
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_normalize(const char* path) {
@@ -422,7 +422,7 @@ String path_replace_extension(const char* path, const char* new_ext) {
         if (need_dot) result[pos++] = '.';
         memcpy(result + pos, new_ext, ext_len);
         result[pos + ext_len] = '\0';
-        return (String){.len = strlen(result), .ptr = result};
+        return string_wrap_n(result, strlen(result));
     }
 
     size_t base_len = (size_t)(dot - path);
@@ -435,7 +435,7 @@ String path_replace_extension(const char* path, const char* new_ext) {
     if (need_dot) result[pos++] = '.';
     memcpy(result + pos, new_ext, ext_len);
     result[pos + ext_len] = '\0';
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_without_extension(const char* path) {
@@ -455,7 +455,7 @@ String path_without_extension(const char* path) {
     if (!result) return STRING_EMPTY;
     memcpy(result, path, len);
     result[len] = '\0';
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 String path_common_prefix(const char* path1, const char* path2) {
@@ -493,7 +493,7 @@ String path_common_prefix(const char* path1, const char* path2) {
             result[0] = path1[0];
             result[1] = ':';
             result[2] = '\0';
-            return (String){.len = strlen(result), .ptr = result};
+            return string_wrap_n(result, strlen(result));
         }
 #endif
         if (is_sep(path1[0]) && is_sep(path2[0])) {
@@ -507,7 +507,7 @@ String path_common_prefix(const char* path1, const char* path2) {
     if (!result) return STRING_EMPTY;
     memcpy(result, path1, last_sep);
     result[last_sep] = '\0';
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 static size_t count_components(const char* path) {
@@ -536,7 +536,7 @@ static void split_components(const char* path, String* comps, size_t count) {
         if (buf) {
             memcpy(buf, start, len);
             buf[len] = '\0';
-            comps[idx] = (String){.len = len, .ptr = buf};
+            comps[idx] = string_wrap_n(buf, len);
         } else {
             comps[idx] = STRING_EMPTY;
         }
@@ -640,7 +640,7 @@ String path_relative(const char* base, const char* target) {
     string_free(norm_base);
     string_free(norm_target);
 
-    return (String){.len = strlen(result), .ptr = result};
+    return string_wrap_n(result, strlen(result));
 }
 
 bool_t path_is_subpath(const char* parent, const char* child) {
