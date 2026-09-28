@@ -257,7 +257,12 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	case *ast.IndexExpression:
 		objType := eg.inferType(e.Object)
 		if objType == "s" {
-			return eg.GenerateExpression(e.Object) + ".ptr[" + eg.GenerateExpression(e.Index) + "]"
+			// string 下标 s[i] 取的是第 i 个字符，必须经由 SSO 安全的取址宏。
+			// 原先生成 `s.ptr[i]`：短串（len <= 15）的数据在 .sso 里、.ptr 未初始化，
+			// 于是读到随机内存。用 string_data 而不是 string_cdata 是因为这样
+			// 写侧（s[0] = 'x'）也能编译。
+			return "string_data(" + eg.GenerateExpression(e.Object) + ")[" +
+				eg.GenerateExpression(e.Index) + "]"
 		}
 		if eg.isObjectTyped(e.Object) {
 			// 动态对象下标读取 obj["key"] → dynobj_get(obj, key)
@@ -2289,6 +2294,12 @@ func (eg *ExpressionGenerator) indexElementKaulaType(obj ast.Expression) string 
 		}
 	}
 	t = strings.TrimSpace(t)
+	// string 的下标产出的是 char，不是 string。不特判的话上面会原样返回
+	// "string"，调用方据此把 s[i] 判成 "s"（字符串），于是 println(s[0]) 生成
+	// string_cdata(string_data(s)[0]) —— 给 char 再套一层取址。
+	if t == "string" || t == "str" || t == "String" {
+		return "char"
+	}
 	if strings.HasSuffix(t, "*") {
 		return strings.TrimSuffix(t, "*")
 	}

@@ -383,6 +383,13 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 				builder.WriteString(sg.codegen.expressionGenerator.GenerateExpression(el))
 			}
 			builder.WriteString("}")
+		} else if strLit, ok := stmt.Value.(*ast.StringLiteral); ok && isCharArrayDecl(cType) {
+			// char s[40] = "abc";
+			// GenerateExpression 对字符串字面量一律生成 String 结构体字面量
+			// （那是 string 变量需要的形态），直接拿来初始化 char 数组会被 clang 拒：
+			//     array initializer must be an initializer list or string literal
+			// 定长 char 数组的初始化器必须是 C 字符串字面量。
+			builder.WriteString(" = \"" + escapeCString(strLit.Value) + "\"")
 		} else {
 			builder.WriteString(" = ")
 			valueCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
@@ -396,6 +403,24 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	}
 	builder.WriteString(";\n")
 	return builder.String()
+}
+
+// isCharArrayDecl 判断一个 C 声明类型是不是「定长 char 数组」（char[N]）。
+// 用于区分 char s[40] = "abc" 与 string s = "abc"：前者的初始化器必须是
+// C 字符串字面量，后者是 String 结构体字面量。
+func isCharArrayDecl(cType string) bool {
+	t := strings.TrimSpace(cType)
+	lb := strings.Index(t, "[")
+	if lb < 0 || !strings.HasSuffix(t, "]") {
+		return false
+	}
+	base := strings.TrimSpace(t[:lb])
+	base = strings.TrimSpace(strings.TrimPrefix(base, "const "))
+	switch base {
+	case "char", "signed char", "unsigned char":
+		return true
+	}
+	return false
 }
 
 // formatCVarDecl 生成 C 变量声明字符串，处理固定大小数组类型和函数指针类型
@@ -1846,11 +1871,13 @@ func (sg *StatementGenerator) generateForInStatement(stmt *ast.ForInStatement) s
 
 	var elemCType string
 	var isFixedArray bool
+	var isStringIter bool
 	var arraySize string
 
 	if iterName != "" {
 		if sym := sg.codegen.GetSymbol(iterName); sym != nil {
 			kt := sym.Type
+			isStringIter = kt == "string"
 			elemKaula := inferElementType(kt)
 			if elemKaula != "" {
 				elemCType = sg.codegen.typeGenerator.convertType(elemKaula, false)
@@ -1883,6 +1910,11 @@ func (sg *StatementGenerator) generateForInStatement(stmt *ast.ForInStatement) s
 	}
 	if isFixedArray {
 		code += "[_i_]"
+	} else if isStringIter {
+		// 迭代 string：元素是第 i 个字符，必须经由 SSO 安全的取址宏。
+		// 原先生成 `iterCode.ptr[_i_]`，而短串（len <= STRING_SSO_CAPACITY）的数据
+		// 在 .sso 里、.ptr 未初始化，于是逐字符迭代读到随机内存。
+		code += "string_data(" + iterCode + ")[_i_]"
 	} else {
 		code += ".ptr[_i_]"
 	}
