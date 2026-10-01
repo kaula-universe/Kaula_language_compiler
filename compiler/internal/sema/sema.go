@@ -128,6 +128,14 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 	globalSymbolTable.AddSymbol("std.io", "any", false, "global", 0, 0)
 	globalSymbolTable.AddSymbol("std.prefix", "any", false, "global", 0, 0)
 
+	// 并发句柄类型：`Handle h = spawn f(x)`
+	//
+	// spawn 的结果类型是内核的 KaulaHandle（见 src/concurrency/kaula_conc_task.h）。
+	// 这里登记成内置类型，使 `auto h = spawn ...` 也能推出类型 ——
+	// 否则 spawn 的类型推导无处可去（"cannot deduce type"）。
+	globalSymbolTable.AddSymbol("Handle", "Handle", false, "global", 0, 0)
+	globalSymbolTable.AddSymbol("handle", "Handle", false, "global", 0, 0)
+
 	stdlibConfig, err := stdlib.LoadStdlibConfig(configPath)
 	if err == nil && stdlibConfig != nil {
 		// 只添加模块名，不自动添加函数
@@ -1814,6 +1822,10 @@ func (sa *SemanticAnalyzer) isTypeValid(typeName string) bool {
 		"any":    true,
 		"File":   true, // std.io 的文件句柄类型（C FILE*）
 		"object": true, // 动态对象类型（Object*）
+		// 并发句柄：spawn 的结果类型，映射到内核的 KaulaHandle。
+		// 见 src/concurrency/kaula_conc_task.h —— 编译期与运行期必须一致。
+		"Handle": true,
+		"handle": true,
 	}
 
 	// 检查是否是基本类型
@@ -2549,6 +2561,8 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 		sa.analyzeUnaryExpression(e)
 	case *ast.CallExpression:
 		sa.analyzeCallExpression(e)
+	case *ast.SpawnExpression:
+		sa.analyzeSpawnExpression(e)
 	case *ast.IndexExpression:
 		sa.analyzeIndexExpression(e)
 	case *ast.MemberExpression:
@@ -3355,6 +3369,63 @@ func (sa *SemanticAnalyzer) analyzeTypeCastExpression(expr *ast.TypeCastExpressi
 }
 
 // analyzeCallExpression 分析函数调用表达式
+/*
+ * analyzeSpawnExpression 分析 spawn 表达式。
+ *
+ * 语义（设计说明书 §2.2）：spawn 的目标必须是 conc fn。
+ * 普通 fn 被 spawn 是合法的 —— 编译器会把它包装成
+ * "不可插桩任务"（进预算检测 + 阻塞车道遏制），但那是显式的 escape hatch，
+ * 不能静默发生，否则用户会以为普通 fn 有了 IO 挂起能力。
+ *
+ * 因此规则是：
+ *   - 目标是 conc fn        → 通过
+ *   - 目标是普通 fn         → 报错并指出 #[hint(blocking)] 的写法
+ *   - 目标是未知符号/变量   → 报错（拼写错误或顺序问题）
+ */
+func (sa *SemanticAnalyzer) analyzeSpawnExpression(expr *ast.SpawnExpression) {
+	if expr == nil {
+		return
+	}
+
+	// 先分析实参：即使目标非法，实参里的错误也该报出来
+	for _, arg := range expr.Args {
+		sa.analyzeExpression(arg)
+	}
+
+	ident, ok := expr.Function.(*ast.Identifier)
+	if !ok {
+		sa.errorCollector.AddSemanticError(
+			"spawn 的目标必须是函数名",
+			expr.Pos.Line, expr.Pos.Column,
+			"invalid_spawn_target",
+			"写成 spawn my_func(args)；不支持 spawn (expr)(args)",
+		)
+		return
+	}
+
+	target := sa.findFunctionDeclaration(ident.Name)
+	if target == nil {
+		// 可能是变量持有函数指针 —— 那也不能 spawn
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("spawn 目标 '%s' 不是已声明的函数", ident.Name),
+			expr.Pos.Line, expr.Pos.Column,
+			"spawn_target_not_found",
+			"确认函数已声明；函数指针请先包一层 conc fn",
+		)
+		return
+	}
+
+	if !target.IsConcurrent {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("不能 spawn 普通 fn '%s'", ident.Name),
+			expr.Pos.Line, expr.Pos.Column,
+			"spawn_requires_conc_fn",
+			"改成 conc fn，或直接调用（顺序执行等价）",
+		)
+		return
+	}
+}
+
 func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 	if expr == nil {
 		return
@@ -4071,6 +4142,16 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		return ""
 	}
 	switch e := expr.(type) {
+	case *ast.SpawnExpression:
+		// spawn 的类型恒为 Handle（对应内核的 KaulaHandle）。
+		// 不看被 spawn 的函数返回什么 —— 那是 await 之后才有的东西。
+		return "Handle"
+	case *ast.AwaitExpression:
+		// await 的类型是被等待 Handle 对应任务的返回值类型。
+		// 这里取不到 Task 信息（运行时才知道），故返回空 ——
+		// 顺序调用 conc fn 的结果类型由具体用法给出，
+		// 让它落到"无法推导"比猜错类型更安全。
+		return ""
 	case *ast.LambdaExpression:
 		ps := append([]string(nil), e.ParamTypes...)
 		for i := range ps {

@@ -82,6 +82,19 @@ type CodeGenerator struct {
 
 	currentFunctionName       string
 	currentFunctionReturnType string
+
+	/*
+	 * inConcResume 表示正在生成 conc fn 的 resume 函数体。
+	 *
+	 * 此时 `return X` 不能生成裸的 C return —— resume 的返回类型是
+	 * KaulaResumeResult，不是用户函数的返回类型。必须改写成
+	 * "把 X 存进 Frame 的 result 字段，再返回 DONE"。
+	 *
+	 * concFrameVar 是 resume 里那个 Frame 指针的变量名（"f"）。
+	 */
+	inConcResume  bool
+	concFrameVar  string
+	concHasResult bool
 	callStack                 map[string]bool
 
 	// 当前类上下文：在生成构造函数/方法体期间设置，供 exprgen 识别成员字段
@@ -1558,6 +1571,13 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// kmm_v4_scope_pop / kmm_v4_survivor_* / kaula_add_i64 未声明直接编译失败。
 		allIncludes.WriteString("#include \"kmm_scoped_allocator_v4.h\"\n")
 		allIncludes.WriteString("#include \"kaula_runtime.h\"\n")
+		// 并发内核：conc fn 的 Frame / resume / coercion shim 依赖
+		// KaulaResumeResult、kaula_spawn、kaula_handle_await 等。
+		// 仅当程序里真的出现 conc fn 时才包含 —— 不用 spawn 的程序
+		// 链接器会把这整个归档丢弃（设计说明书 §2.7 推论二）。
+		if UsesConcurrency() {
+			allIncludes.WriteString("#include \"concurrency/kaula_conc.h\"\n")
+		}
 		// Windows (MSVC ABI)：使用浮点的 TU 会引用 _fltused（CRT 提供）。
 		// --freestanding 在 Windows 宿主上链接时同样不链 CRT（-nostdlib），
 		// 必须自备 stub，否则链接期 undefined symbol: _fltused。
@@ -1570,6 +1590,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		allIncludes.WriteString("#endif\n")
 	} else {
 		allIncludes.WriteString("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"kaula.h\"\n#include \"kaula_runtime.h\"\n")
+		// 并发内核（见上面的同款注释）
+		if UsesConcurrency() {
+			allIncludes.WriteString("#include \"concurrency/kaula_conc.h\"\n")
+		}
 		// Windows (MSVC ABI / UCRT)：编译器对使用浮点的 TU 生成未定义引用 _fltused，
 		// 该符号由 CRT 提供；本工具链不链接 CRT，必须自备定义（标准 _fltused stub）
 		// 幂等守卫：多文件编译（injectLocalCode）会把各本地导入 .kl 各自生成

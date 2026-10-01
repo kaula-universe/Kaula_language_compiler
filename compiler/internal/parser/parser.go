@@ -3897,6 +3897,22 @@ func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
 	for {
 		if p.curTok.Type == lexer.TOKEN_DOT {
 			p.nextToken()
+
+			// 后缀 await：`h.await`。
+			// 语义上是 `await h`，但 lexer 按后缀形式切成 IDENTIFIER DOT AWAIT。
+			// 必须先判 AWAIT 再走成员名分支 —— 否则 await 会被当作
+			// 成员名，生成 MemberAccess(h, "await")，语义完全跑偏。
+			if p.curTok.Type == lexer.TOKEN_AWAIT {
+				awaitPos := ast.Position{
+					Line:   p.curTok.Line,
+					Column: p.curTok.Column,
+					File:   p.file,
+				}
+				p.nextToken()
+				expr = &ast.AwaitExpression{Handle: expr, Pos: awaitPos}
+				continue
+			}
+
 			// 成员名可以是标识符、类型关键字、或带下划线的标识符（如 string_contains_string）
 			if p.isIdentOrTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_PRINTLN || p.curTok.Type == lexer.TOKEN_LPAREN {
 				// 如果点后面直接是 (，如 obj.(expr)，跳过
@@ -4302,12 +4318,20 @@ func (p *Parser) parseSpawnExpressionIterative() ast.Expression {
 	}
 	p.nextToken() // 跳过 spawn
 
-	// 解析函数表达式（通常是标识符）
-	function := p.parsePrimaryExpressionIterative()
-	if function == nil {
+	/*
+	 * 只取函数名，不走 parsePrimaryExpressionIterative。
+	 *
+	 * 原因：primary 会连同后缀链一起吃掉 `work(42)` 里的 `(42)`，
+	 * 于是下面的 LPAREN 检查永远为假，实参一个都收不到
+	 * （实测 spawn work(42) 解析出 0 个实参）。
+	 * spawn 的目标必须是裸函数名，这里按标识符解析即可。
+	 */
+	if p.curTok.Type != lexer.TOKEN_IDENT {
 		p.error("spawn 后应跟函数名")
 		return nil
 	}
+	function := &ast.Identifier{Name: p.curTok.Value, Pos: pos}
+	p.nextToken()
 
 	// 解析参数列表（如果函数后面跟 (）
 	spawn := &ast.SpawnExpression{
@@ -4333,6 +4357,28 @@ func (p *Parser) parseSpawnExpressionIterative() ast.Expression {
 	}
 
 	return spawn
+}
+
+// parseAwaitExpressionIterative 解析 await 表达式
+// 语法: await handle_expr
+func (p *Parser) parseAwaitExpressionIterative() ast.Expression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken() // 跳过 await
+
+	handle := p.parsePrimaryExpressionIterative()
+	if handle == nil {
+		p.error("await 后应跟一个 Handle 表达式")
+		return nil
+	}
+
+	return &ast.AwaitExpression{
+		Handle: handle,
+		Pos:    pos,
+	}
 }
 
 // parseCallExpressionIterative 迭代解析函数调用表达式

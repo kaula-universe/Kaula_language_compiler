@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"kaula/internal/ast"
 	"kaula/internal/astutil"
+	"kaula/internal/codegen/conc"
 	"kaula/internal/comptime"
 	"kaula/internal/stdlib"
 	"math"
@@ -318,6 +319,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.generateStructLiteral(e)
 	case *ast.SpawnExpression:
 		return eg.generateSpawnExpression(e)
+	case *ast.AwaitExpression:
+		return eg.generateAwaitExpression(e)
 	default:
 		return "0"
 	}
@@ -3919,39 +3922,123 @@ func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) stri
 	return inner
 }
 
+// concFuncRegistry 记录 conc fn 的 C 侧签名，供 spawn 生成时查参数名。
+//
+// 为什么要单独记：spawn 的语法是 `spawn f(a, b)`，只给了函数名，
+// 不知道 f 的形参叫什么。而 Frame 的字段名就是形参名 ——
+// 写 arg_0 与 Frame 定义对不上，编译必然失败（这是原实现的 bug）。
+var concFuncRegistry = map[string]*conc.Emitter{}
+
+// RegisterConcFunc 在生成 conc fn 时登记其签名
+func RegisterConcFunc(e *conc.Emitter) {
+	concFuncRegistry[e.CName] = e
+}
+
+// LookupConcFunc 按 C 名查 conc fn 的签名；不存在返回 nil
+func LookupConcFunc(cName string) *conc.Emitter {
+	return concFuncRegistry[cName]
+}
+
+// codeUsesConcurrency 记录本 TU 是否用到并发内核。
+//
+// codegen 据此决定要不要 #include "concurrency/kaula_conc.h"。
+// 不用 conc fn 的程序不该被内核头拖累（裸机与嵌入式是硬需求）。
+var codeUsesConcurrency bool
+
+// UsesConcurrency 报告本 TU 是否用到并发内核
+func UsesConcurrency() bool { return codeUsesConcurrency }
+
+/*
+ * EmitResume 在 resume 上下文中生成函数体。
+ *
+ * 与普通生成的区别：resume 的 C 返回类型是 KaulaResumeResult，
+ * 所以 `return X` 必须被改写成"存 Frame + 返回 DONE"。
+ * 这里打开 inConcResume 开关，语句生成器据此改写。
+ */
+func (fg *FunctionGenerator) EmitResume(stmt *ast.FunctionStatement, emitter *conc.Emitter,
+	analysis *conc.BodyAnalysis) string {
+
+	cg := fg.codegen
+
+	// 保存外层状态
+	prevReturnType := cg.currentFunctionReturnType
+	prevInResume := cg.inConcResume
+	prevFrameVar := cg.concFrameVar
+	savedScopeDepth := cg.kmmScopeDepth
+	prevInFuncBody := cg.inFunctionBody
+
+	cg.currentFunctionReturnType = stmt.ReturnType
+	/*
+	 * 只有双形态才需要 return 改写。
+	 *
+	 * 单一形态（无挂起点）里没有 Frame，shim 直接内联函数体，
+	 * `return X` 就是普通 C return。若此时也改写，
+	 * 会生成 f->result = ... 而 f 根本不存在。
+	 */
+	cg.inConcResume = analysis.NeedsSuspend
+	cg.concFrameVar = "f"
+	cg.kmmScopeDepth = 0
+	cg.inFunctionBody = true
+
+	segments := fg.concBodySegments(stmt, analysis)
+
+	cg.currentFunctionReturnType = prevReturnType
+	cg.inConcResume = prevInResume
+	cg.concFrameVar = prevFrameVar
+	cg.kmmScopeDepth = savedScopeDepth
+	cg.inFunctionBody = prevInFuncBody
+
+	bodyCode := ""
+	for _, seg := range segments {
+		bodyCode += seg
+	}
+	return emitter.Generate(analysis, bodyCode, stmt.Body)
+}
+
 // generateSpawnExpression 生成 spawn 表达式代码
-// spawn func(args...) → kaula_spawn(func_resume, frame, sizeof(frame))
+// spawn f(args...) → 分配 Frame + kaula_spawn(f_resume, frame, sizeof(frame))
+//
+// 关键：Frame 字段按形参名写入，与 lowering 产出的 Frame 定义严格一致。
 func (eg *ExpressionGenerator) generateSpawnExpression(e *ast.SpawnExpression) string {
-	// 获取函数名
-	funcName := ""
-	if ident, ok := e.Function.(*ast.Identifier); ok {
-		funcName = ident.Name
-	} else {
-		return "/* spawn: unsupported function expression */ kaula_handle_null()"
+	// 一旦用到 spawn，就必须包含并发内核头
+	codeUsesConcurrency = true
+
+	// 被 spawn 的函数必须是 conc fn；取其 C 名并查签名
+	ident, ok := e.Function.(*ast.Identifier)
+	if !ok {
+		return "/* spawn: 函数表达式暂不支持 */ kaula_handle_null()"
 	}
 
-	// 生成 Frame 分配和初始化代码
-	frameName := fmt.Sprintf("K_%s_Frame", funcName)
-	resumeName := fmt.Sprintf("K_%s_resume", funcName)
-
-	var builder strings.Builder
-	builder.WriteString("({\n")
-	builder.WriteString(fmt.Sprintf("    %s* __frame = (%s*)kmm_v4_alloc_global(sizeof(%s));\n",
-		frameName, frameName, frameName))
-
-	// 初始化 Frame 字段（参数）
-	for i, arg := range e.Args {
-		if i < len(e.Args) {
-			// 假设函数参数名与 Frame 字段名相同（需要 sema 阶段传递参数名）
-			// 这里简化处理，使用 arg_N 作为字段名
-			argCode := eg.GenerateExpression(arg)
-			builder.WriteString(fmt.Sprintf("    __frame->arg_%d = %s;\n", i, argCode))
-		}
+	cName := eg.codegen.UserFuncCName(ident.Name)
+	emitter := LookupConcFunc(cName)
+	if emitter == nil {
+		// 没登记 = 不是 conc fn（或定义在别处）。
+		// 返回明确的错误 handle，而不是生成必然编译不过的 C。
+		return fmt.Sprintf(
+			"/* spawn: '%s' 不是 conc fn */ kaula_handle_error_result(KAULA_ERR_SPAWN_TARGET)", ident.Name)
 	}
 
-	builder.WriteString(fmt.Sprintf("    __frame->pc = 0;\n"))
-	builder.WriteString(fmt.Sprintf("    kaula_spawn(%s, __frame, sizeof(%s));\n", resumeName, frameName))
-	builder.WriteString("})")
+	// 求值实参
+	argCodes := make([]string, 0, len(e.Args))
+	for _, arg := range e.Args {
+		argCodes = append(argCodes, eg.GenerateExpression(arg))
+	}
 
-	return builder.String()
+	return emitter.GenerateSpawn(argCodes)
+}
+
+// generateAwaitExpression 生成 await 表达式代码
+// await h → kaula_handle_await(h)
+//
+// 说明：await 是同步点。顺序路径下它阻塞当前线程；
+// 并发路径下若发生在 conc fn 内部，当前 Task 会挂起并归还 Worker。
+// 两种形态在语法上无区别，区别只在 lowering 时是否位于 conc fn 内。
+func (eg *ExpressionGenerator) generateAwaitExpression(e *ast.AwaitExpression) string {
+	if e.Handle == nil {
+		return "/* await: 缺少 Handle */ NULL"
+	}
+	// await 同样依赖内核 API
+	codeUsesConcurrency = true
+	handleCode := eg.GenerateExpression(e.Handle)
+	return fmt.Sprintf("kaula_handle_await(%s)", handleCode)
 }

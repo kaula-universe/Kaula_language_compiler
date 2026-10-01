@@ -1514,6 +1514,34 @@ func (s *SpawnExpression) SetPosition(pos Position) {
 	s.Pos = pos
 }
 
+// AwaitExpression 表示 await 表达式：等待一个 Handle 取得结果。
+//
+// 设计说明书 §2.4：`h.await` 是同步点。
+// 顺序路径下它阻塞当前线程；并发路径下它把当前 Task 挂起，
+// 把 Worker 还给调度器 —— 这一点由 lowering 决定，语法上无区别。
+type AwaitExpression struct {
+	Handle Expression // 被等待的 Handle
+	Pos    Position
+}
+
+// expressionNode 实现Expression接口
+func (a *AwaitExpression) expressionNode() {}
+
+// String 实现Node接口
+func (a *AwaitExpression) String() string {
+	return "AwaitExpression"
+}
+
+// GetPosition 实现Node接口
+func (a *AwaitExpression) GetPosition() Position {
+	return a.Pos
+}
+
+// SetPosition 实现Node接口
+func (a *AwaitExpression) SetPosition(pos Position) {
+	a.Pos = pos
+}
+
 // IndexExpression 表示索引表达式
 type IndexExpression struct {
 	Object Expression
