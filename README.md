@@ -403,8 +403,11 @@ kaula/
 │       └── version/           # 版本信息读取
 ├── src/                       # 运行时系统（C 实现）
 │   ├── kaula.h                # 跨平台头文件
+│   ├── platform.h             # 平台抽象（TLS / 原子 / 时钟 / 睡眠）
 │   ├── kmm_scoped_allocator_v4.h  # KMM V4 内存管理
+│   ├── concurrency/           # 并发内核（work-stealing 调度器）
 │   └── ...
+├── test/                      # 测试（.kl 冒烟 / 压力 / C / 内核回归）
 ├── std/                       # 标准库（C 实现，62 个模块）
 ├── pkglib/                    # 第三方库
 ├── scripts/

@@ -3,6 +3,7 @@
 import (
 	"fmt"
 	"kaula/internal/ast"
+	"kaula/internal/codegen/conc"
 	"sort"
 	"strings"
 )
@@ -1334,59 +1335,187 @@ func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) st
 }
 
 // generateConcurrentFunction 生成并发函数（conc fn）
-// 产出：
-// 1. Frame 结构体（保存跨 suspend 存活的变量）
-// 2. resume 函数（状态机）
+//
+// 产出（文档 §9.1）：
+//  1. Frame 结构体 —— 保存跨 suspend 存活的变量
+//  2. resume 函数 —— 状态机；无挂起点时退化为单一形态
+//  3. coercion shim —— 让 conc fn 能当普通 fn 用（§9.4）
+//
+// 实际代码生成委托给 conc 包：Frame 形状与状态划分由那里的
+// 静态分析决定，这个函数只负责把 Kaula 侧的符号表翻译成 C 类型。
 func (fg *FunctionGenerator) generateConcurrentFunction(stmt *ast.FunctionStatement) string {
-	var builder strings.Builder
+	// 出现 conc fn 就需要并发内核头
+	codeUsesConcurrency = true
 
-	// 1. 生成 Frame 结构体
-	frameName := fmt.Sprintf("K_%s_Frame", stmt.Name)
-	builder.WriteString(fmt.Sprintf("// Frame for conc fn %s\n", stmt.Name))
-	builder.WriteString(fmt.Sprintf("typedef struct {\n"))
-	builder.WriteString(fmt.Sprintf("    int pc;  // program counter (state)\n"))
+	// 分析函数体：找挂起点与需要提升的变量
+	analysis := conc.AnalyzeBody(stmt.Body)
 
-	// 参数作为 Frame 字段
-	for i, param := range stmt.Params {
-		paramType := "int64_t"
-		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
-			isNullable := false
-			if i < len(stmt.ParamNullables) {
-				isNullable = stmt.ParamNullables[i]
-			}
-			if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable); ctype != "" {
-				paramType = ctype
-			}
-		}
-		builder.WriteString(fmt.Sprintf("    %s %s;\n", paramType, param))
+	// 构造 Emitter
+	cName := fg.codegen.UserFuncCName(stmt.Name)
+	if stmt.IsExported {
+		cName = stmt.Name
+	}
+	emitter := &conc.Emitter{
+		FuncName:    stmt.Name,
+		CName:       cName,
+		ReturnType:  stmt.ReturnType,
+		CReturnType: fg.mapReturnType(stmt.ReturnType),
+		Params:      stmt.Params,
+		ParamTypes:  stmt.ParamTypes,
 	}
 
-	// 返回值字段
-	returnType := "void*"
-	if stmt.ReturnType != "" && stmt.ReturnType != "void" {
+	for i := range stmt.Params {
+		ctype := "int64_t"
 		isNullable := false
-		if ctype := fg.codegen.typeGenerator.convertType(stmt.ReturnType, isNullable); ctype != "" {
-			returnType = ctype
+		if i < len(stmt.ParamNullables) {
+			isNullable = stmt.ParamNullables[i]
+		}
+		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+			if t := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable); t != "" {
+				ctype = t
+			}
+		}
+		emitter.ParamCTypes = append(emitter.ParamCTypes, ctype)
+		emitter.ParamNullables = append(emitter.ParamNullables, isNullable)
+	}
+
+	// 进入函数作用域：让语句生成器能解析参数
+	prevReturnType := fg.codegen.currentFunctionReturnType
+	fg.codegen.currentFunctionReturnType = stmt.ReturnType
+	savedScopeDepth := fg.codegen.kmmScopeDepth
+	fg.codegen.kmmScopeDepth = 0
+	fg.codegen.EnterScope("conc_" + stmt.Name)
+	for i, p := range stmt.Params {
+		nullable := false
+		if i < len(stmt.ParamNullables) {
+			nullable = stmt.ParamNullables[i]
+		}
+		kType := ""
+		if i < len(stmt.ParamTypes) {
+			kType = stmt.ParamTypes[i]
+		}
+		fg.codegen.AddSymbol(p, kType, nullable, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+	}
+
+	fg.codegen.ExitScope()
+	fg.codegen.kmmScopeDepth = savedScopeDepth
+	fg.codegen.currentFunctionReturnType = prevReturnType
+
+	// 登记签名：spawn 生成时需要按形参名写 Frame 字段
+	// 同时固化形态判定：GenerateSpawn 可能先于 Generate 被调用
+	emitter.SetStateful(analysis.NeedsSuspend)
+	RegisterConcFunc(emitter)
+
+	// 函数体在 resume 上下文中重新生成（return 需要改写）
+	return fg.EmitResume(stmt, emitter, analysis)
+}
+
+// statementHasSuspend 报告一条语句里是否含可插桩调用
+func statementHasSuspend(s ast.Statement) bool {
+	switch v := s.(type) {
+	case *ast.ExpressionStatement:
+		return conc.HasSuspendCall(v.Expression)
+	case *ast.ReturnStatement:
+		return conc.HasSuspendCall(v.Value)
+	case *ast.VariableDeclaration:
+		return conc.HasSuspendCall(v.Value)
+	case *ast.YieldStatement:
+		return conc.HasSuspendCall(v.Source)
+	case *ast.IfStatement:
+		if conc.HasSuspendCall(v.Condition) {
+			return true
+		}
+		for _, x := range v.Body {
+			if statementHasSuspend(x) {
+				return true
+			}
+		}
+		for _, x := range v.Else {
+			if statementHasSuspend(x) {
+				return true
+			}
+		}
+	case *ast.WhileStatement:
+		if conc.HasSuspendCall(v.Condition) {
+			return true
+		}
+		for _, x := range v.Body {
+			if statementHasSuspend(x) {
+				return true
+			}
+		}
+	case *ast.ForStatement:
+		if conc.HasSuspendCall(v.Condition) {
+			return true
+		}
+		for _, x := range v.Body {
+			if statementHasSuspend(x) {
+				return true
+			}
+		}
+	case *ast.ForInStatement:
+		for _, x := range v.Body {
+			if statementHasSuspend(x) {
+				return true
+			}
+		}
+	case *ast.BlockStatement:
+		for _, x := range v.Statements {
+			if statementHasSuspend(x) {
+				return true
+			}
 		}
 	}
-	builder.WriteString(fmt.Sprintf("    %s result;\n", returnType))
+	return false
+}
 
-	builder.WriteString(fmt.Sprintf("} %s;\n\n", frameName))
+// concSuspendReturn 产出"保存状态并挂起返回"的 C 片段。
+//
+// idx 是即将挂起的段序号，同时作为 pc 的下一站。
+func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx int) string {
+	var b strings.Builder
 
-	// 2. 生成 resume 函数
-	resumeName := fmt.Sprintf("K_%s_resume", stmt.Name)
-	builder.WriteString(fmt.Sprintf("// Resume function for conc fn %s\n", stmt.Name))
-	builder.WriteString(fmt.Sprintf("KaulaResumeResult %s(void* frame_ptr) {\n", resumeName))
-	builder.WriteString(fmt.Sprintf("    %s* f = (%s*)frame_ptr;\n", frameName, frameName))
-	builder.WriteString(fmt.Sprintf("    switch (f->pc) {\n"))
-	builder.WriteString(fmt.Sprintf("    case 0:\n"))
-	builder.WriteString(fmt.Sprintf("        f->pc = 1;\n"))
-	builder.WriteString(fmt.Sprintf("        // TODO: generate state machine from function body\n"))
-	builder.WriteString(fmt.Sprintf("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n"))
-	builder.WriteString(fmt.Sprintf("    default:\n"))
-	builder.WriteString(fmt.Sprintf("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n"))
-	builder.WriteString(fmt.Sprintf("    }\n"))
-	builder.WriteString(fmt.Sprintf("}\n\n"))
+	// 保存参数与跨 suspend 的局部变量到 Frame
+	for _, p := range stmt.Params {
+		b.WriteString(fmt.Sprintf("    f->%s = %s;\n", p, p))
+	}
+	b.WriteString(fmt.Sprintf("    f->pc = %d;\n", idx))
+	b.WriteString("    return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .value = NULL };\n")
+	return b.String()
+}
 
-	return builder.String()
+/*
+ * concBodySegments 按挂起点把函数体切成若干段 C 代码。
+ *
+ * 每段末尾若含挂起调用，就紧跟一个"保存状态并返回 SUSPEND"的片段。
+ * resume 跑到那里就把 Frame 写好并让出 Worker，恢复时从下一段继续。
+ *
+ * 必须逐语句生成而不是整段生成：整段生成的话，中途挂起会跳过写回，
+ * 恢复后读到的是未初始化的 Frame 字段。
+ */
+func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analysis *conc.BodyAnalysis) []string {
+	if len(analysis.SuspendSites) == 0 {
+		return []string{fg.codegen.statementGenerator.generateStmtsWithLiveness(stmt.Body, nil)}
+	}
+
+	segments := make([]string, 0, len(analysis.SuspendSites)+1)
+	var current strings.Builder
+
+	for _, s := range stmt.Body {
+		if s == nil {
+			continue
+		}
+		current.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(
+			[]ast.Statement{s}, nil))
+
+		if statementHasSuspend(s) {
+			// 段序号即 pc 的下一站
+			current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1))
+			segments = append(segments, current.String())
+			current.Reset()
+		}
+	}
+	segments = append(segments, current.String())
+
+	return segments
 }

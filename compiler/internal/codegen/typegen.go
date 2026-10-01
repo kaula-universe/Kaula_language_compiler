@@ -28,6 +28,11 @@ func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
 		codegen: cg,
 		clibTypeMap: map[string]string{
 			"File": "FILE*",
+			// 并发句柄：spawn 的结果类型。
+			// 对应 src/concurrency/kaula_conc_task.h 里的 KaulaHandle，
+			// 编译期与运行期必须是同一个类型，否则 spawn 的返回值无法传递。
+			"Handle": "KaulaHandle",
+			"handle": "KaulaHandle",
 		},
 		structTypes:    make(map[string]bool),
 		classTypes:     make(map[string]bool),

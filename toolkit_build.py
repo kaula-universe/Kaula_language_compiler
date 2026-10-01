@@ -30,6 +30,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
+#
+# 子进程输出解码策略
+#
+# 不能用 text=True 的默认行为：Windows 中文环境下 locale 编码是 GBK，
+# 而 clang 的告警里会带 UTF-8 的中文字符（源码注释），
+# 于是 subprocess 的读取线程抛 UnicodeDecodeError —— 构建日志被截断，
+# 真正的错误信息反而看不到（实测 kaula_conc_*.c 只要有告警就会触发）。
+#
+# 统一按 UTF-8 解码 + 替换非法字节：编译器输出里没有需要严格保真的内容。
+_TEXT_MODE = dict(text=True, encoding="utf-8", errors="replace")
+
+
 def _detect_worker_count():
     """自动检测并行编译 worker 数。
 
@@ -224,7 +236,7 @@ class ToolDetector:
             try:
                 result = subprocess.run(
                     [preferred, "--version"],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, **_TEXT_MODE, timeout=5
                 )
                 if result.returncode == 0:
                     version_line = result.stdout.split('\n')[0]
@@ -238,7 +250,7 @@ class ToolDetector:
             try:
                 result = subprocess.run(
                     [compiler, "--version"],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, **_TEXT_MODE, timeout=5
                 )
                 if result.returncode == 0:
                     version_line = result.stdout.split('\n')[0]
@@ -251,7 +263,7 @@ class ToolDetector:
         try:
             result = subprocess.run(
                 ["cl", "/nologo"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, **_TEXT_MODE, timeout=5
             )
             output = (result.stderr if result.stderr else result.stdout).strip()
             if "error D8003" in output or "Compiler Version" in output:
@@ -270,7 +282,7 @@ class ToolDetector:
             for archiver in ["llvm-lib", "lib"]:
                 try:
                     subprocess.run([archiver, "/?"],
-                                   capture_output=True, text=True, timeout=5)
+                                   capture_output=True, **_TEXT_MODE, timeout=5)
                     print(f"[+] 归档工具: {archiver} (COFF)")
                     return archiver
                 except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -283,7 +295,7 @@ class ToolDetector:
             try:
                 result = subprocess.run(
                     [ar, "--version"],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, **_TEXT_MODE, timeout=5
                 )
                 if result.returncode == 0:
                     print(f"[+] 归档工具: {ar}")
@@ -297,7 +309,7 @@ class ToolDetector:
         try:
             result = subprocess.run(
                 ["go", "version"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, **_TEXT_MODE, timeout=5
             )
             if result.returncode == 0:
                 version_line = result.stdout.strip()
@@ -476,7 +488,7 @@ class CBuilder:
             cmd.extend(["-c", str(src_file), "-o", str(out_obj)])
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, **_TEXT_MODE, timeout=120)
             if result.returncode != 0:
                 err = result.stderr if result.stderr else result.stdout
                 print(chr(10) + "  [-] 失败: " + src_file.name)
@@ -508,7 +520,7 @@ class CBuilder:
             ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, **_TEXT_MODE, timeout=60)
             if result.returncode != 0:
                 err = result.stderr if result.stderr else result.stdout
                 print(f"[-] 创建静态库失败: {err}")
@@ -743,7 +755,7 @@ class GoBuilder:
         with ProgressBar(1, f"Go 编译 {output_name}", width=30) as pbar:
             try:
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=300,
+                    cmd, capture_output=True, **_TEXT_MODE, timeout=300,
                     cwd=str(self.config.compiler_dir), env=env
                 )
                 pbar.update()
@@ -903,7 +915,7 @@ def main():
         try:
             result = subprocess.run(
                 [sys.executable, str(version_script), "--update"],
-                capture_output=True, text=True, cwd=str(Path(__file__).parent)
+                capture_output=True, **_TEXT_MODE, cwd=str(Path(__file__).parent)
             )
             if result.returncode == 0:
                 print(f"[+] {result.stdout.strip()}")

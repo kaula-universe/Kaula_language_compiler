@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Kaula 并发内核 · 测试构建与运行脚本
+
+用法：
+    python test/concurrency/run_tests.py                # 全部
+    python test/concurrency/run_tests.py --only deque   # 只跑名字含 deque 的
+    python test/concurrency/run_tests.py --list         # 列出用例
+    python test/concurrency/run_tests.py --asan         # 开启 ASan/UBSan
+    python test/concurrency/run_tests.py --stress 20    # 重复 20 轮查竞态
+
+设计：
+- 每个 test_*.c 独立编译成可执行文件，链接 src/concurrency/ 下的内核。
+- 按平台自动注入 KAULA_PLATFORM_* 宏与线程库。
+- 退出码非 0 即失败；--stress 在首次失败时停止。
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TEST_DIR = PROJECT_ROOT / "test" / "concurrency"
+SRC_DIR = PROJECT_ROOT / "src"
+CONC_DIR = SRC_DIR / "concurrency"
+BUILD_DIR = PROJECT_ROOT / "build" / "concurrency_tests"
+
+
+def detect_platform():
+    """返回 (windows, unix, linux, macos, web, uses_pthread)"""
+    if sys.platform.startswith("win"):
+        return 1, 0, 0, 0, 0, False
+    if sys.platform == "darwin":
+        return 0, 1, 0, 1, 0, True
+    if sys.platform.startswith("linux"):
+        return 0, 1, 1, 0, 0, True
+    # 其他 Unix 兜底
+    return 0, 1, 0, 0, 0, True
+
+
+def find_compiler():
+    env = os.environ.get("CC")
+    if env and shutil.which(env):
+        return shutil.which(env)
+    for name in ("clang", "gcc", "cc"):
+        path = shutil.which(name)
+        if path:
+            return path
+    print("[-] 未找到 C 编译器（clang / gcc / cc），可用 CC 环境变量指定")
+    return None
+
+
+def platform_defines():
+    w, u, l, m, web, _ = detect_platform()
+    return [
+        f"-DKAULA_PLATFORM_WINDOWS={w}",
+        f"-DKAULA_PLATFORM_UNIX={u}",
+        f"-DKAULA_PLATFORM_LINUX={l}",
+        f"-DKAULA_PLATFORM_MACOS={m}",
+        f"-DKAULA_PLATFORM_WEB={web}",
+    ]
+
+
+def common_flags():
+    return [
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-Wno-unused-function",
+    ] + platform_defines() + [
+        "-I", str(SRC_DIR),
+        "-I", str(CONC_DIR),
+        "-I", str(TEST_DIR),
+    ]
+
+
+def clang_rt_lib_dir():
+    """
+    找到 clang 的 sanitizer 运行时目录（Windows）。
+
+    ASan 默认以动态方式链接，需要 clang_rt.asan_dynamic-*.dll
+    在 PATH 上，否则可执行文件启动即失败（0xC0000135 STATUS_DLL_NOT_FOUND）。
+    """
+    clang = shutil.which("clang") or shutil.which("clang-cl")
+    if not clang:
+        return None
+    # <llvm>/bin/clang.exe → <llvm>/lib/clang/<ver>/lib/windows
+    llvm_bin = Path(clang).resolve().parent
+    clang_lib = llvm_bin.parent / "lib" / "clang"
+    if not clang_lib.is_dir():
+        return None
+    for version in sorted(clang_lib.iterdir(), reverse=True):
+        candidate = version / "lib" / "windows"
+        if candidate.is_dir():
+            return str(candidate)
+    return None
+
+
+def windows_sdk_lib_dirs():
+    """
+    找到 Windows SDK 的 um 库目录（含 ws2_32.lib）。
+
+    内核的 IO 后端在 Windows 上用 winsock2 的 recv/send，需要 ws2_32.lib。
+    MSVC 会自动定位，但 clang 直接驱动链接器时不会，所以显式给 -L。
+
+    注意：这里用正斜杠路径。Windows 路径里的反斜杠在 docstring 中
+    会被当作转义序列，且 clang 的 -L 参数与路径必须是同一个 argv 元素，
+    手工加引号会让引号进入路径本身（subprocess 已负责正确转义）。
+    """
+    roots = [
+        Path("C:/Program Files (x86)/Windows Kits/10/Lib"),
+        Path("C:/Program Files/Windows Kits/10/Lib"),
+    ]
+    dirs = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for version in sorted(root.iterdir(), reverse=True):
+            if not version.is_dir():
+                continue
+            for arch in ("x64", "x86", "arm64"):
+                candidate = version / "um" / arch
+                if candidate.is_dir():
+                    dirs.append(str(candidate))
+                    break
+            if dirs:
+                break
+    return dirs
+
+
+def link_flags():
+    if sys.platform.startswith("win"):
+        flags = []
+        for d in windows_sdk_lib_dirs():
+            flags += ["-L" + d]
+        flags += ["-lws2_32"]
+        return flags
+    return ["-pthread"]
+
+
+def collect_tests(only=None):
+    tests = sorted(TEST_DIR.glob("test_*.c"))
+    if only:
+        tests = [t for t in tests if only in t.stem]
+    return tests
+
+
+def runtime_sources():
+    """
+    内核运行时代码 TU。
+
+    KMM 分配器是必需的：内核的 Task/帧都从它的 survivor 段分配。
+    缺席的模块自动跳过，这样测试可以按模块逐个推进。
+    """
+    names = [
+        "kaula_conc.c",
+        "kaula_conc_io_primitives.c",
+        "kaula_conc_io_backend.c",
+        "kaula_conc_scheduler.c",
+        "kaula_conc_worker.c",
+        "kaula_conc_iodriver.c",
+        "kaula_conc_block_lane.c",
+        "kaula_conc_epoch.c",
+        "kaula_conc_completion.c",
+        "kaula_conc_evict.c",
+        "kaula_conc_metrics.c",
+        "kaula_conc_budget.c",
+        "kaula_conc_task.c",
+    ]
+    sources = [CONC_DIR / n for n in names if (CONC_DIR / n).exists()]
+    kmm = SRC_DIR / "kmm_scoped_allocator_v4.c"
+    if kmm.exists():
+        sources.append(kmm)
+    return sources
+
+
+def build_one(cc, test_file, extra, verbose):
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    exe = BUILD_DIR / (test_file.stem + (".exe" if sys.platform.startswith("win") else ""))
+
+    compile_only = [str(test_file)]
+    compile_only += [str(s) for s in runtime_sources()]
+
+    # clang 在 Windows 上接受 -L<带空格路径> 的单参数形式（无需额外引号）。
+    # subprocess 已在 list 形式下对每个元素做正确的命令行转义，
+    # 手工加引号反而会让引号本身变成路径的一部分。
+    cmd = [cc] + common_flags() + extra + compile_only + link_flags()
+    cmd += ["-o", str(exe)]
+    # sanitizer 需在编译与链接两处都出现
+    if extra:
+        cmd += extra
+
+    if verbose:
+        print("[cc]", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    # 注意：链接错误（LNK2019/LNK1120）出现在 stdout，不在 stderr。
+    # 只看 stderr 会得到一句无信息量的 "linker command failed"。
+    diag = (proc.stderr or "") + (proc.stdout or "")
+    if proc.returncode != 0:
+        print(f"[-] 编译/链接失败: {test_file.name}")
+        print(diag[:8000])
+        return None
+    if "warning" in diag.lower():
+        print(f"[warn] {test_file.name}:")
+        print(diag[:3000])
+    return exe
+
+
+def run_one(exe, verbose, timeout=180, env=None):
+    if verbose:
+        print("[run]", exe.name)
+    try:
+        proc = subprocess.run([str(exe)], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout,
+                              env=env)
+    except subprocess.TimeoutExpired:
+        print(f"[TIMEOUT] {exe.name} 超过 {timeout}s 未结束（疑似死锁）")
+        return 124
+    if proc.stdout:
+        print(proc.stdout.rstrip())
+    if proc.stderr:
+        print(proc.stderr.rstrip())
+    return proc.returncode
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", help="只跑名字包含该子串的用例")
+    ap.add_argument("--list", action="store_true", help="列出用例")
+    ap.add_argument("--verbose", "-v", action="store_true")
+    ap.add_argument("--asan", action="store_true", help="开启 ASan/UBSan")
+    ap.add_argument("--stress", type=int, default=1, help="重复轮数")
+    ap.add_argument("--timeout", type=int, default=180, help="单用例超时秒数")
+    args = ap.parse_args()
+
+    tests = collect_tests(args.only)
+    if args.list:
+        for t in tests:
+            print(t.stem)
+        return 0
+    if not tests:
+        print("[-] 没有匹配的用例")
+        return 1
+
+    cc = find_compiler()
+    if not cc:
+        return 1
+
+    extra = []
+    run_env = None
+    if args.asan:
+        if sys.platform == "darwin":
+            extra = ["-fsanitize=address"]
+        else:
+            extra = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+        if sys.platform.startswith("win"):
+            # clang 的 ASan 是动态链接：运行时必须能找到对应 DLL
+            rt = clang_rt_lib_dir()
+            if rt is None:
+                print("[-] 找不到 clang sanitizer 运行时目录，--asan 不可用")
+                return 1
+            run_env = dict(os.environ)
+            run_env["PATH"] = rt + os.pathsep + run_env.get("PATH", "")
+            print(f"[*] ASan 运行时: {rt}")
+
+    w, _, l, m, _, _ = detect_platform()
+    print(f"[*] 编译器   : {cc}")
+    print(f"[*] 平台     : {'windows' if w else 'linux' if l else 'macos' if m else 'unix'}")
+    print(f"[*] 用例     : {len(tests)} 个 x {args.stress} 轮")
+    if extra:
+        print(f"[*] sanitizer: {' '.join(extra)}")
+
+    failed = []
+    for round_no in range(args.stress):
+        if args.stress > 1:
+            print(f"\n===== 第 {round_no + 1}/{args.stress} 轮 =====")
+        for t in tests:
+            exe = build_one(cc, t, extra, args.verbose)
+            if exe is None:
+                failed.append((t.stem, "build"))
+                continue
+            rc = run_one(exe, args.verbose, args.timeout, run_env)
+            if rc != 0:
+                failed.append((t.stem, f"rc={rc}"))
+        if failed:
+            break
+
+    print("\n" + "=" * 60)
+    if failed:
+        print("失败：")
+        for name, why in failed:
+            print(f"  {name}: {why}")
+        return 1
+    print(f"全部通过：{len(tests)} 个用例 x {args.stress} 轮")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

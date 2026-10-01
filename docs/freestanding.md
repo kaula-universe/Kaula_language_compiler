@@ -154,7 +154,7 @@ python scripts/run_freestanding_tests.py --only L7 --qemu-timeout 120   # 调 QE
 |----|------|------|------|
 | **L1** | C 层全函数台账 + printf 一致性 | 2 | 122 函数 / 1644 断言（freestanding）；107 函数 / 1545 断言（托管，双环境）；1028 项与 libc `printf` 逐字节比对 |
 | **L2** | 交叉编译零依赖 | 20 | 4 架构各自：编译通过、未定义符号审计（只允许白名单 libcall）、引用确实是本库对象、`-nostdlib` 独立 `ld.lld` 出 ELF、ELF 头合法 |
-| **L3** | Kaula 层全函数 | 6 | `tests/freestanding/kl/*.kl` 托管模式**编译并运行**（校验行为 + 退出码），`--freestanding` 模式编译链接出裸机 ELF |
+| **L3** | Kaula 层全函数 | 6 | `test/freestanding/kl/*.kl` 托管模式**编译并运行**（校验行为 + 退出码），`--freestanding` 模式编译链接出裸机 ELF |
 | **L4** | boot 全链路 | 6 | 5 种引导配置出可引导 ELF + 静态校验（机器类型、LOAD 段、零未定义符号） |
 | **L5** | 语言全功能 | 53 | `test/*.kl` 全量语料逐个 `--freestanding`：前端 + 代码生成 + C 编译必须全过 |
 | **L6** | 配置一致性 | 15 | `compiler/stdlib.json` ↔ 头文件 `extern` ↔ 归档符号三方一致，依赖声明对齐 |

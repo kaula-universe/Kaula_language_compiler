@@ -2141,6 +2141,54 @@ func inferElementType(typeStr string) string {
 // KMM_V4_SCOPE_START/END 使用 do-while(0) 包裹，return 会跳过 KMM_V4_SCOPE_END
 // 中的 scope_pop，导致作用域栈不弹出。此处按当前 kmmScopeDepth 补齐 pop。
 func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement) string {
+	/*
+	 * conc fn 的 resume：改写 return。
+	 *
+	 * resume 的 C 返回类型是 KaulaResumeResult，不是用户函数的返回类型。
+	 * 裸生成 `return X;` 会让 clang 报类型不匹配。
+	 */
+	if sg.codegen.inConcResume {
+		retType := sg.codegen.currentFunctionReturnType
+		isVoid := (retType == "" || retType == "void" || retType == "Void")
+		return sg.generateConcReturn(stmt, isVoid)
+	}
+	return sg.generateReturnStatementNormal(stmt)
+}
+
+/*
+ * generateConcReturn 生成 conc fn resume 体内的 return。
+ *
+ * `return X`  →
+ *      f->result = X;
+ *      f->pc = -1;
+ *      return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = &f->result };
+ *
+ * void 函数则只标记完成。
+ */
+func (sg *StatementGenerator) generateConcReturn(stmt *ast.ReturnStatement, isVoid bool) string {
+	f := sg.codegen.concFrameVar
+	if f == "" {
+		f = "f"
+	}
+
+	var b strings.Builder
+
+	if isVoid || stmt.Value == nil {
+		b.WriteString(f + "->pc = -1;\n")
+		b.WriteString("return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
+		return b.String()
+	}
+
+	valueCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+	b.WriteString(f + "->result = " + valueCode + ";\n")
+	b.WriteString(f + "->pc = -1;\n")
+	b.WriteString("return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = &" +
+		f + "->result };\n")
+	return b.String()
+}
+
+// generateReturnStatementNormal 生成普通 fn 的 return（原逻辑）
+func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStatement) string {
 	retType := sg.codegen.currentFunctionReturnType
 	isVoid := (retType == "" || retType == "void" || retType == "Void")
 

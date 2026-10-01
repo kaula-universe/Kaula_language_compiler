@@ -8,7 +8,7 @@ freestanding 模式全链路测试 / Freestanding mode full-chain test runner
                         + 与 libc printf 的同进程逐字节一致性
     L2  交叉编译零依赖  4 个目标（x86_64/i386/riscv64/aarch64）编译 + 未定义符号审计
                         + 无 libc 链接出独立 ELF（-nostdlib -static）
-    L3  Kaula 层全函数  tests/freestanding/kl/*.kl 每个 import freestanding.* 程序
+    L3  Kaula 层全函数  test/freestanding/kl/*.kl 每个 import freestanding.* 程序
                         托管模式编译并运行（断言 + 退出码）, freestanding 模式编译
     L4  boot 全链路     x86_64 PVH/Multiboot、i386 Multiboot、riscv64 PVH、aarch64 PVH
                         构建可引导 ELF + 静态校验（入口符号/段/未定义符号）
@@ -46,8 +46,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BUILD = PROJECT_ROOT / "build" / "fs-test"
-C_DIR = PROJECT_ROOT / "tests" / "freestanding" / "c"
-KL_DIR = PROJECT_ROOT / "tests" / "freestanding" / "kl"
+C_DIR = PROJECT_ROOT / "test" / "freestanding" / "c"
+KL_DIR = PROJECT_ROOT / "test" / "freestanding" / "kl"
 STD_LIB = PROJECT_ROOT / "compiler" / "stdlib.json"
 FS_DIR = PROJECT_ROOT / "freestanding"
 BIN_DIRS = (PROJECT_ROOT / "build" / "bin", PROJECT_ROOT / "bin")
@@ -619,7 +619,7 @@ KNOWN_BOOT_GAPS = {
         "同 riscv64：-d int 显示在 __bss_start 处 Data Abort（ESR 0x25，翻译故障），\n"
         "随后按 VBAR_EL1=0x200 跳进向量表跑飞。boot stub 未建立 TTBR0 恒等映射。\n"
         "修复方向：aarch64.S 里加 TCR/MAIR + L0 1GB 粒度恒等映射，并设 VBAR_EL1。\n"
-        "（UART 本身没问题：tests/freestanding/c/uart_probe.c 在同一机器上能打印）",
+        "（UART 本身没问题：test/freestanding/c/uart_probe.c 在同一机器上能打印）",
 }
 
 
