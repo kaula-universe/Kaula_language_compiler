@@ -63,3 +63,4 @@ test/stress_recursion
 test/stress_struct
 test/stress_numeric
 test/stress_alias
+test/runtime/test_phase1
