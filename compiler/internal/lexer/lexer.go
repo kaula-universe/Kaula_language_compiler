@@ -62,6 +62,8 @@ const (
 	TOKEN_STATIC
 	TOKEN_CONST
 	TOKEN_ADOPT
+	TOKEN_CONC    // conc fn: 并发函数
+	TOKEN_SPAWN   // spawn: 并发提交
 	// 类型关键字
 	TOKEN_TYPE_INT
 	TOKEN_TYPE_FLOAT
@@ -584,6 +586,10 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_IMPLEMENTS
 	case "constructor":
 		tokenType = TOKEN_CONSTRUCTOR
+	case "conc":
+		tokenType = TOKEN_CONC
+	case "spawn":
+		tokenType = TOKEN_SPAWN
 	// 类型关键字
 	case "int":
 		tokenType = TOKEN_TYPE_INT

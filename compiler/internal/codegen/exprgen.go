@@ -316,6 +316,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.generateAttributeExpression(e)
 	case *ast.StructLiteral:
 		return eg.generateStructLiteral(e)
+	case *ast.SpawnExpression:
+		return eg.generateSpawnExpression(e)
 	default:
 		return "0"
 	}
@@ -3915,4 +3917,41 @@ func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) stri
 		return fmt.Sprintf("(K_%s)%s", sl.TypeName, inner)
 	}
 	return inner
+}
+
+// generateSpawnExpression 生成 spawn 表达式代码
+// spawn func(args...) → kaula_spawn(func_resume, frame, sizeof(frame))
+func (eg *ExpressionGenerator) generateSpawnExpression(e *ast.SpawnExpression) string {
+	// 获取函数名
+	funcName := ""
+	if ident, ok := e.Function.(*ast.Identifier); ok {
+		funcName = ident.Name
+	} else {
+		return "/* spawn: unsupported function expression */ kaula_handle_null()"
+	}
+
+	// 生成 Frame 分配和初始化代码
+	frameName := fmt.Sprintf("K_%s_Frame", funcName)
+	resumeName := fmt.Sprintf("K_%s_resume", funcName)
+
+	var builder strings.Builder
+	builder.WriteString("({\n")
+	builder.WriteString(fmt.Sprintf("    %s* __frame = (%s*)kmm_v4_alloc_global(sizeof(%s));\n",
+		frameName, frameName, frameName))
+
+	// 初始化 Frame 字段（参数）
+	for i, arg := range e.Args {
+		if i < len(e.Args) {
+			// 假设函数参数名与 Frame 字段名相同（需要 sema 阶段传递参数名）
+			// 这里简化处理，使用 arg_N 作为字段名
+			argCode := eg.GenerateExpression(arg)
+			builder.WriteString(fmt.Sprintf("    __frame->arg_%d = %s;\n", i, argCode))
+		}
+	}
+
+	builder.WriteString(fmt.Sprintf("    __frame->pc = 0;\n"))
+	builder.WriteString(fmt.Sprintf("    kaula_spawn(%s, __frame, sizeof(%s));\n", resumeName, frameName))
+	builder.WriteString("})")
+
+	return builder.String()
 }

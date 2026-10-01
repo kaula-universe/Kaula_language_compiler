@@ -256,6 +256,18 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 			return p.parseExpressionStatementIterative()
 		}
 		return p.parseFunctionStatementIterative()
+	case lexer.TOKEN_CONC:
+		// conc fn: 并发函数
+		if p.peekTok.Type == lexer.TOKEN_FUNC {
+			p.nextToken() // 跳过 conc，现在 curTok = fn
+			fn := p.parseFunctionStatementIterative()
+			if fn != nil {
+				fn.IsConcurrent = true
+			}
+			return fn
+		}
+		p.error("conc 后必须跟 fn")
+		return nil
 	case lexer.TOKEN_LBRACE:
 		// 裸块语句 { ... }：创建新作用域
 		return p.parseBlockStatementIterative()
@@ -3562,6 +3574,9 @@ func isAssignOp(op lexer.TokenType) bool {
 // parsePrimaryExpressionIterative 迭代解析基本表达式
 func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 	switch p.curTok.Type {
+	case lexer.TOKEN_SPAWN:
+		// spawn expr: 并发提交 conc fn
+		return p.parseSpawnExpressionIterative()
 	case lexer.TOKEN_ADOPT:
 		// adopt(x) 内置转换运算符：当作函数调用解析
 		if p.peekTok.Type == lexer.TOKEN_LPAREN {
@@ -4275,6 +4290,49 @@ func (p *Parser) parseAttributeExpressionIterative() ast.Expression {
 		Attr: attrs[0],
 		Pos:  pos,
 	}
+}
+
+// parseSpawnExpressionIterative 解析 spawn 表达式
+// 语法: spawn func(args...)
+func (p *Parser) parseSpawnExpressionIterative() ast.Expression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken() // 跳过 spawn
+
+	// 解析函数表达式（通常是标识符）
+	function := p.parsePrimaryExpressionIterative()
+	if function == nil {
+		p.error("spawn 后应跟函数名")
+		return nil
+	}
+
+	// 解析参数列表（如果函数后面跟 (）
+	spawn := &ast.SpawnExpression{
+		Function: function,
+		Args:     []ast.Expression{},
+		Pos:      pos,
+	}
+
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken() // 跳过 (
+		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+			arg := p.parseExpressionIterative()
+			if arg != nil {
+				spawn.Args = append(spawn.Args, arg)
+			}
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken() // 跳过 )
+		}
+	}
+
+	return spawn
 }
 
 // parseCallExpressionIterative 迭代解析函数调用表达式
