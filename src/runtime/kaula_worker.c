@@ -5,9 +5,13 @@
 #include "kaula_worker.h"
 #include "kaula_task.h"
 #include "kaula_scheduler.h"
+#include "kaula_iodriver.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+/* IoDriver */
+extern KaulaIoDriver g_iodriver;
 
 /* ========== TLS 当前 Worker ========== */
 
@@ -71,6 +75,11 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
     /* 重置预算 */
     kaula_budget_reset(&w->budget, w->budget.quantum > 0 ? w->budget.quantum : KAULA_DEFAULT_BUDGET_QUANTUM);
 
+    /* 如果是 IO 完成后恢复，设置 TLS io_result */
+    if (task->io_result != 0 || atomic_load_explicit(&task->state, memory_order_acquire) == KAULA_TASK_RUNNING) {
+        g_kaula_current_io_result = task->io_result;
+    }
+
     /* 执行循环 */
     for (;;) {
         /* 预算检查 */
@@ -102,13 +111,14 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
             return;
 
         case KAULA_RESUME_SUSPEND:
-            /* IO 挂起（阶段一暂不实现，当作完成处理） */
-            kaula_task_complete(task, result.value);
+            /* IO 挂起：提交给 IoDriver */
+            task->io_request = result.io_request;
+            kaula_iodriver_submit(&g_iodriver, task, result.io_request);
             w->current_task = NULL;
             return;
 
         case KAULA_RESUME_BLOCKED:
-            /* 阻塞（阶段一暂不实现，当作完成处理） */
+            /* 阻塞（阶段二暂不实现，当作完成处理） */
             kaula_task_complete(task, result.value);
             w->current_task = NULL;
             return;

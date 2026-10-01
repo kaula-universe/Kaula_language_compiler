@@ -45,12 +45,31 @@ typedef enum {
     KAULA_RESUME_BLOCKED          = 3,  /* 不可 lowering 的阻塞 */
 } KaulaResumeStatus;
 
+/* IO 请求类型 */
+typedef enum {
+    KAULA_IO_READ      = 1,
+    KAULA_IO_WRITE     = 2,
+    KAULA_IO_CONNECT   = 3,
+    KAULA_IO_ACCEPT    = 4,
+    KAULA_IO_SLEEP     = 5,  /* 定时器 */
+} KaulaIoType;
+
+/* IO 请求 */
+typedef struct {
+    KaulaIoType   type;
+    int           fd;           /* 文件描述符 / socket */
+    void*         buf;          /* 读写缓冲区 */
+    size_t        buf_len;      /* 缓冲区长度 */
+    uint64_t      timeout_ns;   /* 超时（SLEEP 类型使用） */
+} KaulaIoRequest;
+
 /* ========== 结构体 ========== */
 
 /* Resume 函数签名（编译器 Lowering 产出） */
 typedef struct KaulaResumeResult {
     KaulaResumeStatus status;
     void*             value;       /* DONE 时的返回值 */
+    KaulaIoRequest    io_request;  /* SUSPEND 时的 IO 请求 */
 } KaulaResumeResult;
 
 typedef KaulaResumeResult (*KaulaResumeFn)(void* frame);
@@ -84,6 +103,10 @@ typedef struct KaulaTask {
 
     /* ---- 结果 ---- */
     void*                   result;
+
+    /* ---- IO 上下文（SUSPENDED 时有效） ---- */
+    KaulaIoRequest          io_request;     /* 当前挂起的 IO 请求 */
+    int                     io_result;      /* IO 完成后的结果（字节数或错误码） */
 
     /* ---- Handle 关联 ---- */
     KaulaHandle             handle;
@@ -122,6 +145,9 @@ extern void* kaula_handle_await(KaulaHandle h);
 extern int   kaula_handle_poll(KaulaHandle h);
 
 /* ========== 内联辅助 ========== */
+
+/* TLS: 当前 Task 的 IO 结果（resume_fn 读取） */
+extern __thread int g_kaula_current_io_result;
 
 static inline KaulaHandle kaula_handle_from_task(struct KaulaTask* task) {
     KaulaHandle h;
