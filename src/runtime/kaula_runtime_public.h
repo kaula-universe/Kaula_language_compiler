@@ -30,6 +30,7 @@
 #include "kaula_budget.h"
 #include "kaula_mpsc_queue.h"
 #include "kaula_iodriver.h"
+#include "kaula_block_lane.h"
 #include "kaula_worker.h"
 #include "kaula_scheduler.h"
 
