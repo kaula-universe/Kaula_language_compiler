@@ -3,6 +3,7 @@
  */
 
 #include "kaula_runtime_public.h"
+#include "kaula_block_lane.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,9 @@ KaulaInjectQueue g_inject_queue;
 
 /* IoDriver */
 KaulaIoDriver g_iodriver;
+
+/* Block Lane */
+KaulaBlockLane g_block_lane;
 
 /* 全局 Task ID 计数器 */
 _Atomic(uint64_t) g_next_task_id = 1;
@@ -55,6 +59,13 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
         return err;
     }
 
+    /* 初始化 Block Lane */
+    err = kaula_block_lane_init(&g_block_lane, 4); /* 初始 4 个线程 */
+    if (err != 0) {
+        kaula_iodriver_destroy(&g_iodriver);
+        return err;
+    }
+
     /* 创建 Worker 线程 */
     for (uint32_t i = 0; i < n_workers; i++) {
         err = kaula_worker_create(&g_workers[i], i);
@@ -77,6 +88,22 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
             kaula_worker_stop(&g_workers[i]);
             kaula_worker_join(&g_workers[i]);
         }
+        kaula_block_lane_destroy(&g_block_lane);
+        kaula_iodriver_destroy(&g_iodriver);
+        return err;
+    }
+
+    /* 启动 Block Lane 线程 */
+    err = kaula_block_lane_start(&g_block_lane);
+    if (err != 0) {
+        /* 启动失败：停止 IoDriver 和 Worker */
+        kaula_iodriver_stop(&g_iodriver);
+        kaula_iodriver_join(&g_iodriver);
+        for (uint32_t i = 0; i < n_workers; i++) {
+            kaula_worker_stop(&g_workers[i]);
+            kaula_worker_join(&g_workers[i]);
+        }
+        kaula_block_lane_destroy(&g_block_lane);
         kaula_iodriver_destroy(&g_iodriver);
         return err;
     }
@@ -106,6 +133,11 @@ void kaula_runtime_shutdown(void) {
     kaula_iodriver_stop(&g_iodriver);
     kaula_iodriver_join(&g_iodriver);
     kaula_iodriver_destroy(&g_iodriver);
+
+    /* 停止 Block Lane */
+    kaula_block_lane_stop(&g_block_lane);
+    kaula_block_lane_join(&g_block_lane);
+    kaula_block_lane_destroy(&g_block_lane);
 
     /* 销毁 KMM V4 */
     kmm_v4_destroy_pool();

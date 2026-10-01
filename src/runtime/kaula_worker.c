@@ -6,12 +6,16 @@
 #include "kaula_task.h"
 #include "kaula_scheduler.h"
 #include "kaula_iodriver.h"
+#include "kaula_block_lane.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 /* IoDriver */
 extern KaulaIoDriver g_iodriver;
+
+/* Block Lane */
+extern KaulaBlockLane g_block_lane;
 
 /* ========== TLS 当前 Worker ========== */
 
@@ -68,6 +72,13 @@ void kaula_worker_loop(KaulaWorker* w) {
 /* ========== Worker 执行 Task ========== */
 
 void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
+    /* 检查 Task 是否已完成（从 Block Lane 返回的） */
+    if (atomic_load_explicit(&task->state, memory_order_acquire) == KAULA_TASK_DONE) {
+        /* 已完成，直接跳过 */
+        w->current_task = NULL;
+        return;
+    }
+
     /* 设置当前 Task */
     w->current_task = task;
     atomic_store_explicit(&task->state, KAULA_TASK_RUNNING, memory_order_release);
@@ -118,8 +129,9 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
             return;
 
         case KAULA_RESUME_BLOCKED:
-            /* 阻塞（阶段二暂不实现，当作完成处理） */
-            kaula_task_complete(task, result.value);
+            /* 阻塞：提交给 Block Lane */
+            task->io_request = result.io_request;
+            kaula_block_lane_submit(&g_block_lane, task);
             w->current_task = NULL;
             return;
         }
