@@ -737,6 +737,7 @@ type FunctionStatement struct {
 	IsExported  bool               // export 修饰符：显式导出（含 pub 语义，跨文件可见 + C 级导出）
 PrefixName  string             // 如果使用prefix，记录prefix名称
 	IsAsm       bool               // 是否是 asm 函数（#[asm] 注解）
+	IsConcurrent bool              // 是否是并发函数（conc fn）
 	Pos         Position
 
 	// Captures 嵌套函数（定义在另一函数体内）的捕获变量列表，
@@ -1486,6 +1487,31 @@ func (c *CallExpression) GetPosition() Position {
 // SetPosition 实现Node接口
 func (c *CallExpression) SetPosition(pos Position) {
 	c.Pos = pos
+}
+
+// SpawnExpression 表示 spawn 表达式（并发提交 conc fn）
+type SpawnExpression struct {
+	Function Expression   // 被调用的函数（必须是 conc fn）
+	Args     []Expression // 参数列表
+	Pos      Position
+}
+
+// expressionNode 实现Expression接口
+func (s *SpawnExpression) expressionNode() {}
+
+// String 实现Node接口
+func (s *SpawnExpression) String() string {
+	return "SpawnExpression"
+}
+
+// GetPosition 实现Node接口
+func (s *SpawnExpression) GetPosition() Position {
+	return s.Pos
+}
+
+// SetPosition 实现Node接口
+func (s *SpawnExpression) SetPosition(pos Position) {
+	s.Pos = pos
 }
 
 // IndexExpression 表示索引表达式

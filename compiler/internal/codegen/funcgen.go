@@ -268,6 +268,11 @@ func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 }
 
 func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStatement) string {
+	// conc fn: 并发函数，生成 Frame 结构体 + resume 函数
+	if stmt.IsConcurrent {
+		return fg.generateConcurrentFunction(stmt)
+	}
+
 	// 函数作用域边界隔离：return 路径的 per-object survivor 回收（
 	// generateSurvivorFreeForReturn 遍历当前作用域到根的作用域链）必须停在
 	// 当前函数的外层作用域，否则嵌套函数的 return 会回收外层函数的存活变量，
@@ -1325,5 +1330,63 @@ func (fg *FunctionGenerator) generateAsmFunction(stmt *ast.FunctionStatement) st
 	builder.WriteString("}\n")
 
 	fg.codegen.ExitScope()
+	return builder.String()
+}
+
+// generateConcurrentFunction 生成并发函数（conc fn）
+// 产出：
+// 1. Frame 结构体（保存跨 suspend 存活的变量）
+// 2. resume 函数（状态机）
+func (fg *FunctionGenerator) generateConcurrentFunction(stmt *ast.FunctionStatement) string {
+	var builder strings.Builder
+
+	// 1. 生成 Frame 结构体
+	frameName := fmt.Sprintf("K_%s_Frame", stmt.Name)
+	builder.WriteString(fmt.Sprintf("// Frame for conc fn %s\n", stmt.Name))
+	builder.WriteString(fmt.Sprintf("typedef struct {\n"))
+	builder.WriteString(fmt.Sprintf("    int pc;  // program counter (state)\n"))
+
+	// 参数作为 Frame 字段
+	for i, param := range stmt.Params {
+		paramType := "int64_t"
+		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+			isNullable := false
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
+			if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable); ctype != "" {
+				paramType = ctype
+			}
+		}
+		builder.WriteString(fmt.Sprintf("    %s %s;\n", paramType, param))
+	}
+
+	// 返回值字段
+	returnType := "void*"
+	if stmt.ReturnType != "" && stmt.ReturnType != "void" {
+		isNullable := false
+		if ctype := fg.codegen.typeGenerator.convertType(stmt.ReturnType, isNullable); ctype != "" {
+			returnType = ctype
+		}
+	}
+	builder.WriteString(fmt.Sprintf("    %s result;\n", returnType))
+
+	builder.WriteString(fmt.Sprintf("} %s;\n\n", frameName))
+
+	// 2. 生成 resume 函数
+	resumeName := fmt.Sprintf("K_%s_resume", stmt.Name)
+	builder.WriteString(fmt.Sprintf("// Resume function for conc fn %s\n", stmt.Name))
+	builder.WriteString(fmt.Sprintf("KaulaResumeResult %s(void* frame_ptr) {\n", resumeName))
+	builder.WriteString(fmt.Sprintf("    %s* f = (%s*)frame_ptr;\n", frameName, frameName))
+	builder.WriteString(fmt.Sprintf("    switch (f->pc) {\n"))
+	builder.WriteString(fmt.Sprintf("    case 0:\n"))
+	builder.WriteString(fmt.Sprintf("        f->pc = 1;\n"))
+	builder.WriteString(fmt.Sprintf("        // TODO: generate state machine from function body\n"))
+	builder.WriteString(fmt.Sprintf("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n"))
+	builder.WriteString(fmt.Sprintf("    default:\n"))
+	builder.WriteString(fmt.Sprintf("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n"))
+	builder.WriteString(fmt.Sprintf("    }\n"))
+	builder.WriteString(fmt.Sprintf("}\n\n"))
+
 	return builder.String()
 }
