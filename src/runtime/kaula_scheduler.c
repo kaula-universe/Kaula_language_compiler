@@ -5,6 +5,7 @@
 #include "kaula_scheduler.h"
 #include "kaula_worker.h"
 #include "kaula_task.h"
+#include "kaula_iodriver.h"
 #include "../kmm_scoped_allocator_v4.h"
 
 #include <stdlib.h>
@@ -21,6 +22,12 @@ extern KaulaInjectQueue g_inject_queue;
 
 /* 全局 Task ID 计数器 */
 extern _Atomic(uint64_t) g_next_task_id;
+
+/* IoDriver */
+extern KaulaIoDriver g_iodriver;
+
+/* TLS: 当前 Task 的 IO 结果 */
+__thread int g_kaula_current_io_result = 0;
 
 /* ========== Task 实现 ========== */
 

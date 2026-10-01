@@ -64,3 +64,4 @@ test/stress_struct
 test/stress_numeric
 test/stress_alias
 test/runtime/test_phase1
+test/runtime/test_phase2

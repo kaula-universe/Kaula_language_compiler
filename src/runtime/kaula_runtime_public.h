@@ -28,6 +28,8 @@
 #include "kaula_task.h"
 #include "kaula_ws_deque.h"
 #include "kaula_budget.h"
+#include "kaula_mpsc_queue.h"
+#include "kaula_iodriver.h"
 #include "kaula_worker.h"
 #include "kaula_scheduler.h"
 

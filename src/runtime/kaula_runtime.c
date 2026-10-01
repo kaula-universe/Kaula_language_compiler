@@ -16,6 +16,9 @@ uint32_t g_worker_count = 0;
 /* 全局注入队列 */
 KaulaInjectQueue g_inject_queue;
 
+/* IoDriver */
+KaulaIoDriver g_iodriver;
+
 /* 全局 Task ID 计数器 */
 _Atomic(uint64_t) g_next_task_id = 1;
 
@@ -46,17 +49,36 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
     /* 初始化全局注入队列 */
     kaula_inject_queue_init(&g_inject_queue);
 
+    /* 初始化 IoDriver */
+    int err = kaula_iodriver_init(&g_iodriver);
+    if (err != 0) {
+        return err;
+    }
+
     /* 创建 Worker 线程 */
     for (uint32_t i = 0; i < n_workers; i++) {
-        int err = kaula_worker_create(&g_workers[i], i);
+        err = kaula_worker_create(&g_workers[i], i);
         if (err != 0) {
             /* 创建失败：停止已创建的 Worker */
             for (uint32_t j = 0; j < i; j++) {
                 kaula_worker_stop(&g_workers[j]);
                 kaula_worker_join(&g_workers[j]);
             }
+            kaula_iodriver_destroy(&g_iodriver);
             return err;
         }
+    }
+
+    /* 启动 IoDriver 线程 */
+    err = kaula_iodriver_start(&g_iodriver);
+    if (err != 0) {
+        /* 启动失败：停止 Worker */
+        for (uint32_t i = 0; i < n_workers; i++) {
+            kaula_worker_stop(&g_workers[i]);
+            kaula_worker_join(&g_workers[i]);
+        }
+        kaula_iodriver_destroy(&g_iodriver);
+        return err;
     }
 
     g_runtime_initialized = 1;
@@ -79,6 +101,11 @@ void kaula_runtime_shutdown(void) {
     for (uint32_t i = 0; i < g_worker_count; i++) {
         kaula_worker_join(&g_workers[i]);
     }
+
+    /* 停止 IoDriver */
+    kaula_iodriver_stop(&g_iodriver);
+    kaula_iodriver_join(&g_iodriver);
+    kaula_iodriver_destroy(&g_iodriver);
 
     /* 销毁 KMM V4 */
     kmm_v4_destroy_pool();
