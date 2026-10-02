@@ -7,7 +7,7 @@
 // 事务定义见 TRANSACTION.md。
 //
 // 输出固定格式的一行 RESULT，run_bench.py 按 key=value 解析：
-//   RESULT tps=... elapsed_ns=... p50=... p95=... p99=... max=... n=... conc=... checksum=...
+//   RESULT tps=... elapsed_ns=... p50=... p95=... p99=... max=... n=... win=... checksum=...
 
 import std.io
 import std.time
@@ -67,38 +67,11 @@ conc fn curve_degrade(spin_rounds: i64) -> i64 {
 
 // ---------- 分位数 ----------
 
-// 选择第 idx 小的元素。
-//
-// 只取 4 个分位数，所以不做全排序 —— O(n) 扫 4 次，
-// 而 n^2 的选择排序在这里虽然也不贵，但没必要。
-fn select_kth(a: i64[], n: i64, idx: i64) -> i64 {
-    i64 v = a[0];
-    i64 i = 0;
-    while i < n {
-        if a[i] < v {
-            v = a[i];
-        }
-        i = i + 1;
-    }
-    i64 seen = 0;
-    i64 j = 0;
-    while j < n {
-        if a[j] == v {
-            seen = seen + 1;
-            if seen == idx {
-                return v;
-            }
-        }
-        j = j + 1;
-    }
-    return v;
-}
-
 // ---------- 主流程 ----------
 
 fn main() -> i32 {
     i64 total = @@TOTAL@@;
-    i64 conc = @@CONC@@;
+    i64 win = @@CONC@@;
 
     // 预热：首轮含线程首次调度与缓存冷启动，不计入
     Handle hw = spawn curve_light();
@@ -109,21 +82,21 @@ fn main() -> i32 {
     }
 
     // 延迟样本：单事务客户端侧延迟（提交 -> 拿到结果），含调度
-    i64 lat[@@MAX_SAMPLES@@];
+    [@@MAX_SAMPLES@@]i64 lat;
     i64 n = 0;
     i64 checksum = 0;
 
     i64 issued = 0;
     i64 done = 0;
 
-    // 在途句柄窗口：最多 conc 个
-    Handle in_flight[@@MAX_CONC@@];
-    i64 submit_ts[@@MAX_CONC@@];
-    i64 submitted[@@MAX_CONC@@];
+    // 在途句柄窗口：最多 win 个
+    [@@MAX_CONC@@]Handle in_flight;
+    [@@MAX_CONC@@]i64 submit_ts;
+    [@@MAX_CONC@@]i64 submitted;
 
     i64 t0 = std.time.time_now_ns();
 
-    // 窗口式：先填满 conc 个在途，再逐个 await。
+    // 窗口式：先填满 win 个在途，再逐个 await。
     //
     // 为什么不逐个「提交-等-提交」串行：那测的是单任务往返延迟，
     // 根本没有并发在飞，TPS 会低一个数量级。
@@ -136,7 +109,7 @@ fn main() -> i32 {
     while done < total {
         // 1) 填窗口
         i64 j = 0;
-        while j < conc {
+        while j < win {
             // Kaula 不支持 &&，用嵌套 if 表达「两条件同时成立」。
             if issued >= total {
                 break;
@@ -172,14 +145,29 @@ fn main() -> i32 {
     i64 p99 = 0;
     i64 mx = 0;
     if n > 0 {
-        p50 = select_kth(lat, n, (n * 50) / 100 + 1);
-        p95 = select_kth(lat, n, (n * 95) / 100 + 1);
-        p99 = select_kth(lat, n, (n * 99) / 100 + 1);
-        mx = select_kth(lat, n, n);
+        // 就地选择排序：n <= 2000，O(n^2) 在计时区外跑，代价可忽略。
+        // 不用「数组作函数参数」的 helper —— 那条路径会生成非法 C。
+        i64 a = 0;
+        while a < n {
+            i64 b = a + 1;
+            while b < n {
+                if lat[b] < lat[a] {
+                    i64 tmp = lat[a];
+                    lat[a] = lat[b];
+                    lat[b] = tmp;
+                }
+                b = b + 1;
+            }
+            a = a + 1;
+        }
+        p50 = lat[(n * 50) / 100];
+        p95 = lat[(n * 95) / 100];
+        p99 = lat[(n * 99) / 100];
+        mx = lat[n - 1];
     }
 
     // 输出固定格式的一行，run_bench.py 按 key=value 解析。
     // 写成单行：多行调用与自动补分号的脚本会互相干扰。
-    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed, " elapsed_ns=", elapsed, " p50=", p50, " p95=", p95, " p99=", p99, " max=", mx, " n=", n, " conc=", conc, " checksum=", checksum);
+    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed, " elapsed_ns=", elapsed, " p50=", p50, " p95=", p95, " p99=", p99, " max=", mx, " n=", n, " win=", win, " checksum=", checksum);
     return 0;
 }
