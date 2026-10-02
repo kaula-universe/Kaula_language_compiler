@@ -96,6 +96,104 @@ conc fn fetch_after_delay(string url, i64 delay_ms) -> string {
 Frame 字段一律用真实 C 类型，不用 `void*` 占位。`void*` 能与任意整型互转，
 编译器不会报错，但值已经被静默截断——宁可编译失败，也不要静默给错答案。
 
+#### 内存归属：Frame 变量按值内嵌，不参与 SOR 堆分配
+
+**契约：跨挂起点存活的变量以按值内嵌进 Frame 字段，不接入 KMM V4 分配。**
+
+```c
+K_Point p;        /* 内嵌，不是 K_Point* */
+int64_t total;
+```
+
+resume 段首的恢复是普通的按值拷贝（`K_Point p = f->p;`）。同一变量若出现在
+普通 `fn` 里，`--sor` 会给出堆分配决策（`/* sor: BumpPool */` + 作用域末尾
+`survivor_free` 精确回收）；在 `conc fn` 里这条路径**整体不适用**。
+
+理由是生命周期对齐：Frame 随任务 retire，挂在 Frame 上的内嵌值随 Frame 一起
+释放，回收时机由 epoch 判定统一裁决，不存在二次释放或提前释放的窗口。若改成
+`T*` + KMM 分配，就必须让每个 Frame 字段在任务 retire 时逐个 `free`，而 retire
+的时机由 epoch 回收器决定——两套回收机制要在同一时刻正确交错，代价远大于
+Frame 变大的成本，且失败模式是静默 UAF。
+
+代价是 Frame 会随局部变量总大小膨胀。已知取舍：
+
+- 局部变量总大小受 KMM/Frame 分配上限约束；大数组应放在堆上由调用方持有，
+  在 conc fn 里只跨挂起点传**指针**（指针本身 8 字节，内嵌代价可忽略）。
+- `needs_free` 字段目前恒为 0：内嵌模型下 Frame 自身无需逐字段释放。
+  改用堆分配模型时该字段才会被启用——它是模型切换的预留位，不是当前的活跃路径。
+
+**防回归**：`conc/frame_test.go` 与 `conc/ownership_test.go` 守住这条契约。
+若将来要改用堆分配模型（契约 A → B），必须同时解决 epoch pin 与 retire 的
+时序，并更新这两处测试。
+
+### 段内含复合语句：守卫槽位
+
+`pc` 表达的是「函数体按**顶层语句**切成了几段」。挂起点落在循环体/分支体里时，
+顶层切分看不见它——而把整条复合语句生成两遍（提交半 + 结果半）意味着恢复后
+整个循环体再跑一遍。它不崩，只是把副作用做了两遍。
+
+所以对「体内部含挂起点」的复合语句，`while` / `if` / `block` 整条只生成一次，
+改由 Frame 的 `sub[d]` 表达恢复位置：每层一个槽位计数器，语句逐条包进守卫。
+
+```kaula
+conc fn loop_sum(i64 n) -> i64 {
+    i64 total = 0
+    i64 i = 0
+    while i < n {
+        std.time.time_sleep(1)     // 挂起点在循环体内
+        total = total + i
+        i = i + 1
+    }
+    return total
+}
+```
+
+生成的不是「`while` 出现两次」，而是一个状态机：
+
+```c
+case 0: {
+    int64_t n     = f->n;
+    int64_t total = f->total;      /* 段首恢复副本 */
+    int64_t i     = f->i;
+    if (f->sub[0] == 0) { f->sub[0] = 1; total = 0; }
+    if (f->sub[0] == 1) { f->sub[0] = 2; i     = 0; }
+    if (f->sub[0] == 2) {                     /* 复合语句不推进，见下 */
+    for (;;) {
+        if (f->sub[1] == 0) { f->sub[1] = 1; if (!(i < n)) break; }
+        if (f->sub[1] == 1) {
+            f->sub[1] = 2;
+            KaulaIoRequest r = {0}; r.type = KAULA_IO_SLEEP; ...
+            f->total = total; f->i = i;       /* 挂起前写回 */
+            f->pc = 0; f->sub[1] = 2;
+            return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .io_request = r };
+        }
+        if (f->sub[1] == 2) { f->sub[1] = 3; total = total + i; }
+        if (f->sub[1] == 3) { f->sub[1] = 4; i = i + 1; }
+        f->sub[1] = 0;                         /* 每轮复位 */
+    }
+    f->sub[0] = 3;
+    }
+    if (f->sub[0] == 3) { f->sub[0] = 4; f->result = total; ... }
+}
+```
+
+四条要点：
+
+- **挂起返回必须就地发出**。外层的挂起返回挂在复合语句的花括号之外，
+  引用不到循环体里刚构造的 `KaulaIoRequest` —— 那是 `use of undeclared
+  identifier`。
+- **复合语句所在的槽位进入时不推进**。恢复点在那条语句的**内部**，
+  推进了就整条跳过它，连带跳过它里面的循环。推进挪到它执行完之后，
+  这正好也是 C 的语义：后面的语句只在循环跑完之后才该执行。
+- **段体内的变量声明降级成赋值**。守卫槽位是 `if (...) { ... }`，是嵌套
+  作用域；声明留在槽位里的话，循环之后的代码看到的是段首那份，累加结果会丢。
+- **活跃判据用遍历序号，不用源码行号**。解析器从不填 `CallExpression.Pos`，
+  拿行号当界会让「跨挂起存活的变量」一个都判定不出来——不写回、也不恢复，
+  恢复后读到的全是上次 resume 留下的旧值。
+
+守卫槽位能表达的形态有边界（一条槽位一个挂起点、层数有上限），做不到的
+形态一律编译期报诊断，见第 3 章「守卫槽位的边界」。
+
 ## 1.4 关键 ABI 约定
 
 ### 可插桩调用 ↔ IO 操作码
@@ -269,11 +367,27 @@ main: spawn 返回 ──── Worker: 完成 → 退休 → 立刻回收 ─�
                     ^^^^^^^^ 这个窗口里帧已经被释放了
 ```
 
-所以 `kaula_handle_from_task` 拿 pin，`await_into` 读完放掉。
+所以 `kaula_handle_from_task` 拿 pin，归还点是 `kaula_handle_release`。
+
+**归还点有两个**，都是「句柄不再可能被读」的时刻：`await_into` 读完
+（声明位置，编译器走这条），以及作用域出口（编译器为每个 `Handle` 局部量
+发一次）。少了第二个，「句柄被丢弃且从不 `await`」时那个 pin 永远不还，
+会一直挡住回收直到 shutdown，把内存峰值拖到进程结束。
+
+计数放在 `KaulaTask.pin_refs` 而不是句柄结构里，是为了让 release **幂等**：
+编译器在 `await_into` 之后再发一次（作用域出口那一发）是正常的，而句柄是
+按值传递的，那次调用看不到第一次已经清过标志。放在共享计数上，第二次会
+发现计数已归零并补回去，不会把 epoch pin 多放一次——多放一次就是提前
+回收，那是悬垂，比泄漏危险得多。
+
+漏发 release 仍然是可能的（编译器侧的保守退化）：pin 不归还 = 泄漏，
+可观测；pin 多归还 = 悬垂，不可观测。方向不能反。
 
 `await_into` 还有一个理由：它由调用点提供目标地址与 `sizeof`，拷贝发生在
 pin 期间、栈上、大小已知的位置。返回裸指针等于把一个随时会悬垂的地址交给调用者，
-而且它往往不崩，只是安静地返回上一次那个任务的旧值。
+而且它往往不崩，只是安静地返回上一次那个任务的旧值。表达式位置的 `await`
+返回的正是那种地址——所以它**不**在内部归还 pin（调用方接着要解引用），
+归还交给作用域出口那一发 `release`。
 
 ## 1.9 阻塞车道与 Worker 撤离（I5）
 
@@ -348,8 +462,8 @@ python test/concurrency/run_tests.py --asan          # AddressSanitizer
 | 用例 | 断言数 | 覆盖 |
 |---|---|---|
 | `test_worker.c` | 476 | 预算、自适应、窃取、状态机 |
-| `test_task.c` | 436 | Task 生命周期、await、退休 |
-| `test_iodriver.c` | 156 | 挂起表、定时器、IO 分派、阻塞车道伸缩 |
+| `test_task.c` | 451 | Task 生命周期、await、退休、**Handle drop 的 pin 归还** |
+| `test_iodriver.c` | 150 | 挂起表、定时器、IO 分派、阻塞车道伸缩 |
 | `test_mpsc_queue.c` | 107 | Vyukov 队列并发正确性 |
 | `test_epoch.c` | 27 | epoch 回收 |
 | `test_platform.c` | 21 | 平台抽象 |
@@ -369,10 +483,22 @@ kaulac test/concurrency/test_i4.kl && ./test/concurrency/test_i4.exe
 # slow = ok
 # elapsed < 300      两个 200ms sleep 并发，未串行
 # i4 ok
+
+kaulac test/concurrency/test_loop_suspend.kl && ./test/concurrency/test_loop_suspend.exe
+# loop_sum(4) = 6             循环体内挂起：循环变量跨挂起存活并推进
+# nested_sum(3) = 6           嵌套 while：两层槽位各自独立
+# branch_pick(4) = 20         if/else 分支内挂起（走 then）
+# branch_pick(5) = 10         走 else：一个分支里两次挂起
+# loop_with_jumps(6) = 9      break / continue 与挂起点共存
+# spawned loop_sum(4) = 6     同一份代码走内核调度路径
 ```
 
+`test_loop_suspend` 的每一项都断言**精确值**，而不是「没崩」。恢复位置错了
+不会崩，只会安静地把副作用做两遍或者少做几轮——那种 bug 只有断言值才抓得住。
+
 编译器侧对应的单元测试在 `compiler/internal/codegen/conc/`（分析、Frame、
-resume 分段）与 `compiler/internal/parser/`、`compiler/internal/sema/`
+resume 分段）与 `compiler/internal/codegen/`（守卫槽位、Handle pin 归还、
+conc fn 签名表隔离），以及 `compiler/internal/parser/`、`compiler/internal/sema/`
 （`conc fn` / `spawn` / `await` 的语法与语义）。
 
 ---
@@ -528,15 +654,38 @@ slab 位图用 `KMM_V4_ALIGN64`（`__attribute__((aligned(8)))`）显式对齐�
 
 | 缺口 | 影响 | 状态 |
 |---|---|---|
-| **loop / branch 内的挂起点** | 状态机按**顶层语句**切分。循环体内的挂起不会被正确切分 | 已知边界，测试未覆盖 |
-| **Handle 的 drop 语义** | 句柄持有 pin。句柄被丢弃且从不 `await` 时那个 pin 不归还，会挡回收到 shutdown | 保守方向：泄漏可观测、悬垂不可观测 |
-| **表达式位置的 await** | `h1.await + h2.await` 拿不到目标类型，只能靠 `Handle` 变量名查表解引用；查不到时退回裸地址并留注释 | 声明位置（`i64 x = h.await`）走安全的 `await_into` |
+| **表达式位置的 await** | `h1.await + h2.await` 拿不到目标类型，只能靠 `Handle` 变量名查表解引用；查不到时退回裸地址并留注释 | 声明位置（`i64 x = h.await`）走安全的 `await_into`；pin 已能在作用域出口归还 |
+| **复合语句内取用 await 的返回值** | `while { i64 n = fs_read(fd, buf, len) }` 这类写法不成立：提交与取回结果两半分属同一条语句，恢复到后半时前半已经过去了 | 编译期报诊断，不静默取过期的 TLS 结果 |
+| **`for .. in` 体内的挂起点** | 迭代下标是编译器生成的局部量，不在 Frame 里，恢复后会从头再数一遍 | 编译期报诊断 |
+| **条件里的挂起点** | `while read() < n`：条件每轮求值，「恢复时该不该重算条件」没有确定答案 | 编译期报诊断 |
+| **一条语句里多个挂起点** | 一次挂起要占掉两个相邻槽位（提交 / 取回结果），放不下第二对 | 编译期报诊断 |
 | **Windows IOCP 后端** | 当前是简化实现：只处理唤醒包，未投递 overlapped 读写。补齐后 Windows 才能做 IO 复用 | 测试已跳过 |
-| **`concFuncRegistry`** | 包级全局 map，多文件编译会互相污染 | 应改为 per-CodeGenerator |
 | **形式化验证** | 只有 ASan 与 C 断言覆盖 | TSan / loom / TLA+ 未做 |
 
-其中第一条是最需要优先处理的：它不是性能问题，而是**语义问题**——
-循环体内的挂起点会让状态机丢失执行位置。
+前三类新增缺口都来自「循环体 / 分支体里的挂起点」那一条的收尾：守卫槽位
+方案让恢复位置能落进复合语句内部（见 1.9），但它的表达力有边界 —— 一条
+槽位只能记一个挂起点，而复合语句的恢复位置要同时表达「哪一层循环」和
+「哪一条语句」。做不到的形态一律在编译期报诊断，而不是让代码编过、
+跑起来安静地拿到过期的结果。
+
+## 3.1 守卫槽位的边界
+
+复合语句体内部含挂起点时，`while` / `if` / `block` 会被整条只生成一次，
+改由 Frame 的 `sub[d]`（每层一个槽位计数器）表达「本轮执行到第几条」。
+层数上限 `KAULA_CONC_SUB_DEPTH = 8`（I3：一切有界），超出由编译器报诊断。
+
+几条刻意的取舍：
+
+- **不用 `goto` 跳进循环体**。标签之后的代码按词法作用域解析标识符，
+  源码变量名在标签之前声明过，跳过那条声明只会读到未初始化的副本。
+  要修正就得给段内声明改名，那会牵动整个符号表。守卫方案不需要改名。
+- **段体内的变量声明降级成赋值**，对象统一由段首的恢复副本提供。
+  守卫槽位是 `if (...) { ... }`，是嵌套作用域；声明留在槽位里的话，
+  循环之后的代码看到的是段首那份，累加结果会丢。
+- **不提前释放**。提前释放按语句序号决定，而恢复路径会截断在中途。
+  少释放是可观测的保守退化（作用域出口照常回收），重复释放是 double-free。
+- **段体里指针类型的跨 suspend 局部量不分配对象**，只从 Frame 恢复。
+  指针跨挂起点的所有权语义是另一个话题，与恢复位置正交。
 
 这些缺口的共同点是：不会导致崩溃，退化是平缓的、可观测的。
 这与内核的整体取向一致——宁可慢一点、保守一点，也不要给出一个静默错误的结果。

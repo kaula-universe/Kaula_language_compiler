@@ -85,12 +85,12 @@ fn main() -> i32 {
 	c, _ := genConc(t, src)
 
 	for _, want := range []string{
-		"KAULA_CONC_SUB_DEPTH",              // Frame 里的槽位数组
-		"f->sub[1] == 0",                    // 循环头
-		"f->sub[1] == 1",                    // 循环体第一条语句
+		"KAULA_CONC_SUB_DEPTH", // Frame 里的槽位数组
+		"f->sub[1] == 0",       // 循环头
+		"f->sub[1] == 1",       // 循环体第一条语句
 		"return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .io_request", // 就地挂起
-		"if (!(i < n)) break;",              // 条件为假时跳出
-		"f->sub[1] = 0;",                    // 每轮末尾复位
+		"if (!(i < n)) break;", // 条件为假时跳出
+		"f->sub[1] = 0;",       // 每轮末尾复位
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("生成代码缺少 %q：\n%s", want, c)
