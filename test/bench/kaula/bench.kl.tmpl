@@ -19,50 +19,50 @@ import std.time
 // Kaula 的乘法是检查溢出并陷阱 —— 这两处不是防御性写法，是必需写法。
 
 conc fn parse_and_checksum() -> i64 {
-    i64 state = 2545
-    i64 checksum = 0
-    i64 k = 0
+    i64 state = 2545;
+    i64 checksum = 0;
+    i64 k = 0;
     while k < 256 {
-        state = ((state % 1048576) * 1103515245 + 12345) % 9223372036854775807
-        checksum = ((checksum % 1073741824) * 31 + (state % 256)) % 9223372036854775807
-        k = k + 1
+        state = ((state % 1048576) * 1103515245 + 12345) % 9223372036854775807;
+        checksum = ((checksum % 1073741824) * 31 + (state % 256)) % 9223372036854775807;
+        k = k + 1;
     }
-    return checksum
+    return checksum;
 }
 
 // ---------- 四个曲线 ----------
 
 // light：纯计算，无挂起。验证 conc fn 零开销与调度器 overhead。
 conc fn curve_light() -> i64 {
-    return parse_and_checksum()
+    return parse_and_checksum();
 }
 
 // suspend：一次挂起 + 一次计算。sleep 被 lowering 改写成 IoDriver
 // 定时器请求，提交后 Worker 立刻转做别的事（I4）。
 conc fn curve_suspend() -> i64 {
-    std.time.time_sleep_us(@@SUSPEND_US@@)
-    return parse_and_checksum()
+    std.time.time_sleep_us(@@SUSPEND_US@@);
+    return parse_and_checksum();
 }
 
 // mixed：@@MIXED_SLEEP_PCT@@% 的任务带挂起。
 conc fn curve_mixed(with_sleep: bool) -> i64 {
     if with_sleep {
-        std.time.time_sleep_us(@@SUSPEND_US@@)
+        std.time.time_sleep_us(@@SUSPEND_US@@);
     }
-    return parse_and_checksum()
+    return parse_and_checksum();
 }
 
 // degrade：@@DEGRADE_PCT@@% 的任务是长忙循环。
 // 忙循环而不是睡眠 —— 睡会走定时器，那是 suspend 那条路。
 // 这里要的是「占住 Worker 的计算」，正是预算与停滞判定该管的东西。
 conc fn curve_degrade(spin_rounds: i64) -> i64 {
-    i64 acc = 1
-    i64 r = 0
+    i64 acc = 1;
+    i64 r = 0;
     while r < spin_rounds {
-        acc = ((acc % 1073741824) * 1103515245 + 12345) % 9223372036854775807
-        r = r + 1
+        acc = ((acc % 1073741824) * 1103515245 + 12345) % 9223372036854775807;
+        r = r + 1;
     }
-    return acc ^ parse_and_checksum()
+    return acc ^ parse_and_checksum();
 }
 
 // ---------- 分位数 ----------
@@ -72,26 +72,26 @@ conc fn curve_degrade(spin_rounds: i64) -> i64 {
 // 只取 4 个分位数，所以不做全排序 —— O(n) 扫 4 次，
 // 而 n^2 的选择排序在这里虽然也不贵，但没必要。
 fn select_kth(a: i64[], n: i64, idx: i64) -> i64 {
-    i64 v = a[0]
-    i64 i = 0
+    i64 v = a[0];
+    i64 i = 0;
     while i < n {
         if a[i] < v {
-            v = a[i]
+            v = a[i];
         }
-        i = i + 1
+        i = i + 1;
     }
-    i64 seen = 0
-    i64 j = 0
+    i64 seen = 0;
+    i64 j = 0;
     while j < n {
         if a[j] == v {
-            seen = seen + 1
+            seen = seen + 1;
             if seen == idx {
-                return v
+                return v;
             }
         }
         j = j + 1;
     }
-    return v
+    return v;
 }
 
 // ---------- 主流程 ----------
@@ -101,23 +101,23 @@ fn main() -> i32 {
     i64 conc = @@CONC@@;
 
     // 预热：首轮含线程首次调度与缓存冷启动，不计入
-    Handle hw = spawn curve_light()
-    i64 vw = hw.await
+    Handle hw = spawn curve_light();
+    i64 vw = hw.await;
     if vw != 13356499072 {
-        std.io.println("BENCH_ERROR warmup checksum ", vw)
-        return 1
+        std.io.println("BENCH_ERROR warmup checksum ", vw);
+        return 1;
     }
 
     // 延迟样本：单事务客户端侧延迟（提交 -> 拿到结果），含调度
-    i64 lat[@@MAX_SAMPLES@@]
-    i64 n = 0
-    i64 checksum = 0
+    i64 lat[@@MAX_SAMPLES@@];
+    i64 n = 0;
+    i64 checksum = 0;
 
-    i64 issued = 0
+    i64 issued = 0;
     i64 done = 0;
 
     // 在途句柄窗口：最多 conc 个
-    Handle in_flight[@@MAX_CONC@@]
+    Handle in_flight[@@MAX_CONC@@];
     i64 submit_ts[@@MAX_CONC@@];
     i64 submitted[@@MAX_CONC@@];
 
@@ -135,8 +135,12 @@ fn main() -> i32 {
     // 所以 P99 反映的是真实单事务延迟，而不是批耗时。
     while done < total {
         // 1) 填窗口
-        i64 j = 0
-        while j < conc && issued < total {
+        i64 j = 0;
+        while j < conc {
+            // Kaula 不支持 &&，用嵌套 if 表达「两条件同时成立」。
+            if issued >= total {
+                break;
+            }
             i64 ts = std.time.time_now_ns();
             @@SUBMIT@@;
             submit_ts[j] = ts;
@@ -163,7 +167,7 @@ fn main() -> i32 {
     i64 elapsed = std.time.time_now_ns() - t0;
 
     // 分位数在计时区之外算：排序本身不该污染被测量的时间
-    i64 p50 = 0
+    i64 p50 = 0;
     i64 p95 = 0;
     i64 p99 = 0;
     i64 mx = 0;
@@ -174,15 +178,8 @@ fn main() -> i32 {
         mx = select_kth(lat, n, n);
     }
 
-    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed,
-                   " elapsed_ns=", elapsed,
-                   " p50=", p50,
-                   " p95=", p95,
-                   " p99=", p99,
-                   " max=", mx,
-                   " n=", n,
-                   " conc=", conc,
-                   " issued=", issued,
-                   " checksum=", checksum)
+    // 输出固定格式的一行，run_bench.py 按 key=value 解析。
+    // 写成单行：多行调用与自动补分号的脚本会互相干扰。
+    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed, " elapsed_ns=", elapsed, " p50=", p50, " p95=", p95, " p99=", p99, " max=", mx, " n=", n, " conc=", conc, " checksum=", checksum);
     return 0;
 }
