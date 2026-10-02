@@ -81,8 +81,22 @@ static uint64_t worker_rand(KaulaWorker* w) {
 
 int kaula_conc_worker_post(KaulaWorker* w, KaulaTask* task) {
     if (w == NULL) {
-        /* 无主：进全局注入队列 */
-        if (kaula_scheduler_inject_push(task)) return 0;
+        /*
+         * 无主：进全局注入队列。
+         *
+         * 必须唤醒一个 Worker —— 否则正在 park 的 Worker 只能等自己
+         * 1ms 的 park 超时到期。挂起往返要走两次注入队列（Worker→Driver
+         * 的结果回投、Driver→Worker 的提交），两次各赔 1ms，
+         * 实测就是那残余的约 2ms。
+         *
+         * worker_park 里那个 1ms 超时的注释写着它是「漏唤醒的自愈」——
+         * 注入队列这条路不是漏唤醒，是**根本没有唤醒**，于是自愈机制
+         * 退化成了唯一唤醒机制。
+         */
+        if (kaula_scheduler_inject_push(task)) {
+            kaula_scheduler_notify_one();
+            return 0;
+        }
         return KAULA_ERR_WOULD_BLOCK;
     }
 
