@@ -363,6 +363,22 @@ int kaula_handle_error(KaulaHandle h) {
  */
 
 /* 核心：等完成后把结果拷进调用者的缓冲区 */
+/*
+ * 上一次 await 的服务时间。
+ *
+ * 定义在 task.c 而不是 worker.c（那里有 kaula_conc_tls_io_result），
+ * 因为它属于 await 路径 —— 与它记的量同生命周期。
+ */
+_Thread_local uint64_t kaula_conc_tls_last_latency_ns = 0;
+
+/* Task 的服务时间；打点缺失或时钟倒流时返回 0 —— 不编造数值 */
+uint64_t kaula_task_latency_ns(const KaulaTask* task) {
+    if (task == NULL) return 0;
+    uint64_t c = task->complete_ns;
+    uint64_t s = task->submit_ns;
+    return (c > s) ? (c - s) : 0;
+}
+
 static int await_copy_out(KaulaHandle h, void* dst, size_t dst_size, uint64_t timeout_ns) {
     if (h.task == NULL || dst == NULL) return 0;
 
@@ -376,11 +392,36 @@ static int await_copy_out(KaulaHandle h, void* dst, size_t dst_size, uint64_t ti
         if (src != NULL && dst_size > 0) {
             memcpy(dst, src, dst_size);
         }
+        /*
+         * 把本次 await 的服务时间留在 TLS 里，供调用方随后取用。
+         *
+         * 走 TLS 而不给 await 加出参：codegen 只生成
+         * `kaula_handle_await_into(h, &x, sizeof(x))` 这一种形态，
+         * 改出参会牵动所有 await 的生成与 ABI。一个无参访问器就够
+         * 基准与诊断用了。
+         */
+        kaula_conc_tls_last_latency_ns = kaula_task_latency_ns(h.task);
+    } else {
+        kaula_conc_tls_last_latency_ns = 0;
     }
 
     /* 读完了，归还句柄持有的那个 pin */
     kaula_handle_release(h);
     return ok;
+}
+
+/*
+ * kaula_conc_last_latency_ns —— 上一次 await 的服务时间（纳秒）。
+ *
+ * 与「谁先取到结果」无关，所以延迟统计该用它：并发窗口里按调用方
+ * 掐表量到的是排队 + 顺序取回，与服务时间能差两个数量级。
+ *
+ * 编译器生成的 await 形态不带出参，基准与诊断代码经
+ *   extern fn kaula_conc_last_latency_ns() -> u64
+ * 取值（extern 形参里放不了 Handle，无参就没这个问题）。
+ */
+uint64_t kaula_conc_last_latency_ns(void) {
+    return kaula_conc_tls_last_latency_ns;
 }
 
 /*
