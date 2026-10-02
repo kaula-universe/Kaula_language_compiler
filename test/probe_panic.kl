@@ -1,5 +1,17 @@
 import std.io
+import std.string
 import std.panic
+
+# panic 捕获路径探针。
+#
+# 原写法用 panic_try/panic_leave：setjmp 帧注册在 panic_try 自身的 C 栈帧上，
+# 函数返回后该帧即失效。此后若 panic() 触发 longjmp 回跳就是未定义行为，
+# Windows x64 的栈 cookie 校验会直接 failfast —— 实测退出码 0xC0000028
+# (STATUS_STACK_COOKIE_CHECK_FAILURE)，稳定复现。
+#
+# std/panic/panic.h:19 与 docs/tutorials/error-and-panic.md:220 都写明
+# panic_protect 是唯一推荐入口：setjmp 帧在回调执行期间始终在栈上，
+# longjmp 回跳合法。test/error_handling.kl 已验证该路径可正常工作。
 
 fn risky(flag: i32) {
     if flag == 1 {
@@ -8,16 +20,16 @@ fn risky(flag: i32) {
     std.io.println("risky done")
 }
 
+fn risky_body(ctx: void()) {
+    risky(1)
+}
+
 fn main() {
     PanicFrame f
     i32 caught = 0
-    if std.panic.panic_try(&f) == 0 {
-        risky(1)
-        std.panic.panic_leave(&f)
-    } else {
+    if std.panic.panic_protect(&f, &risky_body, null) == 1 {
         caught = 1
-        std.io.println("caught: ", std.panic.panic_message())
-        std.panic.panic_leave(&f)
+        std.io.println("caught: ", std.string.string_create(std.panic.panic_message()))
     }
     std.io.println("recovered, caught=", caught)
 }
