@@ -103,9 +103,9 @@ def clang_rt_lib_dir():
 
 def windows_sdk_lib_dirs():
     """
-    找到 Windows SDK 的 um 库目录（含 ws2_32.lib）。
+    找到 Windows SDK 的 um 库目录（含 winmm.lib）。
 
-    内核的 IO 后端在 Windows 上用 winsock2 的 recv/send，需要 ws2_32.lib。
+    内核在 Windows 上调 timeBeginPeriod 抬系统时钟分辨率，需要 winmm.lib。
     MSVC 会自动定位，但 clang 直接驱动链接器时不会，所以显式给 -L。
 
     注意：这里用正斜杠路径。Windows 路径里的反斜杠在 docstring 中
@@ -138,11 +138,13 @@ def link_flags():
         flags = []
         for d in windows_sdk_lib_dirs():
             flags += ["-L" + d]
-        # ws2_32: winsock2 的 recv/send（内核 IO 原语走它）
-        # winmm:   timeBeginPeriod/timeEndPeriod，用于抬高系统时钟分辨率。
-        #          不抬的话默认 15.625ms 的时钟粒度会把所有亚毫秒超时
-        #          抬成一个节拍，测试里的定时精度全部失真。
-        flags += ["-lws2_32", "-lwinmm"]
+        # winmm: timeBeginPeriod/timeEndPeriod，用于抬高系统时钟分辨率。
+        #        不抬的话默认 15.625ms 的时钟粒度会把所有亚毫秒超时
+        #        抬成一个节拍，测试里的定时精度全部失真。
+        #
+        # 这里没有 ws2_32：内核的 IO 执行用 read/write，不是 recv/send，
+        # 所以不再需要 socket 库。测试用例也改用 pipe 造可读事件。
+        flags += ["-lwinmm"]
         return flags
     return ["-pthread"]
 

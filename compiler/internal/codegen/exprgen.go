@@ -956,7 +956,7 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	 * 这就是设计说明书 §2.3「conc fn 能当 fn 用」的落地：
 	 * 隐式、零心智、调用方无需改写。
 	 */
-	if emitter := LookupConcFunc(cFuncName); emitter != nil {
+	if emitter := eg.codegen.LookupConcFunc(cFuncName); emitter != nil {
 		cFuncName = emitter.ShimFn()
 		codeUsesConcurrency = true
 	}
@@ -3953,21 +3953,37 @@ func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) stri
 	return inner
 }
 
-// concFuncRegistry 记录 conc fn 的 C 侧签名，供 spawn 生成时查参数名。
+// concFuncs 记录本编译单元内 conc fn 的 C 侧签名，供 spawn 生成时查参数名。
 //
 // 为什么要单独记：spawn 的语法是 `spawn f(a, b)`，只给了函数名，
 // 不知道 f 的形参叫什么。而 Frame 的字段名就是形参名 ——
 // 写 arg_0 与 Frame 定义对不上，编译必然失败（这是原实现的 bug）。
-var concFuncRegistry = map[string]*conc.Emitter{}
+//
+// 它是 CodeGenerator 的字段而不是包级全局：一次编译会为每个 local import
+// 建独立的 CodeGenerator（见 kaulac main.go 的 localCG），包级 map 会让
+// A 文件的 conc fn 在编译 B 文件时仍可见。后果是 B 里的 spawn 查到 A 的
+// 同名签名，Frame 字段名与实际调用的函数对不上 —— 而 Frame 字段名就是
+// 形参名，写错不报 C 错误，只是往错误的字段里塞实参，await 恒取零值。
+//
+// 查不到时 generateSpawnExpression 返回明确的错误 handle 而不是猜，
+// 那才是这个表该有的兜底：作用域内的东西看不见就说看不见。
+//
+// 与 handleResultTypes 同一层：两者都只描述"本单元生成过什么"。
+func (cg *CodeGenerator) concFuncs() map[string]*conc.Emitter {
+	if cg.concFuncMap == nil {
+		cg.concFuncMap = make(map[string]*conc.Emitter)
+	}
+	return cg.concFuncMap
+}
 
-// RegisterConcFunc 在生成 conc fn 时登记其签名
-func RegisterConcFunc(e *conc.Emitter) {
-	concFuncRegistry[e.CName] = e
+// RegisterConcFunc 在生成 conc fn 时登记其签名（仅本编译单元可见）
+func (cg *CodeGenerator) RegisterConcFunc(e *conc.Emitter) {
+	cg.concFuncs()[e.CName] = e
 }
 
 // LookupConcFunc 按 C 名查 conc fn 的签名；不存在返回 nil
-func LookupConcFunc(cName string) *conc.Emitter {
-	return concFuncRegistry[cName]
+func (cg *CodeGenerator) LookupConcFunc(cName string) *conc.Emitter {
+	return cg.concFuncs()[cName]
 }
 
 // codeUsesConcurrency 记录本 TU 是否用到并发内核。
@@ -4069,10 +4085,12 @@ func (eg *ExpressionGenerator) generateSpawnExpression(e *ast.SpawnExpression) s
 	}
 
 	cName := eg.codegen.UserFuncCName(ident.Name)
-	emitter := LookupConcFunc(cName)
+	emitter := eg.codegen.LookupConcFunc(cName)
 	if emitter == nil {
-		// 没登记 = 不是 conc fn（或定义在别处）。
-		// 返回明确的错误 handle，而不是生成必然编译不过的 C。
+		// 没登记 = 不是 conc fn（或定义在另一个编译单元）。
+		// 返回明确的错误 handle，而不是猜一份签名：
+		// spawn 按 Frame 的字段名（形参名）写实参，猜错不报 C 错误，
+		// 只是把实参塞进错误的字段，await 恒取零值。
 		return fmt.Sprintf(
 			"/* spawn: '%s' 不是 conc fn */ kaula_handle_error_result(KAULA_ERR_SPAWN_TARGET)", ident.Name)
 	}
@@ -4101,7 +4119,7 @@ func (cg *CodeGenerator) noteHandleResultType(varName string, e *ast.SpawnExpres
 	if !ok {
 		return
 	}
-	emitter := LookupConcFunc(cg.UserFuncCName(ident.Name))
+	emitter := cg.LookupConcFunc(cg.UserFuncCName(ident.Name))
 	if emitter == nil {
 		return
 	}
@@ -4126,20 +4144,31 @@ func (eg *ExpressionGenerator) generateAwaitExpression(e *ast.AwaitExpression) s
 	handleCode := eg.GenerateExpression(e.Handle)
 
 	/*
-	 * 表达式位置的 await：必须解引用。
+	 * 表达式位置的 await：拷进临时变量再取值，绝不解引用裸指针。
 	 *
-	 * kaula_handle_await 返回的是「结果的地址」（统一约定，见
-	 * kaula_conc_task.c）。不解引用就是把地址当数值 ——
-	 * 一个像指针的垃圾数，而且它不崩，只是答案错。
+	 * kaula_handle_await 返回的是「结果所在内存的地址」，那个地址指向
+	 * Task 的 Frame 字段（见 kaula_conc_task.c:302）。Frame 在任务完成时
+	 * 就随任务 retire，地址的有效期只到「epoch 判定没人再读」为止。
+	 * 所以 `*(T*)kaula_handle_await(h)` 是解引用一个随时会悬垂的地址 ——
+	 * 表现为安静地返回一个已回收 Frame 里残留的旧值，不崩，只是答案错。
+	 * 这正是 `h1.await + h2.await + h3.await` 曾读出垃圾的原因。
 	 *
-	 * 目标类型从 Handle 变量名查回来（声明 `Handle h = spawn f()`
-	 * 时登记）。查不到就退回裸地址，并在注释里说明风险 ——
-	 * 宁可让人看见注释，也不要静默给错数。
+	 * 正确做法与声明位置（stmtgen.go 的 `i64 x = h.await`）一致：
+	 * 走 kaula_handle_await_into，把结果 memcpy 到一个大小明确、类型正确、
+	 * 且确定存活到本次表达式结束的位置。内核不猜类型，调用点给。
+	 *
+	 * 用 GNU 语句表达式 `({ ... })` 包住，与 closure.go 的既有写法一致：
+	 * 语句表达式的值是最后一条语句的值，因此可以安全地嵌在表达式里。
 	 */
 	if ident, ok := e.Handle.(*ast.Identifier); ok {
 		if cType, known := eg.codegen.handleResultTypes[ident.Name]; known && cType != "" && cType != "void" {
-			return fmt.Sprintf("*(%s*)kaula_handle_await(%s)", cType, handleCode)
+			eg.codegen.lambdaCounter++
+			return fmt.Sprintf("({ %[1]s __t; kaula_handle_await_into(%[2]s, &__t, sizeof(%[1]s)); __t; })",
+				cType, handleCode)
 		}
 	}
-	return fmt.Sprintf("/* await 结果类型未知：未解引用 */ kaula_handle_await(%s)", handleCode)
+	// 结果类型未知：无法确定拷贝大小，不能瞎拷。显式落成编译错误，
+	// 而不是静默返回一个可能悬垂的地址。
+	return fmt.Sprintf("((%s)kaula_handle_await(%s) /* 错误：await 的结果类型未知，无法安全取值；请改为声明式 `T x = h.await` */)",
+		eg.codegen.typeGenerator.convertType("i64", false), handleCode)
 }

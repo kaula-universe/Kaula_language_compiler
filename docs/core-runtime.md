@@ -23,7 +23,7 @@ Kaula 是一个**语言级并发执行内核**：用户只写 `conc fn`，编译
 
 ```kaula
 conc fn fetch(url: string) -> string {
-    std.net.net_connect(url)     // 可插桩 IO → suspend 点
+    std.net.net_recv(url)        // 可插桩 IO → suspend 点
     return parse(url)
 }
 
@@ -106,10 +106,8 @@ Frame 字段一律用真实 C 类型，不用 `void*` 占位。`void*` 能与任
 
 | Kaula 调用 | `KaulaIoType` | 参数 |
 |---|---|---|
-| `net_recv` / `fs_read` | `KAULA_IO_READ` | `(fd, buf, len)` |
-| `net_send` / `net_write` / `fs_write` | `KAULA_IO_WRITE` | `(fd, buf, len)` |
-| `net_connect` | `KAULA_IO_CONNECT` | `(fd)` |
-| `net_accept` | `KAULA_IO_ACCEPT` | `(fd)` |
+| `fs_read` | `KAULA_IO_READ` | `(fd, buf, len)` |
+| `fs_write` | `KAULA_IO_WRITE` | `(fd, buf, len)` |
 | `time_sleep` / `time_after` | `KAULA_IO_SLEEP` | `(ms)`，内核按纳秒算 |
 
 匹配只看函数名的最后一段。这样 `std.time.time_sleep` 与 `time_sleep` 命中同一项——
@@ -118,6 +116,29 @@ Frame 字段一律用真实 C 类型，不用 `void*` 占位。`void*` 能与任
 
 映射不上的函数**保守退回普通调用**，而不是猜一个操作码让内核去执行错的操作。
 这是 I1「分类错了只降吞吐」的落点。
+
+### IO 语义是 fd，不是 socket
+
+内核的 IO 执行用 `read` / `write`，不是 `recv` / `send`：
+
+```c
+case KAULA_IO_READ:  return (int)read(req->fd, req->buf, req->buf_len);
+case KAULA_IO_WRITE: return (int)write(req->fd, req->buf, req->buf_len);
+```
+
+覆盖面上 `read`/`write` 严格更宽 —— POSIX 里 socket 就是 fd，所以网络照样走
+同一条路，而普通文件与 pipe 只有 `read`/`write` 能读。原来的 `recv`/`send` 是
+反过来：网络能走，文件与 pipe 一进来就 `ENOTSOCK`。
+
+代价是内核不再需要 socket 头与库：`winsock2.h`（必须排在 `windows.h` 之前，
+是个顺序陷阱）与 `ws2_32.lib` 都不再是构建前提。
+
+`net_*` 一律不在插桩表里。`net_recv` / `net_send` 在 POSIX 上本来就能靠
+`KAULA_IO_READ` / `WRITE` 走通，但登记它们会让 Windows 上同一段代码静默退化
+（SOCKET 不是 CRT fd，`_read` 对它无效）；`net_connect` / `net_accept` 更是
+socket 专属，`read`/`write` 表达不了。它们统一退回普通阻塞调用：行为正确，
+只是那个 Worker 会真的卡住。这比登记成操作码再让内核回 `ENOSYS` 好 ——
+后者是把「退化成阻塞」换成了「静默给出操作失败」。
 
 ### I4 的具体形态
 
@@ -298,6 +319,10 @@ spawn 居然成功了」，而已经 `join` 过的 Worker 不会被重建，任�
 事件、时钟、环境变量。IO 复用后端按平台选 epoll(ET) / kqueue / IOCP，
 收敛成 4 个操作：`add` / `del` / `wait` / `next_event`。
 
+内核对 socket 没有依赖：IO 执行用 `read`/`write`（fd 语义），非阻塞设置也
+只在调用方已引入 socket 头时才走 `ioctlsocket`。所以 `winsock2.h` 与
+`ws2_32.lib` 都不是内核的构建前提（详见 §1.4「IO 语义是 fd，不是 socket」）。
+
 IO 后端上有一个容易踩的坑：**唤醒通道用独立的哨兵 fd 标识**，
 不用「读出 `ev.data` 与哨兵比较」以外的方式。早期实现把 Task 指针塞进
 `ev.data.ptr`，而唤醒 fd 又用 `ev.data.fd`，同一字段被两种语义混用；
@@ -318,13 +343,13 @@ python test/concurrency/run_tests.py --only worker   # 单跑一个
 python test/concurrency/run_tests.py --asan          # AddressSanitizer
 ```
 
-1248 个断言，7 个用例文件：
+1245 个断言，7 个用例文件：
 
 | 用例 | 断言数 | 覆盖 |
 |---|---|---|
 | `test_worker.c` | 476 | 预算、自适应、窃取、状态机 |
 | `test_task.c` | 436 | Task 生命周期、await、退休 |
-| `test_iodriver.c` | 159 | 挂起表、定时器、阻塞车道伸缩 |
+| `test_iodriver.c` | 156 | 挂起表、定时器、IO 分派、阻塞车道伸缩 |
 | `test_mpsc_queue.c` | 107 | Vyukov 队列并发正确性 |
 | `test_epoch.c` | 27 | epoch 回收 |
 | `test_platform.c` | 21 | 平台抽象 |
@@ -506,7 +531,7 @@ slab 位图用 `KMM_V4_ALIGN64`（`__attribute__((aligned(8)))`）显式对齐�
 | **loop / branch 内的挂起点** | 状态机按**顶层语句**切分。循环体内的挂起不会被正确切分 | 已知边界，测试未覆盖 |
 | **Handle 的 drop 语义** | 句柄持有 pin。句柄被丢弃且从不 `await` 时那个 pin 不归还，会挡回收到 shutdown | 保守方向：泄漏可观测、悬垂不可观测 |
 | **表达式位置的 await** | `h1.await + h2.await` 拿不到目标类型，只能靠 `Handle` 变量名查表解引用；查不到时退回裸地址并留注释 | 声明位置（`i64 x = h.await`）走安全的 `await_into` |
-| **Windows IOCP 后端** | 当前是简化实现，socket 路径不可用 | 测试已跳过 |
+| **Windows IOCP 后端** | 当前是简化实现：只处理唤醒包，未投递 overlapped 读写。补齐后 Windows 才能做 IO 复用 | 测试已跳过 |
 | **`concFuncRegistry`** | 包级全局 map，多文件编译会互相污染 | 应改为 per-CodeGenerator |
 | **形式化验证** | 只有 ASan 与 C 断言覆盖 | TSan / loom / TLA+ 未做 |
 

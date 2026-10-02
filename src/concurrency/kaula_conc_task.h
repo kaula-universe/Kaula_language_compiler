@@ -59,6 +59,7 @@ typedef enum {
     KAULA_ERR_SHUTDOWN      = 3,   /* 运行时不接受新任务 */
     KAULA_ERR_CANCELLED     = 4,   /* 任务已被取消 */
     KAULA_ERR_TIMEOUT       = 5,   /* await 超时 */
+    KAULA_ERR_IO            = 6,   /* IO 投递/注册失败（非内存原因） */
 } KaulaError;
 
 /* ========== 任务状态 ========== */
@@ -97,21 +98,49 @@ typedef KaulaResumeResult (*KaulaResumeFn)(void* frame);
 
 /* ========== IO 请求（文档 §6.2） ========== */
 
+/*
+ * IO 请求类型。语义是「fd」而不是「socket」。
+ *
+ * 读写一律走 read/write：这既覆盖普通文件与 pipe，也在 POSIX 上覆盖
+ * socket（socket 就是 fd）。内核因此不需要 socket 头、不需要 winsock、
+ * 不需要 ws2_32 —— 见 kaula_conc_io_backend.c 的 do_io。
+ *
+ * KAULA_IO_CONNECT / KAULA_IO_ACCEPT 是 socket 专属操作（accept 与
+ * connect 无法用 read/write 表达），内核不实现，保留编号只为让旧代码
+ * 拿到明确的 ENOSYS 而不是落进"未知类型"。编译器也不再把 net_connect /
+ * net_accept 映射到内核 —— 那些调用退回普通阻塞调用，行为正确。
+ */
 typedef enum {
     KAULA_IO_READ    = 1,
     KAULA_IO_WRITE   = 2,
-    KAULA_IO_CONNECT = 3,
-    KAULA_IO_ACCEPT  = 4,
+    KAULA_IO_CONNECT = 3,   /* 保留：内核不实现 */
+    KAULA_IO_ACCEPT  = 4,   /* 保留：内核不实现 */
     KAULA_IO_SLEEP   = 5,   /* 定时器 */
-
-    /* 别名：网络语义，与读写同路径 */
-    KAULA_IO_RECV    = 6,
-    KAULA_IO_SEND    = 7,
 } KaulaIoType;
+
+/*
+ * fd 的宽度按平台实际需要定，不强行统一。
+ *
+ * POSIX 上就是进程 fd 表里的下标，int 足够。
+ * Windows 上要装的是 HANDLE —— 它是指针宽的，用 int 存会把高位
+ * 截掉，拿到一个看似合法的野指针。所以那边用 intptr_t。
+ *
+ * 注意 Windows 分支拿到的是 CRT fd（fopen/_pipe 的产物），不是裸
+ * HANDLE：_read/_write 与 _get_osfhandle 都以 CRT fd 为入口，
+ * 这是三者之间唯一自洽的口径。
+ *
+ * 编译器生成的代码写 `(KaulaIoFd)(...)`，不写死 int ——
+ * 见 compiler/internal/codegen/conc_io_rewrite.go。
+ */
+#if KAULA_PLATFORM_WINDOWS
+typedef intptr_t KaulaIoFd;
+#else
+typedef int KaulaIoFd;
+#endif
 
 typedef struct {
     KaulaIoType type;
-    int         fd;
+    KaulaIoFd   fd;
     void*       buf;
     size_t      buf_len;
     uint64_t    timeout_ns;
@@ -125,6 +154,22 @@ struct KaulaResumeResult {
     void*             block_fn;     /* BLOCKED 时的阻塞函数 */
     void*             block_arg;    /* BLOCKED 时的阻塞参数 */
 };
+
+/* ========== 复合语句恢复深度 ========== */
+
+/*
+ * KAULA_CONC_SUB_DEPTH 是「复合语句内恢复槽位」的层数上限。
+ *
+ * 为什么需要它：resume 的 pc 只能表示「顶层语句切分到哪儿了」。
+ * 循环体/分支体里的挂起点落在顶层切分之外，pc 表达不了 ——
+ * 症状是恢复后重新执行整个循环体（副作用翻倍），或者更糟：
+ * 生成不出能编译的 C。这类错误不崩，只是答案错。
+ *
+ * 所以对「体内部含挂起点」的复合语句，编译器给每一层开一个槽位计数器，
+ * 恢复时按槽位跳过本轮已执行的语句。层数必须编译期定死（I3：一切有界），
+ * 超出由编译器报诊断 —— 不静默写坏 Frame。
+ */
+#define KAULA_CONC_SUB_DEPTH 8
 
 /* ========== 任务标志 ========== */
 
@@ -170,6 +215,16 @@ struct KaulaTask {
 
     /* ---- 取消（文档 §3.3 Handle API） ---- */
     _Atomic(int)        cancelled;
+
+    /*
+     * pin_refs：本任务当前被多少个「尚未归还的句柄」持有 pin。
+     *
+     * 计数放在 Task 而不是句柄结构里，是为了让 kaula_handle_release 幂等：
+     * 编译器会在 await_into 之后再发一次（作用域出口），句柄是按值传递的，
+     * 那次调用看不到第一次已经把标志清掉。放在共享计数上，第二次会发现
+     * 计数已归零并补回去，不会把 epoch pin 多放一次。
+     */
+    _Atomic(int)        pin_refs;
 
     /* ---- 完成通知 ---- */
     kaula_p_event       done_event;   /* await 等待此事件 */
@@ -294,5 +349,28 @@ int         kaula_handle_try_await_into(KaulaHandle h, void* dst, size_t dst_siz
                                         uint64_t timeout_ns);
 void        kaula_handle_cancel(KaulaHandle h);
 int         kaula_handle_error(KaulaHandle h);
+
+/*
+ * 句柄的 drop 语义：归还它持有的那一个 epoch pin。
+ *
+ * 为什么必须有：pin 是在 kaula_handle_from_task（也就是 spawn 返回那一刻）
+ * 拿的，挡的是「任务已完成并被 retire，而调用方还没来得及 await」那个窗口。
+ * 代价是句柄**从不** await 时那个 pin 永远不还，会一直挡住回收直到
+ * shutdown —— 内存峰值被拖到进程结束。
+ *
+ * 归还点就是「句柄不再可能被读」的时刻，两个：
+ *   - await_into 读完（声明位置，编译器走这条）
+ *   - 作用域出口（编译器为每个 Handle 局部量发一次本调用）
+ *
+ * 幂等：编译器在 await_into 之后再发一次是正常的（作用域出口那一发），
+ * 第二次会发现计数已归零并补回，不会把 pin 多放一次。多放一次就是提前
+ * 回收，那是悬垂 —— 比泄漏危险得多，所以这里刻意做成可重复调用的。
+ *
+ * 漏发不是问题：pin 不还 = 泄漏，可观测；pin 多还 = 悬垂，不可观测。
+ */
+void        kaula_handle_release(KaulaHandle h);
+
+/* 当前还欠多少个 epoch pin（未归还的句柄数）；测试与诊断用 */
+int         kaula_handle_pin_debt(KaulaHandle h);
 
 #endif /* KAULA_CONC_TASK_H */

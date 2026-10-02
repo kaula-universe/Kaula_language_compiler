@@ -1,0 +1,98 @@
+// P0 端到端测试：挂起点在复合语句体内部
+//
+// 覆盖 5 种恢复场景：
+//   1. while 体内挂起 —— 循环变量跨挂起存活并正确推进
+//   2. spawn + await 路径（经内核调度，不是 coercion shim）
+//   3. if/else 两个分支各有挂起点 —— 恢复时不能重算条件走错分支
+//   4. break / continue 与挂起点共存
+//   5. 嵌套 while —— 两层槽位各自独立
+//
+// 每例都断言**精确值**，而不是「没崩」。恢复位置错了不会崩，
+// 只会安静地把副作用做两遍或者少做几轮 —— 那种 bug 只有断言值才抓得住。
+
+import std.io
+import std.time
+
+// ---------- 1. while 体内挂起 ----------
+
+conc fn loop_sum(i64 n) -> i64 {
+    i64 total = 0
+    i64 i = 0
+    while i < n {
+        std.time.time_sleep(1)
+        total = total + i
+        i = i + 1
+    }
+    return total
+}
+
+// ---------- 5. 嵌套 while ----------
+
+conc fn nested_sum(i64 n) -> i64 {
+    i64 total = 0
+    i64 i = 0
+    while i < n {
+        i64 j = 0
+        while j < 2 {
+            std.time.time_sleep(1)
+            total = total + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return total
+}
+
+// ---------- 3. if/else 分支内挂起 ----------
+
+// 返回 10*n：偶数走 then 分支（挂起一次），奇数走 else 分支（挂起两次）
+conc fn branch_pick(i64 n) -> i64 {
+    i64 acc = 0
+    if n % 2 == 0 {
+        std.time.time_sleep(1)
+        acc = 5
+    } else {
+        std.time.time_sleep(1)
+        acc = acc + 1
+        std.time.time_sleep(1)
+        acc = acc + 1
+    }
+    return acc * n
+}
+
+// ---------- 4. break / continue 与挂起点共存 ----------
+
+conc fn loop_with_jumps(i64 n) -> i64 {
+    i64 total = 0
+    i64 i = 0
+    while true {
+        std.time.time_sleep(1)
+        if i >= n {
+            break
+        }
+        if i % 2 == 0 {
+            i = i + 1
+            continue
+        }
+        total = total + i
+        i = i + 1
+    }
+    return total
+}
+
+fn main() -> i32 {
+    // 顺序调用（coercion shim）：就地驱动 resume
+    std.io.println("loop_sum(4) = ", loop_sum(4))
+    std.io.println("nested_sum(3) = ", nested_sum(3))
+    std.io.println("branch_pick(4) = ", branch_pick(4))
+    std.io.println("branch_pick(5) = ", branch_pick(5))
+    std.io.println("loop_with_jumps(6) = ", loop_with_jumps(6))
+
+    // spawn + await 路径：经内核调度（Worker 执行）而不是 shim
+    Handle h = spawn loop_sum(4)
+    i64 spawned = h.await
+    std.io.println("spawned loop_sum(4) = ", spawned)
+
+    std.io.println("loop ok")
+    return 0
+}

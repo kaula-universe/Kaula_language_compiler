@@ -134,6 +134,24 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 	b.WriteString("    /* 程序计数：0=入口，N=第 N 个 suspend 点之后，-1=已完成 */\n")
 	b.WriteString("    int             pc;\n")
 
+	/*
+	 * 复合语句内的恢复槽位。
+	 *
+	 * pc 只能表达「顶层语句切到哪儿」。循环体/分支体里的挂起点落在
+	 * 顶层切分之外 —— 没有 sub 就只能重新执行整个循环体，
+	 * 而重新执行不会报错，只是把副作用做两遍。
+	 *
+	 * sub[d] 是第 d 层复合语句「本轮已执行到第几个语句」。
+	 * 恢复时按它跳过已执行的语句，再继续往下走。
+	 * branch[d] 记 if 选了哪个分支 —— 条件不能重算，重算就可能走错分支。
+	 *
+	 * 不变量：离开某个复合语句时 sub[d] 必须回到 0。
+	 * 生成代码靠「每轮末尾写回 0」维持它，所以进入任一层时读到的都是 0。
+	 */
+	b.WriteString("    /* 复合语句内的恢复槽位与 if 分支选择 */\n")
+	b.WriteString("    int             sub[KAULA_CONC_SUB_DEPTH];\n")
+	b.WriteString("    int             branch[KAULA_CONC_SUB_DEPTH];\n")
+
 	// 参数：函数入口时写入，跨所有挂起点存活
 	if len(e.Params) > 0 {
 		b.WriteString("    /* 参数 */\n")
@@ -255,30 +273,31 @@ func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, segments []stri
 		b.WriteString(fmt.Sprintf("    case %d: {\n", pc))
 		if pc == 0 {
 			b.WriteString("        /* 入口：参数由 spawn 时写入 Frame */\n")
-			for _, p := range e.Params {
-				b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n", e.CTypeOfParamByName(p), p, p))
-			}
 		} else {
-			line, kind := 0, SuspendNone
+			kind := SuspendNone
 			if pc-1 < len(analysis.SuspendSites) {
-				line = analysis.SuspendSites[pc-1].Line
 				kind = analysis.SuspendSites[pc-1].Kind
 			}
-			b.WriteString(fmt.Sprintf("        /* 从第 %d 个挂起点恢复（源码行 %d，%s） */\n",
-				pc, line, kind))
-			/*
-			 * 活到本段的变量：参数 + 早于本段声明的局部。
-			 *
-			 * 参数每段都要重建 —— concSuspendReturn 在挂起前把参数写回了
-			 * Frame，而 resume 的栈帧是全新的，不重建就是读未初始化值。
-			 */
-			for _, p := range e.Params {
-				b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n", e.CTypeOfParamByName(p), p, p))
-			}
-			for _, v := range e.frameVarsLiveAt(analysis, pc) {
-				b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n",
-					e.FrameVarCType(v.Name), v.Name, v.Name))
-			}
+			// 行号只是注释：解析器不填表达式位置，它通常是 0。
+			// 真正决定恢复哪一批变量的是序号，不是这里打印的行号。
+			b.WriteString(fmt.Sprintf("        /* 从第 %d 个挂起点恢复（%s） */\n", pc, kind))
+		}
+		/*
+		 * 活到本段的变量：参数 + 早于本段声明的局部。
+		 *
+		 * 参数每段都要重建 —— 挂起前把参数写回了 Frame，
+		 * 而 resume 的栈帧是全新的，不重建就是读未初始化值。
+		 *
+		 * 局部变量同理，且**第 0 段也要**：守卫模式下第 0 段也可能被重入
+		 * （复合语句体内部的挂起会把 pc 留在 0 段），此时恢复点之后的
+		 * 循环变量只剩 Frame 里的那一份。
+		 */
+		for _, p := range e.Params {
+			b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n", e.CTypeOfParamByName(p), p, p))
+		}
+		for _, v := range e.frameVarsLiveAt(analysis, pc) {
+			b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n",
+				e.FrameVarCType(v.Name), v.Name, v.Name))
 		}
 
 		b.WriteString(seg)
@@ -302,23 +321,26 @@ func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, segments []stri
 }
 
 /*
- * frameVarsLiveAt 报告恢复到第 pc 段时，哪些跨 suspend 变量已经有值。
+ * frameVarsLiveAt 报告恢复到第 pc 段时，哪些跨 suspend 变量需要有恢复副本。
  *
- * 第 pc 段自己会声明的变量不在其中 —— 恢复它会与段内的声明重复定义。
- * 判据用声明行号：段号单调对应源码顺序，声明行早于该段起点即为已存活。
+ * 判据用遍历序号（见 SuspendSite.Ordinal）：变量声明在第 k 个挂起点之前，
+ * 就必须在第 k 个挂起点处已存在。
+ *
+ * 界取「本段最靠后的那个挂起点」：那一处是最早的恢复位置，必须恢复的变量最多。
+ * 守卫模式（RestoreAll）下界是 RestoreAll —— 段体的声明被降级成赋值，
+ * 对象统一由这里的恢复副本提供，少一个就编译不过。
  */
 func (e *Emitter) frameVarsLiveAt(analysis *BodyAnalysis, pc int) []VarInfo {
-	if pc <= 0 || len(analysis.FrameVars) == 0 {
+	if len(analysis.FrameVars) == 0 {
 		return nil
 	}
-	// 该段之前最后一个挂起点的源码行：早于它声明的变量一定已存活
-	cutoff := 0
-	if pc-1 < len(analysis.SuspendSites) {
-		cutoff = analysis.SuspendSites[pc-1].Line
+	bound := analysis.RestoreOrdinal(pc)
+	if bound < 0 {
+		return nil
 	}
 	var out []VarInfo
 	for _, v := range analysis.FrameVars {
-		if v.DeclLine < cutoff {
+		if analysis.LiveAt(v, bound) {
 			out = append(out, v)
 		}
 	}

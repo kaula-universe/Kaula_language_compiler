@@ -1354,6 +1354,18 @@ func (fg *FunctionGenerator) generateConcurrentFunction(stmt *ast.FunctionStatem
 	// 分析函数体：找挂起点与需要提升的变量
 	analysis := conc.AnalyzeBody(stmt.Body)
 
+	/*
+	 * 跨挂起点的所有权校验。
+	 *
+	 * Frame 让局部变量跨挂起点存活，而挂起意味着当前 Worker 被归还、
+	 * 任务可能跨线程恢复 —— 恢复后所有存活性判断都得重新成立。
+	 * 这里在生成任何 C 代码之前先校验一遍：确定有问题的用法直接报编译错误，
+	 * 而不是让它编过、跑起来安静地读到已移空的槽位。
+	 */
+	for _, issue := range conc.ValidateOwnership(stmt.Name, stmt.Body) {
+		fg.codegen.error(fmt.Sprintf("line %d: %s\n  建议: %s", issue.Line, issue.Message, issue.Hint))
+	}
+
 	// 构造 Emitter
 	cName := fg.codegen.UserFuncCName(stmt.Name)
 	if stmt.IsExported {
@@ -1408,7 +1420,7 @@ func (fg *FunctionGenerator) generateConcurrentFunction(stmt *ast.FunctionStatem
 	// 登记签名：spawn 生成时需要按形参名写 Frame 字段
 	// 同时固化形态判定：GenerateSpawn 可能先于 Generate 被调用
 	emitter.SetStateful(analysis.NeedsSuspend)
-	RegisterConcFunc(emitter)
+	fg.codegen.RegisterConcFunc(emitter)
 
 	// 函数体在 resume 上下文中重新生成（return 需要改写）
 	return fg.EmitResume(stmt, emitter, analysis)
@@ -1476,8 +1488,13 @@ func statementHasSuspend(s ast.Statement) bool {
 // concSuspendReturn 产出"保存状态并挂起返回"的 C 片段。
 //
 // idx 是即将挂起的段序号，同时作为 pc 的下一站。
+// subNext 是下一段起点的守卫槽位：跨段时恒为 0（段体从槽位 0 重新起跑）。
+//
+// 它只服务于「顶层语句两段式切分」。复合语句体内部的挂起必须就地发挂起返回
+// —— 外层这里的作用域看不到循环体/分支体里生成的 IO 请求局部量，
+// 强行引用就是 use of undeclared identifier（见 conc_io_rewrite.go）。
 func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx int,
-	analysis *conc.BodyAnalysis, ctypes map[string]string) string {
+	analysis *conc.BodyAnalysis, subNext int) string {
 
 	var b strings.Builder
 
@@ -1487,18 +1504,18 @@ func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx 
 	 * 必须写回 Frame 里每一个在下一段还要读的变量 —— 漏一个，
 	 * 恢复时那个局部就是未初始化值。这类 bug 不崩，只是静默算错。
 	 */
-	for _, p := range stmt.Params {
-		b.WriteString(fmt.Sprintf("    f->%s = %s;\n", p, p))
-	}
-	for _, v := range analysis.FrameVars {
-		if v.DeclLine >= analysis.SuspendSites[minInt(idx-1, len(analysis.SuspendSites)-1)].Line {
-			// 在本段（或更晚）才声明的，此刻还没有值
-			continue
+	bound := -1
+	if len(analysis.SuspendSites) > 0 {
+		k := idx - 1
+		if k >= len(analysis.SuspendSites) {
+			k = len(analysis.SuspendSites) - 1
 		}
-		b.WriteString(fmt.Sprintf("    f->%s = %s;\n", v.Name, v.Name))
+		bound = analysis.SuspendSites[k].Ordinal
 	}
+	b.WriteString(fg.codegen.concSaveLiveVars(bound))
 
 	b.WriteString(fmt.Sprintf("    f->pc = %d;\n", idx))
+	b.WriteString(fmt.Sprintf("    f->sub[0] = %d;\n", subNext))
 
 	/*
 	 * 把 IO 请求交给 Worker → IoDriver。
@@ -1529,6 +1546,8 @@ func minInt(a, b int) int {
 /*
  * concBodySegments 按挂起点把函数体切成若干段 C 代码。
  *
+ * == 顶层语句：两段式切分 ==
+ *
  * 每段末尾若含挂起调用，就紧跟一个"保存状态并返回 SUSPEND"的片段。
  * resume 跑到那里就把 Frame 写好并让出 Worker，恢复时从下一段继续。
  *
@@ -1540,39 +1559,208 @@ func minInt(a, b int) int {
  *   第二次 concIoResult —— 恢复后从 TLS 取结果，函数体从这里继续
  * 这就是"把一次调用劈成两半"：不劈的话，要么 Worker 原地阻塞在 IO 上
  * （违反 I4），要么恢复后拿不到结果。
+ *
+ * == 复合语句：整条只生成一次 ==
+ *
+ * 体内部含挂起点的 while / if / block 不能拆成两段 —— 它们不是「执行两次
+ * 同一段代码」，而是「恢复到循环体内部的某一处」。所以这类语句整条只生成
+ * 一次，恢复位置交给 Frame.sub[d] 的守卫槽位（见 conc_guard.go）。
+ *
+ * 一旦某段里出现了这样的复合语句，**整段**都进守卫模式：排在它之前的语句
+ * 在恢复时会被重新执行（`i64 i = 0` 再跑一遍就是循环从头数），必须同样被
+ * 槽位挡住。所以守卫与否是**整段**的属性，生成之前先分组、判定完再动手。
  */
 func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analysis *conc.BodyAnalysis) []string {
+	cg := fg.codegen
+	sg := cg.statementGenerator
+
 	if len(analysis.SuspendSites) == 0 {
-		return []string{fg.codegen.statementGenerator.generateStmtsWithLiveness(stmt.Body, nil)}
+		return []string{sg.generateStmtsWithLiveness(stmt.Body, nil)}
 	}
 
+	// 挂起返回需要知道此刻活跃的变量；内联挂起需要知道当前段号
+	cg.concAnalysis = analysis
+	cg.concParams = stmt.Params
+	defer func() {
+		cg.concAnalysis = nil
+		cg.concParams = nil
+		cg.concGuardDepth = -1
+		cg.concGuardSeq = 0
+		cg.concSegmentPC = 0
+		cg.concSlotAwaits = 0
+	}()
+
 	segments := make([]string, 0, len(analysis.SuspendSites)+1)
+	cutoffs := make([]int, 0, len(analysis.SuspendSites)+1)
 	var current strings.Builder
 
-	ctypes := fg.frameVarCTypes(analysis)
+	// maxOrdinal：本段内最靠后的挂起点序号 —— Frame 变量恢复的界
+	maxOrdinal := -1
 
-	for _, s := range stmt.Body {
-		if s == nil {
+	// finishSegment 收束一段（不动守卫状态：守卫是组的属性，不是段的属性）
+	finishSegment := func() {
+		var bound int
+		if cg.concGuardActive() {
+			/*
+			 * 守卫模式：恢复副本覆盖全部跨 suspend 变量。
+			 *
+			 * 段体的声明被降级成「赋值」（对象由段首恢复副本提供），
+			 * 所以一个都不能漏；漏一个就是「use of undeclared identifier」。
+			 */
+			bound = conc.RestoreAll
+		} else {
+			bound = -1
+			if pc := len(segments); pc > 0 && pc-1 < len(analysis.SuspendSites) {
+				bound = analysis.SuspendSites[pc-1].Ordinal
+			}
+			if maxOrdinal > bound {
+				bound = maxOrdinal
+			}
+		}
+		segments = append(segments, current.String())
+		cutoffs = append(cutoffs, bound)
+		current.Reset()
+		maxOrdinal = -1
+	}
+
+	for _, grp := range concGroupBody(stmt.Body) {
+		/*
+		 * 整段决定要不要守卫。段体占第 0 层，复合语句体再往下开一层。
+		 * 提前判定是必须的：段体里排在复合语句之前的语句此刻就要决定
+		 * 带不带守卫，等看到复合语句再回头补已经来不及了。
+		 */
+		if grp.guarded {
+			cg.concGuardDepth = 0
+			cg.concGuardSeq = 0
+		} else {
+			cg.concGuardDepth = -1
+			cg.concGuardSeq = 0
+		}
+		// 本组是否已经因为一条顶层挂起语句而切过段（切过就不能在组尾再收一次）
+		splitInGroup := false
+
+		for _, s := range grp.stmts {
+			cg.concSegmentPC = len(segments)
+
+			if !statementHasSuspend(s) {
+				// generateStmtsWithLiveness 在守卫模式下自带槽位包装
+				current.WriteString(sg.generateStmtsWithLiveness([]ast.Statement{s}, nil))
+				continue
+			}
+
+			cg.concCheckSupported(s, stmt.Name)
+
+			if concIsResumableCompound(s) {
+				/*
+				 * 整条只生成一次：恢复位置由体内各层的守卫槽位表达。
+				 *
+				 * 必须走 concIoSubmit：可插桩调用要生成「构造请求 + 就地挂起
+				 * 返回」这一整块。走 concIoNone 的话调用原样生成，Worker 就地
+				 * 阻塞在 IO 上 —— 状态机形状还在，但 I4 已经没了。
+				 */
+				if l := concMaxSuspendOrdinal(s); l > maxOrdinal {
+					maxOrdinal = l
+				}
+				current.WriteString(fg.concGenerateStmts(concIoSubmit, []ast.Statement{s}))
+				continue
+			}
+
+			if !cg.concGuardActive() {
+				// 前半段：实参求值 + 请求构造 + 提交
+				current.WriteString(fg.concGenerateStmts(concIoSubmit, []ast.Statement{s}))
+				current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1, analysis, 0))
+				finishSegment()
+				splitInGroup = true
+				cg.concSegmentPC = len(segments)
+
+				// 后半段：从 TLS 取结果，函数体从这里继续。
+				// 守卫组被这里切成两段，后半段仍需保持守卫（同一组一个属性）。
+				if grp.guarded {
+					cg.concGuardDepth = 0
+					cg.concGuardSeq = 0
+				}
+				current.WriteString(fg.concGenerateStmts(concIoResult, []ast.Statement{s}))
+				continue
+			}
+
+		/*
+			 * 守卫模式下的两段式切分：两个相邻槽位。
+			 *
+			 * 包装由 generateStmtsWithLiveness 自己做，这里不能再包一层 ——
+			 * 多包一层就会出现「sub[d] 先推进一格、再进同一条语句」的嵌套守卫，
+			 * 第二个守卫永远不成立。
+			 *
+			 * submit 槽里的挂起返回把 sub[d] 设成 concGuardSeq ——
+			 * 那正是下一个（result）槽的序号，于是恢复后从 result 槽接着走。
+			 */
+			current.WriteString(fg.concGenerateStmts(concIoSubmit, []ast.Statement{s}))
+			current.WriteString(fg.concGenerateStmts(concIoResult, []ast.Statement{s}))
 			continue
 		}
 
-		if statementHasSuspend(s) {
-			// 前半段：实参求值 + 请求构造 + 提交
-			current.WriteString(fg.concGenerateStmts(concIoSubmit, []ast.Statement{s}))
-			current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1, analysis, ctypes))
-			segments = append(segments, current.String())
-			current.Reset()
-
-			// 后半段：从 TLS 取结果，函数体从这里继续
-			current.WriteString(fg.concGenerateStmts(concIoResult, []ast.Statement{s}))
-		} else {
-			current.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(
-				[]ast.Statement{s}, nil))
+		/*
+		 * 组尾收段。
+		 *
+		 * 组里若已经因为顶层挂起语句切过段（splitInGroup），这里就不能再收 ——
+		 * 那会把「取回结果」那半段和本组余下的语句拆成两个 case，而前半段
+		 * 以「段内无挂起」的兜底 return DONE 收尾，于是余下的语句永远执行不到。
+		 */
+		if !splitInGroup {
+			finishSegment()
 		}
 	}
-	segments = append(segments, current.String())
 
+	cg.concGuardDepth = -1
+	analysis.SegmentRestoreOrdinals = cutoffs
 	return segments
+}
+
+/*
+ * concBodyGroup 是一组「落在同一个 resume 段里」的顶层语句。
+ */
+type concBodyGroup struct {
+	// stmts 是这一组的顶层语句（按源码顺序）
+	stmts []ast.Statement
+	// guarded：这一组里有没有「体内含挂起点」的复合语句。
+	// 有的话整组都进守卫模式 —— 组内排在它之前的语句也必须被槽位挡住，
+	// 否则恢复时会被重跑（`i64 i = 0` 再跑一遍就是循环从头数）。
+	guarded bool
+}
+
+/*
+ * concGroupBody 按「顶层语句两段式切分」的规则把函数体分组。
+ *
+ * 分组规则与老切分一致：一条「含挂起点但不是可恢复复合语句」的顶层语句
+ * 结束当前组，它的 result 半另起一组。
+ *
+ * 分组只在「生成之前」做一次：守卫是组的属性，必须先知道整组里有没有
+ * 可恢复复合语句，才知道前面的语句要不要带守卫。
+ */
+func concGroupBody(body []ast.Statement) []concBodyGroup {
+	var groups []concBodyGroup
+	cur := concBodyGroup{}
+
+	for _, s := range body {
+		if s == nil {
+			continue
+		}
+		cur.stmts = append(cur.stmts, s)
+		if concIsResumableCompound(s) {
+			cur.guarded = true
+		}
+		if statementHasSuspend(s) && !concIsResumableCompound(s) {
+			groups = append(groups, cur)
+			cur = concBodyGroup{}
+		}
+	}
+	if len(cur.stmts) > 0 {
+		groups = append(groups, cur)
+	}
+	if len(groups) == 0 {
+		// 空函数体：仍要产出一个（空）段，resume 的 switch 才合法
+		groups = append(groups, concBodyGroup{})
+	}
+	return groups
 }
 
 // withConcIoRewrite 在指定改写模式下运行一次语句生成

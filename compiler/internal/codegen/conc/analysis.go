@@ -46,20 +46,46 @@ type SuspendSite struct {
 	Call ast.Expression
 	// Kind 是挂起类型
 	Kind SuspendKind
-	// Line 是源码行号，用于诊断
+	// Line 是源码行号，仅用于诊断注释
 	Line int
+	// Ordinal 是本挂起点在遍历序里的序号（从 0 开始）。
+	//
+	// 为什么不用 Line 判活跃：解析器从不填 CallExpression.Pos，
+	// 每个挂起点的 Line 都是 0 —— 拿它当界会让「跨挂起存活的变量」
+	// 一个都判定不出来，于是挂起前不写回、恢复时不重建，那些局部
+	// 全部读未初始化的旧值。序号是遍历出来的，一定存在。
+	Ordinal int
 }
 
 // VarInfo 是一个局部变量的跨 suspend 存活信息
 type VarInfo struct {
 	Name string
-	// DeclLine 是声明行
+	// DeclLine 是声明行（仅诊断用，见 SuspendSite.Ordinal 的说明）
 	DeclLine int
+	// DeclOrdinal 是「声明之前最后一个挂起点的序号」，没有则为 -1。
+	//
+	// 于是「v 在第 k 个挂起点存活」等价于 v.DeclOrdinal < k。
+	DeclOrdinal int
 	// Initializer 是初始化表达式；挂起前求值
 	Initializer ast.Expression
 	// KType 是显式声明的 Kaula 类型；auto 声明为空
 	KType string
 }
+
+// SubDepth 是「复合语句恢复槽位」的最大嵌套层数。
+//
+// 生成代码里直接用内核头的 KAULA_CONC_SUB_DEPTH（单一事实来源），
+// 这里这份只用于编译期越界检查。两者必须一致。
+const SubDepth = 8
+
+// RestoreAll 是 SegmentRestoreOrdinals 的哨兵：本段的恢复副本覆盖全部
+// 跨 suspend 变量（而不是「到本段最靠后的那个挂起点为止」）。
+//
+// 守卫模式下必须如此：段体里每条变量声明都被包进 `if (f->sub[d] == k)`，
+// 那个块是嵌套作用域，于是段内的初始化写进的是内层对象，而循环之后
+// 的代码看到的是段首恢复出来的外层对象 —— 两者不是同一个。
+// 所以段体的声明一律降级成「赋值」，对象统一由段首的恢复副本提供。
+const RestoreAll = 1 << 30
 
 // BodyAnalysis 是函数体的分析结果
 type BodyAnalysis struct {
@@ -70,7 +96,52 @@ type BodyAnalysis struct {
 	// NeedsSuspend 为假时，编译器可生成"单一形态"：
 	// 既不需要 pc 字段，也不需要 resume 的 switch（文档 §2.7）
 	NeedsSuspend bool
+
+	/*
+	 * SegmentRestoreOrdinals[i] 是第 i 段的 Frame 变量恢复界（挂起点序号）。
+	 * 第 i 段要恢复的是 DeclOrdinal < 该值的变量；-1 = 本段不需要恢复副本。
+	 *
+	 * 为什么不能一律按「本段第一个挂起点」推：段里含复合语句时，一个段可能
+	 * 有多个挂起点（分别在不同的循环层）。恢复点最靠后的那个决定活跃集 ——
+	 * 取它，才不会在恢复后读到未初始化的循环变量。
+	 *
+	 * 为 nil 时按 SuspendSites 推导（第 i 段的界 = 第 i-1 个挂起点），
+	 * 即「一条顶层语句一个挂起点」的老切分方式。
+	 */
+	SegmentRestoreOrdinals []int
+
+	// ordinalByCall 把挂起点索引到它的序号；内联挂起按调用指针查自己是谁
+	ordinalByCall map[*ast.CallExpression]int
 }
+
+// RestoreOrdinal 返回第 pc 段的 Frame 变量恢复界；-1 = 不需要恢复副本。
+func (a *BodyAnalysis) RestoreOrdinal(pc int) int {
+	if a.SegmentRestoreOrdinals != nil {
+		if pc < 0 || pc >= len(a.SegmentRestoreOrdinals) {
+			return -1
+		}
+		return a.SegmentRestoreOrdinals[pc]
+	}
+	// 老路径：pc 段之前最后一个挂起点
+	if pc <= 0 || len(a.SuspendSites) == 0 {
+		return -1
+	}
+	if pc-1 < len(a.SuspendSites) {
+		return a.SuspendSites[pc-1].Ordinal
+	}
+	return a.SuspendSites[len(a.SuspendSites)-1].Ordinal
+}
+
+// SuspendOrdinalOf 返回某个调用对应的挂起点序号；不是挂起点返回 -1。
+func (a *BodyAnalysis) SuspendOrdinalOf(call *ast.CallExpression) int {
+	if a.ordinalByCall == nil || call == nil {
+		return -1
+	}
+	return a.ordinalByCall[call]
+}
+
+// LiveAt 报告变量 v 在第 k 个挂起点是否已有值（必须被写回 / 被恢复）。
+func (a *BodyAnalysis) LiveAt(v VarInfo, k int) bool { return v.DeclOrdinal < k }
 
 // ========== 可插桩函数注册表 ==========
 
@@ -82,25 +153,46 @@ type InstrumentationTable struct {
 	entries map[string]SuspendKind
 }
 
+/*
+ * 这张表与 concIoTypeOf（codegen 侧的操作码映射）必须逐项一致。
+ *
+ * 两边不一致的后果是"状态机切好了、调用却没改写"：分析阶段认它是挂起点，
+ * 于是把函数体切成多段并插入 pc 赋值；lowering 阶段找不到对应操作码，
+ * 调用原样生成。生成的 C 编译得过、跑得动，只是那个 Worker 原地阻塞在
+ * IO 上 —— I4 静默失效，没有任何诊断。
+ *
+ * 往这张表加条目前，先确认 concIoTypeOf 里有它。
+ */
 var instrumentTable = &InstrumentationTable{
 	entries: map[string]SuspendKind{
-		// 网络
-		"net_connect": SuspendIO,
-		"net_accept":  SuspendIO,
-		"net_recv":    SuspendIO,
-		"net_send":    SuspendIO,
-		"net_read":    SuspendIO,
-		"net_write":   SuspendIO,
-		"web_get":     SuspendIO,
-		"web_post":    SuspendIO,
+		/*
+		 * 网络收发登记为 SuspendIO，靠 KAULA_IO_READ / WRITE 走通 ——
+		 * 内核的 IO 执行是 read/write，POSIX 上 socket 就是 fd。
+		 *
+		 * net_connect / net_accept 不登记：connect/accept 是 socket 专属，
+		 * read/write 表达不了，内核不实现。调用点退回普通阻塞语义，
+		 * 行为正确（只是那个 Worker 会真的卡住）。登记成挂起点却拿不到
+		 * 操作码才是 I4 静默失效的那种错。
+		 */
+		"net_recv":  SuspendIO,
+		"net_send":  SuspendIO,
+		"net_read":  SuspendIO,
+		"net_write": SuspendIO,
+		"web_get":   SuspendIO,
+		"web_post":  SuspendIO,
 		// 文件
 		"fs_read":  SuspendIO,
 		"fs_write": SuspendIO,
 		// 进程
 		"subprocess_wait": SuspendIO,
 		// 定时
-		"time_sleep": SuspendSleep,
-		"time_after": SuspendSleep,
+		// 四种粒度都要登记：只登记毫秒版的话，亚毫秒定时无法成为挂起点，
+		// 挂起路径的开销就测不出来（毫秒粒度把吞吐钉死在 ~1000/s/任务）。
+		"time_sleep":        SuspendSleep,
+		"time_sleep_us":     SuspendSleep,
+		"time_sleep_ns":     SuspendSleep,
+		"time_sleep_seconds": SuspendSleep,
+		"time_after":        SuspendSleep,
 		// 并发原语
 		"handle_await": SuspendAwait,
 		"future_await": SuspendAwait,
@@ -139,73 +231,71 @@ func IsBlocking(name string) bool {
 //
 // 保守策略：一旦函数体含挂起点，就把所有已声明的局部变量提升到 Frame。
 // 多几个字段只多几十字节；而漏掉一个就是跨 suspend 读到栈上的失效值（UAF）。
+//
+// 挂起点与声明在**同一次遍历**里记录，这样「声明在第几个挂起点之前」
+// 是确定的（VarInfo.DeclOrdinal）。分成两次遍历就只能拿源码行号去比，
+// 而解析器不填表达式位置，拿到的是一片 0 —— 判活跃会全部落空。
 func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
-	res := &BodyAnalysis{}
+	res := &BodyAnalysis{ordinalByCall: make(map[*ast.CallExpression]int)}
 
-	decls := collectDecls(body)
-	findSuspends(body, res)
-
-	res.NeedsSuspend = len(res.SuspendSites) > 0
-
-	if res.NeedsSuspend {
-		for _, d := range decls {
-			res.FrameVars = append(res.FrameVars, d)
-		}
-	}
-	return res
-}
-
-// declSet 是变量声明的有序集合
-type declSet struct {
-	list []VarInfo
-	seen map[string]bool
-}
-
-func (d *declSet) add(v VarInfo) {
-	if d.seen == nil {
-		d.seen = make(map[string]bool)
-	}
-	if d.seen[v.Name] {
-		return
-	}
-	d.seen[v.Name] = true
-	d.list = append(d.list, v)
-}
-
-func collectDecls(body []ast.Statement) []VarInfo {
-	var out []VarInfo
+	// cur = 最近一次见到的挂起点序号；-1 表示还没见过挂起点
+	cur := -1
 	seen := make(map[string]bool)
+	var decls []VarInfo
 
-	add := func(name string, line int, init ast.Expression, ktype string) {
+	addDecl := func(name string, line int, init ast.Expression, ktype string) {
 		if name == "" || seen[name] {
 			return
 		}
 		seen[name] = true
-		out = append(out, VarInfo{Name: name, DeclLine: line, Initializer: init, KType: ktype})
+		decls = append(decls, VarInfo{
+			Name: name, DeclLine: line, DeclOrdinal: cur,
+			Initializer: init, KType: ktype,
+		})
+	}
+
+	// note 记录表达式里的挂起点并推进 cur
+	note := func(expr ast.Expression) {
+		res.recordSuspends(expr, &cur)
 	}
 
 	var walk func(stmts []ast.Statement)
 	walk = func(stmts []ast.Statement) {
 		for _, st := range stmts {
+			if st == nil {
+				continue
+			}
 			switch s := st.(type) {
 			case *ast.VariableDeclaration:
-				add(s.Name, s.Pos.Line, s.Value, s.Type)
+				// 先记初始化式里的挂起：变量在自己的初始化式执行期间还没有值
+				note(s.Value)
+				addDecl(s.Name, s.Pos.Line, s.Value, s.Type)
+			case *ast.ExpressionStatement:
+				note(s.Expression)
+			case *ast.ReturnStatement:
+				note(s.Value)
+			case *ast.YieldStatement:
+				note(s.Source)
 			case *ast.BlockStatement:
 				walk(s.Statements)
 			case *ast.IfStatement:
+				note(s.Condition)
 				walk(s.Body)
 				walk(s.Else)
 			case *ast.WhileStatement:
+				note(s.Condition)
 				walk(s.Body)
 			case *ast.ForStatement:
-				if vd, ok := s.Init.(*ast.VariableDeclaration); ok {
-					add(vd.Name, vd.Pos.Line, vd.Value, vd.Type)
+				note(s.Condition)
+				if vd, ok := s.Init.(*ast.VariableDeclaration); ok && vd != nil {
+					note(vd.Value)
+					addDecl(vd.Name, vd.Pos.Line, vd.Value, vd.Type)
 				}
 				walk(s.Body)
 			case *ast.ForInStatement:
 				if s.Variable != nil {
 					// ForIn 的循环变量是 ast.Identifier，没有类型标注
-					add(s.Variable.Name, s.Pos.Line, nil, "")
+					addDecl(s.Variable.Name, s.Pos.Line, nil, "")
 				}
 				walk(s.Body)
 			case *ast.CallStatement:
@@ -214,44 +304,49 @@ func collectDecls(body []ast.Statement) []VarInfo {
 		}
 	}
 	walk(body)
-	return out
+
+	res.NeedsSuspend = len(res.SuspendSites) > 0
+
+	if res.NeedsSuspend {
+		res.FrameVars = decls
+	}
+	return res
 }
 
-// findSuspends 遍历语句，记录挂起点
-func findSuspends(body []ast.Statement, res *BodyAnalysis) {
-	var walk func(stmts []ast.Statement)
-	walk = func(stmts []ast.Statement) {
-		for _, st := range stmts {
-			switch s := st.(type) {
-			case *ast.VariableDeclaration:
-				// 初始化表达式里可能有挂起
-				recordSuspends(s.Value, res)
-			case *ast.ExpressionStatement:
-				recordSuspends(s.Expression, res)
-			case *ast.ReturnStatement:
-				recordSuspends(s.Value, res)
-			case *ast.BlockStatement:
-				walk(s.Statements)
-			case *ast.IfStatement:
-				recordSuspends(s.Condition, res)
-				walk(s.Body)
-				walk(s.Else)
-			case *ast.WhileStatement:
-				recordSuspends(s.Condition, res)
-				walk(s.Body)
-			case *ast.ForStatement:
-				recordSuspends(s.Condition, res)
-				walk(s.Body)
-			case *ast.ForInStatement:
-				walk(s.Body)
-			case *ast.CallStatement:
-				walk(s.Body)
-			case *ast.YieldStatement:
-				recordSuspends(s.Source, res)
+// recordSuspends 记录表达式里的挂起点，并把 cur 推进到最后一个
+func (a *BodyAnalysis) recordSuspends(expr ast.Expression, cur *int) {
+	if expr == nil {
+		return
+	}
+	if call, ok := expr.(*ast.CallExpression); ok {
+		name := CalleeName(call)
+		if name != "" {
+			if k := Lookup(name); k != SuspendNone {
+				ord := len(a.SuspendSites)
+				a.SuspendSites = append(a.SuspendSites, SuspendSite{
+					Call:    call,
+					Kind:    k,
+					Line:    call.Pos.Line,
+					Ordinal: ord,
+				})
+				// 惰性建表：HasSuspendCall 走的是零值 BodyAnalysis
+				if a.ordinalByCall == nil {
+					a.ordinalByCall = make(map[*ast.CallExpression]int)
+				}
+				a.ordinalByCall[call] = ord
+				*cur = ord
 			}
 		}
+		// 递归检查实参：f(g()) 里 g 可能是 IO
+		for _, arg := range call.Args {
+			a.recordSuspends(arg, cur)
+		}
+		return
 	}
-	walk(body)
+
+	for _, sub := range ChildExprs(expr) {
+		a.recordSuspends(sub, cur)
+	}
 }
 
 // matchArmsWalkable 报告 MatchExpression 的分支体是否能作为语句序列遍历。
@@ -288,9 +383,10 @@ func recordSuspends(expr ast.Expression, res *BodyAnalysis) {
 
 // HasSuspendCall 判断表达式里是否含挂起调用
 func HasSuspendCall(expr ast.Expression) bool {
-	res := &BodyAnalysis{}
-	recordSuspends(expr, res)
-	return len(res.SuspendSites) > 0
+	a := &BodyAnalysis{}
+	cur := -1
+	a.recordSuspends(expr, &cur)
+	return len(a.SuspendSites) > 0
 }
 
 // CalleeName 提取被调用者名字；无法确定时返回 ""

@@ -43,6 +43,19 @@ func TestLookup(t *testing.T) {
 	if k := Lookup("time_sleep"); k != SuspendSleep {
 		t.Errorf("time_sleep 应为 SuspendSleep，实际 %v", k)
 	}
+	/*
+	 * connect / accept 必须不在表里。
+	 *
+	 * 内核的 IO 执行是 read/write，socket 专属的 connect/accept 表达不了。
+	 * 若在这里登记，它们会被切成挂起点却在 lowering 阶段找不到操作码 ——
+	 * 生成的 C 编译得过、跑得动，只是 Worker 原地阻塞，I4 静默失效。
+	 */
+	if k := Lookup("net_connect"); k != SuspendNone {
+		t.Errorf("net_connect 不应是挂起点（内核无对应操作码），实际 %v", k)
+	}
+	if k := Lookup("net_accept"); k != SuspendNone {
+		t.Errorf("net_accept 不应是挂起点（内核无对应操作码），实际 %v", k)
+	}
 	if k := Lookup("strlen"); k != SuspendNone {
 		t.Errorf("普通函数应为 SuspendNone，实际 %v", k)
 	}
@@ -136,7 +149,7 @@ func TestSingleSuspend_VarsPromoted(t *testing.T) {
 
 func TestMultipleSuspends_OrderPreserved(t *testing.T) {
 	body := []ast.Statement{
-		exprStmt(call("net_connect", 10), 10),
+		exprStmt(call("net_recv", 10), 10),
 		exprStmt(call("net_send", 20), 20),
 		exprStmt(call("time_sleep", 30), 30),
 	}

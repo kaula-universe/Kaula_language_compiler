@@ -1056,10 +1056,31 @@ func (sg *StatementGenerator) generateObjectStatement(stmt *ast.ObjectStatement)
 
 // generateIfStatement 生成 if 语句代码
 func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string {
-	code := "if ("
 	condCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
-	code += condCode
-	code += ") {\n"
+
+	/*
+	 * 守卫模式：条件求值与分支体分开。
+	 *
+	 * 条件先在自己的槽位里算完并把结果写进 Frame 的 branch[d]，
+	 * 分支体按 branch[d] 选。恢复时条件不会被重算 —— 重算就可能因为
+	 * 变量已被更新而走到另一个分支，那正是「状态机丢失执行位置」。
+	 */
+	guardActive := sg.codegen.concGuardActive() &&
+		(stmtsHaveSuspend(stmt.Body) || stmtsHaveSuspend(stmt.Else))
+	guardDepth := -1
+	seqAfterCond := 0
+	restoreGuard := func() {}
+	var code string
+	if guardActive {
+		restoreGuard = sg.codegen.concGuardEnter()
+		guardDepth = sg.codegen.concGuardDepth
+		code = sg.concGuardCondPrologue(condCode)
+		seqAfterCond = sg.codegen.concGuardSeq
+		code += sg.codegen.indentString() +
+			fmt.Sprintf("if (%s->branch[%d]) {\n", sg.codegen.concFrameVar, guardDepth)
+	} else {
+		code = "if (" + condCode + ") {\n"
+	}
 
 	// 条件分支路径敏感（从 SOR 下移的能力⑤）：快照 promotedVars，
 	// 生成 then 分支后记录新增 promote，恢复后生成 else 分支，最后取交集合并
@@ -1083,6 +1104,19 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 
 	var bodyCode strings.Builder
 	for _, bodyStmt := range stmt.Body {
+		if guardActive {
+			if concIsResumableCompound(bodyStmt) {
+				bodyCode.WriteString(sg.concGuardHold(func() string {
+					return sg.codegen.generateStatement(bodyStmt)
+				}))
+				continue
+			}
+			sg.codegen.concCheckLeafStmt(bodyStmt)
+			bodyCode.WriteString(sg.concGuardSlot(func() string {
+				return sg.codegen.generateStatement(bodyStmt)
+			}))
+			continue
+		}
 		bodyCode.WriteString(sg.codegen.indentString())
 		bodyCode.WriteString(sg.codegen.generateStatement(bodyStmt))
 	}
@@ -1129,6 +1163,18 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 	if len(stmt.Else) > 0 {
 		code += " else {\n"
 
+		/*
+		 * 两个分支**共用**同一段槽位号。
+		 *
+		 * 条件槽位已经把 sub[d] 推进到 seqAfterCond，而恢复时只会走其中一个
+		 * 分支 —— 让 else 从 then 之后的号继续数的话，条件槽位留下的那个号
+		 * 谁都不匹配，整条 else 分支永远不执行（症状是恒走 then 分支，
+		 * 或者什么都不做）。
+		 */
+		if guardActive {
+			sg.codegen.concGuardSeq = seqAfterCond
+		}
+
 		// 恢复 promotedVars 到快照状态，以便独立分析 else 分支
 		sg.codegen.RestorePromotedVars(promotedSnapshot)
 
@@ -1147,6 +1193,19 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 
 		var elseCode strings.Builder
 		for _, elseStmt := range stmt.Else {
+			if guardActive {
+				if concIsResumableCompound(elseStmt) {
+					elseCode.WriteString(sg.concGuardHold(func() string {
+						return sg.codegen.generateStatement(elseStmt)
+					}))
+					continue
+				}
+				sg.codegen.concCheckLeafStmt(elseStmt)
+				elseCode.WriteString(sg.concGuardSlot(func() string {
+					return sg.codegen.generateStatement(elseStmt)
+				}))
+				continue
+			}
 			elseCode.WriteString(sg.codegen.indentString())
 			elseCode.WriteString(sg.codegen.generateStatement(elseStmt))
 		}
@@ -1191,15 +1250,46 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 		// 无 else 分支：then 分支的 promote 不传播到合并点（保守，因为隐式 else 路径没 promote）
 		sg.codegen.RestorePromotedVars(promotedSnapshot)
 	}
+
+	if guardActive {
+		/*
+		 * 分支体自带一层守卫深度，退出时还原回父层。
+		 *
+		 * 不需要额外推进 sub[d]：分支体不是循环，没有「下一轮」，
+		 * 而 if 语句本身在父层已经占了一个槽位，父层负责往下推进。
+		 * branch[d] 同理 —— 每次进入条件槽位都会被重写。
+		 */
+		restoreGuard()
+	}
+
 	code += "\n"
 	return code
 }
 
 // generateWhileStatement 生成 while 语句代码
 func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) string {
-	code := "while ("
-	code += sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
-	code += ") {\n"
+	condCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
+
+	/*
+	 * 守卫模式：循环头重写成「无条件 for + 槽位 0 判条件」。
+	 *
+	 * 为什么不能继续用 while (cond)：sub[d]==0 的含义是「本轮从头开始」，
+	 * 恢复时 sub[d] 是恢复槽位（非 0），while 会在条件为假时直接退出 ——
+	 * 第一轮挂起，恢复后条件一变就再也走不进去。
+	 *
+	 * 每轮末尾把 sub[d] 写回 0，维持「进入任一层时读到的都是 0」这个不变量。
+	 */
+	var code string
+	guardDepth := -1
+	restoreGuard := func() {}
+	if sg.codegen.concGuardActive() && stmtsHaveSuspend(stmt.Body) {
+		restoreGuard = sg.codegen.concGuardEnter()
+		guardDepth = sg.codegen.concGuardDepth
+		code = "for (;;) {\n"
+		code += sg.concGuardLoopHead(condCode)
+	} else {
+		code = "while (" + condCode + ") {\n"
+	}
 
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	sg.codegen.indent++
@@ -1287,6 +1377,19 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 		}
 	} else {
 		code += bodyCode.String()
+	}
+
+	/*
+	 * 守卫模式：每轮末尾把槽位写回 0，下一轮才重新从循环头起跑。
+	 *
+	 * 放在循环体最后一步：`continue` 落到这里（语义与 C while 一致），
+	 * `break` / `return` 提前跳出循环、走不到也不需要 ——
+	 * 它们已经离开了这一层。
+	 */
+	if guardDepth >= 0 {
+		code += sg.codegen.indentString() +
+			fmt.Sprintf("%s->sub[%d] = 0;\n", sg.codegen.concFrameVar, guardDepth)
+		restoreGuard()
 	}
 
 	code += sg.codegen.indentString() + "}\n"
@@ -2920,6 +3023,35 @@ func (sg *StatementGenerator) generateStmtsWithLiveness(stmts []ast.Statement, a
 
 	var b strings.Builder
 	for i, bodyStmt := range stmts {
+		/*
+		 * 守卫模式：每条语句包进一个恢复槽位。
+		 *
+		 * 这里不做提前释放 —— 提前释放按「语句序号」决定，而守卫槽位会把
+		 * 恢复路径截断在中途，提前释放的判定拿不到完整的后续语句序列。
+		 * 少释放是可观测的保守退化（作用域出口照常回收），重复释放会
+		 * double-free，所以宁可不做。
+		 */
+		if sg.codegen.concGuardActive() {
+			if vd, ok := bodyStmt.(*ast.VariableDeclaration); ok && vd != nil {
+				b.WriteString(sg.concGuardedDecl(vd))
+				continue
+			}
+			/*
+			 * 体内含挂起点的复合语句：恢复点在那条语句内部，所以本层的槽位
+			 * 不能在进入时就推进 —— 推进了恢复就会整条跳过它。
+			 */
+			if concIsResumableCompound(bodyStmt) {
+				b.WriteString(sg.concGuardHold(func() string {
+					return sg.codegen.generateStatement(bodyStmt)
+				}))
+				continue
+			}
+			sg.codegen.concCheckLeafStmt(bodyStmt)
+			b.WriteString(sg.concGuardSlot(func() string {
+				return sg.codegen.generateStatement(bodyStmt)
+			}))
+			continue
+		}
 		b.WriteString(sg.codegen.indentString())
 		b.WriteString(sg.codegen.generateStatement(bodyStmt))
 		// F8 修复：return/break/continue 会跳过后续代码，不应在其后生成 early free（dead code）
@@ -3509,6 +3641,15 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 	if currentScope == nil {
 		return ""
 	}
+
+	/*
+	 * Handle 的 pin 归还排在 KMM 回收之前。
+	 *
+	 * 两者互不相干（一个还 epoch pin，一个还 KMM 堆对象），但顺序上
+	 * 先还 pin 更好：pin 挡着的是帧的延迟回收，早一刻还就早一刻可回收。
+	 */
+	handleRelease := sg.generateHandleRelease(currentScope)
+
 	symbols := currentScope.GetAllSymbols()
 	if len(symbols) == 0 {
 		return ""
@@ -3525,6 +3666,7 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 
 	var b strings.Builder
 	indent := sg.codegen.indentString()
+	b.WriteString(handleRelease)
 	for _, name := range names {
 		// F8 修复：函数参数是借用指针，所有权属于调用方，不应在函数内释放
 		if sym := symbols[name]; sym != nil && sym.Scope == "parameter" {
@@ -3676,6 +3818,11 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 		if len(symbols) == 0 {
 			continue
 		}
+
+		// Handle 的 pin 归还（return 路径）：作用域出口那一发被 lastStmtIsReturn
+		// 跳过了，这里必须补上，否则「最后一句是 return」的块会漏还。
+		b.WriteString(sg.generateHandleRelease(scope))
+
 		names := make([]string, 0, len(symbols))
 		for name := range symbols {
 			names = append(names, name)
