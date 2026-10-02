@@ -108,6 +108,31 @@ int kaula_iodriver_backend_next_event(KaulaIoDriver* drv, int* fd, uint32_t* eve
     return 1;
 }
 
+/*
+ * 下面三个是驱动的统一调用面（kaula_conc_iodriver.c 无条件调用它们，
+ * 不做平台分支）。就绪式后端需要给出与完成式后端语义一致的空实现 ——
+ * 少了任何一个，Linux 上就是 undefined symbol 链接失败。
+ */
+
+/* 就绪式后端没有「完成结果」：IO 还没做，结果要等 do_io 跑完才知道。 */
+int kaula_iodriver_backend_next_completion(KaulaIoDriver* drv,
+                                           KaulaTask** out_task, int* out_result) {
+    (void)drv; (void)out_task; (void)out_result;
+    return 0;
+}
+
+/* 每轮事件循环开始时清空就绪批次。 */
+void kaula_iodriver_backend_begin(KaulaIoDriver* drv) {
+    (void)drv;
+    g_ready_count = 0;
+    g_ready_pos = 0;
+}
+
+/* 就绪式后端的在途操作由驱动的挂起表持有，这里无事可做。 */
+void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv) {
+    (void)drv;
+}
+
 /* ================================================================
  * macOS: kqueue
  * ================================================================ */

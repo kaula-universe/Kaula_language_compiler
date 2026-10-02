@@ -413,9 +413,9 @@ int kaula_worker_create(KaulaWorker* w, uint32_t worker_id) {
 }
 
 void kaula_worker_join(KaulaWorker* w) {
-    if (w->thread != 0 || w->park_event != 0) {
+    if (kaula_p_thread_is_valid(&w->thread) || kaula_p_event_is_valid(&w->park_event)) {
         kaula_p_thread_join(w->thread);
-        w->thread = 0;
+        kaula_p_thread_invalidate(&w->thread);
     }
 }
 

@@ -12,6 +12,12 @@
 import std.io
 import std.time
 
+// 注：延迟统计尚未接内核打点（kaula_handle_await_into_timed 已实现，
+// 但从 Kaula 侧调用它需要 codegen 支持或可用的 extern 形参 —— 目前
+// `Handle` 作 extern 形参会被前端拒绝）。
+// 所以下面 lat[] 记的仍是调用方掐表的值，高并发下**不可信**：
+// 它量的是排队 + 顺序取回，不是服务时间。详见 test/bench/TRANSACTION.md。
+
 // ---------- 事务（与 Go/Tokio 逐位一致，见 TRANSACTION.md） ----------
 //
 // 先 % 1048576 再乘：中间值 < 2^50。

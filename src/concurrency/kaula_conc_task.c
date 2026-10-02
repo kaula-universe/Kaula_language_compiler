@@ -54,6 +54,14 @@ void kaula_task_init(KaulaTask* task, KaulaResumeFn fn, void* frame, size_t fram
     task->frame = frame;
     task->frame_size = frame_size;
     task->inner_frame = NULL;
+    /*
+     * 提交时刻在这里打点。
+     *
+     * 必须在「还没进队列」时取 —— 等 post 之后再取就把投递耗时排除在外，
+     * 而那正是调度器该被计入的成本。
+     */
+    task->submit_ns = kaula_p_now_ns();
+    task->complete_ns = 0;
 }
 
 /* ========== 完成 ========== */
@@ -92,6 +100,15 @@ void kaula_task_complete(KaulaTask* task, void* result) {
     task->error = KAULA_OK;
 
     /*
+     * 完成时刻在这里打点，**必须早于置 DONE**。
+     *
+     * 晚一步就晚了：置 DONE 之后唤醒等待者，等待者可能立刻读
+     * complete_ns，而那时它还是 0。放在 release 存之前，
+     * 对任何看到 DONE 的读者都可见。
+     */
+    task->complete_ns = kaula_p_now_ns();
+
+    /*
      * 先发布结果，再置状态 —— 保证看到 DONE 的线程一定看到 result。
      */
     atomic_store_explicit(&task->state, KAULA_TASK_DONE, memory_order_release);
@@ -122,6 +139,7 @@ void kaula_task_complete(KaulaTask* task, void* result) {
 void kaula_task_fail(KaulaTask* task, KaulaError err) {
     task->result = NULL;
     task->error = (int)err;
+    task->complete_ns = kaula_p_now_ns();   /* 失败路径同样打点 */
 
     atomic_store_explicit(&task->state, KAULA_TASK_DONE, memory_order_release);
     kaula_task_wake_waiters(task);
@@ -252,9 +270,9 @@ void kaula_task_recycle(KaulaTask* task) {
         kmm_v4_survivor_free(task->frame);
         task->frame = NULL;
     }
-    if (task->done_event != 0) {
+    if (kaula_p_event_is_valid(&task->done_event)) {
         kaula_p_event_destroy(&task->done_event);
-        task->done_event = 0;
+        kaula_p_event_invalidate(&task->done_event);
     }
     kmm_v4_survivor_free(task);
 }
@@ -373,11 +391,27 @@ static int await_copy_out(KaulaHandle h, void* dst, size_t dst_size, uint64_t ti
  * 不需要内核猜类型，也不需要分配临时缓冲（那会漏）。
  */
 void kaula_handle_await_into(KaulaHandle h, void* dst, size_t dst_size) {
+    kaula_handle_await_into_timed(h, dst, dst_size, NULL);
+}
+
+/*
+ * await_into_timed：await 的同时给出「内核测得的服务时间」。
+ *
+ * out_latency_ns = complete_ns - submit_ns，即任务从被创建到真正做完
+ * 花了多久。这个量与「调用方什么时候轮到去取结果」无关 ——
+ * 并发窗口里那两者能差两个数量级，所以延迟统计必须用这个。
+ *
+ * out_latency_ns 可为 NULL（不关心延迟）。
+ */
+void kaula_handle_await_into_timed(KaulaHandle h, void* dst, size_t dst_size,
+                                   uint64_t* out_latency_ns) {
     /*
      * 任务若是外部（IoDriver / 阻塞车道）线程直接置的 DONE，
      * 唤醒事件可能还没建好。走 ensure_init 会顺带补建。
      */
     kaula_runtime_ensure_init();
+
+    if (out_latency_ns != NULL) *out_latency_ns = 0;
 
     if (h.task == NULL) {
         if (dst != NULL && dst_size > 0) memset(dst, 0, dst_size);
@@ -386,6 +420,18 @@ void kaula_handle_await_into(KaulaHandle h, void* dst, size_t dst_size) {
 
     if (!await_copy_out(h, dst, dst_size, KAULA_P_WAIT_FOREVER)) {
         memset(dst, 0, dst_size);
+        return;
+    }
+
+    if (out_latency_ns != NULL) {
+        /*
+         * complete_ns 是普通字段，但这里已在 pin 内且任务已 DONE，
+         * 不会再被写。complete_ns == 0 表示任务在打点引入之前就完成
+         * （或走了未打点的路径），此时报 0 而不是编造一个数。
+         */
+        uint64_t c = h.task->complete_ns;
+        uint64_t s = h.task->submit_ns;
+        *out_latency_ns = (c > s) ? (c - s) : 0;
     }
 }
 

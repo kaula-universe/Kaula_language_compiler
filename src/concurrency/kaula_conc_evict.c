@@ -111,9 +111,19 @@ void kaula_evict_stop(void) {
     atomic_store_explicit(&g_evict.running, 0, memory_order_release);
 }
 
+/*
+ * 判断依据必须是线程句柄，不是 running 标志。
+ *
+ * 关闭顺序是 stop() 然后 join()，而 stop() 已经把 running 清成 0 ——
+ * 原实现在这里再判一次 running，于是 join 永远直接返回，监控线程的
+ * 句柄既没 join 也没 CloseHandle。kaula_evict_init() 随后的 memset
+ * 还会把这个句柄抹掉，于是每一轮 init/shutdown 都永久漏一个句柄，
+ * 且上一轮的监控线程还活着时下一轮已经开始拆解运行时状态。
+ */
 void kaula_evict_join(void) {
-    if (!g_evict.running) return;
+    if (!kaula_p_thread_is_valid(&g_evict.thread)) return;
     kaula_p_thread_join(g_evict.thread);
+    kaula_p_thread_invalidate(&g_evict.thread);
 }
 
 void kaula_evict_destroy(void) {
