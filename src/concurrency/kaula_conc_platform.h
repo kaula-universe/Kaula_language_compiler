@@ -271,6 +271,10 @@ static inline int kaula_p_thread_join(kaula_p_thread_t t) {
     CloseHandle(t);
     return 0;
 }
+
+/* 判活/失效：与 POSIX 版同名同语义，调用方不依赖底层表示 */
+static inline int  kaula_p_thread_is_valid(kaula_p_thread_t* t) { return *t != NULL; }
+static inline void kaula_p_thread_invalidate(kaula_p_thread_t* t) { *t = NULL; }
 #else
 typedef pthread_t kaula_p_thread_t;
 
@@ -282,6 +286,14 @@ static inline int kaula_p_thread_create(kaula_p_thread_t* out, kaula_p_thread_fn
 static inline int kaula_p_thread_join(kaula_p_thread_t t) {
     return pthread_join(t, NULL);
 }
+
+/*
+ * 与事件同一类的问题：pthread_t 在 glibc 是整型、在 macOS 是指针、
+ * 在别的平台可能是结构体 —— `t != 0` / `t = 0` 并非到处都编得过。
+ * 判活与失效收进平台层，调用方不依赖表示。
+ */
+static inline int  kaula_p_thread_is_valid(kaula_p_thread_t* t) { return *t != 0; }
+static inline void kaula_p_thread_invalidate(kaula_p_thread_t* t) { *t = 0; }
 #endif
 
 /* ========== 可唤醒的休眠原语 ========== */
@@ -319,6 +331,17 @@ static inline void kaula_p_event_reset(kaula_p_event* e) {
     while (WaitForSingleObject(*e, 0) == WAIT_OBJECT_0) { /* 抽干 */ }
 }
 
+/*
+ * 事件是否已创建 / 置为未创建。
+ *
+ * 必须走这两个函数，不能直接写 `e != 0` 或 `e = 0`：
+ * Windows 下 kaula_p_event 是 HANDLE（指针），可以比 0；
+ * POSIX 下它是 pthread_cond 包装的结构体，`!= 0` 与 `= 0` 都编不过。
+ * 把判活/失效收进平台层，调用方就与表示无关了。
+ */
+static inline int  kaula_p_event_is_valid(kaula_p_event* e) { return *e != NULL; }
+static inline void kaula_p_event_invalidate(kaula_p_event* e) { *e = NULL; }
+
 /* 返回 1 = 被唤醒，0 = 超时 */
 static inline int kaula_p_event_wait(kaula_p_event* e, uint64_t timeout_ns) {
     DWORD ms = (timeout_ns == KAULA_P_WAIT_FOREVER)
@@ -331,7 +354,8 @@ static inline int kaula_p_event_wait(kaula_p_event* e, uint64_t timeout_ns) {
 typedef struct {
     pthread_mutex_t m;
     pthread_cond_t  c;
-    int             count;  /* 未被消费的 signal 计数 */
+    int             count;   /* 未被消费的 signal 计数 */
+    int             created; /* 判活标志：结构体没法用 != 0 表达「已创建」 */
 } kaula_p_event;
 
 static inline int kaula_p_event_create(kaula_p_event* out) {
@@ -341,8 +365,13 @@ static inline int kaula_p_event_create(kaula_p_event* out) {
         pthread_mutex_destroy(&out->m);
         return -1;
     }
+    out->created = 1;
     return 0;
 }
+
+/* 与 Windows 版同名同语义：调用方不该知道底下是 HANDLE 还是 pthread_cond */
+static inline int  kaula_p_event_is_valid(kaula_p_event* e) { return e->created; }
+static inline void kaula_p_event_invalidate(kaula_p_event* e) { e->created = 0; }
 
 static inline void kaula_p_event_destroy(kaula_p_event* e) {
     pthread_cond_destroy(&e->c);

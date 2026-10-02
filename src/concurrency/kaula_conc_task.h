@@ -209,6 +209,21 @@ struct KaulaTask {
     /* ---- 属主（I2：任一时刻有且仅有一个 owner） ---- */
     _Atomic(KaulaWorker*) owner;
 
+    /*
+     * 单事务服务时间：提交 -> 完成。
+     *
+     * 为什么必须由内核打点，而不是调用方自己掐表：
+     * 调用方拿到结果的时刻取决于「它什么时候轮到去取」，而不是
+     * 「任务什么时候真的做完」。并发窗口里两者可以差两个数量级 ——
+     * 槽位 999 早就算完了，却要等 0..998 全取完才被看到，
+     * 于是量到的是排队 + 顺序取回，不是服务时间。
+     *
+     * complete_ns 在 kaula_task_complete 里、置 DONE 之前写入，
+     * 因此对任何看到 DONE 的读者都可见（happens-before 那次 release 存）。
+     */
+    uint64_t            submit_ns;    /* kaula_task_init 时打点 */
+    uint64_t            complete_ns;  /* complete/fail 时打点 */
+
     /* ---- 结果 ---- */
     void*               result;
     int                 error;        /* KaulaError */
@@ -347,6 +362,20 @@ int         kaula_handle_poll(KaulaHandle h);
 void        kaula_handle_await_into(KaulaHandle h, void* dst, size_t dst_size);
 int         kaula_handle_try_await_into(KaulaHandle h, void* dst, size_t dst_size,
                                         uint64_t timeout_ns);
+
+/*
+ * await_into_timed：同时给出内核测得的服务时间（纳秒）。
+ *
+ * out_latency_ns = complete_ns - submit_ns，在 kaula_task_init 与
+ * kaula_task_complete 里打点，**与「调用方何时轮到取结果」无关**。
+ *
+ * 延迟统计必须用它：并发窗口里按调用方掐表量到的是「排队 + 顺序取回」，
+ * 与服务时间可以差两个数量级（槽位 999 早算完，却要等 0..998 全取完）。
+ *
+ * out_latency_ns 可为 NULL。
+ */
+void        kaula_handle_await_into_timed(KaulaHandle h, void* dst, size_t dst_size,
+                                          uint64_t* out_latency_ns);
 void        kaula_handle_cancel(KaulaHandle h);
 int         kaula_handle_error(KaulaHandle h);
 
