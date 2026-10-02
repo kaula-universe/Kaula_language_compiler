@@ -124,6 +124,14 @@ KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, si
         return spawn_failed(KAULA_ERR_OOM);
     }
     kaula_task_init(task, fn, frame, frame_size);
+    /*
+     * Frame 由调用方（生成代码）堆分配，随任务退休释放。
+     *
+     * 不置这个标志的话，帧在正常完成路径上永远不会被回收 ——
+     * kaula_task_recycle 只服务"spawn 被拒"那条路。
+     * 每 spawn 泄一个 Frame，泄漏量与调用次数成正比。
+     */
+    task->flags |= KAULA_TASK_FLAG_FRAME_ON_HEAP;
     atomic_store_explicit(&task->owner, owner, memory_order_relaxed);
 
     atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1, memory_order_relaxed);
@@ -186,6 +194,12 @@ static KaulaResumeResult simple_trampoline(void* frame_ptr) {
     KaulaSimpleFn call = (KaulaSimpleFn)slots[0];
     void* user_frame = slots[1];
 
+    /*
+     * 结果是「指向 Frame 里 result 字段的指针」，不是值本身。
+     *
+     * 所以这里**不能**释放 user_frame：await 还没读。
+     * 释放由 retire_frames 在 epoch 回收期完成。
+     */
     return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = call(user_frame) };
 }
 
@@ -195,10 +209,32 @@ typedef struct {
     void* user_frame;
 } KaulaSimpleFrame;
 
+/*
+ * 懒初始化：编译器生成的代码不要求用户显式 init。
+ *
+ * 没有这一步的症状很隐蔽：spawn 把任务丢进注入队列，
+ * 却没有任何 Worker 来取（worker_count == 0），
+ * await 就永久阻塞 —— 程序挂死且一行输出都没有。
+ */
+static void conc_ensure_init(void) {
+    /* 统一对外头不能被本模块包含（与本头互 include）——就地声明 */
+    extern int kaula_runtime_is_initialized(void);
+    extern int kaula_runtime_ensure_init(void);
+    if (!kaula_runtime_is_initialized()) {
+        kaula_runtime_ensure_init();
+    }
+}
+
+static KaulaHandle kaula_spawn_ex(KaulaResumeFn resume_fn, void* frame, size_t frame_size);
+
+KaulaHandle kaula_spawn(KaulaResumeFn resume_fn, void* frame, size_t frame_size) {
+    conc_ensure_init();
+    return kaula_spawn_ex(resume_fn, frame, frame_size);
+}
+
 KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
                                 void* frame, size_t frame_size) {
-    (void)frame_size;
-
+    conc_ensure_init();
     if (atomic_load_explicit(&g_conc_runtime.shutdown, memory_order_acquire)) {
         return spawn_failed(KAULA_ERR_SHUTDOWN);
     }
@@ -208,7 +244,7 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
         return spawn_failed(KAULA_ERR_OOM);
     }
 
-    /* 包装帧：前两个槽是 { fn, user_frame }，其余是 conc fn 的结果槽 */
+    /* 包装帧：前两个槽是 { fn, user_frame }，供 trampoline 取用 */
     KaulaSimpleFrame* wrapper = (KaulaSimpleFrame*)kmm_v4_alloc_global(sizeof(KaulaSimpleFrame));
     if (wrapper == NULL) {
         kaula_task_recycle(task);
@@ -218,6 +254,14 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
     wrapper->user_frame = frame;
 
     kaula_task_init(task, simple_trampoline, wrapper, sizeof(KaulaSimpleFrame));
+    /*
+     * 用户帧挂在 inner_frame 上，随任务退休一起释放。
+     *
+     * 结果以 &f->result 的形式返回，await 会读它 —— 所以不能在这里
+     * 或 trampoline 里释放，必须等没人能读之后（epoch）。
+     */
+    task->inner_frame = frame;
+    task->flags |= KAULA_TASK_FLAG_FRAME_ON_HEAP;
     atomic_store_explicit(&task->owner, NULL, memory_order_relaxed);
 
     atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1, memory_order_relaxed);
@@ -226,7 +270,11 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
         /* 全部队列都满：就地执行，保证 spawn 语义不退化 */
         void* r = fn(frame);
         kaula_task_complete(task, r);
-        kmm_v4_survivor_free(wrapper);
+        /*
+         * wrapper 不在这里 free —— complete 已经把它交给 epoch 了。
+         * 手动 free 会与 epoch 的回收撞车（double free），
+         * 而 epoch 的回收时机不可预测，所以它未必当场炸。
+         */
         return kaula_handle_from_task(task);
     }
 
@@ -234,7 +282,7 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
     return kaula_handle_from_task(task);
 }
 
-KaulaHandle kaula_spawn(KaulaResumeFn resume_fn, void* frame, size_t frame_size) {
+static KaulaHandle kaula_spawn_ex(KaulaResumeFn resume_fn, void* frame, size_t frame_size) {
     KaulaWorker* w = kaula_conc_current_worker();
 
     if (w == NULL) {

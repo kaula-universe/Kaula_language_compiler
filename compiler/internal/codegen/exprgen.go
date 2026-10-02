@@ -807,6 +807,20 @@ func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression)
 
 // generateCallExpression 生成函数调用表达式代码（支持泛型调用）
 func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) string {
+	/*
+	 * 可插桩 IO 在 conc fn 内改写成 IoDriver 提交 / 结果取回（I4）。
+	 *
+	 * 必须放在所有分派之前：模块限定调用（std.time.time_sleep）在下面
+	 * 会走 generateMethodCall 分支，那时已经拿不到统一的改写机会了。
+	 *
+	 * 这一步也不能放在实参生成之后 —— submit 形态不是"调用"，而是
+	 * "构造请求 + 挂起"，两者语义不同，不能共用一条生成路径。
+	 */
+	if code, done := eg.concIoCallRewrite(e, conc.CalleeName(e)); done {
+		eg.codegen.noteConcIoUse()
+		return code
+	}
+
 	if v, ok := eg.generateClosureCall(e); ok {
 		return v
 	}
@@ -929,6 +943,23 @@ func (eg *ExpressionGenerator) generateCallExpression(e *ast.CallExpression) str
 	// 语义查询（捕获参数、stdlib 签名、println 判断）仍用原始 Kaula 名 funcName，
 	// 只有最终拼 C 输出时才用 cFuncName，避免查询表失配。
 	cFuncName := eg.codegen.UserFuncCName(funcName)
+
+	/*
+	 * 顺序调用 conc fn：重定向到 coercion shim。
+	 *
+	 * conc fn 在 C 侧没有可直接调用的同名符号 ——
+	 * 它产出的是 Frame / resume / shim 三件套，
+	 * 普通名字对应的状态机入口签名是 KaulaResumeResult(void*)，
+	 * 与用户的调用语法不符。
+	 *
+	 * 顺序调用应当走 shim（文档 §9.4）：栈上建 Frame、就地驱动完成。
+	 * 这就是设计说明书 §2.3「conc fn 能当 fn 用」的落地：
+	 * 隐式、零心智、调用方无需改写。
+	 */
+	if emitter := LookupConcFunc(cFuncName); emitter != nil {
+		cFuncName = emitter.ShimFn()
+		codeUsesConcurrency = true
+	}
 
 	// 追踪第三方库的使用
 	if eg.codegen.stdlibConfig != nil {
@@ -3948,6 +3979,9 @@ var codeUsesConcurrency bool
 // UsesConcurrency 报告本 TU 是否用到并发内核
 func UsesConcurrency() bool { return codeUsesConcurrency }
 
+// noteConcurrencyUse 供其他生成器（语句生成器）标记并发内核已被使用
+func (eg *ExpressionGenerator) noteConcurrencyUse() { codeUsesConcurrency = true }
+
 /*
  * EmitResume 在 resume 上下文中生成函数体。
  *
@@ -3988,11 +4022,36 @@ func (fg *FunctionGenerator) EmitResume(stmt *ast.FunctionStatement, emitter *co
 	cg.kmmScopeDepth = savedScopeDepth
 	cg.inFunctionBody = prevInFuncBody
 
-	bodyCode := ""
-	for _, seg := range segments {
-		bodyCode += seg
+	/*
+	 * 跨 suspend 变量的 C 类型必须由这里解析：只有 funcgen 能访问
+	 * typeGenerator，conc 包不认识 Kaula 的类型名。
+	 *
+	 * 猜错的后果是静默的数据损坏 —— void* 能与任意整型互转，
+	 * 编译器不报错，值已经被截断了。
+	 */
+	emitter.FrameVarCTypes = fg.frameVarCTypes(analysis)
+
+	return emitter.Generate(analysis, segments, stmt.Body)
+}
+
+// frameVarCTypes 把 analysis 里的变量名映射到 C 类型
+func (fg *FunctionGenerator) frameVarCTypes(analysis *conc.BodyAnalysis) map[string]string {
+	out := make(map[string]string, len(analysis.FrameVars))
+	tg := fg.codegen.typeGenerator
+	for _, v := range analysis.FrameVars {
+		/*
+		 * auto 声明的 Type 也已被 sema 填好（sema 在 codegen 之前跑）。
+		 * 真正拿不到类型的只有 for-in 循环变量与无初始化的声明，
+		 * 那些落到 FrameVarCType 的 void* 兜底。
+		 */
+		if v.KType == "" {
+			continue
+		}
+		if c := tg.convertType(v.KType, false); c != "" {
+			out[v.Name] = c
+		}
 	}
-	return emitter.Generate(analysis, bodyCode, stmt.Body)
+	return out
 }
 
 // generateSpawnExpression 生成 spawn 表达式代码
@@ -4027,6 +4086,31 @@ func (eg *ExpressionGenerator) generateSpawnExpression(e *ast.SpawnExpression) s
 	return emitter.GenerateSpawn(argCodes)
 }
 
+/*
+ * noteHandleResultType 登记 `Handle x = spawn f()` 里 x 的结果 C 类型。
+ *
+ * 为什么需要：await 在**表达式位置**（`h1.await + h2.await`）拿不到目标类型
+ * —— 声明处有类型，表达式位置只有 await 自己。而 kaula_handle_await 返回的是
+ * 「结果的地址」，不解引用就会把地址当数值用（表现为一个像指针的垃圾数）。
+ *
+ * 声明处是唯一同时知道「变量名」和「被 spawn 的函数」的地方，
+ * 所以表按变量名建，await 时查回来。
+ */
+func (cg *CodeGenerator) noteHandleResultType(varName string, e *ast.SpawnExpression) {
+	ident, ok := e.Function.(*ast.Identifier)
+	if !ok {
+		return
+	}
+	emitter := LookupConcFunc(cg.UserFuncCName(ident.Name))
+	if emitter == nil {
+		return
+	}
+	if cg.handleResultTypes == nil {
+		cg.handleResultTypes = make(map[string]string)
+	}
+	cg.handleResultTypes[varName] = emitter.CReturnType
+}
+
 // generateAwaitExpression 生成 await 表达式代码
 // await h → kaula_handle_await(h)
 //
@@ -4040,5 +4124,22 @@ func (eg *ExpressionGenerator) generateAwaitExpression(e *ast.AwaitExpression) s
 	// await 同样依赖内核 API
 	codeUsesConcurrency = true
 	handleCode := eg.GenerateExpression(e.Handle)
-	return fmt.Sprintf("kaula_handle_await(%s)", handleCode)
+
+	/*
+	 * 表达式位置的 await：必须解引用。
+	 *
+	 * kaula_handle_await 返回的是「结果的地址」（统一约定，见
+	 * kaula_conc_task.c）。不解引用就是把地址当数值 ——
+	 * 一个像指针的垃圾数，而且它不崩，只是答案错。
+	 *
+	 * 目标类型从 Handle 变量名查回来（声明 `Handle h = spawn f()`
+	 * 时登记）。查不到就退回裸地址，并在注释里说明风险 ——
+	 * 宁可让人看见注释，也不要静默给错数。
+	 */
+	if ident, ok := e.Handle.(*ast.Identifier); ok {
+		if cType, known := eg.codegen.handleResultTypes[ident.Name]; known && cType != "" && cType != "void" {
+			return fmt.Sprintf("*(%s*)kaula_handle_await(%s)", cType, handleCode)
+		}
+	}
+	return fmt.Sprintf("/* await 结果类型未知：未解引用 */ kaula_handle_await(%s)", handleCode)
 }

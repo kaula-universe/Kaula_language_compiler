@@ -10,6 +10,10 @@ import (
 
 type FunctionGenerator struct {
 	codegen *CodeGenerator
+
+	// lastIoVar 是最近一次 submit 形态生成的 IO 请求变量名，
+	// concSuspendReturn 用它填 KaulaResumeResult.io_request
+	lastIoVar string
 }
 
 func NewFunctionGenerator(cg *CodeGenerator) *FunctionGenerator {
@@ -1472,16 +1476,54 @@ func statementHasSuspend(s ast.Statement) bool {
 // concSuspendReturn 产出"保存状态并挂起返回"的 C 片段。
 //
 // idx 是即将挂起的段序号，同时作为 pc 的下一站。
-func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx int) string {
+func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx int,
+	analysis *conc.BodyAnalysis, ctypes map[string]string) string {
+
 	var b strings.Builder
 
-	// 保存参数与跨 suspend 的局部变量到 Frame
+	/*
+	 * 保存活到下一段的变量。
+	 *
+	 * 必须写回 Frame 里每一个在下一段还要读的变量 —— 漏一个，
+	 * 恢复时那个局部就是未初始化值。这类 bug 不崩，只是静默算错。
+	 */
 	for _, p := range stmt.Params {
 		b.WriteString(fmt.Sprintf("    f->%s = %s;\n", p, p))
 	}
+	for _, v := range analysis.FrameVars {
+		if v.DeclLine >= analysis.SuspendSites[minInt(idx-1, len(analysis.SuspendSites)-1)].Line {
+			// 在本段（或更晚）才声明的，此刻还没有值
+			continue
+		}
+		b.WriteString(fmt.Sprintf("    f->%s = %s;\n", v.Name, v.Name))
+	}
+
 	b.WriteString(fmt.Sprintf("    f->pc = %d;\n", idx))
-	b.WriteString("    return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .value = NULL };\n")
+
+	/*
+	 * 把 IO 请求交给 Worker → IoDriver。
+	 *
+	 * io_request 字段是 I4 的关键：Worker 读到 SUSPEND 后立刻把它
+	 * 投给 IoDriver 并让出自己，绝不原地执行这次 IO。
+	 *
+	 * 用最近一个 __kaula_io_N：submit 形态生成的就是那个具名局部量，
+	 * 生命周期覆盖到这条 return。没有它，IoDriver 收到的是空请求 ——
+	 * 类型 0 不是任何合法 op，会直接被拒。
+	 */
+	if fg.lastIoVar != "" {
+		b.WriteString(fmt.Sprintf("    return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, "+
+			".io_request = %s, .value = NULL };\n", fg.lastIoVar))
+	} else {
+		b.WriteString("    return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .value = NULL };\n")
+	}
 	return b.String()
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 /*
@@ -1492,6 +1534,12 @@ func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx 
  *
  * 必须逐语句生成而不是整段生成：整段生成的话，中途挂起会跳过写回，
  * 恢复后读到的是未初始化的 Frame 字段。
+ *
+ * 含挂起的那条语句要被生成两次：
+ *   第一次 concIoSubmit —— 构造 IO 请求并提交，函数体到此为止
+ *   第二次 concIoResult —— 恢复后从 TLS 取结果，函数体从这里继续
+ * 这就是"把一次调用劈成两半"：不劈的话，要么 Worker 原地阻塞在 IO 上
+ * （违反 I4），要么恢复后拿不到结果。
  */
 func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analysis *conc.BodyAnalysis) []string {
 	if len(analysis.SuspendSites) == 0 {
@@ -1501,21 +1549,53 @@ func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analy
 	segments := make([]string, 0, len(analysis.SuspendSites)+1)
 	var current strings.Builder
 
+	ctypes := fg.frameVarCTypes(analysis)
+
 	for _, s := range stmt.Body {
 		if s == nil {
 			continue
 		}
-		current.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(
-			[]ast.Statement{s}, nil))
 
 		if statementHasSuspend(s) {
-			// 段序号即 pc 的下一站
-			current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1))
+			// 前半段：实参求值 + 请求构造 + 提交
+			current.WriteString(fg.concGenerateStmts(concIoSubmit, []ast.Statement{s}))
+			current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1, analysis, ctypes))
 			segments = append(segments, current.String())
 			current.Reset()
+
+			// 后半段：从 TLS 取结果，函数体从这里继续
+			current.WriteString(fg.concGenerateStmts(concIoResult, []ast.Statement{s}))
+		} else {
+			current.WriteString(fg.codegen.statementGenerator.generateStmtsWithLiveness(
+				[]ast.Statement{s}, nil))
 		}
 	}
 	segments = append(segments, current.String())
 
 	return segments
+}
+
+// withConcIoRewrite 在指定改写模式下运行一次语句生成
+func (fg *FunctionGenerator) withConcIoRewrite(mode concIoRewriteMode, gen func() string) string {
+	prev := fg.codegen.concIoRewrite
+	prevVar := fg.codegen.lastIoVar
+	fg.codegen.concIoRewrite = mode
+	if mode != concIoSubmit {
+		// result 形态不应把上一次 submit 的变量名带进下一段
+		fg.codegen.lastIoVar = ""
+	}
+	out := gen()
+	fg.codegen.concIoRewrite = prev
+	if mode == concIoSubmit {
+		fg.lastIoVar = fg.codegen.lastIoVar
+	}
+	fg.codegen.lastIoVar = prevVar
+	return out
+}
+
+// concGenerateStmts 在指定改写模式下生成一段语句
+func (fg *FunctionGenerator) concGenerateStmts(mode concIoRewriteMode, stmts []ast.Statement) string {
+	return fg.withConcIoRewrite(mode, func() string {
+		return fg.codegen.statementGenerator.generateStmtsWithLiveness(stmts, nil)
+	})
 }

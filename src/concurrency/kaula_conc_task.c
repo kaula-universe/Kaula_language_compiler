@@ -19,6 +19,9 @@
 #include "kaula_conc_metrics.h"
 #include "../kmm_scoped_allocator_v4.h"
 
+/* 统一对外头不能被本模块包含（与本头互 include）——就地声明用到的两个符号 */
+extern int kaula_runtime_ensure_init(void);
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -50,6 +53,7 @@ void kaula_task_init(KaulaTask* task, KaulaResumeFn fn, void* frame, size_t fram
     task->resume_fn = fn;
     task->frame = frame;
     task->frame_size = frame_size;
+    task->inner_frame = NULL;
 }
 
 /* ========== 完成 ========== */
@@ -57,6 +61,29 @@ void kaula_task_init(KaulaTask* task, KaulaResumeFn fn, void* frame, size_t fram
 void kaula_task_wake_waiters(KaulaTask* task) {
     if (atomic_load(&task->waiters) > 0) {
         kaula_p_event_signal(&task->done_event);
+    }
+}
+
+/*
+ * retire_frames 把任务持有的帧交给 epoch 延迟释放。
+ *
+ * 不能在 kaula_task_complete 里直接 free：await 可能正持有 handle
+ * 并准备读 frame 里的 result 字段。epoch 保证所有活跃 Worker 离开后
+ * 才真正释放，那时已经没人能读到它了。
+ *
+ * 两块帧（内核包装帧 + 用户帧）分别退休 —— epoch 只会 survivor_free
+ * 它拿到的那个指针，没有析构钩子，所以得分两次挂。
+ */
+static void retire_frames(KaulaTask* task) {
+    if (task->flags & KAULA_TASK_FLAG_FRAME_ON_HEAP) {
+        if (task->inner_frame != NULL) {
+            kaula_epoch_retire(task->inner_frame);
+            task->inner_frame = NULL;
+        }
+        if (task->frame != NULL && task->frame_size > 0) {
+            kaula_epoch_retire(task->frame);
+            task->frame = NULL;
+        }
     }
 }
 
@@ -88,6 +115,7 @@ void kaula_task_complete(KaulaTask* task, void* result) {
      * 不能立即 free：可能有线程正持有 KaulaHandle.task 指针在 await。
      * epoch 保证所有活跃 Worker 都离开后才会真正释放。
      */
+    retire_frames(task);
     kaula_epoch_retire(task);
 }
 
@@ -102,6 +130,7 @@ void kaula_task_fail(KaulaTask* task, KaulaError err) {
                               memory_order_acq_rel);
     kaula_conc_metrics_inc_failed();
 
+    retire_frames(task);
     kaula_epoch_retire(task);
 }
 
@@ -232,10 +261,26 @@ void kaula_task_recycle(KaulaTask* task) {
 
 /* ========== Handle ========== */
 
+/*
+ * 句柄持有 pin：安全期的定义是「从 spawn 到 await 读完」。
+ *
+ * 只在 await 里 pin 是不够的 —— 那是马后炮：
+ *   main: spawn 返回 ──── 某个 Worker: 完成 → retire → 立刻 reclaim ──── main: pin, await
+ * 这个窗口里帧已经被释放了。醒来 memcpy 读到的是已回收内存
+ * （表现为一个像指针的垃圾数），而它往往不崩。
+ *
+ * 所以 pin 必须在句柄产生的那一刻拿，await 读完再放。
+ *
+ * 已知代价：句柄被丢弃且从不 await 时，那一个 pin 不会归还，
+ * 会一直挡住回收直到 shutdown。这是保守方向 —— 泄漏可观测、
+ * 而悬垂指针不可观测。Kaula 目前没有 Handle 的 drop 语义，
+ * 补上之后应当在那里归还 pin。
+ */
 KaulaHandle kaula_handle_from_task(KaulaTask* task) {
     KaulaHandle h;
     h.task_id = task->task_id;
     h.task = task;
+    kaula_epoch_pin();
     return h;
 }
 
@@ -254,8 +299,87 @@ int kaula_handle_error(KaulaHandle h) {
     return (int)h.task_id;
 }
 
+/*
+ * await 的结果约定：内核返回的是「结果所在内存的地址」，不是结果本身。
+ *
+ * 那个地址指向 Task 的 Frame 里的一块字段。Frame 在任务完成时就随任务
+ * 一起 retire 了，所以地址的有效期只到"epoch 判定没人再读"为止。
+ *
+ * 因此 await 必须 pin 住整个「等 + 读」过程，而且读出来的内容必须
+ * 在 pin 期间拷走 —— 返回裸指针等于把一个随时会悬垂的地址交给调用者。
+ * main 这类非 Worker 线程没有 epoch 槽位，不 pin 就等于告诉回收器
+ * 「没人会读，随便收」：醒来读到的可能是已释放内存，
+ * 或者更糟 —— 一个已回收并复用的 Frame 里残留的旧值。
+ */
+
+/* 核心：等完成后把结果拷进调用者的缓冲区 */
+static int await_copy_out(KaulaHandle h, void* dst, size_t dst_size, uint64_t timeout_ns) {
+    if (h.task == NULL || dst == NULL) return 0;
+
+    /*
+     * 句柄在 kaula_handle_from_task 里已经 pin 过，
+     * 安全期从 spawn 就开始 —— 这里不能只靠本次 pin。
+     */
+    int ok = kaula_task_await(h.task, timeout_ns);
+    if (ok) {
+        const void* src = h.task->result;
+        if (src != NULL && dst_size > 0) {
+            memcpy(dst, src, dst_size);
+        }
+    }
+
+    /* 读完了，释放句柄持有的那个 pin */
+    kaula_epoch_unpin();
+    return ok;
+}
+
+/*
+ * await_into：把结果直接写进调用者的变量。
+ *
+ * 这是编译器唯一应当使用的 await 入口 —— 调用点知道结果的类型与大小，
+ * 由它提供 dst，拷贝就发生在一个大小明确、类型正确、栈上的位置。
+ * 不需要内核猜类型，也不需要分配临时缓冲（那会漏）。
+ */
+void kaula_handle_await_into(KaulaHandle h, void* dst, size_t dst_size) {
+    /*
+     * 任务若是外部（IoDriver / 阻塞车道）线程直接置的 DONE，
+     * 唤醒事件可能还没建好。走 ensure_init 会顺带补建。
+     */
+    kaula_runtime_ensure_init();
+
+    if (h.task == NULL) {
+        if (dst != NULL && dst_size > 0) memset(dst, 0, dst_size);
+        return;
+    }
+
+    if (!await_copy_out(h, dst, dst_size, KAULA_P_WAIT_FOREVER)) {
+        memset(dst, 0, dst_size);
+    }
+}
+
+int kaula_handle_try_await_into(KaulaHandle h, void* dst, size_t dst_size, uint64_t timeout_ns) {
+    if (h.task == NULL) {
+        if (dst != NULL && dst_size > 0) memset(dst, 0, dst_size);
+        return 0;
+    }
+    return await_copy_out(h, dst, dst_size, timeout_ns);
+}
+
+/*
+ * await 返回「结果所在内存的地址」。
+ *
+ * 与 await_into 的区别只在于 pin 的去留：
+ *   await_into  读完立刻归还句柄持有的 pin —— 推荐，声明处用它
+ *   await       保留 pin 到进程结束 —— 表达式位置（`h1.await + h2.await`）
+ *               拿不到目标类型与大小，无法用 into 形态，只能靠 pin 不归还
+ *
+ * 后者的代价是 pin 永久挡住回收：句柄被 await 过但没走 into 的路径
+ * 会让那块内存留到 shutdown。这是保守方向（泄漏可观测、悬垂不可观测），
+ * 补上 Handle 的 drop 语义后应当在那里归还 pin。
+ */
 void* kaula_handle_await(KaulaHandle h) {
     if (h.task == NULL) return NULL;
+    kaula_runtime_ensure_init();
     if (!kaula_task_await(h.task, KAULA_P_WAIT_FOREVER)) return NULL;
     return h.task->result;
 }

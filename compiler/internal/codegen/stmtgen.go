@@ -257,6 +257,36 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		cType += "*"
 	}
 
+	/*
+	 * `Handle h = spawn f(...)`
+	 *
+	 * 登记 h 的结果 C 类型：表达式位置的 await（`h.await + ...`）
+	 * 只能靠这张表才知道该解引用成什么类型。
+	 */
+	if sp, ok := stmt.Value.(*ast.SpawnExpression); ok {
+		sg.codegen.noteHandleResultType(stmt.Name, sp)
+	}
+
+	if aw, ok := stmt.Value.(*ast.AwaitExpression); ok && stmt.Name != "" {
+		sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local",
+			stmt.Pos.Line, stmt.Pos.Column)
+		handleCode := sg.codegen.expressionGenerator.GenerateExpression(aw.Handle)
+		sg.codegen.expressionGenerator.noteConcurrencyUse()
+		/*
+		 * 走 await_into：结果直接写进这个变量。
+		 *
+		 * 不用 `*(T*)kaula_handle_await(h)` —— 那样是解引用一个
+		 * 「Frame 里字段的地址」，而 Frame 在任务完成时就随任务 retire。
+		 * 解引用发生在句柄 pin 释放之后，是个随时悬垂的读；
+		 * 更糟的是它常常不崩，只是安静地返回上一次任务的旧值。
+		 *
+		 * 内核不知道 Kaula 的类型，所以大小由这里给 —— 调用点知道。
+		 */
+		return fmt.Sprintf("%s %s;\nkaula_handle_await_into(%s, &%s, sizeof(%s));\n",
+			cType, stmt.Name, handleCode, stmt.Name, cType)
+	}
+
+
 	var builder strings.Builder
 	builder.Grow(128)
 

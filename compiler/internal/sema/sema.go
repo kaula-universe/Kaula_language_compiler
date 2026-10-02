@@ -104,13 +104,21 @@ func (sa *SemanticAnalyzer) SetSOREnabled(enabled bool) {
 }
 
 // isFunctionSOR 判断当前函数是否启用了 SOR
-// 优先级：--sor 全局标志 > #[sor] 函数注解
+// 优先级：--sor 全局标志 > conc fn > #[sor] 函数注解
+//
+// conc fn 恒定视为 SOR 开启：Frame 要让局部变量跨 suspend 点存活，
+// 这正是所有权系统该覆盖的生命周期问题。不开的话 conc fn 只能靠
+// conc.AnalyzeBody 单独决定 Frame 形状，跨挂起点的存活变量无人校验。
+// 该判定只影响 conc fn 自身的函数体 —— 同一程序里的普通函数不受影响，
+// 因此不会把无关代码拖进所有权检查（SOR 错误是致命的）。
 func (sa *SemanticAnalyzer) isFunctionSOR() bool {
 	if sa.sorGlobalEnabled {
 		return true
 	}
-	if sa.currentFunction != nil && sa.currentFunction.SOREnabled {
-		return true
+	if sa.currentFunction != nil {
+		if sa.currentFunction.SOREnabled || sa.currentFunction.IsConcurrent {
+			return true
+		}
 	}
 	return false
 }

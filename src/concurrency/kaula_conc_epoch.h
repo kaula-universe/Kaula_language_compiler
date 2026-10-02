@@ -53,6 +53,15 @@ void kaula_epoch_shutdown(void);
 void kaula_epoch_enter(void);
 
 /*
+ * 非 Worker 线程（main / 外部线程）的显式 pin。
+ *
+ * 必须包住"读 Task / 结果字段"的整个过程。
+ * 不 pin 的话没人知道有人在读，reclaim 随时可能把脚下的内存释放掉。
+ */
+void kaula_epoch_pin(void);
+void kaula_epoch_unpin(void);
+
+/*
  * 退出临界区：把 local_epoch 推进到当前 global_epoch，
  * 并顺带尝试一次回收。
  */

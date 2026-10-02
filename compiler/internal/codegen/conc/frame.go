@@ -27,6 +27,12 @@ type Emitter struct {
 	ReturnType string
 	// CReturnType 是对应的 C 类型
 	CReturnType string
+	// FrameVarCTypes 是跨 suspend 存活的局部变量对应的 C 类型。
+	//
+	// 必须由调用方（funcgen，能访问 typeGenerator）填 —— conc 包不认识
+	// Kaula 的类型名，自己猜会错（i64 vs i32 vs String 布局都不同，
+	// 猜错就是静默的数据损坏，不是编译错误）。
+	FrameVarCTypes map[string]string
 	// Params 是参数名
 	Params []string
 	// ParamTypes 是参数类型（Kaula 侧）
@@ -51,23 +57,42 @@ func (e *Emitter) SimpleEntryFn() string { return e.CName + "_simple" }
 // Generate 为一个 conc fn 产出全部 C 代码。
 //
 // analysis 是函数体的分析结果（由 AnalyzeBody 得到）。
-func (e *Emitter) Generate(analysis *BodyAnalysis, bodyCode string, body []ast.Statement) string {
+// FrameVarCType 返回跨 suspend 变量的 C 类型；未知时保守用 void*
+func (e *Emitter) FrameVarCType(name string) string {
+	if e.FrameVarCTypes != nil {
+		if t, ok := e.FrameVarCTypes[name]; ok && t != "" {
+			return t
+		}
+	}
+	return "void*"
+}
+
+// Generate 为一个 conc fn 产出全部 C 定义。
+//
+// segments 是按挂起点切开的函数体分段；第 i 段对应 resume 的 case i。
+// 分段而不是整段，是为了让每段末尾能插入"保存状态并挂起返回"。
+func (e *Emitter) Generate(analysis *BodyAnalysis, segments []string, body []ast.Statement) string {
 	var out strings.Builder
 	e.stateful = analysis.NeedsSuspend
+
+	joined := ""
+	for _, s := range segments {
+		joined += s
+	}
 
 	if !analysis.NeedsSuspend {
 		// 单一形态：没有挂起点，resume 只是一次转发。
 		// 编译器可以把 resume 与普通函数内联合并，spawn 也能退化为普通调用。
 		out.WriteString(e.generateSimpleFrame())
-		out.WriteString(e.generateSimpleResume(bodyCode))
-		out.WriteString(e.generateShim(bodyCode, false))
+		out.WriteString(e.generateSimpleResume(joined))
+		out.WriteString(e.generateShim(joined, false))
 		return out.String()
 	}
 
 	// 双形态：pc + Frame 字段
 	out.WriteString(e.generateStatefulFrame(analysis))
-	out.WriteString(e.generateStatefulResume(analysis, bodyCode))
-	out.WriteString(e.generateShim(bodyCode, true))
+	out.WriteString(e.generateStatefulResume(analysis, segments))
+	out.WriteString(e.generateShim(joined, true))
 	return out.String()
 }
 
@@ -123,8 +148,15 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 		b.WriteString("    /* 跨 suspend 存活的局部变量 */\n")
 		for _, v := range analysis.FrameVars {
 			b.WriteString(fmt.Sprintf("    /* %s */\n", v.Name))
-			// 类型未知时用 void*：保守但安全（编译器稍后可优化为具体类型）
-			b.WriteString(fmt.Sprintf("    void*          %s__v;\n", v.Name))
+			/*
+			 * 用真实 C 类型，不是 void*。
+			 *
+			 * 这些字段的读写发生在不同 resume case 里，类型必须与
+			 * 函数体里的局部变量完全一致；void* 会让 resume 里的
+			 * 恢复语句类型不匹配，或者更糟 —— void*↔整数的隐式转换
+			 * 被接受，于是半个值被静默截断。
+			 */
+			b.WriteString(fmt.Sprintf("    %-14s %s;\n", e.FrameVarCType(v.Name), v.Name))
 		}
 	}
 
@@ -196,38 +228,62 @@ func (e *Emitter) generateSimpleResume(bodyCode string) string {
 	return b.String()
 }
 
-func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, bodyCode string) string {
+/*
+ * generateStatefulResume 产出双形态的 resume：一个 switch，pc 是下标。
+ *
+ * 关键结构：第 i 个 case 承载第 i 段函数体。
+ *
+ * 早期版本把所有段拼起来塞进 case 0，把每个恢复 case 写成空壳 ——
+ * 于是挂起后再 resume 时直接返回 DONE，而 f->result 从没被写过，
+ * await 恒取到零值。这类错误不会崩，只会静默给错答案。
+ *
+ * 每段开头都要把跨挂起点存活的变量从 Frame 恢复成本地变量：上一段
+ * 是在另一次 resume 调用（另一个栈帧）里跑的，那些局部早已随那次返回销毁。
+ */
+func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, segments []string) string {
 	var b strings.Builder
 
 	b.WriteString("/* Resume for conc fn " + e.FuncName + "\n")
-	b.WriteString(fmt.Sprintf(" * %d 个 suspend 点。pc 从入口顺序推进，\n", len(analysis.SuspendSites)))
+	b.WriteString(fmt.Sprintf(" * %d 个挂起点 -> %d 段状态。pc 从入口顺序推进，\n",
+		len(analysis.SuspendSites), len(segments)))
 	b.WriteString(" * 每次 resume 只跑到下一个挂起点就返回，把 Worker 让出去。 */\n")
 	b.WriteString("KaulaResumeResult " + e.ResumeFn() + "(void* frame_ptr) {\n")
 	b.WriteString("    " + e.FrameType() + "* f = (" + e.FrameType() + "*)frame_ptr;\n")
 	b.WriteString("    switch (f->pc) {\n")
 
-	// 入口 case：参数已在 spawn 时写入 Frame，这里从 Frame 恢复到局部变量
-	b.WriteString("    case 0: {\n")
-	b.WriteString("        /* 入口：从 Frame 恢复参数 */\n")
-	for _, p := range e.Params {
-		b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n", e.CTypeOfParamByName(p), p, p))
-	}
-	b.WriteString(bodyCode)
-	// 返回值已由 return 改写存入 f->result（见 generateConcReturn）
-	b.WriteString("        f->pc = -1;\n")
-	if e.HasResult() {
-		b.WriteString("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = &f->result };\n")
-	} else {
-		b.WriteString("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
-	}
-	b.WriteString("    }\n")
+	for pc, seg := range segments {
+		b.WriteString(fmt.Sprintf("    case %d: {\n", pc))
+		if pc == 0 {
+			b.WriteString("        /* 入口：参数由 spawn 时写入 Frame */\n")
+			for _, p := range e.Params {
+				b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n", e.CTypeOfParamByName(p), p, p))
+			}
+		} else {
+			line, kind := 0, SuspendNone
+			if pc-1 < len(analysis.SuspendSites) {
+				line = analysis.SuspendSites[pc-1].Line
+				kind = analysis.SuspendSites[pc-1].Kind
+			}
+			b.WriteString(fmt.Sprintf("        /* 从第 %d 个挂起点恢复（源码行 %d，%s） */\n",
+				pc, line, kind))
+			/*
+			 * 活到本段的变量：参数 + 早于本段声明的局部。
+			 *
+			 * 参数每段都要重建 —— concSuspendReturn 在挂起前把参数写回了
+			 * Frame，而 resume 的栈帧是全新的，不重建就是读未初始化值。
+			 */
+			for _, p := range e.Params {
+				b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n", e.CTypeOfParamByName(p), p, p))
+			}
+			for _, v := range e.frameVarsLiveAt(analysis, pc) {
+				b.WriteString(fmt.Sprintf("        %s %s = f->%s;\n",
+					e.FrameVarCType(v.Name), v.Name, v.Name))
+			}
+		}
 
-	// 每个 suspend 点一个恢复 case
-	for i, site := range analysis.SuspendSites {
-		b.WriteString(fmt.Sprintf("    case %d: {\n", i+1))
-		b.WriteString(fmt.Sprintf("        /* 从第 %d 个挂起点恢复（源码行 %d，%s） */\n",
-			i+1, site.Line, site.Kind))
-		b.WriteString("        /* 参数已由挂起前的写回保存到 Frame */\n")
+		b.WriteString(seg)
+
+		// 段尾兜底：段内既没挂起也没 return 时落到这里
 		b.WriteString("        f->pc = -1;\n")
 		if e.HasResult() {
 			b.WriteString("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = &f->result };\n")
@@ -238,11 +294,35 @@ func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, bodyCode string
 	}
 
 	b.WriteString("    default:\n")
-	b.WriteString("        /* 已完成：不应再次进入 */\n")
+	b.WriteString("        /* 已完成（pc = -1）：不应再次进入 */\n")
 	b.WriteString("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
 	b.WriteString("    }\n")
 	b.WriteString("}\n\n")
 	return b.String()
+}
+
+/*
+ * frameVarsLiveAt 报告恢复到第 pc 段时，哪些跨 suspend 变量已经有值。
+ *
+ * 第 pc 段自己会声明的变量不在其中 —— 恢复它会与段内的声明重复定义。
+ * 判据用声明行号：段号单调对应源码顺序，声明行早于该段起点即为已存活。
+ */
+func (e *Emitter) frameVarsLiveAt(analysis *BodyAnalysis, pc int) []VarInfo {
+	if pc <= 0 || len(analysis.FrameVars) == 0 {
+		return nil
+	}
+	// 该段之前最后一个挂起点的源码行：早于它声明的变量一定已存活
+	cutoff := 0
+	if pc-1 < len(analysis.SuspendSites) {
+		cutoff = analysis.SuspendSites[pc-1].Line
+	}
+	var out []VarInfo
+	for _, v := range analysis.FrameVars {
+		if v.DeclLine < cutoff {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // ---------- coercion shim ----------
@@ -293,19 +373,43 @@ func (e *Emitter) generateShim(bodyCode string, stateful bool) string {
 		b.WriteString(bodyCode)
 		b.WriteString("}\n\n")
 
-		b.WriteString("/* spawn 入口：供内核 trampoline 调用 */\n")
+		/*
+		 * spawn 入口：供内核 trampoline 调用的 void*(void*)。
+		 *
+		 * 它只是"从 Frame 取参数 → 调 shim → 把结果写回 Frame"的一层壳。
+		 * 不重复函数体：函数体已经在上面的 shim 里，
+		 * 复制一份既浪费代码体积，又让两条路径有漂移风险
+		 * （顺序调用与 spawn 的行为不一致）。
+		 */
+		b.WriteString("/* spawn 入口：把 Frame 的参数喂给 shim，结果写回 */\n")
 		b.WriteString("static void* " + e.SimpleEntryFn() + "(void* frame_ptr) {\n")
 		b.WriteString("    " + e.FrameType() + "* f = (" + e.FrameType() + "*)frame_ptr;\n")
-		for i, p := range e.Params {
-			b.WriteString(fmt.Sprintf("    %s %s = f->%s;\n", e.CTypeOfParam(i), p, p))
+
+		var args []string
+		for _, p := range e.Params {
+			args = append(args, "f->"+p)
 		}
-		b.WriteString("    /* 与顺序路径同一份函数体 */\n")
-		b.WriteString(bodyCode)
+		call := e.ShimFn() + "(" + strings.Join(args, ", ") + ")"
 		if e.HasResult() {
-			b.WriteString("    f->result = result;\n")
+			/*
+			 * 返回**结果的地址**，不是结果本身。
+			 *
+			 * 必须与双形态 resume 的 `.value = &f->result` 严格一致 ——
+			 * await 只认一种约定。两条路径约定不同的话，
+			 * await 会在其中一条上静默解引用一个当量整数。
+			 *
+			 * 而且结果类型可能是结构体（如 String），位模式转 void* 编不过；
+			 * 给地址是唯一能同时覆盖标量与结构体的形式。
+			 *
+			 * 代价：Frame 必须活到 await 读完为止。
+			 * 由内核的 epoch 退休机制保证（见 kaula_task_complete）。
+			 */
+			b.WriteString("    f->result = " + call + ";\n")
+			b.WriteString("    return (void*)&f->result;\n")
+		} else {
+			b.WriteString("    " + call + ";\n")
 			b.WriteString("    return (void*)0;\n")
 		}
-		b.WriteString("    return (void*)0;\n")
 		b.WriteString("}\n\n")
 		return b.String()
 	}
@@ -379,10 +483,23 @@ func (e *Emitter) GenerateSpawn(argExprs []string) string {
 			e.ResumeFn()))
 	} else {
 		/*
-		 * 单一形态：没有 Frame 字段，也不走 resume。
+		 * 单一形态：没有 pc，也不走 resume。
 		 * 但仍须交给内核执行 —— 否则 spawn 就失去了"并发提交"的语义。
-		 * 帧内容只有一个结果槽，用一个包装结构承载返回值。
+		 * Frame 在这里只是参数包与结果槽。
 		 */
+		/*
+		 * 参数必须搬进 Frame。
+		 *
+		 * 入口只拿到 void* frame_ptr，没有第二个参数通道，
+		 * 所以参数只能随帧一起交过去。
+		 * 漏掉这一步的症状很隐蔽：入口照常执行、照常返回，
+		 * 但参数全是 memset 清出来的 0 —— 结果恒为"拿 0 当参数算一遍"。
+		 */
+		for i, arg := range argExprs {
+			if i < len(e.Params) {
+				b.WriteString(fmt.Sprintf("        __frame->%s = %s;\n", e.Params[i], arg))
+			}
+		}
 		b.WriteString(fmt.Sprintf("        __h = kaula_spawn_simple(%s, __frame, sizeof(*__frame));\n",
 			e.SimpleEntryFn()))
 	}

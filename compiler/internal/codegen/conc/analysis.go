@@ -57,6 +57,8 @@ type VarInfo struct {
 	DeclLine int
 	// Initializer 是初始化表达式；挂起前求值
 	Initializer ast.Expression
+	// KType 是显式声明的 Kaula 类型；auto 声明为空
+	KType string
 }
 
 // BodyAnalysis 是函数体的分析结果
@@ -174,12 +176,12 @@ func collectDecls(body []ast.Statement) []VarInfo {
 	var out []VarInfo
 	seen := make(map[string]bool)
 
-	add := func(name string, line int, init ast.Expression) {
+	add := func(name string, line int, init ast.Expression, ktype string) {
 		if name == "" || seen[name] {
 			return
 		}
 		seen[name] = true
-		out = append(out, VarInfo{Name: name, DeclLine: line, Initializer: init})
+		out = append(out, VarInfo{Name: name, DeclLine: line, Initializer: init, KType: ktype})
 	}
 
 	var walk func(stmts []ast.Statement)
@@ -187,7 +189,7 @@ func collectDecls(body []ast.Statement) []VarInfo {
 		for _, st := range stmts {
 			switch s := st.(type) {
 			case *ast.VariableDeclaration:
-				add(s.Name, s.Pos.Line, s.Value)
+				add(s.Name, s.Pos.Line, s.Value, s.Type)
 			case *ast.BlockStatement:
 				walk(s.Statements)
 			case *ast.IfStatement:
@@ -197,12 +199,13 @@ func collectDecls(body []ast.Statement) []VarInfo {
 				walk(s.Body)
 			case *ast.ForStatement:
 				if vd, ok := s.Init.(*ast.VariableDeclaration); ok {
-					add(vd.Name, vd.Pos.Line, vd.Value)
+					add(vd.Name, vd.Pos.Line, vd.Value, vd.Type)
 				}
 				walk(s.Body)
 			case *ast.ForInStatement:
 				if s.Variable != nil {
-					add(s.Variable.Name, s.Pos.Line, nil)
+					// ForIn 的循环变量是 ast.Identifier，没有类型标注
+					add(s.Variable.Name, s.Pos.Line, nil, "")
 				}
 				walk(s.Body)
 			case *ast.CallStatement:
