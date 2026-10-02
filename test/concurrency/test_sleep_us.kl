@@ -1,0 +1,45 @@
+// 亚毫秒挂起通路验证
+//
+// 目的：确认 time_sleep_us 会被 lowering 改写成 IoDriver 定时器，
+// 且纳秒换算正确（不是被静默当成毫秒放大 1000 倍）。
+//
+// 判据：1000 次 200µs 挂起，串行执行需要 >= 200ms。
+// 若换算错了（当成 ms），每次变 200ms，总耗时会是 200 秒级 ——
+// 差三个数量级，一眼能看出来。
+
+import std.io
+import std.time
+
+conc fn nap(us: i64) -> i64 {
+    std.time.time_sleep_us(us)
+    return us
+}
+
+fn main() -> i32 {
+    i64 t0 = std.time.time_now_ms()
+
+    // 先单次，确认没有量级错误
+    Handle h0 = spawn nap(200)
+    i64 one = h0.await
+    std.io.println("one = ", one)
+
+    i64 total = 0
+    i64 i = 0
+    while i < 1000 {
+        Handle h = spawn nap(200)
+        i64 v = h.await
+        total = total + v
+        i = i + 1
+    }
+
+    i64 dt = std.time.time_now_ms() - t0
+    std.io.println("total = ", total)
+    std.io.println("elapsed_ms = ", dt)
+
+    if (dt >= 150 && dt < 5000) {
+        std.io.println("us-suspend ok")
+    } else {
+        std.io.println("us-suspend BAD (量级不对)")
+    }
+    return 0
+}
