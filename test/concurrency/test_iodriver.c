@@ -169,6 +169,63 @@ static void test_timer_suspend_resume(void) {
     kaula_runtime_shutdown();
 }
 
+/*
+ * 亚毫秒定时精度：守住「挂起往返的额外开销远小于一个时钟节拍」。
+ *
+ * 这个 bug 不崩溃、不给错结果，只是让所有定时慢约 20 倍，
+ * 所以能悄悄回归 —— 别的用例全绿时它照样红。必须单独钉一条。
+ *
+ * 根因是 Windows 默认系统时钟粒度 15.625ms：所有带超时的等待都被
+ * 向上量化到下一个节拍。修法是进程启动时 timeBeginPeriod(1)，
+ * 外加亚毫秒超时折成「不等待、立即重查」。
+ */
+static void test_subms_timer_precision(void) {
+    TEST_CASE("亚毫秒定时精度：额外开销应远小于 15.625ms 时钟节拍");
+    KaulaRuntimeConfig cfg = {0};
+    cfg.worker_count = 2;
+    ASSERT_EQ(kaula_runtime_init(&cfg), 0, "初始化应成功");
+
+    /* 预热：首轮含线程首次调度与缓存冷启动 */
+    for (int i = 0; i < 2; i++) {
+        TimerFrame* w = (TimerFrame*)kmm_v4_alloc_global(sizeof(TimerFrame));
+        memset(w, 0, sizeof(*w));
+        w->pc = 0;
+        w->delay_ns = 200000;   /* 200us */
+        KaulaHandle wh = kaula_spawn(timer_resume, w, sizeof(TimerFrame));
+        if (!kaula_handle_is_null(wh)) {
+            kaula_handle_await(wh);
+        }
+    }
+
+    const int N = 20;
+    uint64_t t0 = kaula_p_now_ns();
+    for (int i = 0; i < N; i++) {
+        TimerFrame* f = (TimerFrame*)kmm_v4_alloc_global(sizeof(TimerFrame));
+        memset(f, 0, sizeof(*f));
+        f->pc = 0;
+        f->delay_ns = 200000;   /* 200us */
+        KaulaHandle h = kaula_spawn(timer_resume, f, sizeof(TimerFrame));
+        if (kaula_handle_is_null(h)) { TEST_FAIL("spawn 应成功"); break; }
+        (void)kaula_handle_await(h);
+    }
+    uint64_t per = (kaula_p_now_ns() - t0) / N;
+    uint64_t overhead = (per > 200000) ? (per - 200000) : 0;
+
+    printf("  200us 定时 %d 次，平均 %llu us/次，额外开销 %llu us\n",
+           N, (unsigned long long)(per / 1000), (unsigned long long)(overhead / 1000));
+
+    /*
+     * 阈值 8ms：15.625ms 的节拍是目标，8ms 留约一半余量给调度抖动，
+     * 同时仍远低于一个节拍 —— 回归时必然越线。
+     */
+    ASSERT_TRUE(overhead < 8000000ULL,
+                "亚毫秒定时额外开销应 < 8ms；若接近 15.6ms 量级，"
+                "多半是系统时钟分辨率没抬（缺 timeBeginPeriod）"
+                "或亚毫秒超时被折成了等待");
+
+    kaula_runtime_shutdown();
+}
+
 static void test_many_timers(void) {
     TEST_CASE("多个定时器并发挂起都能按时唤醒");
     KaulaRuntimeConfig cfg = {0};
@@ -683,6 +740,7 @@ int main(void) {
 
     TEST_SECTION("IoDriver 定时器");
     test_timer_suspend_resume();
+    test_subms_timer_precision();
     test_many_timers();
     TEST_SECTION("IoDriver socket");
     test_socket_suspend_resume();

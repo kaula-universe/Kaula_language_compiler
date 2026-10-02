@@ -172,7 +172,16 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
         }
     }
 
-    /* ---- 后台线程 ---- */
+    /*
+     * ---- 后台线程 ----
+     *
+     * 先抬时钟分辨率再起线程：Worker park 超时是 1ms、IoDriver 批等待
+     * 也会用到亚 15.6ms 的超时，不抬的话每次挂起往返多付约 20ms 固定税
+     * （见 kaula_conc_platform.h 的说明）。放在线程起来之前，
+     * 免得第一批任务就吃到未抬分辨率的节拍。
+     */
+    kaula_p_timer_resolution_raise();
+
     if (kaula_iodriver_start() != 0) {
         for (uint32_t i = 0; i < cfg.worker_count; i++) {
             kaula_worker_stop(&g_conc_workers[i]);
@@ -233,6 +242,14 @@ void kaula_runtime_shutdown(void) {
     /* 1. 置关闭标记：不再接受新 spawn，且此后不允许再初始化 */
     atomic_store_explicit(&g_conc_runtime.shutdown, 1, memory_order_release);
     atomic_store_explicit(&g_conc_shut_down, 1, memory_order_release);
+
+    /*
+     * 还原时钟分辨率。
+     *
+     * 放在停后台线程之前：驱动线程停止时还要做最后一轮定时器复查，
+     * 那一步仍会用到带超时的等待。进程级设置，不能泄漏到用户后续逻辑。
+     */
+    kaula_p_timer_resolution_restore();
 
     /* 2. 停撤离监控 */
     kaula_evict_stop();

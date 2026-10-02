@@ -138,7 +138,11 @@ def link_flags():
         flags = []
         for d in windows_sdk_lib_dirs():
             flags += ["-L" + d]
-        flags += ["-lws2_32"]
+        # ws2_32: winsock2 的 recv/send（内核 IO 原语走它）
+        # winmm:   timeBeginPeriod/timeEndPeriod，用于抬高系统时钟分辨率。
+        #          不抬的话默认 15.625ms 的时钟粒度会把所有亚毫秒超时
+        #          抬成一个节拍，测试里的定时精度全部失真。
+        flags += ["-lws2_32", "-lwinmm"]
         return flags
     return ["-pthread"]
 
