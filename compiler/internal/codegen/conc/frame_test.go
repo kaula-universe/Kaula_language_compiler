@@ -27,7 +27,7 @@ func newEmitter(params ...string) *Emitter {
 
 func TestGenerate_Simple_FrameHasNoPC(t *testing.T) {
 	e := newEmitter("url")
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, "", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, []string{""}, nil)
 
 	if !strings.Contains(res, "K_fetch_Frame") {
 		t.Error("应生成 Frame 类型")
@@ -52,7 +52,7 @@ func TestGenerate_Simple_FrameHasNoPC(t *testing.T) {
  */
 func TestGenerate_Simple_FrameCarriesParamsAndResult(t *testing.T) {
 	e := newEmitter("url")
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, "", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, []string{""}, nil)
 
 	if !strings.Contains(res, "int64_t url;") {
 		t.Error("单一形态的 Frame 也必须承载参数（spawn 要传递实参）")
@@ -64,7 +64,7 @@ func TestGenerate_Simple_FrameCarriesParamsAndResult(t *testing.T) {
 
 func TestGenerate_Simple_ResumeHasNoSwitch(t *testing.T) {
 	e := newEmitter()
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, "    /* body */\n", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, []string{"    /* body */\n"}, nil)
 
 	if strings.Contains(res, "switch (f->pc)") {
 		t.Error("无挂起点时 resume 不应有 switch（会引入分支开销）")
@@ -81,7 +81,7 @@ func TestGenerate_Simple_ResumeHasNoSwitch(t *testing.T) {
  */
 func TestGenerate_Simple_HasSimpleEntryForKernel(t *testing.T) {
 	e := newEmitter("url")
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, "", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: false}, []string{""}, nil)
 
 	if !strings.Contains(res, "K_fetch_simple") {
 		t.Error("单一形态需产出 void*(void*) 入口供内核 trampoline 调用")
@@ -103,7 +103,7 @@ func TestGenerate_Stateful_FrameHasPCAndVars(t *testing.T) {
 		FrameVars: []VarInfo{{Name: "resp", DeclLine: 11}},
 	}
 
-	res := e.Generate(analysis, "", nil)
+	res := e.Generate(analysis, []string{""}, nil)
 
 	if !strings.Contains(res, "int             pc;") {
 		t.Error("有挂起点时 Frame 应含 pc 字段")
@@ -111,8 +111,16 @@ func TestGenerate_Stateful_FrameHasPCAndVars(t *testing.T) {
 	if !strings.Contains(res, "int64_t url;") {
 		t.Error("参数应进入 Frame 字段")
 	}
-	if !strings.Contains(res, "resp__v") {
+	/*
+	 * 跨 suspend 变量按真实 C 类型入 Frame，不用 void* 改名后缀。
+	 * void* 能与任意整型互转，编译器不报错但值已经被截断 ——
+	 * 宁可这里编译失败，也不要静默给错答案。
+	 */
+	if !strings.Contains(res, "resp;") {
 		t.Error("跨 suspend 变量应进入 Frame")
+	}
+	if strings.Contains(res, "resp__v") {
+		t.Error("Frame 字段不应使用 void* 占位：会静默截断整数值")
 	}
 	if !strings.Contains(res, "int64_t result;") {
 		t.Error("返回值应进入 Frame 字段")
@@ -130,7 +138,8 @@ func TestGenerate_Stateful_ResumeHasCasePerSuspend(t *testing.T) {
 		},
 	}
 
-	res := e.Generate(analysis, "", nil)
+	// 3 个挂起点 → 4 段（第 3 段之后的收尾段）
+	res := e.Generate(analysis, []string{"", "", "", ""}, nil)
 
 	if !strings.Contains(res, "case 0:") {
 		t.Error("应有入口 case 0")
@@ -146,11 +155,42 @@ func TestGenerate_Stateful_ResumeHasCasePerSuspend(t *testing.T) {
 	}
 }
 
+// 回归：早期把所有段拼进 case 0、恢复 case 写成空壳，
+// 挂起后 resume 直接返回 DONE，f->result 从没被写过 —— await 恒取零值。
+func TestGenerate_Stateful_ResumeCarriesSegmentBody(t *testing.T) {
+	e := newEmitter()
+	analysis := &BodyAnalysis{
+		NeedsSuspend: true,
+		SuspendSites: []SuspendSite{
+			{Call: call("net_recv", 5), Kind: SuspendIO, Line: 5},
+		},
+	}
+
+	res := e.Generate(analysis, []string{"    /* 段0 */\n", "    /* 段1 */\n"}, nil)
+
+	seg0 := strings.Index(res, "case 0:")
+	seg1 := strings.Index(res, "case 1:")
+	if seg0 < 0 || seg1 < 0 || seg1 < seg0 {
+		t.Fatal("两个 case 应按源码顺序出现")
+	}
+	mid := res[seg0:seg1]
+	if !strings.Contains(mid, "/* 段0 */") {
+		t.Error("case 0 应承载第 0 段函数体")
+	}
+	if strings.Contains(mid, "/* 段1 */") {
+		t.Error("case 0 不应包含第 1 段（否则挂起后走不到）")
+	}
+	after := res[seg1:]
+	if !strings.Contains(after, "/* 段1 */") {
+		t.Error("case 1 应承载第 1 段函数体")
+	}
+}
+
 // ---------- coercion shim ----------
 
 func TestShim_StackFrameNoAllocation(t *testing.T) {
 	e := newEmitter("url")
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, "", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, []string{""}, nil)
 
 	if !strings.Contains(res, "K_fetch_Frame frame;") {
 		t.Error("双形态 shim 应在栈上建 Frame")
@@ -162,7 +202,7 @@ func TestShim_StackFrameNoAllocation(t *testing.T) {
 
 func TestShim_SuspendUsesBlockingWait(t *testing.T) {
 	e := newEmitter()
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, "", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, []string{""}, nil)
 
 	if !strings.Contains(res, "kaula_iodriver_blocking_wait") {
 		t.Error("shim 的 SUSPEND 分支应就地等 IO，不经过调度器")
@@ -174,7 +214,7 @@ func TestShim_SuspendUsesBlockingWait(t *testing.T) {
 
 func TestShim_HandlesAllResumeStatuses(t *testing.T) {
 	e := newEmitter()
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, "", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, []string{""}, nil)
 
 	for _, st := range []string{
 		"KAULA_RESUME_DONE",
@@ -204,7 +244,7 @@ func TestGeneratedCommentsAreClosed(t *testing.T) {
 				{Call: call("net_recv", 1), Kind: SuspendIO, Line: 1},
 			}
 		}
-		res := e.Generate(analysis, "    /* body */\n", nil)
+		res := e.Generate(analysis, []string{"    /* body */\n"}, nil)
 
 		open := strings.Count(res, "/*")
 		close := strings.Count(res, "*/")
@@ -326,7 +366,7 @@ func TestGenerate_VoidReturn(t *testing.T) {
 		CName:       "K_notify",
 		CReturnType: "void",
 	}
-	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, "", nil)
+	res := e.Generate(&BodyAnalysis{NeedsSuspend: true}, []string{""}, nil)
 
 	if !strings.Contains(res, "void K_notify_as_fn(void)") {
 		t.Error("void 返回的 shim 签名应为 void")
@@ -358,7 +398,7 @@ func TestEndToEnd_NoSuspendPath(t *testing.T) {
 	}
 	analysis := AnalyzeBody(body)
 	e := newEmitter("x")
-	res := e.Generate(analysis, "    /* generated body */\n", body)
+	res := e.Generate(analysis, []string{"    /* generated body */\n"}, body)
 
 	if !strings.Contains(res, "generated body") {
 		t.Error("函数体应被包含在产物中")
@@ -376,7 +416,7 @@ func TestEndToEnd_SuspendPath(t *testing.T) {
 	}
 	analysis := AnalyzeBody(body)
 	e := newEmitter("url")
-	res := e.Generate(analysis, "    /* generated body */\n", body)
+	res := e.Generate(analysis, []string{"    /* generated body */\n"}, body)
 
 	if !strings.Contains(res, "switch (f->pc)") {
 		t.Error("有挂起的函数应走双形态")

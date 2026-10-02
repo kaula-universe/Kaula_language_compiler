@@ -32,6 +32,18 @@
 static int g_conc_initialized = 0;
 static _Atomic(int) g_conc_initing = 0;
 
+/*
+ * 关闭闩锁：shutdown 之后永不再初始化。
+ *
+ * 单看 g_conc_initialized 是不够的 —— shutdown 会把它清回 0，
+ * 于是下一次 ensure_init 会把整套运行时重新拉起来，清掉 shutdown 标志。
+ * 症状是"关掉之后再 spawn 居然成功了"，且已经 join 过的 Worker 不会被重建，
+ * 任务投进没有消费者的队列 —— await 永久阻塞。
+ *
+ * 这个闩锁是单调的：一旦置位，进程生命周期内不再复位。
+ */
+static _Atomic(int) g_conc_shut_down = 0;
+
 /* ========== 配置解析 ========== */
 
 static uint32_t env_uint(const char* name, uint32_t fallback) {
@@ -202,6 +214,9 @@ fail_early:
  * 首次调用走默认配置；用户后续显式 init 会被忽略（幂等）。
  */
 int kaula_runtime_ensure_init(void) {
+    if (atomic_load_explicit(&g_conc_shut_down, memory_order_acquire)) {
+        return -1;
+    }
     if (g_conc_initialized) return 0;
     return kaula_runtime_init(NULL);
 }
@@ -215,8 +230,9 @@ int kaula_runtime_is_initialized(void) {
 void kaula_runtime_shutdown(void) {
     if (!g_conc_initialized) return;
 
-    /* 1. 置关闭标记：不再接受新 spawn */
+    /* 1. 置关闭标记：不再接受新 spawn，且此后不允许再初始化 */
     atomic_store_explicit(&g_conc_runtime.shutdown, 1, memory_order_release);
+    atomic_store_explicit(&g_conc_shut_down, 1, memory_order_release);
 
     /* 2. 停撤离监控 */
     kaula_evict_stop();

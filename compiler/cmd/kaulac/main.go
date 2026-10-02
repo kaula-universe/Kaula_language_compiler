@@ -3711,6 +3711,38 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			{"spend_call.c", "spend_call.o"},
 			{"allocator.c", "allocator.o"},
 		}
+
+		/*
+		 * 并发内核：只有程序里真的用了 conc fn / spawn 才编。
+		 *
+		 * 这是设计说明书 §2.7 推论二的实现：
+		 * 无人使用 spawn 时，调度器代码一个字节都不进最终二进制 ——
+		 * 对裸机与嵌入式是硬需求，不是优化项。
+		 */
+		if codegen.UsesConcurrency() {
+			for _, name := range []string{
+				"kaula_conc_io_primitives", "kaula_conc_io_backend",
+				"kaula_conc_task", "kaula_conc_epoch", "kaula_conc_completion",
+				"kaula_conc_budget", "kaula_conc_metrics", "kaula_conc_worker",
+				"kaula_conc_scheduler", "kaula_conc_iodriver",
+				"kaula_conc_block_lane", "kaula_conc_evict", "kaula_conc",
+			} {
+				runtimeSources = append(runtimeSources, struct{ cName, oName string }{
+					"concurrency/" + name + ".c", "conc_" + name + ".o",
+				})
+				/*
+				 * 必须同时登记到链接列表。
+				 * 只加进编译列表是不够的 —— 那样会编出 .o 但不链接，
+				 * 表现为 "undefined symbol: kaula_spawn" 这类链接错误，
+				 * 而 C 编译阶段完全通过，排查方向会被误导到代码生成上。
+				 */
+				runtimeObjs = append(runtimeObjs, "conc_"+name+".o")
+			}
+			if verboseMode {
+				fmt.Println("[Compile] 并发内核: 程序使用了 conc fn / spawn，编译并链接调度器")
+			}
+		}
+
 		for _, rs := range runtimeSources {
 			// 裸机只需要 KMM 分配器：spend_call.c / allocator.c 依赖 libc
 			//（fwrite/abort），在 -nostdlib 下必然编译失败 —— boot 路径同样不编它们。

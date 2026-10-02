@@ -149,6 +149,18 @@ struct KaulaTask {
     void*               frame;
     size_t              frame_size;
 
+    /*
+     * 第二块需回收的内存：包在 frame 里的用户帧。
+     *
+     * spawn_simple 用一个内核分配的包装帧承载 { 函数指针, 用户帧 }，
+     * 用户的 Frame 是生成代码另外分配的。两块都要随任务退休一起释放。
+     *
+     * 为什么结果必须活到 await 之后：任务结果以 &f->result 的形式返回，
+     * await 读的是 Frame 里的字段。提前释放就是 UAF ——
+     * 而且它不会崩，会安静地返回上次那个任务的旧值。
+     */
+    void*               inner_frame;
+
     /* ---- 属主（I2：任一时刻有且仅有一个 owner） ---- */
     _Atomic(KaulaWorker*) owner;
 
@@ -265,6 +277,21 @@ int         kaula_handle_is_null(KaulaHandle h);
 void*       kaula_handle_await(KaulaHandle h);
 void*       kaula_handle_try_await(KaulaHandle h, uint64_t timeout_ns);
 int         kaula_handle_poll(KaulaHandle h);
+
+/*
+ * await_into：把任务结果写进调用者的缓冲区。编译器生成的代码只应走这条。
+ *
+ * 为什么必须有 into 形态：
+ * 任务结果是「Frame 里某字段的地址」，而 Frame 在完成时就随任务 retire。
+ * 返回裸地址等于交出一个随时会悬垂的指针 —— 而它未必崩，
+ * 常常安静地返回上一次那个任务的旧值。
+ *
+ * dst 在调用者栈上，大小与类型由调用点确定：拷贝不越界，
+ * 也不需要内核分配临时缓冲（那会每 await 漏一次）。
+ */
+void        kaula_handle_await_into(KaulaHandle h, void* dst, size_t dst_size);
+int         kaula_handle_try_await_into(KaulaHandle h, void* dst, size_t dst_size,
+                                        uint64_t timeout_ns);
 void        kaula_handle_cancel(KaulaHandle h);
 int         kaula_handle_error(KaulaHandle h);
 

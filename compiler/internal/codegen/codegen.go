@@ -95,6 +95,29 @@ type CodeGenerator struct {
 	inConcResume  bool
 	concFrameVar  string
 	concHasResult bool
+
+	/*
+	 * concIoRewrite 决定可插桩调用在 resume 里被生成成什么（I4）。
+	 *
+	 * 一次挂起要把调用劈成两半：
+	 *   submit 段：算出实参 → 填 KaulaIoRequest → 交 IoDriver → 归还 Worker
+	 *   result 段：恢复后从 kaula_conc_tls_io_result 取回结果
+	 * 所以同一条语句要按两种模式各生成一次。
+	 *
+	 * 早期版本没做这个拆分，生成的是"原地阻塞调用 + 空转挂起"——
+	 * 状态机形状对，但 Worker 真的卡在 IO 上，直接违反 I4。
+	 */
+	concIoRewrite  concIoRewriteMode
+	concIoCounter  int
+
+	// lastIoVar 是本次 lowering 里最近生成的 IO 请求变量名，
+	// 供 concSuspendReturn 填进 KaulaResumeResult.io_request
+	lastIoVar string
+
+	// handleResultTypes：Handle 变量名 → 其任务结果的 C 类型。
+	// 由 `Handle h = spawn f()` 的声明处登记，表达式位置的 await 查它来解引用。
+	handleResultTypes map[string]string
+
 	callStack                 map[string]bool
 
 	// 当前类上下文：在生成构造函数/方法体期间设置，供 exprgen 识别成员字段
