@@ -16,6 +16,7 @@
 #include "kaula_conc.h"
 
 #include <string.h>
+#include <stdint.h>
 
 #if KAULA_PLATFORM_WINDOWS
     #include <winsock2.h>
@@ -325,59 +326,89 @@ static void test_block_lane_isolation(void) {
     cfg.max_block_threads = 8;
     ASSERT_EQ(kaula_runtime_init(&cfg), 0, "初始化应成功");
 
-    /*
+/*
      * 4 个各阻塞 50ms 的任务，共 200ms 串行工作量。
      *
      * 若阻塞发生在 Worker 上，2 个 Worker 只能并行 2 个 → ≥100ms。
      * 走阻塞车道（8 线程）则应接近 50ms。
-     * 阈值取 90ms：留出调度抖动余量，又能区分两种执行位置。
+     *
+     * 取多轮采样中的**最小值**而非单次值：
+     * 调度抖动与机器负载只会让耗时变长、不会变短，所以 min 反映的是
+     * 「系统空闲时的真实能力」。单次采样在 --stress 压测或 CI 负载下
+     * 会偶发冲到 90ms 以上而误报（实测无负载稳定 59-64ms，开 12 个
+     * CPU 占满进程仍是 60-64ms，可见抖动属环境噪声而非逻辑问题）。
+     *
+     * 关键点：这不削弱断言的鉴别力。若阻塞真的跑在 Worker 上，
+     * 每一轮都会 ≥100ms，取 min 同样 ≥100ms，照样失败。只有
+     * 「并行但偶尔被调度拖延」才会被 min 滤掉 —— 而那正是要容忍的噪声。
      */
     const int N = 4;
-    KaulaHandle hs[4];
+    const int ATTEMPTS = 5;
+    uint64_t dt_best = UINT64_MAX;
+    int all_ok = 1;
+    int lane_expanded = 0;
 
     /*
      * 这里不走 kaula_spawn：hint 标志必须在任务被 Worker 取走之前设好，
- *  而 spawn 之后立刻置位是竞态的（Worker 可能已经开跑）。
- *
- * 编译器生成的代码不会有这个问题：#[hint(blocking)] 是静态属性，
- * 在 lowering 期就写进 spawn 的参数里。
- */
-    for (int i = 0; i < N; i++) {
-        BlockFrame* f = (BlockFrame*)kmm_v4_alloc_global(sizeof(BlockFrame));
-        memset(f, 0, sizeof(*f));
-        f->pc = 0;
+     *  而 spawn 之后立刻置位是竞态的（Worker 可能已经开跑）。
+     *
+     * 编译器生成的代码不会有这个问题：#[hint(blocking)] 是静态属性，
+     *  在 lowering 期就写进 spawn 的参数里。
+     */
+    for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
+        KaulaHandle hs[4];
+        uint64_t spawned_before = g_conc_block_lane.total_spawned_threads;
 
-        KaulaTask* t = kaula_task_alloc();
-        if (t == NULL) { TEST_FAIL("Task 分配失败"); break; }
-        kaula_task_init(t, block_resume, f, sizeof(BlockFrame));
-        t->flags |= KAULA_TASK_FLAG_HINT_BLOCKING;
-        atomic_store_explicit(&t->state, KAULA_TASK_READY, memory_order_release);
-        atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1,
-                                  memory_order_relaxed);
+        int submitted = 0;
+        for (int i = 0; i < N; i++) {
+            BlockFrame* f = (BlockFrame*)kmm_v4_alloc_global(sizeof(BlockFrame));
+            if (f == NULL) { TEST_FAIL("Frame 分配失败"); all_ok = 0; break; }
+            memset(f, 0, sizeof(*f));
+            f->pc = 0;
 
-        hs[i] = kaula_handle_from_task(t);
-        ASSERT_FALSE(kaula_handle_is_null(hs[i]), "handle 应有效");
-        ASSERT_EQ(kaula_conc_worker_post(NULL, t), 0, "投递应成功");
+            KaulaTask* t = kaula_task_alloc();
+            if (t == NULL) { TEST_FAIL("Task 分配失败"); all_ok = 0; break; }
+            kaula_task_init(t, block_resume, f, sizeof(BlockFrame));
+            t->flags |= KAULA_TASK_FLAG_HINT_BLOCKING;
+            atomic_store_explicit(&t->state, KAULA_TASK_READY, memory_order_release);
+            atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1,
+                                      memory_order_relaxed);
+
+            hs[i] = kaula_handle_from_task(t);
+            if (kaula_handle_is_null(hs[i])) { TEST_FAIL("handle 应有效"); all_ok = 0; }
+            if (kaula_conc_worker_post(NULL, t) != 0) { TEST_FAIL("投递应成功"); all_ok = 0; }
+            submitted++;
+        }
+
+        uint64_t t0 = kaula_p_now_ns();
+        for (int i = 0; i < submitted; i++) {
+            void* r = kaula_handle_await(hs[i]);
+            if ((int)(intptr_t)r != 123) { TEST_FAIL("阻塞任务应完成"); all_ok = 0; }
+        }
+        uint64_t dt = kaula_p_now_ns() - t0;
+
+        uint64_t spawned_after = g_conc_block_lane.total_spawned_threads;
+        if (spawned_after > spawned_before) lane_expanded = 1;
+
+        if (submitted == N && dt < dt_best) dt_best = dt;
     }
 
-    uint64_t spawned_before = g_conc_block_lane.total_spawned_threads;
-
-    uint64_t t0 = kaula_p_now_ns();
-    for (int i = 0; i < N; i++) {
-        void* r = kaula_handle_await(hs[i]);
-        ASSERT_EQ((int)(intptr_t)r, 123, "阻塞任务应完成");
+    if (dt_best == UINT64_MAX) {
+        TEST_FAIL("没有完成任何一轮完整计时采样");
+        kaula_runtime_shutdown();
+        return;
     }
-    uint64_t dt = kaula_p_now_ns() - t0;
 
-    uint64_t spawned_after = g_conc_block_lane.total_spawned_threads;
-    printf("  (4 个 50ms 阻塞任务总耗时 %llu ms，串行需 200ms；车道新开 %llu 线程)\n",
-           (unsigned long long)(dt / 1000000),
-           (unsigned long long)(spawned_after - spawned_before));
+    printf("  (4 个 50ms 阻塞任务 %d 轮取最优 %llu ms，串行需 200ms；车道扩容%s)\n",
+           ATTEMPTS,
+           (unsigned long long)(dt_best / 1000000),
+           lane_expanded ? "有" : "无");
 
-    ASSERT_TRUE(dt < 90000000ULL,
+    ASSERT_TRUE(all_ok, "所有轮次的阻塞任务都应完成");
+    ASSERT_TRUE(dt_best < 90000000ULL,
                 "阻塞应并行完成；若阻塞跑在 Worker 上会 ≥100ms");
-    ASSERT_TRUE(dt >= 50000000ULL, "总耗时不应短于单次阻塞时长");
-    ASSERT_TRUE(spawned_after > spawned_before, "并发阻塞时应动态扩容车道线程");
+    ASSERT_TRUE(dt_best >= 50000000ULL, "总耗时不应短于单次阻塞时长");
+    ASSERT_TRUE(lane_expanded, "并发阻塞时应动态扩容车道线程");
 
     /*
      * 车道线程数应随并发阻塞需求增长（动态伸缩，文档 §7.2）。
