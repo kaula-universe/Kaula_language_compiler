@@ -4583,15 +4583,27 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 		p.nextToken()
 		blockBody := []ast.Statement{}
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			prevTok := p.curTok
 			bodyStmt := p.parseStatementIterative()
 			if bodyStmt != nil {
 				blockBody = append(blockBody, bodyStmt)
 			}
-			// 如果 parseStatementIterative 没有前进 token（返回 nil 且 token 没变），需要手动前进
-			// 避免死循环
-			if p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
-				// parseStatementIterative 应该已经前进了 token
-				// 如果它失败了，我们也需要前进以避免死循环
+			/*
+			 * 没前进 token 就必须手动前进，否则这里死循环。
+			 *
+			 * 原实现在这个位置留了一个**空的 if**：注释写着
+			 * 「如果它失败了，我们也需要前进以避免死循环」，代码却什么都没做。
+			 * 于是只要块内出现一条解析不了的语句（最常见的来源是块内
+			 * 某处有语法错误，错误恢复把 token 落在奇怪的位置），
+			 * parseStatementIterative 返回 nil 且 token 不变，
+			 * 这个 for 就永远转下去 —— kaulac 挂死，一个字都不输出。
+			 *
+			 * 判据用 token 的类型+值，与本文件其他错误恢复点一致。
+			 */
+			if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+				p.log("跳过无法解析的块内 token: %s=%q",
+					lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+				p.nextToken()
 			}
 		}
 		if p.curTok.Type == lexer.TOKEN_RBRACE {
