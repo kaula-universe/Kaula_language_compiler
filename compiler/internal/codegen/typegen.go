@@ -248,6 +248,23 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 		}
 	}
 
+	/*
+	 * 元素类型 / 指针基类型的统一映射入口。
+	 *
+	 * 必须先查 clibTypeMap 再走 MapKaulaTypeToC —— 后者只认 globalTypeMap。
+	 * 少了这一步，只在 clibTypeMap 里登记的类型在数组与指针位置就会漏成
+	 * 原始 Kaula 名：`[4]Handle` 生成 `Handle hs[4]`，clang 报
+	 * "use of undeclared identifier 'Handle'"。
+	 * 标量位置没事，是因为 convertType 先查了 clibTypeMap；
+	 * 而这里的四个分支都是直接调 MapKaulaTypeToC，把那条路绕过去了。
+	 */
+	mapElem := func(name string) string {
+		if cType, ok := tg.clibTypeMap[name]; ok {
+			return cType
+		}
+		return tg.MapKaulaTypeToC(name)
+	}
+
 	typeLower := strings.ToLower(kaulaType)
 	if cType, ok := globalTypeMap[typeLower]; ok {
 		return cType
@@ -260,7 +277,7 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 			arraySize := typeLower[1:closeBracket]
 			// 元素类型保留原始大小写递归映射（用户定义类型可能含大写，如 [4]Entity）
 			elemType := kaulaType[closeBracket+1:]
-			cElemType := tg.MapKaulaTypeToC(elemType)
+			cElemType := mapElem(elemType)
 			return cElemType + "[" + arraySize + "]"
 		}
 	}
@@ -275,7 +292,7 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 		if cType, ok := globalTypeMap[innerType]; ok {
 			return cType + "*"
 		}
-		return kaulaType[2:] + "*"
+		return mapElem(kaulaType[2:]) + "*"
 	}
 	if strings.HasPrefix(typeLower, "*") {
 		innerType := typeLower[1:]
@@ -289,7 +306,7 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 			return cType + "*"
 		}
 		// 对于 struct 类型，内部递归 tg.MapKaulaTypeToC 会添加 struct 前缀
-		return tg.MapKaulaTypeToC(kaulaType[1:]) + "*"
+		return mapElem(kaulaType[1:]) + "*"
 	}
 	if strings.HasSuffix(typeLower, "*") {
 		baseType := typeLower[:len(typeLower)-1]
@@ -303,7 +320,7 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 			return cType + "*"
 		}
 		// 对于 struct 类型，内部递归 tg.MapKaulaTypeToC 会添加 struct 前缀
-		return tg.MapKaulaTypeToC(kaulaType[:len(kaulaType)-1]) + "*"
+		return mapElem(kaulaType[:len(kaulaType)-1]) + "*"
 	}
 	if strings.HasPrefix(typeLower, "const ") {
 		innerType := kaulaType[6:] // 保留原始大小写，用户定义类型可能含大写

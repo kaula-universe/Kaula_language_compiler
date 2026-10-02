@@ -3405,10 +3405,34 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	// 链接器优化：Windows 强制 lld（MSVC ABI 兼容性）；Linux/macOS 优先 lld（更快），不可用时回退默认
 	if runtime.GOOS == "windows" {
 		clangArgs = append(clangArgs, "-fuse-ld=lld")
-		// Windows 目标下 clang 对栈帧 >4KB 的函数默认生成 __chkstk 调用，
-		// 而本编译器不链接 CRT，导致 ld.lld 报 undefined symbol: __chkstk。
-		// 把探测阈值设到极大值即可避免（程序为单线程、栈充足，安全）。
-		clangArgs = append(clangArgs, "-mstack-probe-size=2147483647")
+		/*
+		 * Windows 栈探测阈值：**必须保留 clang 的默认值（4096），不要抬高。**
+		 *
+		 * 这里原来写的是 -mstack-probe-size=2147483647，理由是
+		 * 「避免 ld.lld 报 undefined symbol: __chkstk」。那个理由在
+		 * 本机并不成立（实测 lld 能正常解析 __chkstk），而代价是真实的：
+		 *
+		 * -mstack-probe-size=N 的语义是「帧小于 N 就不生成栈探测」。
+		 * 抬到极大值等于对**所有**函数关掉栈探测。局部数组一大，
+		 * 分配落在从未触碰过的栈区，会直接跨过保护页 —— 静默破坏内存，
+		 * 不是报错。实测：
+		 *
+		 *     probe=4096（默认）    -> exit 0
+		 *     probe=65536          -> 0xC0000005
+		 *     probe=1048576        -> 0xC0000005
+		 *     probe=2147483647     -> 0xC0000005
+		 *
+		 * 触发用例是普通到不能再普通的代码：
+		 *
+		 *     fn main() -> i32 {
+		 *         [4000]i64 big;    // 32KB 局部数组
+		 *         ...
+		 *     }
+		 *
+		 * 16KB（[2000]i64）正常，32KB（[4000]i64）段错误。
+		 * 「栈充足所以安全」这个假设只对内核的小栈帧成立，
+		 * 对用户代码不成立 —— 而用户代码才是会写大数组的那一方。
+		 */
 	} else if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		// 检测 lld 是否可用，可用则使用（比默认 ld 快 2-5 倍）
 		if _, err := exec.LookPath("ld.lld"); err == nil {
