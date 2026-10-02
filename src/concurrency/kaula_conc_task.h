@@ -311,6 +311,25 @@ extern void          kaula_conc_set_current_worker(struct KaulaWorker* w);
  */
 extern _Thread_local int kaula_conc_tls_io_result;
 
+/*
+ * 上一次 await 的服务时间（complete_ns - submit_ns）。
+ *
+ * 与「谁先取到结果」无关，所以延迟统计必须用它：
+ * 并发窗口里按调用方掐表量到的是排队 + 顺序取回，与服务时间
+ * 能差两个数量级（槽位 999 早算完，却要等 0..998 全取完）。
+ */
+extern _Thread_local uint64_t kaula_conc_tls_last_latency_ns;
+
+/* Task 的服务时间；打点缺失或时钟倒流时返回 0（不编造数值） */
+uint64_t  kaula_task_latency_ns(const KaulaTask* task);
+
+/*
+ * 取上一次 await 的服务时间。编译器生成的 await 形态不带出参，
+ * 基准与诊断代码经 `extern fn kaula_conc_last_latency_ns() -> u64` 取值
+ * （extern 形参里放不了 Handle，无参就没这个问题）。
+ */
+uint64_t  kaula_conc_last_latency_ns(void);
+
 /* ========== Task 等待原语（Task / 完成队列内部使用） ========== */
 
 /*

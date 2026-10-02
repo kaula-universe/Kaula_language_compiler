@@ -12,11 +12,16 @@
 import std.io
 import std.time
 
-// 注：延迟统计尚未接内核打点（kaula_handle_await_into_timed 已实现，
-// 但从 Kaula 侧调用它需要 codegen 支持或可用的 extern 形参 —— 目前
-// `Handle` 作 extern 形参会被前端拒绝）。
-// 所以下面 lat[] 记的仍是调用方掐表的值，高并发下**不可信**：
-// 它量的是排队 + 顺序取回，不是服务时间。详见 test/bench/TRANSACTION.md。
+// 取「上一次 await 的服务时间」。
+//
+// 延迟必须由内核打点，不能由调用方掐表：并发窗口里按「调用方何时
+// 取到结果」量到的是排队 + 顺序取回，与服务时间能差两个数量级。
+// 修复前实测 p50=3.15s 而整轮只用 26ms —— p50 大于总耗时。
+//
+// 走 extern 无参访问器而不是给 await 加出参：codegen 只生成
+// kaula_handle_await_into(h, &x, sizeof(x)) 一种形态，改出参会牵动
+// 所有 await 的生成与 ABI；而 extern 形参里放不了 Handle。
+extern fn kaula_conc_last_latency_ns() -> u64
 
 // ---------- 事务（与 Go/Tokio 逐位一致，见 TRANSACTION.md） ----------
 //
@@ -133,9 +138,11 @@ fn main() -> i32 {
         j = 0;
         while j < filled {
             i64 r = in_flight[j].await;
+            // 服务时间由内核记录（submit -> complete），与取回顺序无关
+            i64 svc = kaula_conc_last_latency_ns();
             checksum = (checksum + r) % 9223372036854775807;
             if n < @@MAX_SAMPLES@@ {
-                lat[n] = std.time.time_now_ns() - submit_ts[j];
+                lat[n] = svc;
                 n = n + 1;
             }
             done = done + 1;
