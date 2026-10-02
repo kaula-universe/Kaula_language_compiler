@@ -52,13 +52,20 @@ func concIoTypeOf(name string) (op string, ok bool) {
 		return "KAULA_IO_READ", true
 	case "net_send", "net_write", "fs_write":
 		return "KAULA_IO_WRITE", true
-	case "net_connect":
-		return "KAULA_IO_CONNECT", true
-	case "net_accept":
-		return "KAULA_IO_ACCEPT", true
-	case "time_sleep", "time_after":
+	case "time_sleep", "time_sleep_us", "time_sleep_ns", "time_sleep_seconds", "time_after":
 		return "KAULA_IO_SLEEP", true
 	}
+	/*
+	 * net_connect / net_accept 不在此表。
+	 *
+	 * connect / accept 是 socket 专属操作，read/write 表达不了，
+	 * 内核不实现。这里不登记，调用点就退回普通阻塞语义 —— 行为正确，
+	 * 只是那个 Worker 会真的卡住。登记成操作码再让内核回 ENOSYS
+	 * 才是错的：那会把"退化成阻塞"换成"静默给出操作失败"。
+	 *
+	 * net_recv / net_send 在表里是安全的：内核的 IO 执行用 read/write，
+	 * 而 POSIX 上 socket 就是 fd，同一条路径通吃。
+	 */
 	return "", false
 }
 
@@ -72,6 +79,17 @@ func (eg *ExpressionGenerator) concIoCallRewrite(
 	cg := eg.codegen
 	if !cg.inConcResume || cg.concIoRewrite == concIoNone {
 		return "", false
+	}
+
+	/*
+	 * 归一化到裸名（std.time.time_sleep → time_sleep）。
+	 *
+	 * 分析阶段用的是裸名，这里若还用带前缀的名字做单位换算，
+	 * switch 会全部落空、静默退回毫秒 —— 亚毫秒定时于是被放大 1000 倍，
+	 * 而且不报错。
+	 */
+	if i := strings.LastIndexByte(funcName, '.'); i >= 0 {
+		funcName = funcName[i+1:]
 	}
 
 	// 只有真正映射到内核 op 的函数才走这条路
@@ -112,8 +130,9 @@ func (eg *ExpressionGenerator) concIoCallRewrite(
 		 */
 		cg.concIoCounter++
 		varName := fmt.Sprintf("__kaula_io_%d", cg.concIoCounter)
-		// 记下来，concSuspendReturn 要把它填进 KaulaResumeResult.io_request
+		// 记下来，挂起返回要把它填进 KaulaResumeResult.io_request
 		cg.lastIoVar = varName
+		cg.concSlotAwaits++
 
 		var b []byte
 		b = append(b, fmt.Sprintf("KaulaIoRequest %s = {0};\n", varName)...)
@@ -122,13 +141,26 @@ func (eg *ExpressionGenerator) concIoCallRewrite(
 		switch op {
 		case "KAULA_IO_SLEEP":
 			/*
-			 * time_sleep 的实参是毫秒，内核按纳秒算。
-			 * 乘法放在这里而不是内核里：Kaula 层的单位约定不该
-			 * 渗进内核，内核只认 ns。
+			 * 内核只认 ns。Kaula 层的单位约定（毫秒/微秒/纳秒/秒）
+			 * 在这里换算掉，不该渗进内核。
+			 *
+			 * 四种粒度都要区分：只有毫秒版可插桩时，亚毫秒定时
+			 * 无法成为挂起点，挂起路径的开销就测不出来
+			 * （毫秒粒度把单任务吞吐钉死在 ~1000/s）。
 			 */
+			mult, unit := "1000000ull", "ms"
+			switch funcName {
+			case "time_sleep_us":
+				mult, unit = "1000ull", "us"
+			case "time_sleep_ns":
+				mult, unit = "1ull", "ns"
+			case "time_sleep_seconds":
+				mult, unit = "1000000000ull", "s"
+			}
 			if len(argCodes) > 0 {
-				b = append(b, fmt.Sprintf("%s.timeout_ns = (uint64_t)(%s) * 1000000ull;\n",
-					varName, argCodes[0])...)
+				b = append(b, fmt.Sprintf(
+					"%s.timeout_ns = (uint64_t)(%s) * %s;  /* %s */\n",
+					varName, argCodes[0], mult, unit)...)
 			} else {
 				b = append(b, fmt.Sprintf("%s.timeout_ns = 0;\n", varName)...)
 			}
@@ -141,7 +173,15 @@ func (eg *ExpressionGenerator) concIoCallRewrite(
 			 * 交给 Kaula 的 runtime 包装层解释。
 			 */
 			if len(argCodes) > 0 {
-				b = append(b, fmt.Sprintf("%s.fd = (int)(%s);\n", varName, argCodes[0])...)
+				/*
+				 * 转成 KaulaIoFd，不写死 (int)。
+				 *
+				 * Windows 上 fd 装的是指针宽的 HANDLE，(int) 会把高位
+				 * 截掉 —— 生成的 C 编译得过，运行时却拿着一个野句柄
+				 * 去 _get_osfhandle，症状是"偶发失败"而不是报错。
+				 * typedef 由内核头定义，两侧自动对齐。
+				 */
+				b = append(b, fmt.Sprintf("%s.fd = (KaulaIoFd)(%s);\n", varName, argCodes[0])...)
 			}
 			if len(argCodes) > 1 {
 				b = append(b, fmt.Sprintf("%s.buf = (void*)(%s);\n", varName, argCodes[1])...)
@@ -154,6 +194,38 @@ func (eg *ExpressionGenerator) concIoCallRewrite(
 					varName, argCodes[3])...)
 			}
 		}
+
+		if !cg.concGuardActive() {
+			/*
+			 * 顶层两段式切分：挂起返回由 concSuspendReturn 在语句末尾统一发出，
+			 * 那里的作用域能看到这条语句生成的 IO 请求局部量。
+			 */
+			return string(b) + varName, true
+		}
+
+		/*
+		 * 守卫模式：挂起返回必须就地发出。
+		 *
+		 * 外层的挂起返回看不到这里的局部量 —— 它挂在复合语句的花括号之外，
+		 * 而这条语句此刻正被包在循环体或分支体里。强行引用就是
+		 * "use of undeclared identifier"。
+		 *
+		 * 恢复槽位取当前语句的下一个：concGuardSlot 在生成之前已经把
+		 * concGuardSeq 推到 k+1，那正是「本语句提交完了」的落点。
+		 * 一条语句里有多个可插桩调用时两个挂起会抢同一个槽位 ——
+		 * 那种情况由 concCheckSupported 报诊断拦下。
+		 */
+		f := cg.concFrameVar
+		ord := -1
+		if cg.concAnalysis != nil {
+			ord = cg.concAnalysis.SuspendOrdinalOf(call)
+		}
+		b = append(b, cg.concSaveLiveVars(ord)...)
+		b = append(b, fmt.Sprintf("%s->pc = %d;\n", f, cg.concSegmentPC)...)
+		b = append(b, fmt.Sprintf("%s->sub[%d] = %d;\n", f, cg.concGuardDepth, cg.concGuardSeq)...)
+		b = append(b, fmt.Sprintf(
+			"return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .io_request = %s, .value = NULL };\n",
+			varName)...)
 
 		return string(b) + varName, true
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"kaula/internal/ast"
 	"kaula/internal/astutil"
+	"kaula/internal/codegen/conc"
 	"kaula/internal/config"
 	"kaula/internal/core"
 	"kaula/internal/sema"
@@ -43,9 +44,9 @@ type CodeGenerator struct {
 	// = 进入当前函数前的外层作用域；generateSurvivorFreeForReturn 遍历到此停，
 	// 防止嵌套函数回收外层函数存活变量（use-after-free）。
 	survivorStopScope *symbol.SymbolTable
-	errors          []string
-	usedModules     []string
-	trackedModules  map[string]bool
+	errors            []string
+	usedModules       []string
+	trackedModules    map[string]bool
 
 	typeGenerator       *TypeGenerator
 	functionGenerator   *FunctionGenerator
@@ -107,18 +108,52 @@ type CodeGenerator struct {
 	 * 早期版本没做这个拆分，生成的是"原地阻塞调用 + 空转挂起"——
 	 * 状态机形状对，但 Worker 真的卡在 IO 上，直接违反 I4。
 	 */
-	concIoRewrite  concIoRewriteMode
-	concIoCounter  int
+	concIoRewrite concIoRewriteMode
+	concIoCounter int
 
 	// lastIoVar 是本次 lowering 里最近生成的 IO 请求变量名，
 	// 供 concSuspendReturn 填进 KaulaResumeResult.io_request
 	lastIoVar string
 
+	/*
+	 * ---- 复合语句内的恢复（守卫模式）----
+	 *
+	 * pc 只能表示「顶层语句切到哪儿」。循环体/分支体里的挂起点落在
+	 * 顶层切分之外，只能整条语句重新生成一遍 —— 恢复后整个循环体
+	 * 再跑一次，副作用翻倍，且不报错。
+	 *
+	 * 守卫模式把「体内部含挂起点」的复合语句整条只生成一次，改成给每层
+	 * 开一个槽位计数器：语句逐条包进 `if (f->sub[d] == k)`，恢复时按槽位
+	 * 跳过本轮已执行的语句。
+	 *
+	 * concGuardDepth：当前复合语句体的守卫层号；-1 = 不在守卫模式。
+	 * concGuardSeq  ：本层下一个可用槽位号。
+	 * concSegmentPC ：本层所在段的 pc，内联挂起要写回它。
+	 */
+	concGuardDepth int
+	concGuardSeq   int
+	concSegmentPC  int
+
+	// concSlotAwaits 是当前语句里已生成的可插桩调用数。
+	// 一条语句含多个挂起点时，一个槽位放不下两段结果 ——
+	// 那时必须报错，不能让第二个挂起点覆盖第一个的恢复位置。
+	concSlotAwaits int
+
+	// concAnalysis / concParams 供挂起返回计算「此刻活跃的变量」。
+	concAnalysis *conc.BodyAnalysis
+	concParams   []string
+
 	// handleResultTypes：Handle 变量名 → 其任务结果的 C 类型。
 	// 由 `Handle h = spawn f()` 的声明处登记，表达式位置的 await 查它来解引用。
 	handleResultTypes map[string]string
 
-	callStack                 map[string]bool
+	// concFuncMap：conc fn 的 C 名 → 其 C 侧签名。
+	// 随 CodeGenerator 走，不做包级全局 —— 一次编译有多个 CodeGenerator
+	// （每个 local import 文件一个），全局表会让文件之间互相看见对方的
+	// conc fn，spawn 于是查到错误的 Frame 字段名（形参名），往错字段塞实参。
+	concFuncMap map[string]*conc.Emitter
+
+	callStack map[string]bool
 
 	// 当前类上下文：在生成构造函数/方法体期间设置，供 exprgen 识别成员字段
 	currentClassName string
@@ -1132,8 +1167,16 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 	symbolTable := symbol.NewSymbolTable(nil, "global")
 
 	cg := &CodeGenerator{
-		output:               "",
-		indent:               0,
+		output: "",
+		indent: 0,
+		/*
+		 * 守卫模式默认关闭。
+		 *
+		 * 零值 0 会被读成「层 0 的复合语句体」，于是**所有**代码生成都
+		 * 被卷进守卫槽位：普通函数的语句被包进 `if (f->sub[0] == k)`，
+		 * 而 f 根本不存在。必须显式置 -1（= 不在守卫模式）。
+		 */
+		concGuardDepth:       -1,
 		templateManager:      tm,
 		config:               cfg,
 		pluginManager:        pm,
@@ -1378,15 +1421,15 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			// 注册全局变量到 codegen 符号表 (成员访问/方法调用需要)
 			cg.AddSymbol(varDecl.Name, varDecl.Type, varDecl.Nullable, "global", varDecl.Pos.Line, varDecl.Pos.Column)
 			initValue := cg.generateExpression(varDecl.Value)
-		// char g[16] = "global";
-		// generateExpression 对字符串字面量一律生成 String 结构体字面量，而定长
-		// char 数组的初始化器必须是 C 字符串字面量。原先只有下面那句
-		//     if isArray && !strings.HasPrefix(initValue, "\"") { initValue = "{0}" }
-		// 兜底，它假设 initValue 已经是 C 字面量——实际永远不是，于是全局 char
-		// 数组一律被降级成 {0}，字符全为 0。
-		if strLit, ok := varDecl.Value.(*ast.StringLiteral); ok && isCharArrayDecl(cType) {
-			initValue = "\"" + escapeCString(strLit.Value) + "\""
-		}
+			// char g[16] = "global";
+			// generateExpression 对字符串字面量一律生成 String 结构体字面量，而定长
+			// char 数组的初始化器必须是 C 字符串字面量。原先只有下面那句
+			//     if isArray && !strings.HasPrefix(initValue, "\"") { initValue = "{0}" }
+			// 兜底，它假设 initValue 已经是 C 字面量——实际永远不是，于是全局 char
+			// 数组一律被降级成 {0}，字符全为 0。
+			if strLit, ok := varDecl.Value.(*ast.StringLiteral); ok && isCharArrayDecl(cType) {
+				initValue = "\"" + escapeCString(strLit.Value) + "\""
+			}
 			if varDecl.IsAuto && varDecl.Type == "" {
 				// 顶层 auto 无法由语义阶段推导类型时回退：若已有推导类型则直接使用
 				cType = "auto"

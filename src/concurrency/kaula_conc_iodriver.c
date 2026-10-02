@@ -44,6 +44,27 @@ static int io_register(KaulaIoDriver* drv, KaulaTask* task,
         return KAULA_ERR_WOULD_BLOCK;
     }
 
+#if KAULA_P_IO_IOCP
+    /*
+     * 完成式后端不走挂起表。
+     *
+     * 挂起表是 fd → Task 的映射，为"一个 fd 就绪、唤醒它上面所有等待者"
+     * 这件事服务。IOCP 下每个等待者对应一次独立的投递，完成包直接带着
+     * Task 回来（next_completion），压根不需要按 fd 反查。
+     *
+     * 硬塞进挂起表只会带来两个 bug：完成时 io_take_fd 按 fd 一次唤醒
+     * 整条链，把还没投递的兄弟等待者也叫醒；以及 del 时无法区分
+     * "这个 fd 没人等了"和"这个等待者被单独取消了"。
+     */
+    if (!kaula_iodriver_backend_add(drv, task, want)) {
+        /* 投递失败。后端可能已把 errno 写进 task->io_result（如管道已关），
+         * 没有的话给一个明确的失败码 —— 不能留 0，那会被读成"读到 0 字节"。 */
+        if (task->io_result == 0) task->io_result = -EIO;
+        return KAULA_ERR_IO;
+    }
+    atomic_fetch_add_explicit(&drv->pending_count, 1, memory_order_relaxed);
+    return 0;
+#else
     /* 首次为该 fd 注册系统事件 */
     uint32_t b = io_bucket(fd);
     int first = 1;
@@ -62,7 +83,7 @@ static int io_register(KaulaIoDriver* drv, KaulaTask* task,
     drv->pending[b] = node;
     atomic_fetch_add_explicit(&drv->pending_count, 1, memory_order_relaxed);
 
-    if (first && !kaula_iodriver_backend_add(drv, fd, want)) {
+    if (first && !kaula_iodriver_backend_add(drv, task, want)) {
         /* 系统注册失败：撤掉刚加的节点 */
         drv->pending[b] = node->next;
         atomic_fetch_sub_explicit(&drv->pending_count, 1, memory_order_relaxed);
@@ -70,6 +91,7 @@ static int io_register(KaulaIoDriver* drv, KaulaTask* task,
         return KAULA_ERR_OOM;
     }
     return 0;
+#endif
 }
 
 /* 桶内是否还有该 fd 的其他等待者 */
@@ -199,18 +221,41 @@ static void iodriver_loop(void* arg) {
             task->io_request = req;
 
             int rc = 0;
+            int done = 0;
+            uint32_t want = 0;
+
             if (req.type == KAULA_IO_SLEEP) {
                 io_timer_add(drv, task, req.timeout_ns);
+                done = 1;
+            } else if (req.type == KAULA_IO_READ) {
+                want = KAULA_IO_EV_READ;
+            } else if (req.type == KAULA_IO_WRITE) {
+                want = KAULA_IO_EV_WRITE;
             } else {
-                uint32_t want = (req.type == KAULA_IO_READ)  ? KAULA_IO_EV_READ
-                             : (req.type == KAULA_IO_WRITE) ? KAULA_IO_EV_WRITE
-                             : KAULA_IO_EV_READ;
-                rc = io_register(drv, task, req.fd, want);
+                /*
+                 * 未知类型（CONNECT / ACCEPT / 未来的保留码）。
+                 *
+                 * 绝不能"默认按可读注册"：那会让一个无法执行的操作
+                 * 挂在某个 fd 上，等就绪后由 do_io 拿 ENOSYS 交差 ——
+                 * 症状是 await 拿到一个说不清来源的失败值，而不是
+                 * 这里就该给出的明确 ENOSYS。
+                 */
+                task->io_result = -ENOSYS;
+                kaula_scheduler_resume_task(task);
+                done = 1;
             }
 
+            if (!done) rc = io_register(drv, task, req.fd, want);
+
             if (rc != 0) {
-                /* 挂起失败：立刻放回调度器，绝不把 Task 丢在半路 */
-                task->io_result = -ENOMEM;
+                /*
+                 * 挂起失败：立刻放回调度器，绝不把 Task 丢在半路。
+                 *
+                 * io_register 在投递失败时可能已经把 errno 写进
+                 * io_result（后端知道得更具体）；只有它没写时才兜底。
+                 * 无条件覆盖会把"管道已关闭"这种明确原因抹成 ENOMEM。
+                 */
+                if (task->io_result == 0) task->io_result = -EIO;
                 kaula_scheduler_resume_task(task);
             }
 
@@ -225,6 +270,8 @@ static void iodriver_loop(void* arg) {
             wait_ns = timer_delta;
         }
 
+        kaula_iodriver_backend_begin(drv);
+
         int nready = kaula_iodriver_backend_wait(drv, wait_ns);
 
         if (nready < 0) {
@@ -232,8 +279,35 @@ static void iodriver_loop(void* arg) {
             break;
         }
 
-        /* 步骤 3：处理就绪事件 */
+        /*
+         * 步骤 3：取事件。
+         *
+         * 两种事件模型在这里分岔，不是风格选择而是正确性要求：
+         *
+         *   完成式（IOCP）：完成包带来的是"已经做完"的事实与字节数。
+         *       必须直接取结果交回 Task，绝不能再调 do_io ——
+         *       那会把同一个 fd 再读一遍，拿到"没有更多数据"，
+         *       于是第二次读的那批数据被静默丢掉。
+         *
+         *   就绪式（epoll / kqueue）：内核只说"可读了"，
+         *       IO 还没做，由这里调 do_io 执行。
+         *
+         * next_completion 在就绪式后端恒返回 0，next_event 在完成式
+         * 后端恒返回 0，所以两条分支各自空转，不需要额外的平台宏。
+         */
         if (nready > 0) {
+            /* 完成式：结果已就绪，直接交回 */
+            KaulaTask* ctask;
+            int cresult;
+            while (kaula_iodriver_backend_next_completion(drv, &ctask, &cresult)) {
+                atomic_fetch_sub_explicit(&drv->pending_count, 1, memory_order_relaxed);
+                ctask->io_result = cresult;
+                atomic_fetch_add_explicit(&drv->total_completions, 1,
+                                          memory_order_relaxed);
+                kaula_scheduler_resume_task(ctask);
+            }
+
+            /* 就绪式：唤醒等待者，由 do_io 执行 IO */
             KaulaTask* woken[KAULA_IO_BATCH_SIZE];
             for (int i = 0; i < nready; i++) {
                 int fd;
@@ -304,7 +378,16 @@ void kaula_iodriver_join(void) {
 void kaula_iodriver_destroy(void) {
     KaulaIoDriver* drv = &g_conc_iodriver;
 
-    /* 清空挂起表与定时器：把残留 Task 标失败，避免 await 死锁 */
+    /*
+     * 清空挂起表与定时器：把残留 Task 标失败，避免 await 死锁。
+     *
+     * 完成式后端（IOCP）没有挂起表，在途操作由后端自己持有。
+     * 端口即将被关闭，那些操作会以 ERROR_ABORTED 完成并排进端口 ——
+     * 但没人再去收包了。所以这里必须先让后端把在途记录清掉，
+     * 否则每个未完成的 overlapped 操作泄漏一条记录。
+     */
+    kaula_iodriver_backend_abort_all(drv);
+
     for (uint32_t b = 0; b < KAULA_IO_BUCKETS; b++) {
         KaulaIoPending* p = drv->pending[b];
         while (p != NULL) {

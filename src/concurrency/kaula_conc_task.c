@@ -269,19 +269,51 @@ void kaula_task_recycle(KaulaTask* task) {
  * 这个窗口里帧已经被释放了。醒来 memcpy 读到的是已回收内存
  * （表现为一个像指针的垃圾数），而它往往不崩。
  *
- * 所以 pin 必须在句柄产生的那一刻拿，await 读完再放。
+ * 所以 pin 在句柄产生的那一刻拿，由 kaula_handle_release 归还。
  *
- * 已知代价：句柄被丢弃且从不 await 时，那一个 pin 不会归还，
- * 会一直挡住回收直到 shutdown。这是保守方向 —— 泄漏可观测、
- * 而悬垂指针不可观测。Kaula 目前没有 Handle 的 drop 语义，
- * 补上之后应当在那里归还 pin。
+ * 归还点有两个，都是「句柄不再可能被读」的时刻：
+ *   - await_into 读完（声明位置，编译器走这条）
+ *   - 句柄离开作用域（编译器在作用域出口发射 kaula_handle_release）
+ *
+ * 计数放在 Task 上而不是句柄结构里，是为了让 release 幂等：
+ * 编译器若在 await_into 之后再发一次 release（作用域出口那一发），
+ * 第二次会发现计数已经归零并补回去，不会把 epoch pin 多放一次 ——
+ * 多放一次就是提前回收，那是悬垂，比泄漏危险得多。
+ *
+ * 漏发 release 仍然是可能的（那是编译器侧的保守退化）：
+ * pin 不归还 → 那块内存留到 shutdown。可观测的泄漏，不是悬垂。
  */
 KaulaHandle kaula_handle_from_task(KaulaTask* task) {
     KaulaHandle h;
     h.task_id = task->task_id;
     h.task = task;
+    atomic_fetch_add_explicit(&task->pin_refs, 1, memory_order_acq_rel);
     kaula_epoch_pin();
     return h;
+}
+
+/*
+ * kaula_handle_release 归还句柄持有的那一个 pin。
+ *
+ * 幂等：多调一次只是什么都不做，不会把 pin 放成负数。
+ * 放在 Task 上做 CAS 递减，最后一个持有者才真正 unpin。
+ */
+void kaula_handle_release(KaulaHandle h) {
+    if (h.task == NULL) return;
+    int prev = atomic_fetch_sub_explicit(&h.task->pin_refs, 1, memory_order_acq_rel);
+    if (prev == 1) {
+        kaula_epoch_unpin();
+    } else if (prev <= 0) {
+        /* 释放次数多于句柄数：补回去，别让计数变负（那会让下一次 release 少放一个 pin） */
+        atomic_fetch_add_explicit(&h.task->pin_refs, 1, memory_order_acq_rel);
+    }
+}
+
+/* 测试可观测：当前还欠多少个 epoch pin（未归还的句柄数） */
+int kaula_handle_pin_debt(KaulaHandle h) {
+    if (h.task == NULL) return 0;
+    int n = atomic_load_explicit(&h.task->pin_refs, memory_order_acquire);
+    return n > 0 ? n : 0;
 }
 
 KaulaHandle kaula_handle_null(void) {
@@ -328,8 +360,8 @@ static int await_copy_out(KaulaHandle h, void* dst, size_t dst_size, uint64_t ti
         }
     }
 
-    /* 读完了，释放句柄持有的那个 pin */
-    kaula_epoch_unpin();
+    /* 读完了，归还句柄持有的那个 pin */
+    kaula_handle_release(h);
     return ok;
 }
 
@@ -370,12 +402,16 @@ int kaula_handle_try_await_into(KaulaHandle h, void* dst, size_t dst_size, uint6
  *
  * 与 await_into 的区别只在于 pin 的去留：
  *   await_into  读完立刻归还句柄持有的 pin —— 推荐，声明处用它
- *   await       保留 pin 到进程结束 —— 表达式位置（`h1.await + h2.await`）
- *               拿不到目标类型与大小，无法用 into 形态，只能靠 pin 不归还
+ *   await       不归还：返回的是「结果的地址」，调用方接着要解引用它，
+ *               此刻 pin 还得留着。归还点交给 kaula_handle_release ——
+ *               编译器在句柄离开作用域时会发一次。
  *
- * 后者的代价是 pin 永久挡住回收：句柄被 await 过但没走 into 的路径
- * 会让那块内存留到 shutdown。这是保守方向（泄漏可观测、悬垂不可观测），
- * 补上 Handle 的 drop 语义后应当在那里归还 pin。
+ * 所以表达式位置的 await（`h1.await + h2.await`）不再把那块内存
+ * 永久留到 shutdown：它在作用域出口就还掉了 pin。
+ *
+ * 但地址本身的生命周期仍然是「到 epoch 判定没人再读为止」，所以
+ * 表达式位置仍然不该出现在需要长期持有结果的场景 —— 声明位置的
+ * await_into 才是那条安全路径。
  */
 void* kaula_handle_await(KaulaHandle h) {
     if (h.task == NULL) return NULL;

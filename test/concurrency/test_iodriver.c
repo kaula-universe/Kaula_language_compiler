@@ -4,7 +4,9 @@
  * 覆盖：
  * - 定时器（SUSPEND + KAULA_IO_SLEEP）：文档 §6 步骤 4
  *   原实现是空壳（立即完成），现必须是真实延迟
- * - socket 往返：epoll/kqueue/IOCP 的 suspend/resume 全链路（I4）
+ * - pipe 往返：epoll/kqueue 的 suspend/resume 全链路（I4）。
+ *   用 pipe 不用 socket —— 内核的 IO 执行是 read/write（fd 语义），
+ *   pipe 能证明覆盖面不依赖 socket
  * - 同 fd 多等待者：原实现 EPOLL_CTL_MOD 会覆盖掉第一个（缺陷 #6）
  * - 阻塞车道：不可插桩的阻塞操作在独立线程执行，不占用 Worker（I5）
  * - 撤离：停滞 Worker 被标记并扩容（P4）
@@ -14,24 +16,93 @@
 
 #include "kaula_conc_test.h"
 #include "kaula_conc.h"
+#include "kaula_conc_io_backend.h"   /* do_io：分派用例直接调 */
 
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
+/*
+ * 测试用的 fd 工厂。
+ *
+ * 内核的 IO 执行走 read/write，语义是 fd 不是 socket —— 所以 socket
+ * 测试只能证明"socket 能用"，而 pipe 能证明"任意可读 fd 能用"。
+ *
+ * Windows 上要分两种 pipe，区别不是风格而是能不能工作：
+ *
+ *   _pipe      CreatePipe 的 CRT 包装，句柄不带 FILE_FLAG_OVERLAPPED。
+ *              用来测 do_io 的分派（同步 _read/_write，不需要异步）。
+ *
+ *   命名管道   必须显式带 FILE_FLAG_OVERLAPPED，否则 overlapped 操作
+ *              在它上面同步执行、不排完成包，IOCP 永远等不到东西。
+ *              再用 _open_osfhandle 包成 CRT fd，让内核那条
+ *              「fd 是 CRT fd → _get_osfhandle 换 HANDLE」的路走通。
+ *
+ * 名字要唯一：同一进程内可能有多条管道并存，重名会 CreateFile 到
+ * 别人的管子上。用 PID + 单调计数。
+ */
 #if KAULA_PLATFORM_WINDOWS
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    typedef SOCKET kaula_test_socket_t;
-    #define KAULA_TEST_INVALID_SOCK INVALID_SOCKET
-    #define KAULA_TEST_CLOSE_SOCK(s) closesocket(s)
+    #include <io.h>
+    #include <fcntl.h>
+
+    #define KAULA_TEST_PIPE(fds)       _pipe(fds, 4096, _O_BINARY)
+    #define KAULA_TEST_WRITE(fd, p, n)  _write(fd, p, (unsigned int)(n))
+    #define KAULA_TEST_CLOSE_FD(fd)    _close(fd)
+
+    /* 带 FILE_FLAG_OVERLAPPED 的一对命名管道端点，包成 CRT fd */
+    static int kaula_test_pipe_async(int fds[2]) {
+        static LONG counter = 0;
+        wchar_t name[64];
+        swprintf(name, sizeof(name) / sizeof(name[0]),
+                 L"\\\\.\\pipe\\kaula_conc_test_%lu_%ld",
+                 GetCurrentProcessId(), InterlockedIncrement(&counter));
+
+        HANDLE server = CreateNamedPipeW(
+            name,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1, 4096, 4096, 0, NULL);
+        if (server == INVALID_HANDLE_VALUE) return -1;
+
+        HANDLE client = CreateFileW(
+            name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+        if (client == INVALID_HANDLE_VALUE) {
+            CloseHandle(server);
+            return -1;
+        }
+
+        /*
+         * _open_osfhandle 接管句柄所有权：之后用 _close 关它，
+         * 也就是 _close 会关掉底层 HANDLE。所以这里失败时不能
+         * 额外 CloseHandle —— 交给 _close，或在 _open 失败时手动关。
+         */
+        int cs = _open_osfhandle((intptr_t)server, _O_BINARY | _O_RDONLY);
+        if (cs < 0) {
+            CloseHandle(server);
+            CloseHandle(client);
+            return -1;
+        }
+        int cc = _open_osfhandle((intptr_t)client, _O_BINARY | _O_RDWR);
+        if (cc < 0) {
+            _close(cs);
+            CloseHandle(client);
+            return -1;
+        }
+
+        fds[0] = cs;
+        fds[1] = cc;
+        return 0;
+    }
+
+    #define KAULA_TEST_PIPE_ASYNC(fds) kaula_test_pipe_async(fds)
 #else
-    #include <sys/socket.h>
-    #include <netinet/in.h>
-    #include <arpa/inet.h>
     #include <unistd.h>
-    typedef int kaula_test_socket_t;
-    #define KAULA_TEST_INVALID_SOCK (-1)
-    #define KAULA_TEST_CLOSE_SOCK(s) close(s)
+    #include <fcntl.h>
+    #define KAULA_TEST_PIPE(fds)       pipe(fds)
+    #define KAULA_TEST_PIPE_ASYNC(fds) pipe(fds)
+    #define KAULA_TEST_WRITE(fd, p, n) write(fd, p, n)
+    #define KAULA_TEST_CLOSE_FD(fd)    close(fd)
 #endif
 
 /* ========== 帧定义 ========== */
@@ -60,25 +131,25 @@ static KaulaResumeResult timer_resume(void* fp) {
     return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = (void*)7 };
 }
 
-/* socket 读任务：挂起等待可读 */
+/* 读任务：挂起等待 fd 可读 */
 typedef struct {
     int             pc;
-    kaula_test_socket_t sock;
+    KaulaIoFd       fd;
     char*           buf;
     size_t          buf_len;
     int             got;
     _Atomic(int)    resume_calls;
-} SockFrame;
+} ReadFrame;
 
-static KaulaResumeResult sock_resume(void* fp) {
-    SockFrame* f = (SockFrame*)fp;
+static KaulaResumeResult read_resume(void* fp) {
+    ReadFrame* f = (ReadFrame*)fp;
     atomic_fetch_add(&f->resume_calls, 1);
 
     if (f->pc == 0) {
         f->pc = 1;
         KaulaIoRequest req = {0};
         req.type = KAULA_IO_READ;
-        req.fd = (int)f->sock;
+        req.fd = f->fd;
         req.buf = f->buf;
         req.buf_len = f->buf_len;
         return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND,
@@ -215,13 +286,18 @@ static void test_subms_timer_precision(void) {
            N, (unsigned long long)(per / 1000), (unsigned long long)(overhead / 1000));
 
     /*
-     * 阈值 8ms：15.625ms 的节拍是目标，8ms 留约一半余量给调度抖动，
-     * 同时仍远低于一个节拍 —— 回归时必然越线。
+     * 阈值 1ms。
+     *
+     * 实测开销 ~93us，所以 1ms 有十倍余量，同时能抓住两类回归：
+     *   - 系统时钟分辨率没抬      → ~15.6ms
+     *   - 注入队列投递后不唤醒    → ~1~2ms（Worker 只能等 park 超时）
+     * 这两个都是「不崩溃、不给错结果、只是慢」的故障，
+     * 阈值放松就等于放弃对它们的防护。
      */
-    ASSERT_TRUE(overhead < 8000000ULL,
-                "亚毫秒定时额外开销应 < 8ms；若接近 15.6ms 量级，"
-                "多半是系统时钟分辨率没抬（缺 timeBeginPeriod）"
-                "或亚毫秒超时被折成了等待");
+    ASSERT_TRUE(overhead < 1000000ULL,
+                "亚毫秒定时额外开销应 < 1ms。接近 15.6ms 量级说明系统时钟"
+                "分辨率没抬（缺 timeBeginPeriod）；接近 1~2ms 说明注入队列"
+                "投递后没唤醒 Worker（它在等 park 超时）");
 
     kaula_runtime_shutdown();
 }
@@ -258,121 +334,147 @@ static void test_many_timers(void) {
     kaula_runtime_shutdown();
 }
 
-/* ========== socket 往返 ========== */
+/* ========== fd 读写往返 ========== */
 
 /*
- * socket 往返测试。
+ * pipe 往返测试。
  *
- * 目前只在 epoll / kqueue 后端上启用：
- * IOCP 是完成式模型，需要真正的 overlapped 投递，
- * 而 kaula_conc_io_backend.c 的 Windows 分支目前是简化实现
- * （只处理唤醒包，未投递 overlapped 读写）。
- * 在那之前跑这条用例只会挂住，没有诊断价值。
+ * 用 pipe 而不是 socket：内核的 IO 执行走 read/write，语义是 fd。
+ * pipe 是"不是 socket 的可读 fd"，它能通过说明 IO 复用的覆盖面
+ * 不依赖 socket —— 这正是 socket 测试给不出的结论。
  *
- * 接入方式已经打通（KaulaIoRequest 的 fd/buf/buf_len 三元组
- * 与 IoDriver 的挂起表、唤醒路径都与后端无关），
- * 补齐 IOCP 分支后把这里的 #if 放开即可。
+ * Windows 上必须用命名管道而不是 _pipe：CreatePipe/_pipe 造出的句柄
+ * 不带 FILE_FLAG_OVERLAPPED，overlapped 操作在它上面会同步执行、
+ * 根本不排完成包，IOCP 于是永远等不到东西。所以那边走
+ * KAULA_TEST_PIPE_ASYNC（见文件头的宏定义）。
  */
-#if KAULA_P_IO_EPOLL || KAULA_P_IO_KQUEUE
-typedef struct {
-    kaula_test_socket_t srv;
-    unsigned short      port;
-    kaula_test_socket_t accepted;
-} accept_ctx;
+static void test_fd_suspend_resume(void) {
+    TEST_CASE("fd 读写：I4（提交后 Worker 立即转做别的事）");
 
-static void accept_thread(void* arg) {
-    accept_ctx* a = (accept_ctx*)arg;
-    a->accepted = accept(a->srv, NULL, NULL);
-}
-
-static void test_socket_suspend_resume(void) {
-    TEST_CASE("socket 读写：I4（提交后 Worker 立即转做别的事）");
-#if KAULA_PLATFORM_WINDOWS
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        TEST_FAIL("WSAStartup 失败");
+    int fds[2] = {-1, -1};
+    if (KAULA_TEST_PIPE_ASYNC(fds) != 0) {
+        TEST_FAIL("创建 pipe 失败");
         return;
     }
-#endif
+
     KaulaRuntimeConfig cfg = {0};
     cfg.worker_count = 2;
     ASSERT_EQ(kaula_runtime_init(&cfg), 0, "初始化应成功");
 
-    /* 建立一对已连接的 socket */
-    kaula_test_socket_t server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    ASSERT_TRUE(server != KAULA_TEST_INVALID_SOCK, "创建 socket");
-    if (server == KAULA_TEST_INVALID_SOCK) { WSACleanup(); return; }
+    /* 写入端先放数据，让读端一注册就绪 */
+    const char* msg = "hello-kernel";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(KAULA_TEST_WRITE(fds[1], msg, msg_len), (int)msg_len, "写入 pipe");
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
+    ReadFrame* f = (ReadFrame*)kmm_v4_alloc_global(sizeof(ReadFrame));
+    memset(f, 0, sizeof(*f));
+    f->pc = 0;
+    f->fd = fds[0];
+    f->buf = (char*)kmm_v4_alloc_global(64);
+    memset(f->buf, 0, 64);
+    f->buf_len = 63;
+    atomic_store(&f->resume_calls, 0);
 
-    ASSERT_EQ(bind(server, (struct sockaddr*)&addr, sizeof(addr)), 0, "bind");
-    ASSERT_EQ(listen(server, 8), 0, "listen");
+    KaulaHandle h = kaula_spawn(read_resume, f, sizeof(ReadFrame));
+    ASSERT_FALSE(kaula_handle_is_null(h), "spawn 应成功");
 
-    int addrlen = sizeof(addr);
-    getsockname(server, (struct sockaddr*)&addr, &addrlen);
+    void* r = kaula_handle_await(h);
+    ASSERT_EQ((int)(intptr_t)r, (int)msg_len, "应读到完整数据");
+    ASSERT_EQ(atomic_load(&f->resume_calls), 2, "应 resume 两次");
+    ASSERT_EQ(memcmp(f->buf, msg, msg_len), 0, "读到的内容应一致");
 
-    kaula_test_socket_t client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    ASSERT_TRUE(client != KAULA_TEST_INVALID_SOCK, "创建 client");
+    KAULA_TEST_CLOSE_FD(fds[0]);
+    KAULA_TEST_CLOSE_FD(fds[1]);
+    kaula_runtime_shutdown();
+}
 
-    /* 先起 accept 线程（它会阻塞在 accept），再 connect */
-    accept_ctx actx;
-    actx.srv = server;
-    actx.port = ntohs(addr.sin_port);
-    actx.accepted = KAULA_TEST_INVALID_SOCK;
+/*
+ * 同一个 fd 上多个等待者。
+ *
+ * 这是「一个 fd 只投递一次」这条优化的判据：第二个 Task 也等同一个
+ * fd 时，两个都必须被唤醒。
+ *
+ * 就绪式（epoll/kqueue）：同 fd 只需注册一次，事件到来时唤醒整条链。
+ * 这条路径原先有个真 bug —— 第二个 Task 走 EPOLL_CTL_MOD 覆盖掉第一个
+ * 注册，第一个 Task 永久挂起（缺陷 #6）。
+ *
+ * 完成式（IOCP）：每个等待者一次独立投递，完成包各带各的 Task。
+ * 走的是完全不同的机制，但要求的结果一样。
+ */
+static void test_two_waiters_same_fd(void) {
+    TEST_CASE("同 fd 多等待者：两个 Task 都应被唤醒");
 
-    kaula_p_thread_t acc_t;
-    kaula_p_thread_create(&acc_t, accept_thread, &actx);
-
-    /* connect 会等 accept 完成（内核阻塞在这里，但这是测试而非内核路径） */
-    int rc = connect(client, (struct sockaddr*)&addr, sizeof(addr));
-    ASSERT_EQ(rc, 0, "connect 应成功");
-
-    kaula_p_thread_join(acc_t);
-    ASSERT_TRUE(actx.accepted != KAULA_TEST_INVALID_SOCK, "accept 应成功");
-
-    if (actx.accepted != KAULA_TEST_INVALID_SOCK) {
-        /* 服务端发数据 */
-        const char* msg = "hello-kernel";
-        ASSERT_TRUE(send(actx.accepted, msg, (int)strlen(msg), 0) > 0, "send");
-
-        /* 起一个读任务：挂起等可读 */
-        SockFrame* f = (SockFrame*)kmm_v4_alloc_global(sizeof(SockFrame));
-        memset(f, 0, sizeof(*f));
-        f->pc = 0;
-        f->sock = client;
-        f->buf = (char*)kmm_v4_alloc_global(64);
-        memset(f->buf, 0, 64);
-        f->buf_len = 63;
-        atomic_store(&f->resume_calls, 0);
-
-        KaulaHandle h = kaula_spawn(sock_resume, f, sizeof(SockFrame));
-        ASSERT_FALSE(kaula_handle_is_null(h), "spawn 应成功");
-
-        void* r = kaula_handle_await(h);
-        ASSERT_EQ((int)(intptr_t)r, (int)strlen("hello-kernel"), "应读到完整数据");
-        ASSERT_EQ(atomic_load(&f->resume_calls), 2, "应 resume 两次");
-        ASSERT_EQ(memcmp(f->buf, msg, strlen(msg)), 0, "读到的内容应一致");
-
-        KAULA_TEST_CLOSE_SOCK(actx.accepted);
+    int fds[2] = {-1, -1};
+    if (KAULA_TEST_PIPE_ASYNC(fds) != 0) {
+        TEST_FAIL("创建 pipe 失败");
+        return;
     }
 
-    KAULA_TEST_CLOSE_SOCK(client);
-    KAULA_TEST_CLOSE_SOCK(server);
+    KaulaRuntimeConfig cfg = {0};
+    cfg.worker_count = 4;
+    ASSERT_EQ(kaula_runtime_init(&cfg), 0, "初始化应成功");
+
+    /*
+     * 数据要写两份，两个等待者才都读得到。
+     *
+     * 字节流管道的读是消耗式的：一份数据只能被一次读取走。
+     * 完成式下两个 ReadFile 各投递一次，第一个会把缓冲抽干，
+     * 第二个就永远挂着（await 死锁）；就绪式下第二个 do_io 拿到
+     * EAGAIN。两者都不是「第二个等待者没被唤醒」，而是数据不够 ——
+     * 用一份数据写这条用例会得到一个假的死锁。
+     */
+    const char* msg = "shared";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(KAULA_TEST_WRITE(fds[1], msg, msg_len), (int)msg_len, "第一次写入");
+    ASSERT_EQ(KAULA_TEST_WRITE(fds[1], msg, msg_len), (int)msg_len, "第二次写入");
+
+    ReadFrame* a = (ReadFrame*)kmm_v4_alloc_global(sizeof(ReadFrame));
+    memset(a, 0, sizeof(*a));
+    a->pc = 0;
+    a->fd = fds[0];
+    /*
+     * 每个等待者只读一条，buf_len 正好等于 msg_len。
+     *
+     * 写成 63（"最多读这么多"）是错的：字节流管道的读是消耗式的，
+     * 一次读会把缓冲里现有的全拿走。第一个 ReadFile(buf_len=63) 会
+     * 把两条消息一起读掉（实测拿到 12 字节），第二个就永远 pending
+     * —— 那是数据不够，不是「第二个等待者没被唤醒」，用这种写法
+     * 会得到一个假的死锁。
+     */
+    a->buf = (char*)kmm_v4_alloc_global(64);
+    memset(a->buf, 0, 64);
+    a->buf_len = msg_len;
+    atomic_store(&a->resume_calls, 0);
+
+    ReadFrame* b = (ReadFrame*)kmm_v4_alloc_global(sizeof(ReadFrame));
+    memset(b, 0, sizeof(*b));
+    b->pc = 0;
+    b->fd = fds[0];
+    b->buf = (char*)kmm_v4_alloc_global(64);
+    memset(b->buf, 0, 64);
+    b->buf_len = msg_len;
+    atomic_store(&b->resume_calls, 0);
+
+    KaulaHandle ha = kaula_spawn(read_resume, a, sizeof(ReadFrame));
+    KaulaHandle hb = kaula_spawn(read_resume, b, sizeof(ReadFrame));
+    ASSERT_FALSE(kaula_handle_is_null(ha), "第一个 spawn 应成功");
+    ASSERT_FALSE(kaula_handle_is_null(hb), "第二个 spawn 应成功");
+
+    /* 依次 await：两个都必须完成，否则第二个会永久挂起 */
+    void* ra = kaula_handle_await(ha);
+    void* rb = kaula_handle_await(hb);
+
+    ASSERT_EQ((int)(intptr_t)ra, (int)msg_len, "第一个应读到一条完整消息");
+    ASSERT_EQ((int)(intptr_t)rb, (int)msg_len, "第二个应读到一条完整消息");
+    ASSERT_EQ(memcmp(a->buf, msg, msg_len), 0, "第一个读到的内容应一致");
+    ASSERT_EQ(memcmp(b->buf, msg, msg_len), 0, "第二个读到的内容应一致");
+    ASSERT_EQ(atomic_load(&a->resume_calls), 2, "第一个应 resume 两次");
+    ASSERT_EQ(atomic_load(&b->resume_calls), 2, "第二个应 resume 两次");
+
+    KAULA_TEST_CLOSE_FD(fds[0]);
+    KAULA_TEST_CLOSE_FD(fds[1]);
     kaula_runtime_shutdown();
-#if KAULA_PLATFORM_WINDOWS
-    WSACleanup();
-#endif
 }
-#else
-static void test_socket_suspend_resume(void) {
-    TEST_CASE("socket 读写（当前后端跳过）");
-    printf("  (跳过：IOCP 后端尚未投递 overlapped 操作，见文件头注释)\n");
-}
-#endif
 
 /* ========== 阻塞车道 ========== */
 
@@ -717,6 +819,67 @@ static void test_config_env_override(void) {
 #endif
 }
 
+/* ========== IO 执行分派 ========== */
+
+/*
+ * do_io 的分派直接验证，不经 IoDriver。
+ *
+ * 这条用例与平台无关（Windows 的 IOCP 后端尚未投递 overlapped 操作，
+ * 但 do_io 本身不依赖后端），所以在所有平台上都跑 ——
+ * fd 往返用例只能覆盖 epoll/kqueue，分派逻辑需要自己的覆盖。
+ */
+static void test_do_io_dispatch(void) {
+    TEST_CASE("do_io 分派：READ/WRITE 走 read/write（非 recv/send）");
+
+    int fds[2] = {-1, -1};
+    if (KAULA_TEST_PIPE(fds) != 0) {
+        TEST_FAIL("创建 pipe 失败");
+        return;
+    }
+
+    const char* msg = "hello-kernel";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(KAULA_TEST_WRITE(fds[1], msg, msg_len), (int)msg_len, "写入 pipe");
+
+    char buf[64];
+    memset(buf, 0, sizeof(buf));
+
+    KaulaIoRequest r = {0};
+    r.type = KAULA_IO_READ;
+    r.fd = fds[0];
+    r.buf = buf;
+    r.buf_len = sizeof(buf) - 1;
+
+    /*
+     * 关键断言：pipe 是"不是 socket 的可读 fd"。
+     * 原实现用 recv，读它会返回 ENOTSOCK（-1/-88），这条会立刻失败。
+     */
+    int n = kaula_iodriver_do_io(&r);
+    ASSERT_EQ(n, (int)msg_len, "应从 pipe 读到完整数据（recv 会在这里 ENOTSOCK）");
+    ASSERT_EQ(memcmp(buf, msg, msg_len), 0, "读到的内容应一致");
+
+    /* WRITE 分派：写回管道 */
+    const char* echo = "pong";
+    KaulaIoRequest w = {0};
+    w.type = KAULA_IO_WRITE;
+    w.fd = fds[1];
+    w.buf = (void*)echo;
+    w.buf_len = 4;
+    ASSERT_EQ(kaula_iodriver_do_io(&w), 4, "WRITE 应写满 4 字节");
+
+    /* socket 专属类型：明确 ENOSYS，不静默当成"按可读注册" */
+    KaulaIoRequest a = {0};
+    a.type = KAULA_IO_ACCEPT;
+    a.fd = fds[0];
+    ASSERT_EQ(kaula_iodriver_do_io(&a), -ENOSYS, "ACCEPT 应明确返回 ENOSYS");
+    KaulaIoRequest c = {0};
+    c.type = KAULA_IO_CONNECT;
+    ASSERT_EQ(kaula_iodriver_do_io(&c), -ENOSYS, "CONNECT 应明确返回 ENOSYS");
+
+    KAULA_TEST_CLOSE_FD(fds[0]);
+    KAULA_TEST_CLOSE_FD(fds[1]);
+}
+
 static void test_config_quantum_honored(void) {
     TEST_CASE("budget_quantum 配置真正生效（缺陷 #8）");
     KaulaRuntimeConfig cfg = {0};
@@ -742,8 +905,11 @@ int main(void) {
     test_timer_suspend_resume();
     test_subms_timer_precision();
     test_many_timers();
-    TEST_SECTION("IoDriver socket");
-    test_socket_suspend_resume();
+    TEST_SECTION("IO 执行分派");
+    test_do_io_dispatch();
+    TEST_SECTION("IoDriver fd 读写");
+    test_fd_suspend_resume();
+    test_two_waiters_same_fd();
     TEST_SECTION("阻塞车道");
     test_block_lane_isolation();
     test_block_lane_direct_submit();

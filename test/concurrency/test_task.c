@@ -152,6 +152,111 @@ static void test_try_await_timeout(void) {
     kaula_task_complete(t, (void*)1);
 }
 
+/* ========== Handle 的 drop 语义：pin 归还 ========== */
+
+/*
+ * 回归：句柄持有 epoch pin，而 pin 只由 await_into 归还。于是「句柄被丢弃且
+ * 从不 await」时那个 pin 永远不还，g_ext_pins 一直 > 0，回收器一律判定
+ * 「不可回收」—— 内存留到 shutdown。
+ *
+ * 这里断言三件事：
+ *   1. 句柄一产生就欠一个 pin（那是有意的：spawn 到 await 之间有窗口）
+ *   2. 释放之后债务归零
+ *   3. 重复释放不会把 pin 放成负数（幂等）—— 编译器会在 await_into 之后再发一次
+ */
+static void test_handle_release_returns_pin(void) {
+    TEST_CASE("drop 归还句柄持有的 pin（句柄从不 await 也不挡回收）");
+    KaulaRuntimeConfig cfg = {0};
+    cfg.worker_count = 2;
+    ASSERT_EQ(kaula_runtime_init(&cfg), 0, "运行时初始化应成功");
+
+    KaulaTask* t = kaula_task_alloc();
+    ASSERT_NOT_NULL(t, "分配应成功");
+    if (t == NULL) return;
+    SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
+    f->pc = 0; f->input = 1; f->result = 0;
+    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    kaula_task_complete(t, (void*)(intptr_t)5);
+
+    KaulaHandle h = kaula_handle_from_task(t);
+    ASSERT_EQ(kaula_handle_pin_debt(h), 1, "句柄产生时就持有一个 pin（spawn→await 有窗口）");
+
+    kaula_handle_release(h);
+    ASSERT_EQ(kaula_handle_pin_debt(h), 0, "drop 之后债务应归零");
+
+    /* 幂等：多放一次 pin 就是提前回收，那是悬垂 */
+    kaula_handle_release(h);
+    kaula_handle_release(h);
+    ASSERT_EQ(kaula_handle_pin_debt(h), 0, "重复 drop 不得把计数带成负数");
+
+    /* 空句柄必须是无操作 */
+    KaulaHandle nul = kaula_handle_null();
+    kaula_handle_release(nul);
+    ASSERT_EQ(kaula_handle_pin_debt(nul), 0, "空句柄不持有 pin");
+
+    kaula_runtime_shutdown();
+}
+
+/* await_into 读完就该还掉那一个 pin：声明位置是编译器唯一会发 release 的路径之一 */
+static void test_await_into_releases_pin(void) {
+    TEST_CASE("await_into 读完即归还 pin");
+    KaulaRuntimeConfig cfg = {0};
+    cfg.worker_count = 2;
+    ASSERT_EQ(kaula_runtime_init(&cfg), 0, "运行时初始化应成功");
+
+    KaulaTask* t = kaula_task_alloc();
+    ASSERT_NOT_NULL(t, "分配应成功");
+    if (t == NULL) return;
+    SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
+    f->pc = 0; f->input = 4; f->result = 13;
+    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    /*
+     * 结果必须是**真实地址**：await_into 会从 result 拷 dst_size 字节。
+     * 本文件里其它用例用 (void*)(intptr_t)N 那种假指针是可以的 ——
+     * kaula_handle_await 只返回地址不解引用；await_into 会 memcpy，
+     * 拿假指针去拷就是段错误。
+     */
+    kaula_task_complete(t, &f->result);
+
+    KaulaHandle h = kaula_handle_from_task(t);
+    int out = 0;
+    kaula_handle_await_into(h, &out, sizeof(out));
+    ASSERT_EQ(out, 13, "结果应正确（4*3+1）");
+    ASSERT_EQ(kaula_handle_pin_debt(h), 0, "await_into 读完即归还");
+
+    kaula_runtime_shutdown();
+}
+
+/*
+ * 表达式位置的 await（kaula_handle_await）**不**还 pin：
+ * 它返回的是「结果的地址」，调用方接着要解引用。归还点交给 release。
+ * 编译器会在作用域出口发那次 release —— 于是不再留到进程结束。
+ */
+static void test_await_expr_defers_release(void) {
+    TEST_CASE("表达式位置 await 把 pin 留给 release");
+    KaulaRuntimeConfig cfg = {0};
+    cfg.worker_count = 2;
+    ASSERT_EQ(kaula_runtime_init(&cfg), 0, "运行时初始化应成功");
+
+    KaulaTask* t = kaula_task_alloc();
+    ASSERT_NOT_NULL(t, "分配应成功");
+    if (t == NULL) return;
+    SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
+    f->pc = 0; f->input = 9; f->result = 0;
+    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    kaula_task_complete(t, (void*)(intptr_t)28);
+
+    KaulaHandle h = kaula_handle_from_task(t);
+    void* r = kaula_handle_await(h);
+    ASSERT_EQ((int)(intptr_t)r, 28, "await 应返回结果");
+    ASSERT_EQ(kaula_handle_pin_debt(h), 1, "await 返回的是地址，pin 此刻还得留着");
+
+    kaula_handle_release(h);
+    ASSERT_EQ(kaula_handle_pin_debt(h), 0, "作用域出口那次 release 归还它");
+
+    kaula_runtime_shutdown();
+}
+
 static void test_fail_wakes_waiters(void) {
     TEST_CASE("kaula_task_fail 也唤醒等待者（否则 await 死锁）");
     KaulaTask* t = kaula_task_alloc();
@@ -268,6 +373,10 @@ int main(void) {
     test_await_spawned();
     test_try_await_timeout();
     test_fail_wakes_waiters();
+    TEST_SECTION("Handle drop");
+    test_handle_release_returns_pin();
+    test_await_into_releases_pin();
+    test_await_expr_defers_release();
     TEST_SECTION("取消");
     test_cancel_flagged_task();
     test_cancel_unintrusive_rejected();

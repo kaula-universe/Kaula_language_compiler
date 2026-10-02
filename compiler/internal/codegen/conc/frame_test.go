@@ -132,7 +132,7 @@ func TestGenerate_Stateful_ResumeHasCasePerSuspend(t *testing.T) {
 	analysis := &BodyAnalysis{
 		NeedsSuspend: true,
 		SuspendSites: []SuspendSite{
-			{Call: call("net_connect", 5), Kind: SuspendIO, Line: 5},
+			{Call: call("fs_read", 5), Kind: SuspendIO, Line: 5},
 			{Call: call("net_send", 6), Kind: SuspendIO, Line: 6},
 			{Call: call("time_sleep", 7), Kind: SuspendSleep, Line: 7},
 		},

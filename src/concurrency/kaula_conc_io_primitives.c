@@ -15,7 +15,7 @@
 #include <errno.h>
 
 #if KAULA_PLATFORM_WINDOWS
-    #include <winsock2.h>
+    /* _read/_write 在 <io.h>（platform.h 已经经 windows.h 拉进来） */
 #else
     #include <unistd.h>
     #include <fcntl.h>
@@ -131,6 +131,14 @@ void kaula_p_io_wait_destroy(kaula_p_io_wait_t w) {
     if (w) CloseHandle(w);
 }
 
+/*
+ * Windows 没有 POSIX 的 fcntl(O_NONBLOCK)，而 CRT fd 也不支持它 ——
+ * 所以这里只对 SOCKET 有意义（走 ioctlsocket）。普通 HANDLE 的非阻塞
+ * 语义由 overlapped 异步提供，不经这个函数。
+ *
+ * 判据用 defined(SOCKET) 而不是 KAULA_PLATFORM_WINDOWS：ioctlsocket 与
+ * winsock2 头由调用方（需要网络时才引入）负责，这里不主动拉 socket 依赖。
+ */
 int kaula_p_io_set_nonblocking(int fd) {
 #if defined(SOCKET)
     u_long mode = 1;
