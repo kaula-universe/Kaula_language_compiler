@@ -31,7 +31,7 @@
 ### 编译系统与内存
 
 - [SOR Sub-structural Ownership](sor-system.md) - 所有权原语、分析流程、内存优化
-- [核心运行时特性](core-runtime.md) - VO 系统、前缀系统、任务调度
+- [并发内核与 KMM V4](concurrency-kernel.md) - conc fn lowering、IoDriver、阻塞车道、epoch 回收、slab/per-thread heap、已知缺口
 - [增量编译缓存](cache-system.md) - SHA-256 验证、原子写入、自动清理
 - [超时与内存控制](timeout-memory.md) - 资源监控、阶段统计、调试输出
 
@@ -88,7 +88,7 @@
 
 ### 想了解内存管理？
 
-查看 [SOR Sub-structural Ownership](sor-system.md) 和 [核心运行时特性](core-runtime.md)。
+查看 [SOR Sub-structural Ownership](sor-system.md) 和 [并发内核与 KMM V4](concurrency-kernel.md)。
 
 KMM V4 是 Kaula 的默认内存分配器，基于 per-thread heap + bump allocation，在基准测试中比 malloc/free 快 **2-20x**：
 
