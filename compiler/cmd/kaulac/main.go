@@ -3897,6 +3897,10 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		clangArgs = append(clangArgs, "-lwininet")
 		clangArgs = append(clangArgs, "-lgdi32")
 		clangArgs = append(clangArgs, "-luser32")
+		// winmm: timeBeginPeriod/timeEndPeriod。并发内核用它把系统时钟
+		// 分辨率抬到 1ms —— 默认 15.625ms 的节拍会把所有亚毫秒超时
+		// 抬成一个节拍，挂起往返多付约 20ms 固定税。
+		clangArgs = append(clangArgs, "-lwinmm")
 		clangArgs = append(clangArgs, "-ladvapi32")
 	}
 

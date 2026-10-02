@@ -151,6 +151,41 @@ static inline uint64_t kaula_p_now_ns(void) {
 }
 #endif
 
+/* ========== 时钟分辨率 ========== */
+
+/*
+ * 把系统时钟粒度抬到 1ms，并在退出时还原。
+ *
+ * 为什么必须做：Windows 默认的系统时钟间隔是 15.625ms。
+ * 任何带超时的等待（WaitForSingleObject / GetQueuedCompletionStatus /
+ * Sleep）都会被向上量化到下一个时钟节拍 —— 请求 1ms 实际阻塞 15.6ms。
+ *
+ * 这对内核是系统性的：Worker park 超时 1ms、IoDriver 批等待、
+ * 任务的完成事件等待，全都会被吃掉一个节拍。实测后果是每次
+ * suspend/resume 往返多付约 20ms 固定税（与请求的睡眠时长无关），
+ * 于是亚毫秒定时完全无法用。
+ *
+ * 只抬分辨率不改量化方向：亚毫秒请求仍应折成「不等待、立即重查」，
+ * 见 kaula_conc_io_backend.c 的超时换算。
+ *
+ * 非 Windows 平台无需处理：POSIX 的条件变量超时是纳秒级的。
+ */
+#if KAULA_PLATFORM_WINDOWS
+/* timeapi.h / winmm.lib。链接时需要 -lwinmm。 */
+#include <timeapi.h>
+
+static inline void kaula_p_timer_resolution_raise(void) {
+    timeBeginPeriod(1);
+}
+
+static inline void kaula_p_timer_resolution_restore(void) {
+    timeEndPeriod(1);
+}
+#else
+static inline void kaula_p_timer_resolution_raise(void) {}
+static inline void kaula_p_timer_resolution_restore(void) {}
+#endif
+
 /* ========== 休眠 ========== */
 
 static inline void kaula_p_sleep_ns(uint64_t ns) {

@@ -228,9 +228,19 @@ int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
     }
     g_iocp_add_count = 0;
 
+    /*
+     * 超时换算：向下取整，亚毫秒一律折成 0（= 立即返回重查定时器堆）。
+     *
+     * 向上取整是错的，而且错得很贵：200us 会被抬成 1ms，
+     * 而 Windows 默认时钟粒度 15.625ms，这一个 1ms 实际阻塞 ~15.6ms。
+     * 折成 0 之后驱动立刻回到循环重查 deadline，亚毫秒定时按 µs 级精度触发。
+     *
+     * 不用取整方向做权衡：向上取整让「本来能立刻触发的定时」多等一个时钟��。
+     * 代价只是亚毫秒场景下多几次空转（0 超时的 wait 是纯用户态返回，很快）。
+     */
     DWORD ms = (timeout_ns == KAULA_P_WAIT_FOREVER)
              ? INFINITE
-             : (DWORD)((timeout_ns + 999999) / 1000000);
+             : (DWORD)(timeout_ns / 1000000);
 
     DWORD bytes = 0;
     ULONG_PTR key = 0;
