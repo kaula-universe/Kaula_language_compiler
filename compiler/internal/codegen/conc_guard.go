@@ -379,7 +379,7 @@ func (cg *CodeGenerator) concCheckSupported(s ast.Statement, fnName string) {
 	}
 
 	if concHasUsedAwaitResult(s) {
-		report("复合语句内的可插桩调用暂不支持取用返回值：恢复落点是循环体里的语句，"+
+		report("复合语句内的可插桩调用暂不支持取用返回值：恢复落点是循环体里的语句，" +
 			"而「提交」与「取回结果」两半分属同一条语句的前后，恢复到后半时前半已经过去了")
 	}
 	if cg.concGuardDepth >= conc.SubDepth {

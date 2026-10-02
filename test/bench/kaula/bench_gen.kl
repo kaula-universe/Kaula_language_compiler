@@ -1,0 +1,188 @@
+// Kaula 并发内核基准驱动 —— 模板
+//
+// 由 run_bench.py 生成：形如双 at 包裹的占位符替换成具体数值后写 bench_gen.kl 编译。
+// 为什么不走命令行参数：Kaula 的参数 API 要构造 CliApp*，
+// 那块语言表面尚未验证；而基准的每一个字节都必须是已验证的东西。
+//
+// 事务定义见 TRANSACTION.md。
+//
+// 输出固定格式的一行 RESULT，run_bench.py 按 key=value 解析：
+//   RESULT tps=... elapsed_ns=... p50=... p95=... p99=... max=... n=... conc=... checksum=...
+
+import std.io
+import std.time
+
+// ---------- 事务（与 Go/Tokio 逐位一致，见 TRANSACTION.md） ----------
+//
+// 先 % 1048576 再乘：中间值 < 2^50。
+// 先 % 1073741824 再 *31：中间值 < 2^35。
+// Kaula 的乘法是检查溢出并陷阱 —— 这两处不是防御性写法，是必需写法。
+
+conc fn parse_and_checksum() -> i64 {
+    i64 state = 2545
+    i64 checksum = 0
+    i64 k = 0
+    while k < 256 {
+        state = ((state % 1048576) * 1103515245 + 12345) % 9223372036854775807
+        checksum = ((checksum % 1073741824) * 31 + (state % 256)) % 9223372036854775807
+        k = k + 1
+    }
+    return checksum
+}
+
+// ---------- 四个曲线 ----------
+
+// light：纯计算，无挂起。验证 conc fn 零开销与调度器 overhead。
+conc fn curve_light() -> i64 {
+    return parse_and_checksum()
+}
+
+// suspend：一次挂起 + 一次计算。sleep 被 lowering 改写成 IoDriver
+// 定时器请求，提交后 Worker 立刻转做别的事（I4）。
+conc fn curve_suspend() -> i64 {
+    std.time.time_sleep_us(0)
+    return parse_and_checksum()
+}
+
+// mixed：0% 的任务带挂起。
+conc fn curve_mixed(with_sleep: bool) -> i64 {
+    if with_sleep {
+        std.time.time_sleep_us(0)
+    }
+    return parse_and_checksum()
+}
+
+// degrade：0% 的任务是长忙循环。
+// 忙循环而不是睡眠 —— 睡会走定时器，那是 suspend 那条路。
+// 这里要的是「占住 Worker 的计算」，正是预算与停滞判定该管的东西。
+conc fn curve_degrade(spin_rounds: i64) -> i64 {
+    i64 acc = 1
+    i64 r = 0
+    while r < spin_rounds {
+        acc = ((acc % 1073741824) * 1103515245 + 12345) % 9223372036854775807
+        r = r + 1
+    }
+    return acc ^ parse_and_checksum()
+}
+
+// ---------- 分位数 ----------
+
+// 选择第 idx 小的元素。
+//
+// 只取 4 个分位数，所以不做全排序 —— O(n) 扫 4 次，
+// 而 n^2 的选择排序在这里虽然也不贵，但没必要。
+fn select_kth(a: i64[], n: i64, idx: i64) -> i64 {
+    i64 v = a[0]
+    i64 i = 0
+    while i < n {
+        if a[i] < v {
+            v = a[i]
+        }
+        i = i + 1
+    }
+    i64 seen = 0
+    i64 j = 0
+    while j < n {
+        if a[j] == v {
+            seen = seen + 1
+            if seen == idx {
+                return v
+            }
+        }
+        j = j + 1;
+    }
+    return v
+}
+
+// ---------- 主流程 ----------
+
+fn main() -> i32 {
+    i64 total = 2000;
+    i64 conc = 1000;
+
+    // 预热：首轮含线程首次调度与缓存冷启动，不计入
+    Handle hw = spawn curve_light()
+    i64 vw = hw.await
+    if vw != 13356499072 {
+        std.io.println("BENCH_ERROR warmup checksum ", vw)
+        return 1
+    }
+
+    // 延迟样本：单事务客户端侧延迟（提交 -> 拿到结果），含调度
+    i64 lat[2000]
+    i64 n = 0
+    i64 checksum = 0
+
+    i64 issued = 0
+    i64 done = 0;
+
+    // 在途句柄窗口：最多 conc 个
+    Handle in_flight[1000]
+    i64 submit_ts[1000];
+    i64 submitted[1000];
+
+    i64 t0 = std.time.time_now_ns();
+
+    // 窗口式：先填满 conc 个在途，再逐个 await。
+    //
+    // 为什么不逐个「提交-等-提交」串行：那测的是单任务往返延迟，
+    // 根本没有并发在飞，TPS 会低一个数量级。
+    //
+    // 为什么不按大批量提交后统一等：那样批边界会形成同步点，
+    // 测出来的是「批」的吞吐而不是调度的吞吐。
+    //
+    // 每个任务的延迟都是单独测的（提交时刻 -> 拿到结果），
+    // 所以 P99 反映的是真实单事务延迟，而不是批耗时。
+    while done < total {
+        // 1) 填窗口
+        i64 j = 0
+        while j < conc && issued < total {
+            i64 ts = std.time.time_now_ns();
+            in_flight[j] = spawn curve_light();
+            submit_ts[j] = ts;
+            submitted[j] = 1;
+            issued = issued + 1;
+            j = j + 1;
+        }
+        i64 filled = j;
+
+        // 2) 逐个取回
+        j = 0;
+        while j < filled {
+            i64 r = in_flight[j].await;
+            checksum = (checksum + r) % 9223372036854775807;
+            if n < 2000 {
+                lat[n] = std.time.time_now_ns() - submit_ts[j];
+                n = n + 1;
+            }
+            done = done + 1;
+            j = j + 1;
+        }
+    }
+
+    i64 elapsed = std.time.time_now_ns() - t0;
+
+    // 分位数在计时区之外算：排序本身不该污染被测量的时间
+    i64 p50 = 0
+    i64 p95 = 0;
+    i64 p99 = 0;
+    i64 mx = 0;
+    if n > 0 {
+        p50 = select_kth(lat, n, (n * 50) / 100 + 1);
+        p95 = select_kth(lat, n, (n * 95) / 100 + 1);
+        p99 = select_kth(lat, n, (n * 99) / 100 + 1);
+        mx = select_kth(lat, n, n);
+    }
+
+    std.io.println("RESULT curve=light tps=", (total * 1000000000) / elapsed,
+                   " elapsed_ns=", elapsed,
+                   " p50=", p50,
+                   " p95=", p95,
+                   " p99=", p99,
+                   " max=", mx,
+                   " n=", n,
+                   " conc=", conc,
+                   " issued=", issued,
+                   " checksum=", checksum)
+    return 0;
+}
