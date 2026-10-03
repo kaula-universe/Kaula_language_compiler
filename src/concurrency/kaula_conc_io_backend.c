@@ -79,16 +79,30 @@ void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd) {
 
 int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
     struct epoll_event evs[IO_READY_BATCH];
-    int ms = (timeout_ns == KAULA_P_WAIT_FOREVER)
-           ? -1
-           : (int)((timeout_ns + 999999) / 1000000);
 
-    int n = epoll_wait(kaula_p_io_wait_epfd(drv->wait), evs, IO_READY_BATCH, ms);
+    /*
+     * 定时交给 timerfd，epoll_wait 因此可以无限阻塞。
+     *
+     * 之前是把 timeout_ns 向上取整成毫秒喂给 epoll_wait，
+     * 亚毫秒定时只能等到下一个毫秒边界 —— 实测 200us 定时额外开销 1030us。
+     * 毫秒取整是 epoll_wait 接口本身的限制，不是参数能调好的。
+     */
+    kaula_p_io_arm_timer(drv->wait, timeout_ns);
+
+    int n = epoll_wait(kaula_p_io_wait_epfd(drv->wait), evs, IO_READY_BATCH, -1);
     if (n < 0) return -1;
 
     g_ready_count = 0;
     g_ready_pos = 0;
     for (int i = 0; i < n; i++) {
+        /* 定时器到期不是 IO 就绪：抽干计数后不计入就绪批次。
+         * 返回 0 是安全的 —— 驱动循环下一轮会重新 io_timers_fire。 */
+        if (evs[i].data.fd == KAULA_P_TIMER_FD) {
+            uint64_t ticks;
+            while (read(kaula_p_io_wait_timerfd(drv->wait), &ticks, sizeof(ticks)) > 0) { }
+            continue;
+        }
+
         uint32_t e = 0;
         if (evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) e |= KAULA_IO_EV_READ;
         if (evs[i].events & (EPOLLOUT | EPOLLERR))          e |= KAULA_IO_EV_WRITE;

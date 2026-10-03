@@ -19,6 +19,9 @@
 #else
     #include <unistd.h>
     #include <fcntl.h>
+    #if KAULA_P_IO_EPOLL
+        #include <sys/timerfd.h>
+    #endif
 #endif
 
 /* ================================================================
@@ -49,13 +52,40 @@ int kaula_p_io_wait_create(kaula_p_io_wait_t* out) {
         return -1;
     }
 
-    *out = (kaula_p_io_wait_t){ ep, efd };
+    /*
+     * 定时器通道：timerfd，同样挂进 epoll。
+     *
+     * 没有它就没有亚毫秒定时 —— epoll_wait 的超时只接受毫秒，
+     * 200us 只能向上取整成 1ms。timerfd 让 epoll_wait 能无限阻塞。
+     */
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (tfd < 0) { close(efd); close(ep); return -1; }
+    ev.events = EPOLLIN;
+    ev.data.fd = KAULA_P_TIMER_FD;
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, tfd, &ev) < 0) {
+        close(tfd); close(efd); close(ep);
+        return -1;
+    }
+
+    *out = (kaula_p_io_wait_t){ ep, efd, tfd };
     return 0;
 }
 
 void kaula_p_io_wait_destroy(kaula_p_io_wait_t w) {
+    if (w.timer_fd >= 0) close(w.timer_fd);
     if (w.wakefd >= 0) close(w.wakefd);
     if (w.epfd >= 0) close(w.epfd);
+}
+
+int kaula_p_io_arm_timer(kaula_p_io_wait_t w, uint64_t delay_ns) {
+    struct itimerspec its;
+    memset(&its, 0, sizeof(its));
+    if (delay_ns != 0 && delay_ns != KAULA_P_WAIT_FOREVER) {
+        its.it_value.tv_sec  = (time_t)(delay_ns / 1000000000ULL);
+        its.it_value.tv_nsec = (long)(delay_ns % 1000000000ULL);
+    }
+    /* it_value 全 0 = 解除武装 */
+    return timerfd_settime(w.timer_fd, 0, &its, NULL);
 }
 
 int kaula_p_io_set_nonblocking(int fd) {
@@ -96,7 +126,7 @@ int kaula_p_io_wait_create(kaula_p_io_wait_t* out) {
         close(kq);
         return -1;
     }
-    *out = (kaula_p_io_wait_t){ kq, -1 };
+    *out = (kaula_p_io_wait_t){ kq, -1, -1 };
     return 0;
 }
 
@@ -119,6 +149,12 @@ int kaula_p_io_wake(kaula_p_io_wait_t w) {
 void kaula_p_io_drain_wake(kaula_p_io_wait_t w) {
     /* EVFILT_USER 是一次性的，无需抽干 */
     (void)w;
+}
+
+/* kqueue 没有独立定时通道，仍靠 wait 超时 —— 亚毫秒精度是那边的已知边界 */
+int kaula_p_io_arm_timer(kaula_p_io_wait_t w, uint64_t delay_ns) {
+    (void)w; (void)delay_ns;
+    return 0;
 }
 
 /* ================================================================
@@ -167,6 +203,12 @@ int kaula_p_io_wake(kaula_p_io_wait_t w) {
 void kaula_p_io_drain_wake(kaula_p_io_wait_t w) {
     /* 一次 PostQueuedCompletionStatus 对应一次唤醒，无需抽干 */
     (void)w;
+}
+
+/* IOCP 的等待超时本身就是毫秒级的，亚毫秒精度是那边的已知边界 */
+int kaula_p_io_arm_timer(kaula_p_io_wait_t w, uint64_t delay_ns) {
+    (void)w; (void)delay_ns;
+    return 0;
 }
 
 #endif /* 后端分派结束 */
