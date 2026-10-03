@@ -65,16 +65,16 @@ int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t wan
     ev.events = to_epoll(want);
     ev.data.fd = fd;      /* 只存 fd —— 修复缺陷 #6 */
 
-    if (epoll_ctl(drv->wait, EPOLL_CTL_ADD, fd, &ev) == 0) return 1;
+    if (epoll_ctl(kaula_p_io_wait_epfd(drv->wait), EPOLL_CTL_ADD, fd, &ev) == 0) return 1;
     if (errno == EEXIST) {
         /* 已注册：合并关注事件，而不是覆盖 Task 指针 */
-        return epoll_ctl(drv->wait, EPOLL_CTL_MOD, fd, &ev) == 0;
+        return epoll_ctl(kaula_p_io_wait_epfd(drv->wait), EPOLL_CTL_MOD, fd, &ev) == 0;
     }
     return 0;
 }
 
 void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd) {
-    epoll_ctl(drv->wait, EPOLL_CTL_DEL, fd, NULL);
+    epoll_ctl(kaula_p_io_wait_epfd(drv->wait), EPOLL_CTL_DEL, fd, NULL);
 }
 
 int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
@@ -83,7 +83,7 @@ int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
            ? -1
            : (int)((timeout_ns + 999999) / 1000000);
 
-    int n = epoll_wait(drv->wait, evs, IO_READY_BATCH, ms);
+    int n = epoll_wait(kaula_p_io_wait_epfd(drv->wait), evs, IO_READY_BATCH, ms);
     if (n < 0) return -1;
 
     g_ready_count = 0;
@@ -156,14 +156,14 @@ int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t wan
     /* udata 用 fd 编码，保持与 epoll 侧一致的判别语义 */
     for (int i = 0; i < n; i++) changes[i].udata = (void*)(intptr_t)fd;
 
-    return kevent(drv->wait, changes, n, NULL, 0, NULL) >= 0;
+    return kevent(kaula_p_io_wait_epfd(drv->wait), changes, n, NULL, 0, NULL) >= 0;
 }
 
 void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd) {
     struct kevent changes[2];
     EV_SET(&changes[0], fd, EVFILT_READ,  EV_DELETE, 0, 0, NULL);
     EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    kevent(drv->wait, changes, 2, NULL, 0, NULL);
+    kevent(kaula_p_io_wait_epfd(drv->wait), changes, 2, NULL, 0, NULL);
 }
 
 int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
@@ -177,7 +177,7 @@ int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
         tsp = &ts;
     }
 
-    int n = kevent(drv->wait, NULL, 0, evs, IO_READY_BATCH, tsp);
+    int n = kevent(kaula_p_io_wait_epfd(drv->wait), NULL, 0, evs, IO_READY_BATCH, tsp);
     if (n < 0) return -1;
 
     g_ready_count = 0;

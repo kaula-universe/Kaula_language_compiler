@@ -127,9 +127,10 @@ void kaula_evict_join(void) {
 }
 
 void kaula_evict_destroy(void) {
-    if (g_evict.wake != 0) {
+    /* 同block_lane：POSIX 上 kaula_p_event 是 struct，不能与 0 比较/赋值 */
+    if (kaula_p_event_is_valid(&g_evict.wake)) {
         kaula_p_event_destroy(&g_evict.wake);
-        g_evict.wake = 0;
+        kaula_p_event_invalidate(&g_evict.wake);
     }
 }
 

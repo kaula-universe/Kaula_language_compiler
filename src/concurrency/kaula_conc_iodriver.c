@@ -344,6 +344,14 @@ int kaula_iodriver_init(void) {
     KaulaIoDriver* drv = &g_conc_iodriver;
     memset(drv, 0, sizeof(*drv));
 
+    /*
+     * 必须先标成无效：memset 之后 wait 是 {0,0}，而 0 是**合法的 fd**
+     * （stdin）。POSIX 上句柄是含两个 fd 的结构体，若 create 失败就直接
+     * 走到 destroy，那两个 close(0) 会把 stdin 关掉。
+     * 零值因此不是「无效」，得显式置 -1。
+     */
+    kaula_p_io_wait_invalidate(&drv->wait);
+
     kaula_mpsc_queue_init(&drv->submit_queue);
 
     if (kaula_p_io_wait_create(&drv->wait) != 0) {
@@ -416,7 +424,8 @@ void kaula_iodriver_destroy(void) {
     }
 
     kaula_p_io_wait_destroy(drv->wait);
-    drv->wait = 0;
+    /* POSIX 上句柄是含两个 fd 的结构体，不能 = 0（只能整体失效） */
+    kaula_p_io_wait_invalidate(&drv->wait);
 }
 
 /* ========== 提交 ========== */
