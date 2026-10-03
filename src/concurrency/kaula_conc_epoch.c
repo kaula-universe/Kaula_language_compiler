@@ -194,37 +194,52 @@ uint32_t kaula_epoch_try_reclaim(void) {
     KaulaRetireList* list = kaula_conc_retire_list();
     if (list == NULL || list->count == 0) return 0;
 
+    /*
+     * 频率限制：列表未达阈值不回收。
+     *
+     * worker_loop 每执行一个任务就 exit 一次 epoch → 每次 try_reclaim
+     * 全扫列表。任务完成时每任务 3 次 retire，列表迅速积累 —— 扫描
+     * 成本 O(列表长度)，每任务一次 → 总 O(n²)。压测实测：
+     * kaula_epoch_try_reclaim 占 CPU 70%（10 万任务每任务 ~40µs）。
+     *
+     * 阈值以下直接跳过：回收是"延迟"而非"丢失" —— 列表有
+     * KAULA_EPOCH_MAX_RETIRED 硬上限兜底（满时强制 advance+回收），
+     * 阈值只控制摊销粒度。阈值 256 时总扫描 Σ(256,512,...) ≈ O(n²/512)，
+     * 10 万任务摊销到 ~10ms 级。
+     */
+    if (list->count < KAULA_EPOCH_RECLAIM_THRESHOLD) return 0;
+
     uint64_t min_active = kaula_epoch_min_active();
 
-    uint32_t freed = 0;
-    uint32_t kept = 0;
-
-    for (uint32_t i = 0; i < list->count; i++) {
-        /*
-         * 安全条件：所有活跃 Worker 的 epoch 都严格大于本对象退休时的 epoch。
-         * 若 min_active > item.epoch，说明没有 Worker 还停留在 item 可见的时期。
-         */
-        if (min_active > list->items[i].epoch) {
-            if (list->items[i].pool != NULL) {
-                /* P0-2：推进复用池而非释放（pool 由调用方保证单线程访问） */
-                KaulaTask* t = (KaulaTask*)list->items[i].ptr;
-                t->next_free = *(KaulaTask**)list->items[i].pool;
-                *(KaulaTask**)list->items[i].pool = t;
-            } else {
-                kmm_v4_survivor_free(list->items[i].ptr);
-            }
-            freed++;
+    /*
+     * 前缀回收：退休列表尾插、global_epoch 单调递增 → 列表按 epoch
+     * 升序排列。安全条件（min_active > item.epoch）在升序列表中构成
+     * 前缀 —— 扫到第一个不安全项即可停止，无需遍历全列表。
+     */
+    uint32_t i = 0;
+    while (i < list->count && min_active > list->items[i].epoch) {
+        if (list->items[i].pool != NULL) {
+            /* P0-2：推进复用池而非释放（pool 由调用方保证单线程访问） */
+            KaulaTask* t = (KaulaTask*)list->items[i].ptr;
+            t->next_free = *(KaulaTask**)list->items[i].pool;
+            *(KaulaTask**)list->items[i].pool = t;
         } else {
-            /* 还不安全，压缩到前 kept 位 */
-            list->items[kept++] = list->items[i];
+            kmm_v4_survivor_free(list->items[i].ptr);
         }
+        i++;
     }
 
-    list->count = kept;
-    if (freed > 0) {
-        atomic_fetch_add_explicit(&g_reclaimed_total, freed, memory_order_relaxed);
+    if (i > 0) {
+        /* 保留段（不安全项）移到前部，列表仍保持升序 */
+        uint32_t kept = list->count - i;
+        if (kept > 0) {
+            memmove(&list->items[0], &list->items[i],
+                    kept * sizeof(list->items[0]));
+        }
+        list->count = kept;
+        atomic_fetch_add_explicit(&g_reclaimed_total, i, memory_order_relaxed);
     }
-    return freed;
+    return i;
 }
 
 void kaula_epoch_reclaim_all(void) {

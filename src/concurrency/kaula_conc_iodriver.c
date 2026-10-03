@@ -166,41 +166,83 @@ static void io_timer_add(KaulaIoDriver* drv, KaulaTask* task, uint64_t delay_ns)
     uint64_t deadline = kaula_p_now_ns() + delay_ns;
     t->deadline_ns = deadline;
     t->task = task;
-    t->next = NULL;
+    t->next = drv->timers;
 
-    /* 按 deadline 递增插入（链表足够短，通常只有几个） */
-    KaulaTimer** link = &drv->timers;
-    while (*link != NULL && (*link)->deadline_ns <= deadline) {
-        link = &(*link)->next;
+    /*
+     * 头插 O(1)，链表无序。
+     *
+     * 原实现按 deadline 递增有序插入 —— 全量并发压测暴露：1 万个同
+     * deadline 的 sleep 挂起时，每个插入都要扫到链表尾部，O(n²) 把
+     * 驱动线程卡在插入上（[D] mixed 场景 spawn 阶段 3.8s 的根因）。
+     *
+     * 无序链表 + 最小 deadline 短路（见 io_timers_fire）：
+     *   插入 O(1)；绝大多数 wake 时 min > now，fire 直接短路 O(1)；
+     *   到期那一刻扫描一次 O(n) 批量 fire。并发 sleep 场景总成本 O(n)。
+     * 分散 deadline 会退化为多次 O(n) 扫描 —— sleep 语义天然集中
+     * （同一批挂起的时间窗相近），可接受；极端分散时 IO 数量本就
+     * 被 MAX_PENDING 限住，单次扫描有界。
+     */
+    drv->timers = t;
+    if (t->deadline_ns < drv->timers_min_deadline) {
+        drv->timers_min_deadline = t->deadline_ns;
     }
-    t->next = *link;
-    *link = t;
 }
 
 /* 处理到期定时器；返回距离下一个到期的纳秒数（无定时器时返回 KAULA_P_WAIT_FOREVER） */
 static uint64_t io_timers_fire(KaulaIoDriver* drv) {
+    if (drv->timers == NULL) {
+        drv->timers_min_deadline = KAULA_P_WAIT_FOREVER;
+        return KAULA_P_WAIT_FOREVER;
+    }
+
     uint64_t now = kaula_p_now_ns();
-    uint64_t next_delta = KAULA_P_WAIT_FOREVER;
 
-    while (drv->timers != NULL && drv->timers->deadline_ns <= now) {
-        KaulaTimer* t = drv->timers;
-        drv->timers = t->next;
-
-        KaulaTask* task = t->task;
-        free(t);
-
-        atomic_fetch_add_explicit(&drv->total_timer_fires, 1, memory_order_relaxed);
-
-        /* 写回 TLS 供 resume_fn 读取，然后交回调度器 */
-        task->io_result = 0;
-        kaula_scheduler_resume_task(task);
+    /* 短路：最近到期时间还没到，本次 wake 无需扫描（O(1)） */
+    if (drv->timers_min_deadline > now) {
+        return drv->timers_min_deadline - now;
     }
 
-    if (drv->timers != NULL) {
-        uint64_t d = drv->timers->deadline_ns - now;
-        next_delta = d;
+    /*
+     * 至少一个到期：整链扫描一次，把到期者全部 fire，
+     * 未到期者保留并重建链表，同时重算最小 deadline。
+     */
+    KaulaTimer* keep = NULL;
+    KaulaTimer* keep_tail = NULL;
+    uint64_t new_min = KAULA_P_WAIT_FOREVER;
+
+    KaulaTimer* cur = drv->timers;
+    while (cur != NULL) {
+        KaulaTimer* next = cur->next;
+        if (cur->deadline_ns <= now) {
+            KaulaTask* task = cur->task;
+            free(cur);
+            atomic_fetch_add_explicit(&drv->total_timer_fires, 1,
+                                      memory_order_relaxed);
+            /* 写回 TLS 供 resume_fn 读取，然后交回调度器 */
+            task->io_result = 0;
+            kaula_scheduler_resume_task(task);
+        } else {
+            cur->next = NULL;
+            if (keep == NULL) {
+                keep = cur;
+                keep_tail = cur;
+            } else {
+                keep_tail->next = cur;
+                keep_tail = cur;
+            }
+            if (cur->deadline_ns < new_min) new_min = cur->deadline_ns;
+        }
+        cur = next;
     }
-    return next_delta;
+
+    drv->timers = keep;
+    drv->timers_min_deadline = new_min;
+
+    if (keep != NULL) {
+        uint64_t d = new_min - now;
+        return d > 0 ? d : 0;
+    }
+    return KAULA_P_WAIT_FOREVER;
 }
 
 /* ========== 主循环 ========== */
@@ -351,6 +393,7 @@ int kaula_iodriver_init(void) {
      * 零值因此不是「无效」，得显式置 -1。
      */
     kaula_p_io_wait_invalidate(&drv->wait);
+    drv->timers_min_deadline = KAULA_P_WAIT_FOREVER;
 
     kaula_mpsc_queue_init(&drv->submit_queue);
 

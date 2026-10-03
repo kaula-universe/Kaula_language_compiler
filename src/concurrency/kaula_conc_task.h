@@ -33,6 +33,8 @@
 
 /* epoch 退休对象上限（文档 §10.3） */
 #define KAULA_EPOCH_MAX_RETIRED      65536
+/* try_reclaim 最小回收阈值（摊销频率限制，见 kaula_conc_epoch.c 说明） */
+#define KAULA_EPOCH_RECLAIM_THRESHOLD 256
 
 /* 默认预算与停滞阈值（文档 §5.3、§7.4） */
 #define KAULA_DEFAULT_BUDGET_QUANTUM 256

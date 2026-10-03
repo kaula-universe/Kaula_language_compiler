@@ -70,8 +70,9 @@ struct KaulaIoDriver {
     KaulaIoPending*   pending[KAULA_IO_BUCKETS];
     _Atomic(uint32_t) pending_count;
 
-    /* 定时器链表（按 deadline 递增插入） */
+    /* 定时器链表（无序头插；timers_min_deadline 供 fire 短路） */
     KaulaTimer*       timers;
+    uint64_t          timers_min_deadline;
 
     /* 统计 */
     _Atomic(uint64_t) total_submits;

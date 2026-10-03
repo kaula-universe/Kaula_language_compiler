@@ -30,7 +30,7 @@
 
 /* 容量必须为 2 的幂（I3） */
 #ifndef KAULA_MPSC_CAPACITY
-    #define KAULA_MPSC_CAPACITY 8192
+    #define KAULA_MPSC_CAPACITY 131072
 #endif
 #define KAULA_MPSC_MASK (KAULA_MPSC_CAPACITY - 1)
 
