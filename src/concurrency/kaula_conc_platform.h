@@ -115,6 +115,16 @@
     #define KAULA_P_WAKE_TAG (-1)
 #endif
 
+/*
+ * 定时器哨兵：epoll 后端把 timerfd 注册进来时用它做 data.fd，
+ * 与真实 fd（>= 0）、唤醒哨兵（-1）都不冲突，驱动据此认出
+ * 「这一轮是定时器到期」而不是 IO 就绪。
+ *
+ * 定义在这里而不是 io_backend.h：kaula_conc_io_primitives.c 只包含
+ * platform.h，而它也要用这个标签来注册 timerfd。
+ */
+#define KAULA_P_TIMER_FD (-2)
+
 /* ========== 单调时钟（纳秒） ========== */
 
 #if KAULA_PLATFORM_WINDOWS
@@ -506,16 +516,19 @@ static inline void kaula_p_mutex_unlock(kaula_p_mutex* m)  { pthread_mutex_unloc
 #if KAULA_PLATFORM_WINDOWS
 typedef HANDLE kaula_p_io_wait_t;
 static inline int  kaula_p_io_wait_epfd(kaula_p_io_wait_t w) { return (int)(intptr_t)w; }
+static inline int  kaula_p_io_wait_timerfd(kaula_p_io_wait_t w) { return -1; }
 static inline int  kaula_p_io_wait_is_valid(kaula_p_io_wait_t* w) { return *w != NULL; }
 static inline void kaula_p_io_wait_invalidate(kaula_p_io_wait_t* w) { *w = NULL; }
 #else
 typedef struct {
-    int epfd;    /* epoll fd 或 kqueue fd */
-    int wakefd;  /* epoll 专用：eventfd；kqueue 恒为 -1 */
+    int epfd;     /* epoll fd 或 kqueue fd */
+    int wakefd;   /* epoll 专用：eventfd；kqueue 恒为 -1 */
+    int timer_fd; /* epoll 专用：timerfd；kqueue 恒为 -1 */
 } kaula_p_io_wait_t;
 static inline int  kaula_p_io_wait_epfd(kaula_p_io_wait_t w) { return w.epfd; }
+static inline int  kaula_p_io_wait_timerfd(kaula_p_io_wait_t w) { return w.timer_fd; }
 static inline int  kaula_p_io_wait_is_valid(kaula_p_io_wait_t* w) { return w->epfd >= 0; }
-static inline void kaula_p_io_wait_invalidate(kaula_p_io_wait_t* w) { w->epfd = -1; w->wakefd = -1; }
+static inline void kaula_p_io_wait_invalidate(kaula_p_io_wait_t* w) { w->epfd = -1; w->wakefd = -1; w->timer_fd = -1; }
 #endif
 
 /* ========== IO 复用原语 ========== */
@@ -537,5 +550,18 @@ int kaula_p_io_wake(kaula_p_io_wait_t w);
 
 /* 清空唤醒通道的待处理计数（读到 WAKE_TAG 事件后调用） */
 void kaula_p_io_drain_wake(kaula_p_io_wait_t w);
+
+/*
+ * 武装定时器：delay_ns 后触发一次（相对现在）。
+ * delay_ns == 0 或 KAULA_P_WAIT_FOREVER 表示解除武装。返回 0 成功。
+ *
+ * 存在的理由：epoll_wait 的超时以毫秒为单位，亚毫秒定时只能向上取整
+ * （实测 200us 定时额外开销 1030us）。交给 timerfd 之后 epoll_wait 可以
+ * 无限阻塞，精度由内核定时器保证，不再受毫秒粒度限制。
+ *
+ * 只有 epoll 后端真正实现；kqueue 与 IOCP 是空实现（返回 0），
+ * 那两边仍靠 wait 超时 —— 亚毫秒精度是那边的已知边界。
+ */
+int kaula_p_io_arm_timer(kaula_p_io_wait_t w, uint64_t delay_ns);
 
 #endif /* KAULA_CONC_PLATFORM_H */
