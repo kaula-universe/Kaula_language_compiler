@@ -37,6 +37,16 @@ typedef struct {
     /* Worker → 车道 任务队列 */
     kaula_mpsc_queue_t task_queue;
 
+    /*
+     * pop 自旋锁（多消费者修复）：
+     * mpsc_queue 是"单消费者"结构，但车道线程会伸缩到多线程，
+     * 每个线程都调 pop —— 多消费者并发 pop 会把同一任务重复取出
+     * （两个线程读到同一 head+seq 就绪 → 各取一次 → 任务执行两次 →
+     * double complete / active 计数下溢）。pop 临界区只有一次队列
+     * 操作（空队列立即返回，不等待），自旋锁开销可忽略。
+     */
+    atomic_flag         pop_lock;
+
     /* 空闲统计与唤醒 */
     _Atomic(uint32_t)  idle_count;
     /*

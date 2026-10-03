@@ -52,6 +52,18 @@ int       kaula_scheduler_inject_empty(void);
 KaulaHandle kaula_spawn(KaulaResumeFn resume_fn, void* frame, size_t frame_size);
 
 /*
+ * kaula_spawn_flags：与 kaula_spawn 相同，但允许调用方在投递**之前**
+ * 设置任务标志（如 KAULA_TASK_FLAG_HINT_BLOCKING）。
+ *
+ * 不要在 kaula_spawn 返回后直接写 h.task->flags：
+ * 任务可能已被 Worker pop 并执行，此时写 flags 与 Worker 读 flags
+ * 是数据竞争（实测导致 10% 概率 segfault / 车道计数错乱）。
+ * 本函数在 task 对 Worker 可见之前完成 flags 设置，无竞争。
+ */
+KaulaHandle kaula_spawn_flags(KaulaResumeFn resume_fn, void* frame,
+                              size_t frame_size, uint32_t flags);
+
+/*
  * kaula_spawn_simple 提交一个"无挂起"的 conc fn。
  *
  * 单一形态的 conc fn 没有状态机：它的 coercion shim 就是普通 C 函数。

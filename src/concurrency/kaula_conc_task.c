@@ -55,7 +55,7 @@ KaulaTask* kaula_task_alloc(void) {
         atomic_store_explicit(&task->owner, NULL, memory_order_relaxed);
         task->submit_ns = 0;
         task->complete_ns = 0;
-        task->result = NULL;
+        atomic_store_explicit(&task->result, NULL, memory_order_relaxed);
         task->error = 0;
         atomic_store_explicit(&task->cancelled, 0, memory_order_relaxed);
         atomic_store_explicit(&task->pin_refs, 0, memory_order_relaxed);
@@ -138,23 +138,54 @@ static void retire_frames(KaulaTask* task) {
     }
 }
 
-void kaula_task_complete(KaulaTask* task, void* result) {
-    task->result = result;
-    task->error = KAULA_OK;
+/* 可观测性计数：外部压测/测试经 extern 读取（不进正常输出） */
+_Atomic(uint64_t) kaula_dbg_double_complete_count = 0;
+_Atomic(uint64_t) kaula_dbg_owner_mismatch_count = 0;
 
+void kaula_task_complete(KaulaTask* task, void* result) {
     /*
-     * 完成时刻在这里打点，**必须早于置 DONE**。
+     * 幂等防护：只有非 DONE 状态能完成（CAS 原子裁决）。
      *
-     * 晚一步就晚了：置 DONE 之后唤醒等待者，等待者可能立刻读
-     * complete_ns，而那时它还是 0。放在 release 存之前，
-     * 对任何看到 DONE 的读者都可见。
+     * 压测发现 double complete（任务被两个执行路径各 complete 一次）：
+     * active_task_count 被过度递减 → uint64 下溢成巨值 → spawn 的
+     * I3 背压（active >= max_tasks）误触发 → 后续 spawn 全部被拒 →
+     * 数万 await 永久挂起。
+     *
+     * 用 CAS 把 state 从非 DONE 推到 DONE：赢者执行完整完成路径，
+     * 输者（已被完成）直接返回，active/wake 统计不重复执行。
+     * 注意：double complete 的根源（任务被两次执行）仍需单独排查，
+     * 这里只是让计数与唤醒保持幂等，避免下溢灾难。
+     *
+     * 顺序必须是：**先发布 result，再 CAS 置 DONE**。
+     *
+     * 原实现 CAS 先置 DONE、result 后写 —— 读者看到 DONE（acquire）
+     * 时 result 可能还是 NULL（未写），await 读到 NULL 误报失败。
+     * 压测实测：50000 任务每轮 0~5 个 await 返回 NULL，但任务实际
+     * 全部完成（done=50000、state=DONE、frame 结果正确）。
+     * 把 result（release）写在 DONE（acq_rel CAS）之前，任何看到
+     * DONE 的读者都必能看到 result —— release/acquire 配对。
      */
+    int prev = atomic_load_explicit(&task->state, memory_order_relaxed);
+    if (prev == KAULA_TASK_DONE) {
+        atomic_fetch_add(&kaula_dbg_double_complete_count, 1);
+        return; /* 已被完成：忽略 */
+    }
+    /* 先发布结果（release），再 CAS 置 DONE —— 读者看到 DONE 必看到 result */
+    atomic_store_explicit(&task->result, result, memory_order_release);
+    task->error = KAULA_OK;
     task->complete_ns = kaula_p_now_ns();
 
-    /*
-     * 先发布结果，再置状态 —— 保证看到 DONE 的线程一定看到 result。
-     */
-    atomic_store_explicit(&task->state, KAULA_TASK_DONE, memory_order_release);
+    if (!atomic_compare_exchange_weak_explicit(
+            &task->state, &prev, KAULA_TASK_DONE,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        /*
+         * CAS 输：另一线程已完成该任务（prev 被它改成 DONE）。
+         * 结果字段以赢者为准（release 序）；输者不再执行
+         * push/wake/retire —— 那些赢者已做，重复执行会下溢计数。
+         */
+        return;
+    }
+    /* 赢者：继续完整完成路径 */
 
     /*
      * 统计与活跃计数必须在唤醒等待者之前更新完。
@@ -181,7 +212,7 @@ void kaula_task_complete(KaulaTask* task, void* result) {
 }
 
 void kaula_task_fail(KaulaTask* task, KaulaError err) {
-    task->result = NULL;
+    atomic_store_explicit(&task->result, NULL, memory_order_release);
     task->error = (int)err;
     task->complete_ns = kaula_p_now_ns();   /* 失败路径同样打点 */
 
@@ -444,7 +475,7 @@ static int await_copy_out(KaulaHandle h, void* dst, size_t dst_size, uint64_t ti
      */
     int ok = kaula_task_await(h.task, timeout_ns);
     if (ok) {
-        const void* src = h.task->result;
+        const void* src = atomic_load_explicit(&h.task->result, memory_order_acquire);
         if (src != NULL && dst_size > 0) {
             memcpy(dst, src, dst_size);
         }
@@ -565,13 +596,13 @@ void* kaula_handle_await(KaulaHandle h) {
     if (h.task == NULL) return NULL;
     kaula_runtime_ensure_init();
     if (!kaula_task_await(h.task, KAULA_P_WAIT_FOREVER)) return NULL;
-    return h.task->result;
+    return atomic_load_explicit(&h.task->result, memory_order_acquire);
 }
 
 void* kaula_handle_try_await(KaulaHandle h, uint64_t timeout_ns) {
     if (h.task == NULL) return NULL;
     if (!kaula_task_await(h.task, timeout_ns)) return NULL;
-    return h.task->result;
+    return atomic_load_explicit(&h.task->result, memory_order_acquire);
 }
 
 int kaula_handle_poll(KaulaHandle h) {

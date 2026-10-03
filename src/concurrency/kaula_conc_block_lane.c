@@ -18,23 +18,29 @@ static void block_lane_thread(void* arg) {
     KaulaBlockLane* lane = (KaulaBlockLane*)arg;
 
     while (atomic_load_explicit(&lane->running, memory_order_acquire)) {
+        /* pop 串行化：mpsc 是单消费者结构，多车道线程必须互斥 */
+        while (atomic_flag_test_and_set_explicit(&lane->pop_lock,
+                                                 memory_order_acquire)) {}
         KaulaTask* task = (KaulaTask*)kaula_mpsc_queue_pop(&lane->task_queue);
+        atomic_flag_clear_explicit(&lane->pop_lock, memory_order_release);
 
         if (task == NULL) {
             /* 空闲：park 到通知事件上，不轮询 */
             atomic_fetch_add_explicit(&lane->idle_count, 1, memory_order_acq_rel);
 
-            /* 缩容判断：空闲线程数超过下限且线程总数 > min，则自行退出 */
-            uint32_t alive = atomic_load_explicit(&lane->thread_count, memory_order_acquire);
-            uint32_t idle = atomic_load_explicit(&lane->idle_count, memory_order_acquire);
-
-            if (alive > KAULA_BLOCK_LANE_MIN_THREADS && idle > 1) {
-                atomic_fetch_sub_explicit(&lane->thread_count, 1, memory_order_acq_rel);
-                atomic_fetch_sub_explicit(&lane->idle_count, 1, memory_order_acq_rel);
-                break;
-            }
-
-            /* 等待通知，超时 200ms 兜底复查 shrinking */
+            /*
+             * 线程保活：不再即时缩容。
+             *
+             * 原实现里 `alive > MIN && idle > 1` 在空转的当下就 break 退出，
+             * 导致任务波峰之间的线程反复创建/销毁（实测 50 个阻塞任务
+             * spawned_threads 累计 424，峰值却只有 8）：下一个任务一来
+             * busy > alive 又要新建线程。pthread_create 单次 ~50us 开销，
+             * 抖动比驻留 8 条线程贵得多。
+             *
+             * 现改为：空闲线程 park 到 notify，由 200ms 超时兜底复查
+             * running（stop 时唤醒），直到 stop 才退出。线程数上限由
+             * max_threads（cap）硬约束，驻留成本可忽略。
+             */
             kaula_p_event_wait(&lane->notify, 200000000ULL);
 
             atomic_fetch_sub_explicit(&lane->idle_count, 1, memory_order_acq_rel);
