@@ -269,6 +269,24 @@ void kaula_runtime_shutdown(void) {
         kaula_worker_join(&g_conc_workers[i]);
     }
 
+    /* 4.5 清空各 Worker 的 Task 复用池（P0-2）。
+     *    池里的 Task 均已 complete/fail 且经 epoch 判定安全，
+     *    现在单线程上下文，直接销毁 event 并释放。 */
+    for (uint32_t i = 0; i < g_conc_runtime.worker_count; i++) {
+        KaulaWorker* w = &g_conc_workers[i];
+        KaulaTask* t = w->task_pool;
+        while (t != NULL) {
+            KaulaTask* nx = t->next_free;
+            if (kaula_p_event_is_valid(&t->done_event)) {
+                kaula_p_event_destroy(&t->done_event);
+                kaula_p_event_invalidate(&t->done_event);
+            }
+            kmm_v4_survivor_free(t);
+            t = nx;
+        }
+        w->task_pool = NULL;
+    }
+
     /* 5. 停 IoDriver：残留挂起任务被标 ECANCELED 并放回 READY */
     kaula_iodriver_stop();
     kaula_iodriver_join();

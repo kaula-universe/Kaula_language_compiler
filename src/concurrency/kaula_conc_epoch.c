@@ -89,6 +89,10 @@ void kaula_epoch_exit(void) {
 /* ========== 退休 ========== */
 
 void kaula_epoch_retire(void* ptr) {
+    kaula_epoch_retire_to(ptr, NULL);
+}
+
+void kaula_epoch_retire_to(void* ptr, void** pool) {
     if (ptr == NULL) return;
 
     atomic_fetch_add_explicit(&g_retired_total, 1, memory_order_relaxed);
@@ -114,8 +118,15 @@ void kaula_epoch_retire(void* ptr) {
              * 生产路径上 retire 发生在"Task 已 DONE"之后，
              * 不会再被 Worker 取走，因此实际是安全的。
              */
-            kmm_v4_survivor_free(ptr);
-            atomic_fetch_add_explicit(&g_reclaimed_total, 1, memory_order_relaxed);
+            if (pool != NULL) {
+                /* 列表满时的强制路径也走复用池（保持单链表） */
+                KaulaTask* t = (KaulaTask*)ptr;
+                t->next_free = *(KaulaTask**)pool;
+                *(KaulaTask**)pool = t;
+            } else {
+                kmm_v4_survivor_free(ptr);
+                atomic_fetch_add_explicit(&g_reclaimed_total, 1, memory_order_relaxed);
+            }
             return;
         }
     }
@@ -123,6 +134,7 @@ void kaula_epoch_retire(void* ptr) {
     list->items[list->count].ptr = ptr;
     list->items[list->count].epoch =
         atomic_load_explicit(&g_conc_epoch.global_epoch, memory_order_acquire);
+    list->items[list->count].pool = pool;
     list->count++;
 }
 
@@ -178,7 +190,14 @@ uint32_t kaula_epoch_try_reclaim(void) {
          * 若 min_active > item.epoch，说明没有 Worker 还停留在 item 可见的时期。
          */
         if (min_active > list->items[i].epoch) {
-            kmm_v4_survivor_free(list->items[i].ptr);
+            if (list->items[i].pool != NULL) {
+                /* P0-2：推进复用池而非释放（pool 由调用方保证单线程访问） */
+                KaulaTask* t = (KaulaTask*)list->items[i].ptr;
+                t->next_free = *(KaulaTask**)list->items[i].pool;
+                *(KaulaTask**)list->items[i].pool = t;
+            } else {
+                kmm_v4_survivor_free(list->items[i].ptr);
+            }
             freed++;
         } else {
             /* 还不安全，压缩到前 kept 位 */
@@ -198,7 +217,13 @@ void kaula_epoch_reclaim_all(void) {
     if (list == NULL) return;
 
     for (uint32_t i = 0; i < list->count; i++) {
-        kmm_v4_survivor_free(list->items[i].ptr);
+        if (list->items[i].pool != NULL) {
+            KaulaTask* t = (KaulaTask*)list->items[i].ptr;
+            t->next_free = *(KaulaTask**)list->items[i].pool;
+            *(KaulaTask**)list->items[i].pool = t;
+        } else {
+            kmm_v4_survivor_free(list->items[i].ptr);
+        }
         atomic_fetch_add_explicit(&g_reclaimed_total, 1, memory_order_relaxed);
     }
     list->count = 0;
@@ -213,7 +238,13 @@ void kaula_epoch_shutdown(void) {
     for (uint32_t i = 0; i < n; i++) {
         KaulaRetireList* l = &g_conc_workers[i].retired;
         for (uint32_t j = 0; j < l->count; j++) {
-            kmm_v4_survivor_free(l->items[j].ptr);
+            if (l->items[j].pool != NULL) {
+                KaulaTask* t = (KaulaTask*)l->items[j].ptr;
+                t->next_free = *(KaulaTask**)l->items[j].pool;
+                *(KaulaTask**)l->items[j].pool = t;
+            } else {
+                kmm_v4_survivor_free(l->items[j].ptr);
+            }
             atomic_fetch_add_explicit(&g_reclaimed_total, 1, memory_order_relaxed);
         }
         l->count = 0;

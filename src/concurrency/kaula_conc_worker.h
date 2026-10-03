@@ -72,6 +72,16 @@ typedef struct KaulaWorker {
     _Atomic(uint64_t) local_epoch;
     KaulaRetireList   retired;
 
+    /*
+     * ---- Task 复用池（P0-2） ----
+     *
+     * owner 独占的单链表（push/pop 都只由本 Worker 在自己上下文执行，
+     * 无锁、零竞争）。epoch 判定 Task 安全后，把 Task 推进这个池
+     * 而不是 free；spawn 时优先从这里取，取空才退到 KMM 全局分配。
+     * done_event 跨复用保留（epoch 期间从未被 destroy）。
+     */
+    KaulaTask*        task_pool;
+
     /* ---- 统计（独占缓存行） ---- */
     KaulaWorkerStats  stats;
     char              _pad_stats[KAULA_CACHE_LINE];
