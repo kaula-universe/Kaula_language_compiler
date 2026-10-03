@@ -163,7 +163,7 @@ def link_flags():
 
 
 def collect_tests(only=None):
-    tests = sorted(TEST_DIR.glob("test_*.c"))
+    tests = sorted(list(TEST_DIR.glob("test_*.c")) + list(TEST_DIR.glob("test_*.kl")))
     if only:
         tests = [t for t in tests if only in t.stem]
     return tests
@@ -201,6 +201,33 @@ def runtime_sources():
 def build_one(cc, test_file, extra, verbose):
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     exe = BUILD_DIR / (test_file.stem + (".exe" if sys.platform.startswith("win") else ""))
+
+    # kl 用例：走 kaulac 编译（编译器内置 conc fn/spawn/Handle 支持），
+    # 产出 build/kl-hosted/<stem>/<stem>（与 run_freestanding_tests 同布局）。
+    if test_file.suffix == ".kl":
+        kaulac = PROJECT_ROOT / "build" / "bin" / ("kaulac.exe" if sys.platform.startswith("win") else "kaulac")
+        if not kaulac.exists():
+            print(f"[-] kaulac 不存在（先构建编译器）: {kaulac}")
+            return None
+        outdir = PROJECT_ROOT / "build" / "kl-hosted" / test_file.stem
+        cmd = [str(kaulac), "-output-dir", str(outdir), str(test_file)]
+        if verbose:
+            print("[kaulac]", " ".join(cmd))
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=900)
+        diag = (proc.stderr or "") + (proc.stdout or "")
+        if proc.returncode != 0 or "Status: Success" not in diag and "成功" not in diag:
+            print(f"[-] kl 编译失败: {test_file.name}")
+            print(diag[-8000:])
+            return None
+        exe = outdir / (test_file.stem + (".exe" if sys.platform.startswith("win") else ""))
+        if not exe.is_file():
+            exe = outdir / test_file.stem
+        if not exe.is_file():
+            print(f"[-] kl 编译未产出可执行: {test_file.name}")
+            print(diag[-2000:])
+            return None
+        return exe
 
     compile_only = [str(test_file)]
     compile_only += [str(s) for s in runtime_sources()]
