@@ -497,6 +497,28 @@ func (cg *CodeGenerator) PromoteSkipNotes() []string {
 	return cg.promoteSkipNotes
 }
 
+// HandleResultType 查询 Handle 变量的结果 C 类型（登记表读）。
+// 未登记返回 ""：该变量不被识别为 Handle（不 release、await 走错误路径）。
+func (cg *CodeGenerator) HandleResultType(varName string) string {
+	if cg.handleResultTypes == nil {
+		return ""
+	}
+	return cg.handleResultTypes[varName]
+}
+
+// RegisterHandleResultType 登记 Handle 变量的结果 C 类型（登记表写）。
+// 除 `Handle x = spawn f()` 的声明处（noteHandleResultType）外，
+// Handle 复制路径（`Handle y = x`）也调用：传播源句柄的结果类型，
+// 否则 y 不被识别为 Handle —— 作用域出口漏发 release（pin 晚还），
+// 表达式位置 y.await 还会走 generateAwaitExpression 的错误分支
+// （生成悬垂读，答案错但不崩）。
+func (cg *CodeGenerator) RegisterHandleResultType(varName, cType string) {
+	if cg.handleResultTypes == nil {
+		cg.handleResultTypes = make(map[string]string)
+	}
+	cg.handleResultTypes[varName] = cType
+}
+
 // tcoState 是"每函数"的尾调用改写状态：循环标签、形参名（实参回写用）、
 // 以及登记为可改写的 self-call 节点集合。
 type tcoState struct {

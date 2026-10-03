@@ -267,6 +267,25 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		sg.codegen.noteHandleResultType(stmt.Name, sp)
 	}
 
+	/*
+	 * `Handle y = x` 复制路径：y 没有 spawn 表达式可提取结果类型
+	 * （复制的是句柄本身，不是新任务），从登记表传播源句柄 x 的结果类型。
+	 *
+	 * 不传播的话 y 不被识别为 Handle：
+	 *   1) 作用域出口漏发 kaula_handle_release —— pin 晚还，内存峰值拖长；
+	 *   2) 表达式位置 y.await 走 generateAwaitExpression 的错误分支，
+	 *      生成 `(i64)kaula_handle_await(y)` —— 解引用已 retire 的 Frame
+	 *      字段，是悬垂读：不崩，但安静地返回旧值。
+	 * 链式复制（y=x, z=y）按语句顺序生成，天然逐级传播。
+	 */
+	if stmt.Type == "Handle" || stmt.Type == "handle" {
+		if id, ok := stmt.Value.(*ast.Identifier); ok {
+			if srcType := sg.codegen.HandleResultType(id.Name); srcType != "" {
+				sg.codegen.RegisterHandleResultType(stmt.Name, srcType)
+			}
+		}
+	}
+
 	if aw, ok := stmt.Value.(*ast.AwaitExpression); ok && stmt.Name != "" {
 		sg.codegen.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, "local",
 			stmt.Pos.Line, stmt.Pos.Column)
