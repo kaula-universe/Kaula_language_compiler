@@ -339,6 +339,10 @@ func concIsResumableCompound(s ast.Statement) bool {
 		return stmtsHaveSuspend(v.Body)
 	case *ast.ForStatement:
 		return stmtsHaveSuspend(v.Body)
+	case *ast.ForInStatement:
+		/* 守卫模式只支持 range 迭代（下标/上下界进 Frame 安全恢复）；
+		   数组/string 迭代含挂起在 concCheckSupported 处已报诊断 */
+		return stmtsHaveSuspend(v.Body) && isRangeIterable(v.Iterable)
 	case *ast.BlockStatement:
 		return stmtsHaveSuspend(v.Statements)
 	}
@@ -347,6 +351,17 @@ func concIsResumableCompound(s ast.Statement) bool {
 
 // concCheckSupported 在把语句交给守卫模式之前先判定它能不能进。
 // 不能进的报诊断 —— 编译失败比静默算错好。
+// isRangeIterable 报告 for..in 的 Iterable 是否为 range(...) 调用
+// （守卫模式下只有 range 迭代能把下标/上下界提升到 Frame 安全恢复）。
+func isRangeIterable(expr ast.Expression) bool {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok || call == nil {
+		return false
+	}
+	id, ok := call.Function.(*ast.Identifier)
+	return ok && id != nil && id.Name == "range"
+}
+
 func (cg *CodeGenerator) concCheckSupported(s ast.Statement, fnName string) {
 	line := concStmtLine(s)
 	report := func(msg string) {
@@ -366,14 +381,26 @@ func (cg *CodeGenerator) concCheckSupported(s ast.Statement, fnName string) {
 			report("for 初始化式里的可插桩调用暂不支持：初始化式只应执行一次")
 		}
 	case *ast.ForInStatement:
-		if stmtsHaveSuspend(v.Body) {
-			report("for..in 循环体内的可插桩调用暂不支持：迭代下标是编译器生成的局部量，" +
-				"不在 Frame 里，恢复后会从头再数一遍")
+		if stmtsHaveSuspend(v.Body) && !isRangeIterable(v.Iterable) {
+			report("for..in 循环体内含可插桩调用时仅支持 range(...) 迭代：" +
+				"数组/string 迭代的下标与迭代对象求值无法安全恢复，" +
+				"恢复后会从头再数一遍或重复求值迭代表达式")
+		}
+		if conc.HasSuspendCall(v.Iterable) {
+			report("for..in 的 range(...) 参数含可插桩调用暂不支持：上下界应在循环进入前一次性求值")
 		}
 	}
 
-	if concHasUsedAwaitResult(s) {
-		report("复合语句内的可插桩调用暂不支持取用返回值：恢复落点是循环体里的语句，" +
+	/*
+	 * 取用挂起调用的返回值：只在守卫模式（复合语句/守卫组）里拦。
+	 *
+	 * 顶层两段式（非守卫）是支持的：submit 段发挂起返回、result 段取回
+	 * （`i64 v = f(x)` → submit `i64 v = <占位>` + result `v = TLS`）。
+	 * 守卫模式里恢复落点是循环体/分支体内的语句，取值语义无法安全兑现，
+	 * 保持拒绝（对 #[hint(blocking)] 调用同样生效）。
+	 */
+	if concHasUsedAwaitResult(s) && cg.concGuardDepth >= 0 {
+		report("守卫模式内的可插桩调用暂不支持取用返回值：恢复落点是循环体里的语句，" +
 			"而「提交」与「取回结果」两半分属同一条语句的前后，恢复到后半时前半已经过去了")
 	}
 	if cg.concGuardDepth >= conc.SubDepth {
@@ -432,7 +459,8 @@ func concHasUsedAwaitResult(s ast.Statement) bool {
 			case *ast.ExpressionStatement:
 				// 整条表达式就是这次调用 → 取值未用
 				if call, ok := v.Expression.(*ast.CallExpression); ok {
-					if name := conc.CalleeName(call); name != "" && conc.Lookup(name) != conc.SuspendNone {
+					if name := conc.CalleeName(call); name != "" &&
+						(conc.Lookup(name) != conc.SuspendNone || conc.IsBlocking(name)) {
 						// 递归进实参：实参里的挂起仍然取值
 						for _, a := range call.Args {
 							walk([]ast.Statement{&ast.ExpressionStatement{Expression: a, Pos: call.Pos}})
@@ -540,7 +568,7 @@ func concCountSuspendExpr(expr ast.Expression) int {
 	}
 	if call, ok := expr.(*ast.CallExpression); ok {
 		n := 0
-		if name := conc.CalleeName(call); name != "" && conc.Lookup(name) != conc.SuspendNone {
+		if name := conc.CalleeName(call); name != "" && (conc.Lookup(name) != conc.SuspendNone || conc.IsBlocking(name)) {
 			n++
 		}
 		for _, a := range call.Args {
@@ -614,7 +642,7 @@ func maxSuspendOrdinalExpr(cur int, expr ast.Expression) int {
 	}
 	if call, ok := expr.(*ast.CallExpression); ok {
 		name := conc.CalleeName(call)
-		if name != "" && conc.Lookup(name) != conc.SuspendNone {
+		if name != "" && (conc.Lookup(name) != conc.SuspendNone || conc.IsBlocking(name)) {
 			cur++
 		}
 		for _, arg := range call.Args {

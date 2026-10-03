@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"kaula/internal/ast"
+	"kaula/internal/codegen/conc"
 )
 
 /*
@@ -95,6 +96,47 @@ func (eg *ExpressionGenerator) concIoCallRewrite(
 	// 只有真正映射到内核 op 的函数才走这条路
 	op, ok := concIoTypeOf(funcName)
 	if !ok {
+		/*
+		 * #[hint(blocking)] 标记的不可插桩调用：走 BLOCKED 形态。
+		 *
+		 * submit 段：保存现场 + 返回 KAULA_RESUME_BLOCKED ——
+		 * Worker 读到后把任务移交 Block Lane（I5），绝不在 Worker
+		 * 上原地执行阻塞操作。
+		 * result 段：调用按普通语义生成，由 Block Lane 线程就地执行
+		 * （它本来就是专用线程，阻塞不占 Worker）。
+		 *
+		 * 顶层（非守卫）不在此就地发挂起返回 —— 顶层两段式由
+		 * concSuspendReturn 在语句末尾统一发出，这里只返回占位 0
+		 * （声明语句在 submit 段需要一个初始化值，result 段再覆盖）。
+		 */
+		if conc.IsBlocking(funcName) {
+			if cg.concIoRewrite == concIoResult {
+				return "", false
+			}
+			if !cg.concGuardActive() {
+				return "0", true
+			}
+			/*
+			 * 守卫模式：就地保存现场 + 返回 BLOCKED。
+			 * 恢复槽位语义与 IO 提交完全一致（见下方 SUSPEND 分支注释）。
+			 */
+			f := cg.concFrameVar
+			ord := -1
+			if cg.concAnalysis != nil {
+				ord = cg.concAnalysis.SuspendOrdinalOf(call)
+			}
+			var b []byte
+			b = append(b, cg.concSaveLiveVars(ord)...)
+			b = append(b, fmt.Sprintf("%s->pc = %d;\n", f, cg.concSegmentPC)...)
+			b = append(b, fmt.Sprintf("%s->sub[%d] = %d;\n", f, cg.concGuardDepth, cg.concGuardSeq)...)
+			b = append(b,
+				"return (KaulaResumeResult){ .status = KAULA_RESUME_BLOCKED, .io_request = {0}, .value = NULL };\n"...)
+			/*
+			 * 守卫模式下 BLOCKED 与 IO 的占位逻辑一致：
+			 * submit 段生成占位 0，result 段由调用点按普通语义生成覆盖。
+			 */
+			return string(b) + "0", true
+		}
 		return "", false
 	}
 

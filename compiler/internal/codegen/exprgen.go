@@ -4186,7 +4186,13 @@ func (eg *ExpressionGenerator) generateSpawnExpression(e *ast.SpawnExpression) s
 		argCodes = append(argCodes, eg.GenerateExpression(arg))
 	}
 
-	return emitter.GenerateSpawn(argCodes)
+	// #[hint(blocking)]：任务投递时带 HINT_BLOCKING 标志，
+	// 内核收到 KAULA_RESUME_BLOCKED 时直接移交 Block Lane（I5）。
+	flags := uint32(0)
+	if conc.IsBlocking(ident.Name) {
+		flags = 1 /* KAULA_TASK_FLAG_HINT_BLOCKING */
+	}
+	return emitter.GenerateSpawn(argCodes, flags)
 }
 
 /*

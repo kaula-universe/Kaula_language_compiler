@@ -152,6 +152,19 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 	b.WriteString("    int             sub[KAULA_CONC_SUB_DEPTH];\n")
 	b.WriteString("    int             branch[KAULA_CONC_SUB_DEPTH];\n")
 
+	/*
+	 * for..in(range) 循环守卫的迭代状态（按深度，同 sub/branch）。
+	 *
+	 * 迭代下标 _i_ 是编译器生成的局部量，原本不在 Frame 里 ——
+	 * 守卫模式恢复时 _i_ 从头再数一遍，循环体被重复执行。
+	 * 把 start/end/step 求值一次存入 Frame，恢复从 f->loop_i[d] 继续，
+	 * 循环体只执行正确轮次。
+	 */
+	b.WriteString("    /* for..in 守卫：迭代下标 / 上界 / 步长 */\n")
+	b.WriteString("    long long       loop_i[KAULA_CONC_SUB_DEPTH];\n")
+	b.WriteString("    long long       loop_end[KAULA_CONC_SUB_DEPTH];\n")
+	b.WriteString("    long long       loop_step[KAULA_CONC_SUB_DEPTH];\n")
+
 	// 参数：函数入口时写入，跨所有挂起点存活
 	if len(e.Params) > 0 {
 		b.WriteString("    /* 参数 */\n")
@@ -478,7 +491,7 @@ func (e *Emitter) generateShim(bodyCode string, stateful bool) string {
  * 所以这里写 f-><参数名>，不是 f->arg_N。
  * （早期版本用 arg_N，与 Frame 定义不一致，编译必然失败。）
  */
-func (e *Emitter) GenerateSpawn(argExprs []string) string {
+func (e *Emitter) GenerateSpawn(argExprs []string, flags uint32) string {
 	var b strings.Builder
 
 	/*
@@ -501,13 +514,27 @@ func (e *Emitter) GenerateSpawn(argExprs []string) string {
 				b.WriteString(fmt.Sprintf("        __frame->%s = %s;\n", e.Params[i], arg))
 			}
 		}
-		b.WriteString(fmt.Sprintf("        __h = kaula_spawn(%s, __frame, sizeof(*__frame));\n",
-			e.ResumeFn()))
+		if flags != 0 {
+			/*
+			 * #[hint(blocking)]：用 kaula_spawn_flags 在任务对 Worker
+			 * 可见之前设好标志 —— 事后写 flags 与 Worker 读 flags 是数据竞争。
+			 */
+			b.WriteString(fmt.Sprintf(
+				"        __h = kaula_spawn_flags(%s, __frame, sizeof(*__frame), %du);\n",
+				e.ResumeFn(), flags))
+		} else {
+			b.WriteString(fmt.Sprintf("        __h = kaula_spawn(%s, __frame, sizeof(*__frame));\n",
+				e.ResumeFn()))
+		}
 	} else {
 		/*
 		 * 单一形态：没有 pc，也不走 resume。
 		 * 但仍须交给内核执行 —— 否则 spawn 就失去了"并发提交"的语义。
 		 * Frame 在这里只是参数包与结果槽。
+		 *
+		 * #[hint(blocking)] 标志在这里被忽略：单一形态没有状态机、
+		 * 永远不会返回 KAULA_RESUME_BLOCKED，车道无从接管；
+		 * 这类任务按普通 fn 提交，Worker 就地执行（I6 的"有栈逃逸"边界）。
 		 */
 		/*
 		 * 参数必须搬进 Frame。

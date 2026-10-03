@@ -194,6 +194,15 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 			// #[attr] pub fn/struct/... — 先解析属性暂存，交给 pub 解析器（函数解析时生效）
 			p.pendingAttributes = p.parseAttributes()
 			return p.parsePubStatementIterative()
+		case lexer.TOKEN_CONC:
+			// #[attr] conc fn — 属性先暂存，conc fn 解析时生效（fn.IsConcurrent 后置）
+			p.pendingAttributes = p.parseAttributes()
+			p.nextToken() // 跳过 conc，现在 curTok = fn
+			fn := p.parseFunctionStatementIterative()
+			if fn != nil {
+				fn.IsConcurrent = true
+			}
+			return fn
 		case lexer.TOKEN_FUNC:
 			return p.parseFunctionStatementIterative()
 		case lexer.TOKEN_STRUCT:

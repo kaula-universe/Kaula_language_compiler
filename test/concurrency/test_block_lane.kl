@@ -1,0 +1,88 @@
+// Kaula 并发内核 · kl 侧触发阻塞车道（BLOCKED 形态）
+//
+// 修复前：未登记（不可插桩）的阻塞调用在 conc fn 里原样生成，
+// Worker 原地阻塞（I4 失效）—— 内核的 Block Lane 从 kl 侧没有入口。
+// 修复后：#[hint(blocking)] 标记的函数：
+//   - spawn 它：任务带 KAULA_TASK_FLAG_HINT_BLOCKING，直接移交车道
+//   - conc fn 内调用它：生成 KAULA_RESUME_BLOCKED，Worker 让出
+//
+// 判据（外部记录）：
+//   - 每个阻塞任务返回值精确（blocking_busy(n) = Σ0..n-1）
+//   - 并发性：4 个阻塞任务并行耗时 ≈ 1 个任务的耗时（lane 接管，不占 Worker）；
+//     若 Worker 原地跑会串行 ≈ 4 倍。
+//   - err=0 即通过。
+
+import std.io
+import std.time
+
+// blocking_busy：未登记的"阻塞"计算（长循环），#[hint(blocking)] 标记。
+// 它不在 instrumentTable（不可插桩），只能走阻塞车道。
+#[hint(blocking)]
+fn blocking_busy(i64 n) -> i64 {
+    i64 acc = 0
+    for i in range(n) {
+        acc += i
+    }
+    return acc
+}
+
+// 场景 A：conc fn 内调用 blocking fn —— 生成 BLOCKED，Worker 让出，
+// Block Lane 线程就地执行阻塞计算。
+conc fn lane_worker(i64 n) -> i64 {
+    i64 v = blocking_busy(n)
+    return v
+}
+
+// 场景 B：blocking conc fn 直接被 spawn —— 任务带 HINT_BLOCKING 标志。
+// 内部挂起（time_sleep）仍走 IoDriver；阻塞计算走车道。
+#[hint(blocking)]
+conc fn lane_spawn_target(i64 n) -> i64 {
+    i64 v = blocking_busy(n)
+    std.time.time_sleep(1)
+    return v + 1
+}
+
+// 校验单个结果
+fn check(i64 got, i64 expect, i64 err, string name) -> i64 {
+    if got != expect {
+        std.io.println("ERR ", name, " got=", got, " expect=", expect)
+        return err + 1
+    }
+    return err
+}
+
+fn main() -> i32 {
+    i64 err = 0
+    i64 n = 30000000
+    i64 expect = n * (n - 1) / 2
+
+    // --- 场景 A：4 个 lane_worker 并发 ---
+    i64 t0 = std.time.time_now_ms()
+    Handle a1 = spawn lane_worker(n)
+    Handle a2 = spawn lane_worker(n)
+    Handle a3 = spawn lane_worker(n)
+    Handle a4 = spawn lane_worker(n)
+    i64 r1 = a1.await
+    i64 r2 = a2.await
+    i64 r3 = a3.await
+    i64 r4 = a4.await
+    i64 tA = std.time.time_now_ms() - t0
+    err = check(r1, expect, err, "A1")
+    err = check(r2, expect, err, "A2")
+    err = check(r3, expect, err, "A3")
+    err = check(r4, expect, err, "A4")
+
+    // --- 场景 B：2 个 blocking spawn ---
+    i64 t1 = std.time.time_now_ms()
+    Handle b1 = spawn lane_spawn_target(n)
+    Handle b2 = spawn lane_spawn_target(n)
+    i64 s1 = b1.await
+    i64 s2 = b2.await
+    i64 tB = std.time.time_now_ms() - t1
+    err = check(s1, expect + 1, err, "B1")
+    err = check(s2, expect + 1, err, "B2")
+
+    std.io.println("block_lane ok err=", err,
+        " tA(ms)=", tA, " tB(ms)=", tB)
+    return 0
+}
