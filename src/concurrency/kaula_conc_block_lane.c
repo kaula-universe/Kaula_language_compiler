@@ -82,16 +82,28 @@ static void block_lane_thread(void* arg) {
 
 /* 尝试新建一个车道线程（动态伸缩，文档 §7.2） */
 static int block_lane_spawn_thread(KaulaBlockLane* lane) {
+    /*
+     * 抢一个名额，必须循环到 CAS 真的成功为止。
+     *
+     * 原来的写法是：CAS 失败后只重新读一次 thread_count 检查上界，
+     * 然后**不重试 CAS 就继续往下走**去创建线程。结果是
+     * thread_count 从来没被加过，而上界检查读到的又是旧的小值，
+     * 于是 `while (busy > alive && spawn() == 0)` 里的 alive 永远追不上
+     * busy，线程无上限地涨。
+     *
+     * 实测（Linux）：第一个 init 还没返回，进程已有 261 个线程
+     * （wchan 分布 195 个空转 + 15 个 futex 等待），随后必然挂死。
+     * 上界 KAULA_BLOCK_LANE_MAX_THREADS=64 完全没起作用。
+     */
     uint32_t alive = atomic_load_explicit(&lane->thread_count, memory_order_acquire);
-    if (alive >= lane->max_threads) return KAULA_ERR_WOULD_BLOCK;
-
-    /* 抢一个名额 */
-    if (!atomic_compare_exchange_strong_explicit(
-            &lane->thread_count, &alive, alive + 1,
-            memory_order_acq_rel, memory_order_acquire)) {
-        /* CAS 失败：可能已有人加了线程，重试一次即可 */
-        alive = atomic_load_explicit(&lane->thread_count, memory_order_acquire);
+    for (;;) {
         if (alive >= lane->max_threads) return KAULA_ERR_WOULD_BLOCK;
+        if (atomic_compare_exchange_weak_explicit(
+                &lane->thread_count, &alive, alive + 1,
+                memory_order_acq_rel, memory_order_acquire)) {
+            break;   /* 名额到手 */
+        }
+        /* CAS 失败时 alive 已被原子地刷新成当前值，继续循环重试 */
     }
 
     kaula_p_thread_t t;
@@ -227,4 +239,8 @@ int kaula_block_lane_submit(KaulaTask* task) {
 
 uint32_t kaula_block_lane_thread_count(void) {
     return atomic_load(&g_conc_block_lane.thread_count);
+}
+
+uint32_t kaula_block_lane_thread_cap(void) {
+    return g_conc_block_lane.max_threads;
 }
