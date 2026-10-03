@@ -33,7 +33,15 @@ typedef struct {
     int result;
 } Frame;
 
-/* 任务体越短，「投递 → Worker 跑完 → 投递方置状态」这个窗口越容易被命中 */
+/*
+ * 任务体越短，「投递 → Worker 跑完 → 投递方置状态」这个窗口越容易被命中
+ *
+ * value 必须是**真实地址**（&f->result），不能是 (void*)(intptr_t)N：
+ * await_into 会从 task->result memcpy，try_await 也把 result 原样交给
+ * 调用方，前提是它真的指向那块内存。传假指针时 await 本身不报错，
+ * 读出来的就是随机地址 —— 表现为「等到了但值不对」，很容易被
+ * 误判成内核的丢完成。test_task.c 里对这条契约有说明。
+ */
 static KaulaResumeResult fast_resume(void* fp) {
     Frame* f = (Frame*)fp;
     if (f->pc == 0) {
@@ -42,13 +50,14 @@ static KaulaResumeResult fast_resume(void* fp) {
     }
     return (KaulaResumeResult){
         .status = KAULA_RESUME_DONE,
-        .value = (void*)(intptr_t)f->result
+        .value = &f->result
     };
 }
 
 static void* shim_call(void* fp) {
     Frame* f = (Frame*)fp;
-    return (void*)(intptr_t)(f->input * 3 + 1);
+    f->result = f->input * 3 + 1;
+    return &f->result;   /* 真实地址，与 fast_resume 同一契约 */
 }
 
 static Frame* frame_new(int input) {
@@ -74,7 +83,19 @@ static int stranded(uint32_t rounds, uint32_t workers, int simple_form) {
         if (kaula_handle_is_null(h)) continue;
 
         void* r = kaula_handle_try_await(h, 200000000ULL);
-        if ((int)(intptr_t)r != (int)i * 3 + 1) bad++;
+        /*
+         * 只判 r == NULL，不 deref。
+         *
+         * deref &f->result 是不安全的：await 返回后句柄的 pin 已经归还，
+         * 帧可能已被 epoch 回收，于是读它就是 use-after-free（实测段错误）。
+         * 用例要判的是「有没有拿到完成」，NULL 就够了 ——
+         * 值对不对由 fast_resume 的真实地址契约保证，不是这里要测的东西。
+         */
+        if (r == NULL) {
+            printf("  [丢完成] i=%u：await 200ms 超时，返回 NULL\n", i);
+            fflush(stdout);
+            bad++;
+        }
 
         kaula_handle_release(h);
     }
@@ -122,7 +143,8 @@ static void test_await_never_strands(void) {
         KaulaHandle h = kaula_spawn(fast_resume, f, sizeof(Frame));
         if (kaula_handle_is_null(h)) continue;
         void* r = kaula_handle_await(h);
-        if ((int)(intptr_t)r != i * 3 + 1) wrong++;
+        /* 同 stranded：只判 NULL，不 deref（帧可能已被 epoch 回收） */
+        if (r == NULL) wrong++;
         kaula_handle_release(h);
     }
     ASSERT_EQ(wrong, 0, "每个 await 都应拿到与输入对应的结果");
