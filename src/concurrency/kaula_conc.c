@@ -159,10 +159,24 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
         goto fail_early;
     }
 
-    /* ---- Worker ---- */
+    /* ---- Worker（两阶段创建，初始化竞态修复）---- */
+    /* 阶段 1：先初始化全部 Worker 结构，任何线程启动前完成，
+     * 否则 worker[0] 的线程一启动就会 steal 读 worker[1..n]
+     * 尚未初始化的本地队列（未初始化读 + 可能窃取垃圾指针）。 */
     for (uint32_t i = 0; i < cfg.worker_count; i++) {
-        if (kaula_worker_create(&g_conc_workers[i], i) != 0) {
+        if (kaula_worker_prepare(&g_conc_workers[i], i) != 0) {
             for (uint32_t j = 0; j < i; j++) {
+                kaula_p_event_destroy(&g_conc_workers[j].park_event);
+            }
+            kaula_block_lane_destroy();
+            kaula_iodriver_destroy();
+            goto fail_early;
+        }
+    }
+    /* 阶段 2：全部结构就绪后统一启动线程 */
+    for (uint32_t i = 0; i < cfg.worker_count; i++) {
+        if (kaula_worker_launch(&g_conc_workers[i]) != 0) {
+            for (uint32_t j = 0; j < cfg.worker_count; j++) {
                 kaula_worker_stop(&g_conc_workers[j]);
                 kaula_worker_join(&g_conc_workers[j]);
             }

@@ -161,7 +161,15 @@ static KaulaHandle spawn_failed(KaulaError err) {
     return h;
 }
 
+static KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
+                                        void* frame, size_t frame_size, uint32_t flags);
+
 KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, size_t frame_size) {
+    return kaula_spawn_to_flags(owner, fn, frame, frame_size, 0);
+}
+
+KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
+                                 void* frame, size_t frame_size, uint32_t flags) {
     if (atomic_load_explicit(&g_conc_runtime.shutdown, memory_order_acquire)) {
         return spawn_failed(KAULA_ERR_SHUTDOWN);
     }
@@ -189,6 +197,8 @@ KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, si
      * 每 spawn 泄一个 Frame，泄漏量与调用次数成正比。
      */
     task->flags |= KAULA_TASK_FLAG_FRAME_ON_HEAP;
+    /* 调用方 flags（如 HINT_BLOCKING）在投递前设置，无竞争 */
+    task->flags |= flags;
     atomic_store_explicit(&task->owner, owner, memory_order_relaxed);
 
     atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1, memory_order_relaxed);
@@ -300,11 +310,23 @@ static void conc_ensure_init(void) {
     }
 }
 
-static KaulaHandle kaula_spawn_ex(KaulaResumeFn resume_fn, void* frame, size_t frame_size);
+static KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
+                                        void* frame, size_t frame_size, uint32_t flags);
 
 KaulaHandle kaula_spawn(KaulaResumeFn resume_fn, void* frame, size_t frame_size) {
     conc_ensure_init();
-    return kaula_spawn_ex(resume_fn, frame, frame_size);
+    return kaula_spawn_flags(resume_fn, frame, frame_size, 0);
+}
+
+KaulaHandle kaula_spawn_flags(KaulaResumeFn resume_fn, void* frame,
+                              size_t frame_size, uint32_t flags) {
+    conc_ensure_init();
+    if (atomic_load_explicit(&g_conc_runtime.shutdown, memory_order_acquire)) {
+        return spawn_failed(KAULA_ERR_SHUTDOWN);
+    }
+
+    KaulaWorker* w = kaula_conc_current_worker();
+    return kaula_spawn_to_flags(w, resume_fn, frame, frame_size, flags);
 }
 
 KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
@@ -357,23 +379,6 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
     }
 
     return kaula_handle_from_task(task);
-}
-
-static KaulaHandle kaula_spawn_ex(KaulaResumeFn resume_fn, void* frame, size_t frame_size) {
-    KaulaWorker* w = kaula_conc_current_worker();
-
-    if (w == NULL) {
-        /*
-         * 非 Worker 线程（main / 外部线程）发起 spawn。
-         * 不能建 Worker 归属，走"owner=NULL + 注入队列"，
-         * 由任一 Worker 取走执行。若一个 Worker 都没有，则原地执行。
-         */
-        if (g_conc_runtime.worker_count == 0) {
-            return kaula_spawn_to(NULL, resume_fn, frame, frame_size);
-        }
-        return kaula_spawn_to(NULL, resume_fn, frame, frame_size);
-    }
-    return kaula_spawn_to(w, resume_fn, frame, frame_size);
 }
 
 /* ========== 唤醒 ========== */

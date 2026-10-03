@@ -225,7 +225,7 @@ struct KaulaTask {
     uint64_t            complete_ns;  /* complete/fail 时打点 */
 
     /* ---- 结果 ---- */
-    void*               result;
+    _Atomic(void*)      result;       /* 原子：await 读与 complete 写必须 release/acquire 配对 */
     int                 error;        /* KaulaError */
 
     /* ---- 取消（文档 §3.3 Handle API） ---- */

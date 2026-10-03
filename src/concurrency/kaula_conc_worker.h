@@ -104,6 +104,8 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task);
 /* ========== 生命周期 ========== */
 
 int  kaula_worker_create(KaulaWorker* w, uint32_t worker_id);
+int  kaula_worker_prepare(KaulaWorker* w, uint32_t worker_id);
+int  kaula_worker_launch(KaulaWorker* w);
 void kaula_worker_join(KaulaWorker* w);
 void kaula_worker_stop(KaulaWorker* w);
 

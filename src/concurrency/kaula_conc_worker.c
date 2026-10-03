@@ -240,7 +240,9 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
     KaulaWorker* owner = atomic_load_explicit(&task->owner, memory_order_acquire);
     if (owner != NULL && owner != w) {
         /* 不该发生：说明投递路径有 bug。此处拒绝执行而非静默继续。 */
-        kaula_task_complete(task, task->result);
+        extern _Atomic(uint64_t) kaula_dbg_owner_mismatch_count;
+        atomic_fetch_add(&kaula_dbg_owner_mismatch_count, 1);
+        kaula_task_complete(task, atomic_load_explicit(&task->result, memory_order_relaxed));
         return;
     }
 
@@ -403,7 +405,15 @@ static void worker_thread_entry(void* arg) {
     kaula_worker_loop(w);
 }
 
-int kaula_worker_create(KaulaWorker* w, uint32_t worker_id) {
+/*
+ * 两阶段创建（初始化竞态修复）：
+ *   prepare 只初始化结构（不含线程），launch 才起线程。
+ * 原实现 create 内 memset+init+thread_create 一气呵成：worker[0] 的线程
+ * 启动后立刻进入 find_work 的 steal 步骤，读取 g_conc_workers[1..n]
+ * 尚未初始化的本地队列 → 未初始化读（TSan: data race）+ 可能窃取到
+ * 半初始化 buffer 里的垃圾指针。
+ */
+int kaula_worker_prepare(KaulaWorker* w, uint32_t worker_id) {
     memset(w, 0, sizeof(*w));
     w->worker_id = worker_id;
     w->rng_state = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(worker_id + 1);
@@ -421,12 +431,20 @@ int kaula_worker_create(KaulaWorker* w, uint32_t worker_id) {
     if (kaula_p_event_create(&w->park_event) != 0) {
         return -1;
     }
+    return 0;
+}
 
+int kaula_worker_launch(KaulaWorker* w) {
     if (kaula_p_thread_create(&w->thread, worker_thread_entry, w) != 0) {
         kaula_p_event_destroy(&w->park_event);
         return -1;
     }
     return 0;
+}
+
+int kaula_worker_create(KaulaWorker* w, uint32_t worker_id) {
+    if (kaula_worker_prepare(w, worker_id) != 0) return -1;
+    return kaula_worker_launch(w);
 }
 
 void kaula_worker_join(KaulaWorker* w) {

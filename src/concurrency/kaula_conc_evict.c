@@ -58,7 +58,13 @@ void kaula_evict_scan(void) {
         uint32_t current = g_conc_runtime.worker_count;
         uint64_t evictions = atomic_load(&g_evict.total);
         if (current < KAULA_MAX_WORKERS && evictions <= KAULA_EVICT_MAX_REPLACEMENTS) {
-            if (kaula_worker_create(&g_conc_workers[current], current) == 0) {
+            /* 两阶段创建（与 runtime_init 一致）：先初始化结构再启动线程，
+             * 否则新 worker 半初始化期间就会被其他 worker 的 steal 读到。 */
+            if (kaula_worker_prepare(&g_conc_workers[current], current) == 0) {
+                if (kaula_worker_launch(&g_conc_workers[current]) != 0) {
+                    kaula_p_event_destroy(&g_conc_workers[current].park_event);
+                    return;
+                }
                 g_conc_runtime.worker_count = current + 1;
                 /*
                  * 被隔离的旧 Worker 已从池中"淡出"：
