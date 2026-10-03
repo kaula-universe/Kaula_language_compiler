@@ -1702,6 +1702,10 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 				stmt.ReturnType = p.curTok.Value
 			}
 			p.nextToken()
+			// 返回类型是泛型实例化（如 Result<i64, i64>）：< 只能来自泛型类型参数
+			if p.curTok.Type == lexer.TOKEN_LT {
+				stmt.ReturnType = stmt.ReturnType + p.parseTypeStringForDecl()
+			}
 			// 处理指针后缀 (Type*)
 			if p.curTok.Type == lexer.TOKEN_MULTIPLY {
 				isPointer = true

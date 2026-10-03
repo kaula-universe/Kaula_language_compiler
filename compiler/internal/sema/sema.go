@@ -1758,6 +1758,20 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 			)
 			return
 		}
+		// return 兼容检查：:= 传播的语义是「Err 时自动 return 当前函数」，
+		// 当前函数的返回类型必须就是该 Result 类型，否则 Err 无处可抛
+		// （生成代码会 return K_Result 撞上 int/void，只能靠 clang 报类型错）。
+		// 这是"错误下限"的一部分：传播目标必须显式，不能静默降级。
+		if sa.currentFunction != nil && sa.currentFunction.ReturnType != inferredType {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf(":= 错误传播要求当前函数返回类型为 '%s'，实际为 '%s'（Err 无处可抛）",
+					inferredType, sa.currentFunction.ReturnType),
+				stmt.Pos.Line, stmt.Pos.Column,
+				"try_assign_return_mismatch",
+				"把函数返回类型改为 Result 类型，或改用显式 match 处理错误",
+			)
+			return
+		}
 		inferredType = okVariant.FieldTypes[0]
 	}
 
