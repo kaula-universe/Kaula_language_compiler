@@ -101,16 +101,33 @@ int kaula_conc_worker_post(KaulaWorker* w, KaulaTask* task) {
     }
 
     /*
-     * 关键：owner 走无 CAS 快路径，其他线程走 CAS 路径。
-     * 原实现在这里一律调 push_tail，而 IoDriver / Block Lane /
-     * await 线程都从外部写同一 deque 的 bottom，破坏 Chase-Lev 不变量。
+     * 只有 owner 能写本地队列；外部线程一律走全局注入队列。
+     *
+     * 这不是保守，是 Chase-Lev 的硬性前提：bottom 只有 owner 能动。
+     * push_external 那次 CAS 会被 owner 随后的裸 store 抹掉：
+     *
+     *     owner    bottom = 5
+     *     external CAS 5->6 成功，写 buffer[5] = taskE
+     *     owner    store bottom = 6        ← 抹掉 external 刚占的槽
+     *
+     * 于是 buffer[5] 被写两次（丢一个 Task），或 bottom 倒退
+     * （已入队的 Task 永远取不到）。两者都无法自愈 ——
+     * Worker 的 1ms park 超时只捞得到「已经在队列里」的 Task。
+     *
+     * 所以这里**不再调 push_external**。外部线程要的只是「有个 Worker
+     * 会去取它」，全局注入队列已经提供这个能力，而且它的 push 侧已串行化。
+     * 代价是外部投递多一次队列中转，换来的是不再丢Task。
      */
-    int ok;
-    if (t_current_worker == w) {
-        ok = kaula_ws_deque_push_owner(&w->local_queue, task);
-    } else {
-        ok = kaula_ws_deque_push_external(&w->local_queue, task);
+    if (t_current_worker != w) {
+        if (kaula_scheduler_inject_push(task)) {
+            kaula_scheduler_notify_one();
+            return 0;
+        }
+        return KAULA_ERR_WOULD_BLOCK;
     }
+
+    /* owner：写自己的本地队列（无 CAS 快路径） */
+    int ok = kaula_ws_deque_push_owner(&w->local_queue, task);
 
     if (ok) {
         /* 通知可能正在 park 的 Worker */

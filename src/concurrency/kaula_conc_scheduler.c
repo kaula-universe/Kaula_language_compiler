@@ -20,13 +20,45 @@ KaulaRuntimeState g_conc_runtime;
 /* 全局注入队列 */
 static KaulaInjectQueue g_inject_queue;
 
-/* ========== 全局注入队列实现 ========== */
+/*
+ * push 侧串行化锁。
+ *
+ * push 的正确性依赖「先写 payload、再推进 tail」这个顺序：pop 要等
+ * tail > head 才去读 buffer，靠的是 tail 上 release 建立的先写后读。
+ * 但原实现把「读 tail → 写 buffer → 写 tail」这段裸露给了并发，两个
+ * pusher 会读到同一个 tail：
+ *
+ *     A 读 tail=T → 写 buffer[T] = taskA
+ *     B 读 tail=T → 写 buffer[T] = taskB    ← 覆盖掉 taskA
+ *     A 写 tail=T+1
+ *     B 写 tail=T+1                          ← 只前进 1
+ *
+ * taskA 永久丢失，而它的 await 再也等不到 —— 一次竞态丢一个任务，
+ * 且完全无法自愈（worker 的 1ms park 超时只捞得到「已经在队列里」的任务）。
+ * 实测：并发窗口下 suspend/mixed 曲线 80%+ 概率死锁，详见 FINDINGS.md F1。
+ *
+ * 为什么是 atomic_flag 而不是 kaula_p_mutex：
+ *   - 静态初始化即可，不依赖 kaula_inject_queue_init 的调用时序；
+ *   - 临界区只有「查满 + 写一格 + 写 tail」三条指令，自旋成本可忽略；
+ *   - pusher 最多三路（main 的 spawn、IoDriver 的 resume、Worker 本地
+ *     队列满时的兜底），临界区内不发生任何阻塞，持锁者绝不会在锁内
+ *     等待别人，因此自旋不可能活锁。
+ *
+ * pop 侧保持原样不动：互斥只加在生产者一侧，读侧的 release/acquire
+ * 配对关系没有变化，改动面越小越好。
+ */
+static atomic_flag g_inject_push_lock = ATOMIC_FLAG_INIT;
 
 /*
- * 实现：单生产者槽位用 CAS 抢占 head。
- * push 从 tail 进（CAS 竞争），pop 从 head 出（多线程可竞争）。
+ * 实现：多生产者 / 多消费者有界队列。
+ * push 从 tail 进（整段串行化），pop 从 head 出（CAS 竞争，多线程可并行）。
  * 容量固定，因此满时返回 0 —— 绝不覆盖未消费的槽位。
+ *
+ * 注意 pop 的 CAS 只保护 head 的推进，**不能替代 push 侧的串行化**：
+ * 两个 pusher 即使各自都「对」，写的也是同一个槽位。
  */
+
+/* ========== 全局注入队列实现 ========== */
 
 void kaula_inject_queue_init(void) {
     atomic_store_explicit(&g_inject_queue.head, 0, memory_order_relaxed);
@@ -35,18 +67,30 @@ void kaula_inject_queue_init(void) {
 }
 
 int kaula_inject_queue_push(KaulaTask* task) {
+    /* 抢锁：acquire，与下面的 release 解锁配对 */
+    while (atomic_flag_test_and_set_explicit(&g_inject_push_lock,
+                                             memory_order_acquire)) {
+        /* 临界区三条指令且不阻塞，持锁者必然在推进，自旋即可 */
+    }
+
     uint64_t tail = atomic_load_explicit(&g_inject_queue.tail, memory_order_relaxed);
     uint64_t head = atomic_load_explicit(&g_inject_queue.head, memory_order_acquire);
 
+    int ok = 1;
     if (tail - head >= KAULA_INJECT_QUEUE_CAPACITY) {
-        return 0; /* 满：背压 */
+        ok = 0; /* 满：背压 */
+    } else {
+        /* 顺序关键：先写 payload，再以 release 推进 tail。
+         * pop 读到 tail > head 之后才读 buffer，正是靠这次 release
+         * 看见 payload。 */
+        atomic_store_explicit(
+            &g_inject_queue.buffer[tail & KAULA_INJECT_QUEUE_MASK],
+            task, memory_order_relaxed);
+        atomic_store_explicit(&g_inject_queue.tail, tail + 1, memory_order_release);
     }
 
-    atomic_store_explicit(
-        &g_inject_queue.buffer[tail & KAULA_INJECT_QUEUE_MASK],
-        task, memory_order_relaxed);
-    atomic_store_explicit(&g_inject_queue.tail, tail + 1, memory_order_release);
-    return 1;
+    atomic_flag_clear_explicit(&g_inject_push_lock, memory_order_release);
+    return ok;
 }
 
 KaulaTask* kaula_inject_queue_pop(void) {

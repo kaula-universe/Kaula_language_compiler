@@ -11,10 +11,32 @@
  *         往 owner 的 bottom 端 push —— 多个生产者并发写 bottom，
  *         Chase-Lev 的正确性前提被破坏。
  *
- * 修复：拆成两个接口。
+ * 修复（**已重新审视，见下方「重要」**）：拆成两个接口。
  *   kaula_ws_deque_push_owner()  仅 owner 调用，最快，无 CAS
  *   kaula_ws_deque_push_external() 任意线程调用，CAS 抢占槽位
  *   pop / steal 走 CAS 判定，与 Chase-Lev 论文一致
+ *
+ * 重要：push_external 与 push_owner/pop **不能并发使用**，它没有
+ *       真正修好缺陷 #2。
+ *
+ *       push_owner / pop 改 bottom 用的是非 CAS 的裸 store，会把
+ *       push_external 那次 CAS 的结果直接覆盖回去：
+ *
+ *           owner 读 b=5
+ *           external CAS 5→6 成功，写 buffer[5] = taskE
+ *           owner   store bottom = 6     ← 抹掉 external 刚占的槽位
+ *
+ *       于是要么 buffer[5] 被写两次（丢一个 Task），要么 bottom 被
+ *       倒退（已入队的 Task 不可达），两者都无法自愈。
+ *       实测：suspend 曲线 100% 死锁（FINDINGS.md F1）。
+ *
+ *       根治办法是回到 Chase-Lev 的原始约束 —— **bottom 只有 owner 写**。
+ *       kaula_conc_worker.c 的 worker_post 已据此收紧：只有调用者
+ *       本身就是 owner 才写本地 deque，外部一律走全局注入队列。
+ *
+ *       本接口保留给单线程 owner 场景与 test_ws_deque.c 使用；
+ *       调用前必须确认 owner 不会同时 push/pop。不要把它接回
+ *       worker_post —— 那正是 F1 的成因。
  *
  * 缺陷 #3：原实现在队列满时返回 false，而所有调用点都忽略了返回值，
  *         导致 Task 被静默丢弃、await 永久阻塞。
