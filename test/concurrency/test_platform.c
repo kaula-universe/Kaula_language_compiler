@@ -112,7 +112,8 @@ static void test_io_wait_handle(void) {
     /* 未注册任何 fd 时 wake 不应崩溃 */
     ASSERT_EQ(kaula_p_io_wake(w), 0, "唤醒应成功");
 
-    kaula_p_io_wait_destroy(&w);
+    /* io_wait 句柄是**按值**传的（与上面 kaula_p_io_wake(w) 一致），不是 &w */
+    kaula_p_io_wait_destroy(w);
     TEST_PASS();
 }
 
