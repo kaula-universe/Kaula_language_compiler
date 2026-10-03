@@ -44,6 +44,9 @@
 /* 唤醒哨兵 fd：不可能与真实 fd 相同（真实 fd 总 >= 0 且通常 > 2） */
 #define KAULA_P_IO_WAKE_FD (-1)
 
+/* 定时器哨兵 KAULA_P_TIMER_FD 定义在 kaula_conc_platform.h：
+ * io_primitives.c 只包含 platform.h，而它也要用它注册 timerfd。 */
+
 /*
  * 等待上限定义在 kaula_conc_task.h（KAULA_IO_BATCH_WAIT_NS），
  * 此处不重复定义。
