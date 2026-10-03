@@ -2588,6 +2588,13 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 		sa.analyzeExpression(e.Condition)
 		sa.analyzeExpression(e.TrueExpr)
 		sa.analyzeExpression(e.FalseExpr)
+	case *ast.AwaitExpression:
+		// await h：h 是对句柄变量的读取。不分析会漏掉 Referenced 标记，
+		// 让 `Handle h2 = h1; ... h2.await` 误报 unused_but_set
+		// （h2 被赋值但"从未读取"）。顺带让未定义句柄也能在 sema 层报错。
+		if e.Handle != nil {
+			sa.analyzeExpression(e.Handle)
+		}
 	case *ast.MatchExpression:
 		sa.analyzeMatchExpression(e)
 	case *ast.ArrayLiteral:
@@ -3431,6 +3438,12 @@ func (sa *SemanticAnalyzer) analyzeSpawnExpression(expr *ast.SpawnExpression) {
 			"改成 conc fn，或直接调用（顺序执行等价）",
 		)
 		return
+	}
+
+	// spawn 引用即使用：登记进 usedFunctions，避免 conc fn 只在 spawn
+	// 里被引用却误报 unused_function。
+	if sa.usedFunctions != nil {
+		sa.usedFunctions[ident.Name] = true
 	}
 }
 
