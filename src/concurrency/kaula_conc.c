@@ -251,8 +251,11 @@ void kaula_runtime_shutdown(void) {
      */
     kaula_p_timer_resolution_restore();
 
-    /* 2. 停撤离监控 */
+    /* 2. 停撤离监控并等它退出。
+     *    join 不能省：监控线程会扫 g_conc_workers[] 并可能扩容 Worker，
+     *    不等它退出就往下拆运行时状态，那边正在读的就是刚被拆的内存。 */
     kaula_evict_stop();
+    kaula_evict_join();
 
     /* 3. 唤醒所有 Worker，让它们看到标志并退出 */
     kaula_scheduler_notify_all();
