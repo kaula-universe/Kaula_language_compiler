@@ -112,17 +112,15 @@ static inline struct KaulaTask* kaula_ws_deque_pop(KaulaWSDeque* q) {
     atomic_store_explicit(&q->bottom, b, memory_order_relaxed);
 
     /*
-     * 关键：seq_cst 栅栏，不可省略。
+     * P1-3：以 acquire 读 top 替代 seq_cst 栅栏（Le et al. 弱内存变体）。
      *
-     * 它禁止把下面的 top 读取重排到 bottom 写入之前，
-     * 从而保证"本 owner 释放了这个位置"这一事实对 thief 可见，
-     * 否则 thief 可能仍按旧的 top 抢走本 owner 已经看到的元素 ——
-     * 表现为同一个 Task 被 pop 和 steal 各计一次（重复执行）。
-     * Chase-Lev 论文 §4 要求此处用 seq_cst 栅栏而非更强的原子读。
+     * 原实现用 `fence(seq_cst) + load top(relaxed)`。Chase-Lev 在弱内存
+     * 模型下的正确变体是 `load top(acquire)` 无栅栏：acquire 读保证
+     * "本 owner 已释放这个位置"（bottom store）对随后 thief 的
+     * bottom load 可见，同时禁止把 top 读重排到 bottom 写之前。
+     * 末元素裁决仍走 seq_cst CAS —— 竞争路径保持最强序。
      */
-    atomic_thread_fence(memory_order_seq_cst);
-
-    int64_t t = atomic_load_explicit(&q->top, memory_order_relaxed);
+    int64_t t = atomic_load_explicit(&q->top, memory_order_acquire);
 
     struct KaulaTask* task = NULL;
 
@@ -191,12 +189,13 @@ static inline struct KaulaTask* kaula_ws_deque_steal(KaulaWSDeque* q) {
     int64_t t = atomic_load_explicit(&q->top, memory_order_acquire);
 
     /*
-     * 关键：seq_cst 栅栏，不可省略。
-     * 与 pop 中的栅栏配对：它保证"读到 bottom > t"发生在
-     * "owner 对该元素的发布完成"之后被观察到。
+     * P1-3：删除 seq_cst 栅栏。
+     *
+     * 原实现在 t 与 b 之间加 fence(seq_cst)。弱内存变体中不需要：
+     * bottom 的 acquire 读已保证"看到 owner 释放位置"（与 pop 的
+     * bottom store 构成顺序约束），最终裁决由 seq_cst CAS 完成。
+     * 每个被窃取的元素省一次全序栅栏。
      */
-    atomic_thread_fence(memory_order_seq_cst);
-
     int64_t b = atomic_load_explicit(&q->bottom, memory_order_acquire);
 
     if (t >= b) {

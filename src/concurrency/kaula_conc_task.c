@@ -28,8 +28,51 @@ extern int kaula_runtime_ensure_init(void);
 /* ========== 分配 ========== */
 
 KaulaTask* kaula_task_alloc(void) {
+    KaulaWorker* w = kaula_conc_current_worker();
+
     /*
-     * 从 KMM survivor 段分配（跨 scope 存活）。
+     * P0-2：优先从本 Worker 的复用池取 Task。
+     *
+     * 池是 owner 独占的单链表（epoch 判定安全后由本 Worker 自己 push），
+     * 取用零原子操作、零系统分配 —— 高频 spawn/join 场景避开
+     * 全局 survivor slab 的 bitmap CAS 竞争。
+     *
+     * done_event 跨复用保留（池内 Task 的 event 从未被 destroy），
+     * 因此此处不 memset 整个结构，只重置业务字段。
+     */
+    if (w != NULL && w->task_pool != NULL) {
+        KaulaTask* task = w->task_pool;
+        w->task_pool = task->next_free;
+        task->next_free = NULL;
+
+        task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
+                                                  memory_order_relaxed);
+        atomic_store_explicit(&task->state, KAULA_TASK_CREATED, memory_order_relaxed);
+        task->resume_fn = NULL;
+        task->frame = NULL;
+        task->frame_size = 0;
+        task->inner_frame = NULL;
+        atomic_store_explicit(&task->owner, NULL, memory_order_relaxed);
+        task->submit_ns = 0;
+        task->complete_ns = 0;
+        task->result = NULL;
+        task->error = 0;
+        atomic_store_explicit(&task->cancelled, 0, memory_order_relaxed);
+        atomic_store_explicit(&task->pin_refs, 0, memory_order_relaxed);
+        atomic_store_explicit(&task->waiters, 0, memory_order_relaxed);
+        memset(&task->io_request, 0, sizeof(task->io_request));
+        task->io_result = 0;
+        task->next = NULL;
+        task->created_ns = kaula_p_now_ns();
+        task->started_ns = 0;
+        task->resume_count = 0;
+        task->steal_count = 0;
+        task->flags = 0;
+        return task;
+    }
+
+    /*
+     * 池空或非 Worker 上下文：从 KMM survivor 段分配（跨 scope 存活）。
      * 帧也来自同一段，故回收时能成对释放。
      */
     KaulaTask* task = (KaulaTask*)kmm_v4_alloc_global(sizeof(KaulaTask));
@@ -128,12 +171,13 @@ void kaula_task_complete(KaulaTask* task, void* result) {
     kaula_task_wake_waiters(task);
 
     /*
-     * 延迟回收（P5）。
+     * 延迟回收（P5）+ 复用池（P0-2）。
      * 不能立即 free：可能有线程正持有 KaulaHandle.task 指针在 await。
-     * epoch 保证所有活跃 Worker 都离开后才会真正释放。
+     * epoch 保证所有活跃 Worker 都离开后才会真正释放（或进复用池）。
      */
     retire_frames(task);
-    kaula_epoch_retire(task);
+    KaulaWorker* cw = kaula_conc_current_worker();
+    kaula_epoch_retire_to(task, cw ? (void**)&cw->task_pool : NULL);
 }
 
 void kaula_task_fail(KaulaTask* task, KaulaError err) {
@@ -149,7 +193,8 @@ void kaula_task_fail(KaulaTask* task, KaulaError err) {
     kaula_conc_metrics_inc_failed();
 
     retire_frames(task);
-    kaula_epoch_retire(task);
+    KaulaWorker* cw = kaula_conc_current_worker();
+    kaula_epoch_retire_to(task, cw ? (void**)&cw->task_pool : NULL);
 }
 
 int kaula_task_cancel(KaulaTask* task) {
@@ -198,14 +243,25 @@ int kaula_task_await(KaulaTask* task, uint64_t timeout_ns) {
             return 1;
         }
 
+        uint64_t idle_park_ns = 100000ULL;   /* P1-4：自适应退避起点 */
+
         while (!task_is_done(task)) {
             KaulaTask* other = kaula_conc_worker_find_work(w);
             if (other != NULL) {
                 kaula_worker_execute_task(w, other);
+                idle_park_ns = 100000ULL;   /* 有活干：重置退避 */
                 continue;
             }
-            /* 无事可做：短暂 park 而不是死等 */
-            kaula_p_event_wait(&w->park_event, 1000000ULL);
+            /*
+             * P1-4：无事可做时自适应退避 park（100us 起步，×2 到 1ms 上限）。
+             *
+             * 目标任务可能正被别的 Worker 执行，完成时只 signal 它的
+             * done_event，不会唤醒本 Worker 的 park_event —— 原实现固定
+             * 1ms 超时意味着最多赔 1ms 唤醒延迟。短退避起步压低平均延迟；
+             * 持续空闲时指数退避到 1ms 兜底（保持"漏唤醒自愈"语义）。
+             */
+            kaula_p_event_wait(&w->park_event, idle_park_ns);
+            if (idle_park_ns < 1000000ULL) idle_park_ns <<= 1;
 
             if (deadline != 0 && kaula_p_now_ns() >= deadline) break;
         }

@@ -91,6 +91,7 @@ int kaula_inject_queue_push(KaulaTask* task) {
 
     atomic_flag_clear_explicit(&g_inject_push_lock, memory_order_release);
     return ok;
+}>>>>>> 1add345 (fix(concurrency): P0-1 注入队列 CAS 槽位预留 + P0-2 per-worker Task 复用池 + P1-3 ws_deque 弱内存变体 + P1-4 协作等待自适应退避)
 }
 
 KaulaTask* kaula_inject_queue_pop(void) {

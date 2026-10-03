@@ -32,10 +32,17 @@ typedef struct {
     _Atomic(uint64_t) global_epoch;
 } KaulaEpochDomain;
 
-/* 退休记录：指针 + 退休时所处的 epoch */
+/*
+ * 退休记录：指针 + 退休时所处的 epoch + 复用目标池。
+ *
+ * pool == NULL：epoch 安全后直接释放（默认）。
+ * pool != NULL：epoch 安全后把 ptr 推进 *pool（P0-2 Task 复用池）。
+ * 复用池由调用方保证单线程访问（per-Worker）。
+ */
 typedef struct {
     void*     ptr;
     uint64_t  epoch;
+    void**    pool;
 } KaulaRetired;
 
 typedef struct {
@@ -69,6 +76,13 @@ void kaula_epoch_exit(void);
 
 /* 延迟释放：把 ptr 挂进当前线程的退休列表 */
 void kaula_epoch_retire(void* ptr);
+
+/*
+ * 延迟释放（带复用池）：epoch 判定安全后，把 ptr 推进 *pool 而非释放。
+ * pool == NULL 等价于 kaula_epoch_retire。
+ * *pool 的访问必须是单线程的（P0-2：per-Worker Task 复用池）。
+ */
+void kaula_epoch_retire_to(void* ptr, void** pool);
 
 /*
  * 尝试回收：把所有"已安全"的退休对象真正释放。
