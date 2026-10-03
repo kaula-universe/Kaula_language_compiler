@@ -234,13 +234,19 @@ static inline const char* kaula_p_get_env(const char* name) {
  */
 typedef void (*kaula_p_thread_fn)(void*);
 
-#if KAULA_PLATFORM_WINDOWS
-typedef HANDLE kaula_p_thread_t;
-
+/*
+ * 两侧的线程入口原生签名都跟这个不一样，所以**都要**垫 trampoline：
+ *   Windows  LPTHREAD_START_ROUTINE = DWORD  WINAPI (*)(LPVOID)  —— 返回 DWORD
+ *   POSIX    void *(*)(void *)                                —— 返回 void*
+ * 统一成 void (*)(void*) 是为了让上层不写平台分支，代价就是这一层转换。
+ */
 typedef struct {
     kaula_p_thread_fn fn;
     void*             arg;
 } kaula_p_trampoline;
+
+#if KAULA_PLATFORM_WINDOWS
+typedef HANDLE kaula_p_thread_t;
 
 static DWORD WINAPI kaula_p_thread_trampoline(LPVOID p) {
     kaula_p_trampoline* t = (kaula_p_trampoline*)p;
@@ -278,9 +284,32 @@ static inline void kaula_p_thread_invalidate(kaula_p_thread_t* t) { *t = NULL; }
 #else
 typedef pthread_t kaula_p_thread_t;
 
+/*
+ * pthread 原生签名是 void *(*)(void *)，与 kaula_p_thread_fn 的
+ * void (*)(void *) **不兼容**。直接传 fn 是 incompatible pointer type，
+ * 而且即使编译器放行也是未定义行为：线程入口的返回值会被调用方当 void* 用。
+ *
+ * 之前这里写着「pthread 原生签名就是 void(*)(void*)，无需 trampoline」——
+ * 那句话是错的，本机只有 Windows 时看不出来，一到 Linux 编译就报错。
+ */
+static void* kaula_p_thread_trampoline(void* p) {
+    kaula_p_trampoline* t = (kaula_p_trampoline*)p;
+    kaula_p_thread_fn fn = t->fn;
+    void* arg = t->arg;
+    fn(arg);
+    return NULL;
+}
+
 static inline int kaula_p_thread_create(kaula_p_thread_t* out, kaula_p_thread_fn fn, void* arg) {
-    /* pthread 原生签名就是 void(*)(void*)，无需 trampoline */
-    return pthread_create(out, NULL, fn, arg);
+    kaula_p_trampoline* t = (kaula_p_trampoline*)malloc(sizeof(kaula_p_trampoline));
+    if (t == NULL) return -1;
+    t->fn = fn;
+    t->arg = arg;
+    if (pthread_create(out, NULL, kaula_p_thread_trampoline, t) != 0) {
+        free(t);
+        return -1;
+    }
+    return 0;
 }
 
 static inline int kaula_p_thread_join(kaula_p_thread_t t) {
@@ -461,11 +490,32 @@ static inline void kaula_p_mutex_unlock(kaula_p_mutex* m)  { pthread_mutex_unloc
     #error "Kaula 并发内核：当前平台没有 IO 复用后端"
 #endif
 
-/* IO 等待句柄：不透明，IoDriver 内部按后端解释 */
+/*
+ * IO 等待句柄：不透明，IoDriver 内部按后端解释。
+ *
+ * POSIX 上是**两个** fd，不是��个：
+ *   epoll 需要 epoll fd + 一个可写的唤醒通道（eventfd）。
+ *   之前只存了 epoll fd，而 kaula_p_io_wake 往 epoll fd 上 write ——
+ *   epoll fd 根本不可写，write 返回 EINVAL，于是**唤醒在 Linux 上整个失效**，
+ *   驱动只能等下一次轮询超时。实测表现为挂起事务的服务时间从 4.6ms
+ *   变成 52.9ms（13 倍），且 kaula_p_io_wake 直接返回 -1。
+ *
+ *   kqueue 只需一个：EVFILT_USER 挂在 kq 自己身上，无需第二个 fd，
+ *   所以那边 wakefd 恒为 -1。
+ */
 #if KAULA_PLATFORM_WINDOWS
 typedef HANDLE kaula_p_io_wait_t;
+static inline int  kaula_p_io_wait_epfd(kaula_p_io_wait_t w) { return (int)(intptr_t)w; }
+static inline int  kaula_p_io_wait_is_valid(kaula_p_io_wait_t* w) { return *w != NULL; }
+static inline void kaula_p_io_wait_invalidate(kaula_p_io_wait_t* w) { *w = NULL; }
 #else
-typedef int kaula_p_io_wait_t;
+typedef struct {
+    int epfd;    /* epoll fd 或 kqueue fd */
+    int wakefd;  /* epoll 专用：eventfd；kqueue 恒为 -1 */
+} kaula_p_io_wait_t;
+static inline int  kaula_p_io_wait_epfd(kaula_p_io_wait_t w) { return w.epfd; }
+static inline int  kaula_p_io_wait_is_valid(kaula_p_io_wait_t* w) { return w->epfd >= 0; }
+static inline void kaula_p_io_wait_invalidate(kaula_p_io_wait_t* w) { w->epfd = -1; w->wakefd = -1; }
 #endif
 
 /* ========== IO 复用原语 ========== */

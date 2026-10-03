@@ -171,9 +171,15 @@ void kaula_block_lane_join(void) {
 
 void kaula_block_lane_destroy(void) {
     KaulaBlockLane* lane = &g_conc_block_lane;
-    if (lane->notify != 0) {
+    /*
+     * 判活/失效一律走 kaula_p_event_is_valid / _invalidate：
+     * kaula_p_event 在 POSIX 上是 struct，不能跟 0 比、也不能赋 0。
+     * 直接写 != 0 / = 0 在 Windows 上能过（那边 HANDLE 是指针），
+     * 一到 Linux 就编译失败。
+     */
+    if (kaula_p_event_is_valid(&lane->notify)) {
         kaula_p_event_destroy(&lane->notify);
-        lane->notify = 0;
+        kaula_p_event_invalidate(&lane->notify);
     }
 }
 

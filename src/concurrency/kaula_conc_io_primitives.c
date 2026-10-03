@@ -49,12 +49,13 @@ int kaula_p_io_wait_create(kaula_p_io_wait_t* out) {
         return -1;
     }
 
-    *out = ep;
+    *out = (kaula_p_io_wait_t){ ep, efd };
     return 0;
 }
 
 void kaula_p_io_wait_destroy(kaula_p_io_wait_t w) {
-    if (w >= 0) close(w);
+    if (w.wakefd >= 0) close(w.wakefd);
+    if (w.epfd >= 0) close(w.epfd);
 }
 
 int kaula_p_io_set_nonblocking(int fd) {
@@ -63,15 +64,20 @@ int kaula_p_io_set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/*
+ * 唤醒写的是 **eventfd**（w.wakefd），不是 epoll fd。
+ * epoll fd 是只读的内核对象，往上 write 返回 EINVAL。
+ * 之前这里写的是 w（epoll fd），所以 Linux 上唤醒从来没成功过。
+ */
 int kaula_p_io_wake(kaula_p_io_wait_t w) {
     uint64_t one = 1;
-    ssize_t n = write(w, &one, sizeof(one));
+    ssize_t n = write(w.wakefd, &one, sizeof(one));
     return (n == (ssize_t)sizeof(one)) ? 0 : -1;
 }
 
 void kaula_p_io_drain_wake(kaula_p_io_wait_t w) {
     uint64_t val;
-    while (read(w, &val, sizeof(val)) > 0) { /* 抽干计数 */ }
+    while (read(w.wakefd, &val, sizeof(val)) > 0) { /* 抽干计数 */ }
 }
 
 /* ================================================================
@@ -90,12 +96,12 @@ int kaula_p_io_wait_create(kaula_p_io_wait_t* out) {
         close(kq);
         return -1;
     }
-    *out = kq;
+    *out = (kaula_p_io_wait_t){ kq, -1 };
     return 0;
 }
 
 void kaula_p_io_wait_destroy(kaula_p_io_wait_t w) {
-    if (w >= 0) close(w);
+    if (w.epfd >= 0) close(w.epfd);
 }
 
 int kaula_p_io_set_nonblocking(int fd) {
@@ -107,7 +113,7 @@ int kaula_p_io_set_nonblocking(int fd) {
 int kaula_p_io_wake(kaula_p_io_wait_t w) {
     struct kevent ch;
     EV_SET(&ch, KAULA_P_WAKE_TAG, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
-    return (kevent(w, &ch, 1, NULL, 0, NULL) < 0) ? -1 : 0;
+    return (kevent(w.epfd, &ch, 1, NULL, 0, NULL) < 0) ? -1 : 0;
 }
 
 void kaula_p_io_drain_wake(kaula_p_io_wait_t w) {
