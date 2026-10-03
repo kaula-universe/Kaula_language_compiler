@@ -50,7 +50,7 @@ static const char* g_test_current = "";
     do { \
         g_test_fail++; \
         fprintf(stderr, "%s:%d  [FAIL] %s: " fmt "\n", \
-                __FILE__, __LINE__, g_test_current, __VA_ARGS__); \
+                __FILE__, __LINE__, g_test_current, ##__VA_ARGS__); \
     } while (0)
 
 /* 无格式化的断言 */

@@ -55,24 +55,37 @@ def find_compiler():
 
 
 def platform_defines():
+    """
+    只定义**为真**的平台宏，假的那个干脆不定义。
+
+    之前一律发 -DKAULA_PLATFORM_WINDOWS={w}，在 Linux 上就成了
+    -DKAULA_PLATFORM_WINDOWS=0。而 #ifdef 只看「是否定义」、不看值，
+    于是 #ifdef KAULA_PLATFORM_WINDOWS 在 Linux 上照样为真 ——
+    test_spawn_completion.c 因此去 include <windows.h>，直接编不过。
+
+    不定义为假是安全的：#if KAULA_PLATFORM_WINDOWS 遇未定义标识符按 0 算，
+    所以 #if 与 #ifdef 两种写法都拿到正确结果。
+    """
+    names = ("KAULA_PLATFORM_WINDOWS", "KAULA_PLATFORM_UNIX", "KAULA_PLATFORM_LINUX",
+             "KAULA_PLATFORM_MACOS", "KAULA_PLATFORM_WEB")
     w, u, l, m, web, _ = detect_platform()
-    return [
-        f"-DKAULA_PLATFORM_WINDOWS={w}",
-        f"-DKAULA_PLATFORM_UNIX={u}",
-        f"-DKAULA_PLATFORM_LINUX={l}",
-        f"-DKAULA_PLATFORM_MACOS={m}",
-        f"-DKAULA_PLATFORM_WEB={web}",
-    ]
+    return [f"-D{n}=1" for n, on in zip(names, (w, u, l, m, web)) if on]
 
 
 def common_flags():
-    return [
+    flags = [
         "-std=c11",
         "-Wall",
         "-Wextra",
         "-Wno-unused-parameter",
         "-Wno-unused-function",
-    ] + platform_defines() + [
+    ]
+    if not sys.platform.startswith("win"):
+        # -std=c11 会定义 __STRICT_ANSI__，glibc 据此隐藏 POSIX 声明
+        # （setenv / unsetenv / pthread_sigmask / ...），结果是隐式声明报错。
+        # _DEFAULT_SOURCE 正是打开这一组的标准开关。
+        flags.append("-D_DEFAULT_SOURCE")
+    return flags + platform_defines() + [
         "-I", str(SRC_DIR),
         "-I", str(CONC_DIR),
         "-I", str(TEST_DIR),

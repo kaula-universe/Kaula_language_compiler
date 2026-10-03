@@ -19,7 +19,7 @@
 
 #include <string.h>
 
-#ifdef KAULA_PLATFORM_WINDOWS
+#if KAULA_PLATFORM_WINDOWS
     #ifndef WIN32_LEAN_AND_MEAN
         #define WIN32_LEAN_AND_MEAN
     #endif
@@ -130,7 +130,7 @@ static void test_await_never_strands(void) {
     kaula_runtime_shutdown();
 }
 
-#ifdef KAULA_PLATFORM_WINDOWS
+#if KAULA_PLATFORM_WINDOWS
 static int own_thread_count(void) {
     HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (s == INVALID_HANDLE_VALUE) return -1;
@@ -155,7 +155,7 @@ static int own_thread_count(void) {
 static void test_shutdown_joins_background_threads(void) {
     TEST_CASE("多轮 init/shutdown 后不得残留后台线程");
 
-#ifdef KAULA_PLATFORM_WINDOWS
+#if KAULA_PLATFORM_WINDOWS
     Sleep(50);
     int before = own_thread_count();
 #endif
@@ -167,7 +167,7 @@ static void test_shutdown_joins_background_threads(void) {
         kaula_runtime_shutdown();
     }
 
-#ifdef KAULA_PLATFORM_WINDOWS
+#if KAULA_PLATFORM_WINDOWS
     Sleep(100);
     int after = own_thread_count();
     ASSERT_TRUE(after <= before + 1,

@@ -20,6 +20,7 @@
 
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>   /* setenv / unsetenv（POSIX 一侧的环境变量覆盖用例）*/
 #include <errno.h>
 
 /*
