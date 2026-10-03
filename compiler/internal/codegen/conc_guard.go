@@ -289,7 +289,7 @@ func (sg *StatementGenerator) generateHandleRelease(scope *symbol.SymbolTable) s
 		if sym == nil || sym.Scope == "parameter" || sym.Scope == "global" {
 			continue
 		}
-		if !sg.isHandleVar(name, sym) {
+		if !sg.isHandleVar(name) {
 			continue
 		}
 		sg.codegen.noteConcIoUse()
@@ -300,23 +300,14 @@ func (sg *StatementGenerator) generateHandleRelease(scope *symbol.SymbolTable) s
 	return b.String()
 }
 
-// isHandleVar 判断一个局部量是不是 Kaula 层的 Handle
-func (sg *StatementGenerator) isHandleVar(name string, sym *symbol.Symbol) bool {
-	if sg.codegen.handleResultTypes != nil && sg.codegen.handleResultTypes[name] != "" {
-		// `Handle h = spawn f()` 的声明处登记过结果类型
-		return true
-	}
-	if sym == nil {
-		return false
-	}
-	switch strings.ToLower(sym.Type) {
-	// 兜底只认 Handle：语言层 spawn 的类型恒为 Handle（sema.go），不存在
-	// Future/Task 句柄。`task` 会撞上 std.concurrent 的 Task 结构体，
-	// 导致作用域出口对 Task 误发 kaula_handle_release（编译错误）。
-	case "handle":
-		return true
-	}
-	return false
+// isHandleVar 判断一个局部量是不是 Kaula 层的 Handle。
+// 只信事实登记：`Handle x = spawn f()` 的声明处（stmtgen.go）登记过结果类型。
+// 不做类型名猜测——字符串匹配会撞上 std.concurrent 的 Task 结构体（"task"）
+// 或任何与句柄同形的用户类型，导致作用域出口误发 kaula_handle_release。
+// 代价：非 spawn 路径产生的 Handle（如 Handle 复制）不在此列，pin 会晚还——
+// 这是泄漏方向，不是悬垂，与"晚还不会早还"的保守哲学一致。
+func (sg *StatementGenerator) isHandleVar(name string) bool {
+	return sg.codegen.handleResultTypes != nil && sg.codegen.handleResultTypes[name] != ""
 }
 
 // stmtsHaveSuspend 报告语句列表里是否含可插桩调用
