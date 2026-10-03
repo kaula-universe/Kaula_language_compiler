@@ -77,4 +77,13 @@ int kaula_block_lane_submit(KaulaTask* task);
 /* 测试钩子：设置当前线程的车道线程数（驱动伸缩逻辑） */
 uint32_t kaula_block_lane_thread_count(void);
 
+/*
+ * 车道线程数上限（由 init 按 max_threads 解析后落定）。
+ *
+ * 单独暴露是因为上界是伸缩逻辑的正确性前提：block_lane_spawn_thread
+ * 的名额靠 CAS 抢，抢不到重试到成功为止；一旦有路径绕过 CAS 直接建线程，
+ * 上界就形同虚设、线程无上限增长（实测 Linux 上冲到 261 个线程后挂死）。
+ */
+uint32_t kaula_block_lane_thread_cap(void);
+
 #endif /* KAULA_CONC_BLOCK_LANE_H */
