@@ -434,8 +434,17 @@ bool kmm_v4_survivor_paged_free(void* ptr) {
     __atomic_fetch_sub(&g_kmm_v4_paged_bytes, sz, __ATOMIC_RELAXED);
     kmm_v4_paged_active_remove(hdr);  // O(1) 摘链（锁保护）
     // 入池（池上限内，同档 Treiber push）或真释放归还 glibc
+    //
+    // 入池会把 Treiber 节点（16 字节：next + size）写进 payload 前 16 字节，
+    // 所以 payload 小于一个节点时不能入池 —— 否则那两发写就越过了块尾，
+    // 把相邻堆块的前 12 字节打成 freelist 指针。实测 4 字节的 payload
+    // （48 字节 hdr + 4 = 52 字节块）释放即越界 12 字节，ASan 直接报
+    // heap-buffer-overflow。小块本来也几乎不可能命中池复用
+    // （kmm_v4_paged_pool_index 把 <1MB 全归 0 档，但复用时还有
+    // old_sz >= size 的检查兜着），直接还给 glibc 没有任何损失。
     size_t pb = __atomic_load_n(&g_paged_pool_bytes, __ATOMIC_RELAXED);
-    if (KMM_V4_LIKELY(sz <= KMM_V4_PAGED_POOL_CAP - pb)) {
+    if (sz >= sizeof(kmm_paged_pool_node_t) &&
+        KMM_V4_LIKELY(sz <= KMM_V4_PAGED_POOL_CAP - pb)) {
         __atomic_store_n(&hdr->pooled, 1, __ATOMIC_RELAXED);
         kmm_paged_pool_node_t* node = (kmm_paged_pool_node_t*)ptr;  // 复用 payload 前 16B
         node->size = sz;
