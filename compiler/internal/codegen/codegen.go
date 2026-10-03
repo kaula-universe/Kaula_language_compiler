@@ -84,6 +84,13 @@ type CodeGenerator struct {
 	currentFunctionName       string
 	currentFunctionReturnType string
 
+	// pendingEnumCtxType：正在生成初始化表达式的声明类型（Kaula 类型名）。
+	// 供泛型 enum 构造（Result.Ok(42)）从声明上下文拿到完整类型参数：
+	// `Result r = Result.Ok(42)` 里 Ok 构造应实例化为 Result<i64,i64>，
+	// 而不是从字面量 42 推断出 i32（丢 Err 参数 → 生成坏 C）。
+	// 声明处设置，表达式生成后清除；return 场景直接用 currentFunctionReturnType。
+	pendingEnumCtxType string
+
 	/*
 	 * inConcResume 表示正在生成 conc fn 的 resume 函数体。
 	 *

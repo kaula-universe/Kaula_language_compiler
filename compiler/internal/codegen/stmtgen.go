@@ -322,7 +322,11 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		if decision := adapter.GetVarDecision(stmt.Name); decision != nil {
 			var initValue string
 			if stmt.Value != nil {
+				// 泛型 enum 构造（Result.Ok(42)）从声明类型取完整类型参数
+				prevCtx := sg.codegen.pendingEnumCtxType
+				sg.codegen.pendingEnumCtxType = stmt.Type
 				initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+				sg.codegen.pendingEnumCtxType = prevCtx
 				// 声明类型是 interface 而初始值是具体类对象 → 装箱成接口句柄。
 				// SOR 路径绕过了基础层的 liftInterfaceValue 调用点（见下方 else 分支），
 				// 不在这里装箱会生成 K_Shape sh = Square_new(...) → C 类型不匹配。
@@ -353,7 +357,10 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 					promotePrefix = prefix
 				}
 			}
+			prevCtx := sg.codegen.pendingEnumCtxType
+			sg.codegen.pendingEnumCtxType = stmt.Type
 			initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			sg.codegen.pendingEnumCtxType = prevCtx
 		}
 		if initValue != "" {
 			// 有初始值：直接用初始值初始化，不调用 alloc_auto
@@ -441,7 +448,13 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			builder.WriteString(" = \"" + escapeCString(strLit.Value) + "\"")
 		} else {
 			builder.WriteString(" = ")
+			// 泛型 enum 构造（Result.Ok(42)）：普通主路径（非 SOR/非指针）
+			// 同样需要声明类型上下文，否则构造点只从字面量推断类型参数
+			// （42→i32，E 缺失）→ 实例化名与声明类型不一致。
+			prevCtx := sg.codegen.pendingEnumCtxType
+			sg.codegen.pendingEnumCtxType = stmt.Type
 			valueCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			sg.codegen.pendingEnumCtxType = prevCtx
 			// 声明类型是 interface 而初始值是具体类对象 → 装箱成接口句柄
 			valueCode = sg.codegen.expressionGenerator.liftInterfaceValue(stmt.Type, valueCode, stmt.Value)
 			builder.WriteString(valueCode)
