@@ -466,13 +466,18 @@ void kaula_handle_await_into_timed(KaulaHandle h, void* dst, size_t dst_size,
 
     if (out_latency_ns != NULL) {
         /*
-         * complete_ns 是普通字段，但这里已在 pin 内且任务已 DONE，
-         * 不会再被写。complete_ns == 0 表示任务在打点引入之前就完成
-         * （或走了未打点的路径），此时报 0 而不是编造一个数。
+         * 只能取 await_copy_out 留下的 TLS 值，**不能回头读 h.task**。
+         *
+         * await_copy_out 在拷贝完结果后就 kaula_handle_release(h) 了 ——
+         * 那是句柄持有的最后一个引用，Task 可能已经被回收。
+         * 此时再读 h.task->complete_ns 就是 use-after-free。
+         *
+         * 这个坑的表现很有欺骗性：不立刻崩，而是安静地返回上一个
+         * 任务的旧值，或者在别处崩（本机实测是 0xC0000005）。
+         *
+         * TLS 值是在 release **之前**、pin 仍然有效时取的，所以它安全。
          */
-        uint64_t c = h.task->complete_ns;
-        uint64_t s = h.task->submit_ns;
-        *out_latency_ns = (c > s) ? (c - s) : 0;
+        *out_latency_ns = kaula_conc_tls_last_latency_ns;
     }
 }
 
