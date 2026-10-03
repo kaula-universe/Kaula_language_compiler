@@ -15,6 +15,9 @@ KaulaEpochDomain g_conc_epoch;
 static _Atomic(uint64_t) g_retired_total = 0;
 static _Atomic(uint64_t) g_reclaimed_total = 0;
 
+/* pin 期内强制回收被阻止的泄漏兜底计数（可观测性，不进正常输出） */
+static _Atomic(uint64_t) g_epoch_pin_forced_leaks = 0;
+
 /* ========== 初始化 ========== */
 
 void kaula_epoch_init(void) {
@@ -112,12 +115,24 @@ void kaula_epoch_retire_to(void* ptr, void** pool) {
         kaula_conc_advance_epoch_if_needed();
         if (list->count >= KAULA_EPOCH_MAX_RETIRED) {
             /*
-             * 仍然太满：直接在当前上下文释放。
-             * 这是唯一的危险点 —— 但此时 epoch 刚被推进过，
-             * 风险窗口极小（仅当有 Worker 恰好在 enter 与访问之间）。
-             * 生产路径上 retire 发生在"Task 已 DONE"之后，
-             * 不会再被 Worker 取走，因此实际是安全的。
+             * 仍然太满：先检查是否有外部 pin（main/await 仍持有句柄）。
+             *
+             * 全量并发压测暴露：10 万任务一次性提交时，每任务 3 次 retire
+             * （wrapper + Frame + Task），每 Worker 2.5 万任务 = 7.5 万
+             * retire > 旧上限 65536 → 触发强制回收。此时 main 还 pin 着
+             * 全部句柄（await 未开始），直接 free/复用会令 await 读到
+             * 已回收的 Task/Frame —— 表现为大量"值错位"（got 恒为某个
+             * 旧任务的 result，err≈10%）。
+             *
+             * 安全优先：有 pin 时泄漏兜底（对象留在内存，await 读安全），
+             * 不回收。泄漏由 shutdown 的 reclaim_all 清账；极端规模下
+             * 这是"慢/多占内存"对"悬垂读"的正确取舍 —— 宁可泄漏不可 UAF。
              */
+            if (atomic_load_explicit(&g_ext_pins, memory_order_seq_cst) > 0) {
+                atomic_fetch_add_explicit(&g_epoch_pin_forced_leaks, 1,
+                                          memory_order_relaxed);
+                return;
+            }
             if (pool != NULL) {
                 /* 列表满时的强制路径也走复用池（保持单链表） */
                 KaulaTask* t = (KaulaTask*)ptr;
