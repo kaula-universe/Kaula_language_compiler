@@ -1,0 +1,17 @@
+[package]
+# 包名即产物名：run_bench.py 找的是 target/release/bench_tokio.exe
+name = "bench_tokio"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# rt-multi-thread: 跨运行时对比要的是多线程调度，不是 current_thread 单线程
+# time:           TRANSACTION.md 规定 suspend 原语是 tokio::time::sleep
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[profile.release]
+# 基准必须关掉调试信息并保留符号级优化，否则测的是 debug 构建的开销
+debug = false
+# LTO 会显著拉长构建时间；跨运行时比的是相对形态，不值得
+lto = false
