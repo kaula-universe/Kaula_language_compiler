@@ -1243,19 +1243,35 @@ func (eg *ExpressionGenerator) generateEnumConstructor(enumBase string, variant 
 	instName := enumBase
 
 	// 泛型枚举：从构造参数推断类型参数（如 Option<int>.Some(42) → int）
+	// 优先从上下文类型（声明类型 / 返回类型）取**完整**类型参数：
+	// `Result r = Result.Ok(42)` 或 `return Result.Ok(42)`（fn -> Result）里
+	// T/E 都由上下文定死；只从字面量推断会丢参数（42→i32，E 缺失）→
+	// typeMap 填不满 → 变体字段里残留类型参数名（unknown type 'E'），
+	// 且实例化名（K_Result_i32）与上下文（K_Result_i64_i64）不一致。
 	if enumStmt != nil && enumStmt.Generic {
 		var argTypes []string
-		for i, arg := range args {
-			t := eg.inferConcreteType(arg)
-			if t == "" && i < len(variant.FieldTypes) {
-				t = variant.FieldTypes[i]
+		if ctxArgs := eg.parseGenericEnumArgsFromCtx(enumBase, len(enumStmt.TypeParams)); ctxArgs != nil {
+			argTypes = ctxArgs
+		} else {
+			for i, arg := range args {
+				t := eg.inferConcreteType(arg)
+				if t == "" && i < len(variant.FieldTypes) {
+					t = variant.FieldTypes[i]
+				}
+				if t != "" {
+					argTypes = append(argTypes, t)
+				}
 			}
-			if t != "" {
-				argTypes = append(argTypes, t)
+			// 上下文缺失且参数不足：猜类型只会产出错误的 C 类型（错误下限原则），
+			// 显式报错比生成一个凑合的类型强。
+			if len(argTypes) < len(enumStmt.TypeParams) {
+				eg.codegen.error(fmt.Sprintf(
+					"泛型 enum '%s' 的类型参数无法完整推断（需要 %d 个，从构造参数只能推出 %d 个）。"+
+						"请通过声明/返回类型给出上下文，如 `%s x = %s.%s(...)`。",
+					enumBase, len(enumStmt.TypeParams), len(argTypes),
+					enumBase, enumBase, variantName))
+				argTypes = append(argTypes, "i64")
 			}
-		}
-		if len(argTypes) == 0 {
-			argTypes = []string{"i32"}
 		}
 		eg.codegen.InstantiateGenericType(enumBase, argTypes, 0)
 		instName = MangleGenericTypeName(enumBase, argTypes)
@@ -1280,6 +1296,63 @@ func (eg *ExpressionGenerator) generateEnumConstructor(enumBase string, variant 
 		parts = append(parts, fieldPart)
 	}
 	return "(" + tag + "){\n        " + strings.Join(parts, ",\n        ") + "\n    }"
+}
+
+// parseGenericEnumArgsFromCtx 从当前编译上下文解析泛型 enum 的完整类型参数。
+// 顺序：① 声明上下文 pendingEnumCtxType（`Result r = Result.Ok(42)`）；
+//       ② 返回类型 currentFunctionReturnType（`return Result.Ok(42)`，fn -> Result）。
+// 上下文类型必须是 `enumBase<arg1, arg2, ...>` 形态且参数个数 == nParams，
+// 否则返回 nil（调用方走参数推断 fallback）。
+// 参数用平衡扫描解析，支持嵌套泛型（Result<Vec<i64>, i64>）。
+func (eg *ExpressionGenerator) parseGenericEnumArgsFromCtx(enumBase string, nParams int) []string {
+	for _, ctxType := range []string{eg.codegen.pendingEnumCtxType, eg.codegen.currentFunctionReturnType} {
+		if ctxType == "" {
+			continue
+		}
+		base, args, ok := splitGenericTypeArgs(ctxType)
+		if !ok || base != enumBase || len(args) != nParams {
+			continue
+		}
+		return args
+	}
+	return nil
+}
+
+// splitGenericTypeArgs 把 "Name<a, b, c>" 拆成 (Name, [a, b, c])。
+// 只做语法级平衡扫描，不做类型校验；不含 <...> 时返回 (s, nil, false)。
+func splitGenericTypeArgs(s string) (string, []string, bool) {
+	lt := strings.Index(s, "<")
+	if lt <= 0 || !strings.HasSuffix(s, ">") {
+		return s, nil, false
+	}
+	base := strings.TrimSpace(s[:lt])
+	inner := s[lt+1 : len(s)-1]
+	var args []string
+	depth := 0
+	cur := strings.Builder{}
+	for _, r := range inner {
+		switch r {
+		case '<':
+			depth++
+			cur.WriteRune(r)
+		case '>':
+			depth--
+			cur.WriteRune(r)
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(cur.String()))
+				cur.Reset()
+			} else {
+				cur.WriteRune(r)
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		args = append(args, strings.TrimSpace(cur.String()))
+	}
+	return base, args, true
 }
 
 // inferConcreteType 从表达式推断 Kaula 类型名（用于泛型实例化参数推断）。
@@ -3609,10 +3682,10 @@ func (eg *ExpressionGenerator) generateMatchExpression(e *ast.MatchExpression) s
 						bindType = eg.matchBindingCType(variant, i, enumName, e.Target)
 						// 同步注册到 codegen 符号表：println/inferType 等依赖
 						// 标识符的类型记录决定格式化行为（否则 String 绑定
-						// 会 fallback 到 %d 打印出指针/长度垃圾）
-						if i < len(variant.FieldTypes) {
-							bindKaulaType = variant.FieldTypes[i]
-						}
+						// 会 fallback 到 %d 打印出指针/长度垃圾）。
+						// 泛型 enum（Result<string,i64>）必须用替换后的具体类型
+						// （string/i64），裸类型参数名 "T" 会让 inferType 走 %d。
+						bindKaulaType = eg.enumFieldKaulaType(variant, i, enumName, e.Target)
 					}
 					code.WriteString(fmt.Sprintf("        %s %s = %s;\n", bindType, binding, fieldAccess))
 					if binding != "_" && bindKaulaType != "" {
@@ -3788,16 +3861,30 @@ func (eg *ExpressionGenerator) matchBindingCType(variant *ast.EnumVariant, field
 	if variant == nil || fieldIndex >= len(variant.FieldTypes) {
 		return "auto"
 	}
-	fieldType := variant.FieldTypes[fieldIndex]
+	fieldType := eg.enumFieldKaulaType(variant, fieldIndex, enumName, target)
 	if eg.codegen.program == nil || eg.codegen.typeGenerator == nil {
 		return fieldType
 	}
+	// 映射到 C 类型（int → int64_t、string → String 等）
+	return eg.codegen.typeGenerator.MapKaulaTypeToC(fieldType)
+}
+
+// enumFieldKaulaType 返回 match 绑定变量的 Kaula 类型名。
+// 变体字段类型中的泛型参数（如 Option<T> 的 T）按目标变量的实际类型参数替换
+// （如 Option<int> → int），返回替换后的 Kaula 类型（如 "string"/"i64"）。
+// 绑定登记处（AddSymbol）与 C 类型计算（matchBindingCType）必须用同一套替换，
+// 否则符号表里残留 "T" 会让 inferType 把 String 绑定 fallback 成 %d 打印。
+func (eg *ExpressionGenerator) enumFieldKaulaType(variant *ast.EnumVariant, fieldIndex int, enumName string, target ast.Expression) string {
+	if variant == nil || fieldIndex >= len(variant.FieldTypes) {
+		return ""
+	}
+	fieldType := variant.FieldTypes[fieldIndex]
 
 	// 解析目标变量的实际类型参数（如 Option<int>）
 	var typeArgs []string
 	if ident, ok := target.(*ast.Identifier); ok {
 		if sym := eg.codegen.GetSymbol(ident.Name); sym != nil {
-			if lt := strings.Index(sym.Type, "<"); lt > 0 {
+			if lt := strings.Index(sym.Type, "<"); lt > 0 && strings.HasSuffix(sym.Type, ">") {
 				argsStr := sym.Type[lt+1 : len(sym.Type)-1]
 				for _, part := range splitTopLevelCommas(argsStr) {
 					if strings.TrimSpace(part) != "" {
@@ -3818,9 +3905,7 @@ func (eg *ExpressionGenerator) matchBindingCType(variant *ast.EnumVariant, field
 			}
 		}
 	}
-
-	// 映射到 C 类型（int → int64_t、string → String 等）
-	return eg.codegen.typeGenerator.MapKaulaTypeToC(fieldType)
+	return fieldType
 }
 
 // generateAttributeExpression 生成表达式级属性的 C 代码
