@@ -112,10 +112,23 @@ KaulaTask* kaula_inject_queue_pop(void) {
         if (atomic_compare_exchange_strong_explicit(
                 &g_inject_queue.head, &expected, head + 1,
                 memory_order_acq_rel, memory_order_relaxed)) {
-            /* 赢者：清空槽位防止悬垂引用被误读 */
-            atomic_store_explicit(
-                &g_inject_queue.buffer[head & KAULA_INJECT_QUEUE_MASK],
-                NULL, memory_order_relaxed);
+            /*
+             * 修复：不再清空槽位。
+             *
+             * 原实现赢者 CAS 后以 relaxed store 清空槽位。该 relaxed
+             * 写允许乱序/延迟执行，与 push 侧「环形 wrap 后写回同一槽位」
+             * 交错时会抹掉刚 push 的新任务：
+             *
+             *   队列满 → push 写 buffer[head&MASK]=T2（tail 推进）
+             *   pop 赢者的 NULL store 延迟执行 → T2 被抹成 NULL
+             *   → 该任务从未被任何 Worker 执行（state=READY、
+             *     start_ns=0、active 计数不减）→ await 永久挂起。
+             *
+             * 清空本身是多余的：head 单调推进，已被取走的槽位在环形
+             * wrap 前必然已被新的 push 覆盖，pop 不会重读旧任务指针。
+             * 去掉清空后，槽位数据残留无害（push 是锁内单写者，下次
+             * 写同槽即覆盖）。
+             */
             return task;
         }
         /* 输者：重试 */
