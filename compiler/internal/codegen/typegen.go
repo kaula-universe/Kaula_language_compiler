@@ -1129,7 +1129,8 @@ func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement
 		args := strings.TrimSuffix(argsPart, ")")
 		code.WriteString(fmt.Sprintf("typedef %s (*%s)(%s);\n\n", retType, stmt.Name, args))
 	} else {
-		code.WriteString(fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name))
+		// 数组类型别名：typedef K_Point[4] Path; 非法，须写成 typedef K_Point Path[4];
+		code.WriteString(fmt.Sprintf("typedef %s;\n\n", formatCVarDecl(cType, stmt.Name)))
 	}
 
 	return code.String()
@@ -1179,6 +1180,14 @@ func (tg *TypeGenerator) convertTypeAliasToCType(kaulaType string) string {
 	// void(T...)R 签名记法委托给主映射器
 	if strings.HasPrefix(cType, "void(") {
 		return tg.MapKaulaTypeToC(cType)
+	}
+
+	// 前缀数组 [N]T：直接交给主映射器（下面的 base 提取会把 "[4]Point" 的
+	// base 截成空串，导致 "[4]Point" 原样流进 typedef，生成非法 C）
+	if strings.HasPrefix(strings.TrimPrefix(cType, "const "), "[") {
+		if mapped := tg.MapKaulaTypeToC(cType); mapped != "" {
+			return mapped
+		}
 	}
 
 	// 用户自定义命名类型（struct/class/enum/跨文件类型，含指针/数组包裹）：
@@ -1247,7 +1256,7 @@ func (tg *TypeGenerator) GenerateGenericTypeAliasStatement(stmt *ast.TypeAliasSt
 
 	cType := tg.convertTypeAliasToCType(underlyingType)
 
-	code.WriteString(fmt.Sprintf("typedef %s %s;\n\n", cType, stmt.Name))
+	code.WriteString(fmt.Sprintf("typedef %s;\n\n", formatCVarDecl(cType, stmt.Name)))
 
 	return code.String()
 }

@@ -358,13 +358,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 				}
 			}
 			// 函数指针类型参数：R (*)(args) name → R (*name)(args)
-			if strings.Contains(paramType, "(*)") {
-				proto.WriteString(formatCVarDecl(paramType, param))
-			} else {
-				proto.WriteString(paramType)
-				proto.WriteByte(' ')
-				proto.WriteString(param)
-			}
+			// 数组类型参数：T[N] name → T name[N]（C 要求声明符在后）
+			proto.WriteString(formatCVarDecl(paramType, param))
 		}
 		for i := range captures {
 			if i > 0 || len(stmt.Params) > 0 {
@@ -473,11 +468,8 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			paramType = fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable)
 		}
 		// 函数指针类型参数：R (*)(args) name → R (*name)(args)（C 语法要求参数名在 (*) 中间）
-		if strings.Contains(paramType, "(*)") {
-			builder.WriteString(formatCVarDecl(paramType, param))
-		} else {
-			builder.WriteString(fmt.Sprintf("%s %s", paramType, param))
-		}
+		// 数组类型参数：T[N] name → T name[N]（C 要求声明符在后）
+		builder.WriteString(formatCVarDecl(paramType, param))
 		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], isNullable, "parameter", stmt.Pos.Line, stmt.Pos.Column)
 	}
 	// 嵌套函数：追加捕获参数（按引用：指针）

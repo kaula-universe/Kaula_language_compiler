@@ -234,7 +234,7 @@ func TestConcGuard_UnsupportedReportsDiagnostic(t *testing.T) {
 			src: `
 import std.time
 
-conc fn sum_items(i64[] arr) -> i64 {
+conc fn sum_items([]i64 arr) -> i64 {
     i64 total = 0
     for v in arr {
         std.time.time_sleep(1)

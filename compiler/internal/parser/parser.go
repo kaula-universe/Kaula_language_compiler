@@ -363,7 +363,10 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 		}
 		// 检查是否是变量声明：标识符后面跟另一个标识符（类型名）
 		// 例如：i64 x, int y, MyType obj
-		if p.peekTok.Type == lexer.TOKEN_IDENT || p.peekTok.Type == lexer.TOKEN_QUESTION || p.peekTok.Type == lexer.TOKEN_MULTIPLY || p.peekTok.Type == lexer.TOKEN_LT {
+		// peek 是 '[' 时也可能是写错的数组声明（Point[4] pts）：
+		// 交给变量声明解析器判定，它确认不是声明会自己回退。
+		if p.peekTok.Type == lexer.TOKEN_IDENT || p.peekTok.Type == lexer.TOKEN_QUESTION || p.peekTok.Type == lexer.TOKEN_MULTIPLY || p.peekTok.Type == lexer.TOKEN_LT ||
+			p.peekTok.Type == lexer.TOKEN_LBRACKET {
 			// 可能是变量声明，但也可能是其他语句
 			// 先尝试变量声明
 			if stmt := p.parseVariableDeclarationIterative(); stmt != nil {
@@ -476,12 +479,39 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		if p.curTok.Type == lexer.TOKEN_LT {
 			p.nextToken()
 			typeArgs := []string{}
-			for p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
-				typeArgs = append(typeArgs, p.curTok.Value)
-				p.nextToken()
+			for p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) ||
+				p.curTok.Type == lexer.TOKEN_LBRACKET {
+				arg := ""
+				if p.curTok.Type == lexer.TOKEN_LBRACKET {
+					// 实参写成前缀数组 "[N]Type"
+					p.nextToken()
+					size := ""
+					if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+						size = p.curTok.Value
+						p.nextToken()
+					}
+					if p.curTok.Type == lexer.TOKEN_RBRACKET {
+						p.nextToken()
+					}
+					arg = "[" + size + "]"
+					if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+						arg += p.curTok.Value
+						p.nextToken()
+					}
+				} else {
+					arg = p.curTok.Value
+					p.nextToken()
+					// 实参写成 "Type[N]"：报错并归一成前缀 "[N]Type"
+					if p.curTok.Type == lexer.TOKEN_LBRACKET {
+						arg = p.checkArrayTypeSuffix(arg, false)
+					}
+				}
+				typeArgs = append(typeArgs, arg)
 				if p.curTok.Type == lexer.TOKEN_COMMA {
 					p.nextToken()
 				} else if p.curTok.Type == lexer.TOKEN_GT {
+					break
+				} else {
 					break
 				}
 			}
@@ -535,6 +565,26 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 		p.curTok = savedCurTok
 		p.peekTok = savedPeekTok
 		return nil
+	}
+
+	// 类型后面紧跟 "[N]"（写成 "Type[N] name"）不是合法写法：
+	// 数组类型用前缀 "[N]Type name"，或把长度挂在变量名上 "Type name[N]"。
+	// 先消费 "[N]"，确认后面紧跟的确实是变量名才报错——否则以 "IDENT [" 开头的
+	// 表达式语句（x[0] = 1）会被误判成声明。
+	if p.curTok.Type == lexer.TOKEN_LBRACKET {
+		size, pos, closed := p.consumeArrayTypeSuffix()
+		if p.curTok.Type != lexer.TOKEN_IDENT || p.curTok.Line != pos.Line {
+			p.lexer.RestoreState(savedLexState)
+			p.curTok = savedCurTok
+			p.peekTok = savedPeekTok
+			return nil
+		}
+		if !closed {
+			p.errorUnclosedArraySuffix(pos)
+		} else {
+			p.errorArrayTypeSuffix(pos, typeName, size, true)
+		}
+		typeName = arraySuffixTypeForm(typeName, size)
 	}
 
 	// 现在必须有变量名
@@ -1501,7 +1551,8 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 				continue
 			}
 
-			if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_MULTIPLY {
+			if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_MULTIPLY ||
+				p.curTok.Type == lexer.TOKEN_LBRACKET {
 				typeOrName := ""
 				typeName := ""
 
@@ -1531,8 +1582,32 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 						p.nextToken()
 					}
 				} else {
-					typeOrName = p.curTok.Value
-					p.nextToken()
+					if p.curTok.Type == lexer.TOKEN_LBRACKET {
+						// 前缀数组参数 "[N]Type name"
+						p.nextToken() // 跳过 '['
+						if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+							typeName = "[" + p.curTok.Value + "]"
+							p.nextToken()
+						} else {
+							typeName = "[]"
+						}
+						if p.curTok.Type == lexer.TOKEN_RBRACKET {
+							p.nextToken()
+						}
+						if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+							typeName += p.curTok.Value
+							p.nextToken()
+						}
+						// 指针元素类型 [N]Type*
+						if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+							typeName += "*"
+							p.nextToken()
+						}
+						typeOrName = ""
+					} else {
+						typeOrName = p.curTok.Value
+						p.nextToken()
+					}
 
 					// 泛型类型参数（如 Option<int> opt）：参数上下文中的 < 只会是泛型类型
 					if p.curTok.Type == lexer.TOKEN_LT {
@@ -1549,6 +1624,11 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 						typeName = typeOrName + "?"
 						typeOrName = ""
 						p.nextToken()
+					} else if p.curTok.Type == lexer.TOKEN_LBRACKET {
+						// 数组参数写成 "Type[N] name"：报错并归一成前缀 "[N]Type"
+						//（修复前 [N] 被静默丢弃，参数退化成标量，直到 clang 才炸）
+						typeName = p.checkArrayTypeSuffix(typeOrName, true)
+						typeOrName = ""
 					}
 				}
 
@@ -1559,11 +1639,21 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 						paramType = typeOrName
 					}
 					isNullable := strings.HasSuffix(paramType, "?")
-					stmt.Params = append(stmt.Params, p.curTok.Value)
+					paramName := p.curTok.Value
+					p.log("解析参数：%s (类型：%s, 可空：%v)", paramName, paramType, isNullable)
+					p.nextToken()
+					// 参数名后缀 "Type name[N]"：归一成前缀 "[N]Type"（与变量声明一致）
+					if p.curTok.Type == lexer.TOKEN_LBRACKET {
+						size, suffixPos, ok := p.consumeArrayTypeSuffix()
+						if !ok {
+							p.errorUnclosedArraySuffix(suffixPos)
+						} else {
+							paramType = "[" + size + "]" + paramType
+						}
+					}
+					stmt.Params = append(stmt.Params, paramName)
 					stmt.ParamTypes = append(stmt.ParamTypes, paramType)
 					stmt.ParamNullables = append(stmt.ParamNullables, isNullable)
-					p.log("解析参数：%s (类型：%s, 可空：%v)", p.curTok.Value, paramType, isNullable)
-					p.nextToken()
 				} else if typeOrName != "" {
 					// typeOrName 就是名称（无类型）
 					stmt.Params = append(stmt.Params, typeOrName)
@@ -1592,24 +1682,33 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 	if p.curTok.Type == lexer.TOKEN_ARROW {
 		p.nextToken()
 	}
-	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT || p.curTok.Type == lexer.TOKEN_MULTIPLY {
+	if p.isTypeToken(p.curTok.Type) || p.curTok.Type == lexer.TOKEN_IDENT || p.curTok.Type == lexer.TOKEN_MULTIPLY ||
+		p.curTok.Type == lexer.TOKEN_LBRACKET {
 		isPointer := false
 		// 处理指针前缀 (*Type)
 		if p.curTok.Type == lexer.TOKEN_MULTIPLY {
 			isPointer = true
 			p.nextToken()
 		}
-		if p.isTypeToken(p.curTok.Type) {
-			stmt.ReturnType = strings.ToLower(lexer.TokenTypeToString(p.curTok.Type))
-			stmt.ReturnType = strings.TrimPrefix(stmt.ReturnType, "type_")
+		if p.curTok.Type == lexer.TOKEN_LBRACKET {
+			// 返回类型写成 [N]Type：数组不能作返回类型，报错并只保留元素类型
+			//（parseArrayReturnTypePrefix 已消费到元素类型之后，这里不能再 nextToken）
+			stmt.ReturnType = p.parseArrayReturnTypePrefix()
 		} else {
-			stmt.ReturnType = p.curTok.Value
-		}
-		p.nextToken()
-		// 处理指针后缀 (Type*)
-		if p.curTok.Type == lexer.TOKEN_MULTIPLY {
-			isPointer = true
+			if p.isTypeToken(p.curTok.Type) {
+				stmt.ReturnType = strings.ToLower(lexer.TokenTypeToString(p.curTok.Type))
+				stmt.ReturnType = strings.TrimPrefix(stmt.ReturnType, "type_")
+			} else {
+				stmt.ReturnType = p.curTok.Value
+			}
 			p.nextToken()
+			// 处理指针后缀 (Type*)
+			if p.curTok.Type == lexer.TOKEN_MULTIPLY {
+				isPointer = true
+				p.nextToken()
+			}
+			// 返回类型写成 Type[N]：数组不能作返回类型
+			stmt.ReturnType = p.checkArrayReturnType(stmt.ReturnType)
 		}
 		if isPointer {
 			stmt.ReturnType = stmt.ReturnType + "*"
@@ -2288,6 +2387,10 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 						param.Nullable = true
 						p.nextToken()
 					}
+					// 数组参数写成 "Type[N] name"：报错并归一成前缀 "[N]Type"
+					if p.curTok.Type == lexer.TOKEN_LBRACKET {
+						param.Type = p.checkArrayTypeSuffix(param.Type, true)
+					}
 					if p.curTok.Type != lexer.TOKEN_IDENT {
 						p.error(fmt.Sprintf("expected parameter name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
 						break
@@ -2303,7 +2406,10 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 					p.nextToken() // 跳过 )
 				}
 
-				// 解析可选返回类型：可以是 IDENT 或类型关键字（int, void, f64 等）
+				// 解析可选返回类型：fn name(params) [->] ReturnType
+				if p.curTok.Type == lexer.TOKEN_ARROW {
+					p.nextToken() // 跳过 ->
+				}
 				isRetTypeKeyword := false
 				switch p.curTok.Type {
 				case lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
@@ -2327,6 +2433,8 @@ func (p *Parser) parseClassStatementIterative() *ast.ClassStatement {
 						retType = retType + "*"
 						p.nextToken()
 					}
+					// 返回类型写成 Type[N]：数组不能作返回类型
+					retType = p.checkArrayReturnType(retType)
 					if returnPointer {
 						retType = "*" + retType
 					}
@@ -2493,6 +2601,10 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 						param.Nullable = true
 						p.nextToken()
 					}
+					// 数组参数写成 "Type[N] name"：报错并归一成前缀 "[N]Type"
+					if p.curTok.Type == lexer.TOKEN_LBRACKET {
+						param.Type = p.checkArrayTypeSuffix(param.Type, true)
+					}
 					if p.curTok.Type != lexer.TOKEN_IDENT {
 						break
 					}
@@ -2522,6 +2634,8 @@ func (p *Parser) parseInterfaceStatementIterative() *ast.InterfaceStatement {
 						method.ReturnType = method.ReturnType + "*"
 						p.nextToken()
 					}
+					// 返回类型写成 Type[N]：数组不能作返回类型
+					method.ReturnType = p.checkArrayReturnType(method.ReturnType)
 				}
 				// 接口方法：分号可省略（与 class 体成员一致），只要下一个 token
 				// 是新成员的开头（fn / 字段或前置返回类型的 IDENT / 类型关键字）
@@ -2783,8 +2897,123 @@ func (p *Parser) parseTypeStringForDecl() string {
 	return p.parseTypeStringImpl(false)
 }
 
+// splitConstPrefix 拆出类型串开头的 const 前缀："const Point" → ("const ", "Point")
+func splitConstPrefix(t string) (string, string) {
+	if strings.HasPrefix(t, "const ") {
+		return "const ", t[len("const "):]
+	}
+	return "", t
+}
+
+// arraySuffixTypeMsg 构造 "Type[N]" 后缀数组类型的报错文案。
+// Kaula 的数组类型把长度放在元素类型前面（[N]Type），
+// 后缀长度只在变量声明符上合法（Type name[N]）。
+func arraySuffixTypeMsg(size, baseType string, declContext bool) string {
+	constPrefix, base := splitConstPrefix(baseType)
+	if declContext {
+		return fmt.Sprintf("array type '%s%s[%s] name' is not valid; write '%s name[%s]' or '%s[%s]%s name'",
+			constPrefix, base, size, base, size, constPrefix, size, base)
+	}
+	return fmt.Sprintf("array type '%s%s[%s]' is not valid; write the length before the element type: '%s[%s]%s'",
+		constPrefix, base, size, constPrefix, size, base)
+}
+
+// arraySuffixTypeForm 把后缀数组 "Type[N]" 归一成前缀形式 "[N]Type"，
+// const 前缀保持在最前面（const Point[4] → const [4]Point）。
+func arraySuffixTypeForm(baseType, size string) string {
+	constPrefix, base := splitConstPrefix(baseType)
+	return constPrefix + "[" + size + "]" + base
+}
+
+// consumeArrayTypeSuffix 消费紧跟在类型后面的 "[N]"（或 "[]"）。
+// 调用前 curTok 必须是 '['，调用后 curTok 停在 ']' 之后。
+// 返回数组长度、'[' 的位置与是否正常闭合。
+// 这里**不**报错：变量声明要先确认 '[' 后面紧跟的确实是变量名
+// （否则 "a[j + 1] = a[j]" 这类表达式语句会被误判成声明并报错），
+// 由调用方在确认语境后决定报什么错。
+func (p *Parser) consumeArrayTypeSuffix() (string, ast.Position, bool) {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	size := ""
+	p.nextToken() // 跳过 '['
+	if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+		size = p.curTok.Value
+		p.nextToken()
+	}
+	if p.curTok.Type != lexer.TOKEN_RBRACKET {
+		return size, pos, false
+	}
+	p.nextToken() // 跳过 ']'
+	return size, pos, true
+}
+
+// errorUnclosedArraySuffix 确认处于类型位置后，报告缺少 ']' 的数组后缀。
+func (p *Parser) errorUnclosedArraySuffix(pos ast.Position) {
+	p.errorAt(pos.Line, pos.Column, "expected ']' after array size")
+}
+
+// errorArrayTypeSuffix 报告 "Type[N]" 这种把长度写在类型后面的数组类型。
+// declContext=true 表示这是变量声明（额外提示 name[N] 后缀写法也合法）。
+func (p *Parser) errorArrayTypeSuffix(pos ast.Position, baseType, size string, declContext bool) {
+	p.errorAt(pos.Line, pos.Column, arraySuffixTypeMsg(size, baseType, declContext))
+}
+
+// checkArrayTypeSuffix 把紧跟类型之后的 "[N]" 报错并归一成前缀形式。
+// curTok 不是 '[' 时原样返回。返回归一后的类型串。
+func (p *Parser) checkArrayTypeSuffix(baseType string, declContext bool) string {
+	if p.curTok.Type != lexer.TOKEN_LBRACKET {
+		return baseType
+	}
+	size, pos, ok := p.consumeArrayTypeSuffix()
+	if !ok {
+		p.errorUnclosedArraySuffix(pos)
+		return arraySuffixTypeForm(baseType, size)
+	}
+	p.errorArrayTypeSuffix(pos, baseType, size, declContext)
+	return arraySuffixTypeForm(baseType, size)
+}
+
+// arrayReturnMsg 数组不能作为返回类型（C 同样不允许返回数组），
+// 无论前缀 [N]T 还是后缀 T[N] 都直接报错。
+func arrayReturnMsg(form string) string {
+	return fmt.Sprintf("array return type '%s' is not valid; functions cannot return arrays", form)
+}
+
+// parseArrayReturnTypePrefix 解析返回类型位置上的前缀数组 "[N]Type"（调用前 curTok 是 '['）。
+// 报错后返回元素类型，避免下游级联出无意义的语义错误。
+func (p *Parser) parseArrayReturnTypePrefix() string {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	size, _, ok := p.consumeArrayTypeSuffix()
+	if !ok {
+		p.errorUnclosedArraySuffix(pos)
+		return ""
+	}
+	base := ""
+	if p.curTok.Type == lexer.TOKEN_IDENT || p.isTypeToken(p.curTok.Type) {
+		base = p.curTok.Value
+		p.nextToken()
+	}
+	p.errorAt(pos.Line, pos.Column, arrayReturnMsg(fmt.Sprintf("[%s]%s", size, base)))
+	return base
+}
+
+// checkArrayReturnType 检查返回类型之后的 "[N]" 后缀。curTok 不是 '[' 时原样返回。
+func (p *Parser) checkArrayReturnType(baseType string) string {
+	if p.curTok.Type != lexer.TOKEN_LBRACKET {
+		return baseType
+	}
+	size, pos, ok := p.consumeArrayTypeSuffix()
+	if !ok {
+		p.errorUnclosedArraySuffix(pos)
+		return baseType
+	}
+	p.errorAt(pos.Line, pos.Column, arrayReturnMsg(fmt.Sprintf("%s[%s]", baseType, size)))
+	return baseType
+}
+
 func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 	var typeStr strings.Builder
+	// 是否已经写出元素类型：用于区分 "[N]Type" 前缀数组与非法的 "Type[N]" 后缀写法
+	sawBaseType := false
 
 	for {
 		switch p.curTok.Type {
@@ -2838,10 +3067,20 @@ func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 			}
 			typeStr.WriteString(p.curTok.Value)
 			p.nextToken()
+			sawBaseType = true
 		case lexer.TOKEN_MULTIPLY:
 			typeStr.WriteString("*")
 			p.nextToken()
 		case lexer.TOKEN_LBRACKET:
+			// 类型已经出现过，再遇 '[' 说明写成了后缀形式 "Type[N]"。
+			// Kaula 的数组类型是前缀 "[N]Type"——报错并归一，避免非法类型串
+			// 一路流到 C 代码生成（那会产出编译不过的 C）。
+			if sawBaseType {
+				normalized := p.checkArrayTypeSuffix(typeStr.String(), false)
+				typeStr.Reset()
+				typeStr.WriteString(normalized)
+				continue
+			}
 			p.nextToken()
 			if p.curTok.Type == lexer.TOKEN_LITERAL_INT {
 				typeStr.WriteString("[")
@@ -3027,6 +3266,13 @@ func (p *Parser) parseFieldDeclarationIterative() *ast.FieldDeclaration {
 	// 字段结束后可以是分号、逗号、} 或下一个字段名
 	// 不强制要求分隔符
 
+	// 字段类型写成 "name: Type[N]"：Kaula 的数组类型是前缀 "[N]Type"。
+	// 这里必须报错——修复前 [N] 被静默丢弃，结构体字段退化成标量，
+	// 编译器一路跑到 clang 才炸（生成的 C 里 s.pts[0] 变成对标量取下标）。
+	if p.curTok.Type == lexer.TOKEN_LBRACKET {
+		typeName = p.checkArrayTypeSuffix(typeName, false)
+	}
+
 	// 检查位域语法: 类型后 : N 位宽
 	bitWidth := 0
 	if p.curTok.Type == lexer.TOKEN_COLON {
@@ -3116,6 +3362,8 @@ func (p *Parser) parseMethodStatementIterative() *ast.MethodStatement {
 		isPointer = true
 		p.nextToken()
 	}
+	// 返回类型写成 Type[N]：数组不能作返回类型
+	method.ReturnType = p.checkArrayReturnType(method.ReturnType)
 	if isPointer {
 		method.ReturnType = method.ReturnType + "*"
 	}
@@ -3218,6 +3466,10 @@ parseMethodParams:
 				p.nextToken()
 				p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 			}
+			// 数组参数写成 "Type[N] name"：报错并归一成前缀 "[N]Type"
+			if p.curTok.Type == lexer.TOKEN_LBRACKET {
+				param.Type = p.checkArrayTypeSuffix(param.Type, true)
+			}
 			if p.curTok.Type != lexer.TOKEN_IDENT {
 				p.error(fmt.Sprintf("expected parameter name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
 				p.curTok = savedCurTok
@@ -3269,6 +3521,8 @@ parseMethodParams:
 				method.ReturnType += "*"
 				p.nextToken()
 			}
+			// 返回类型写成 Type[N]：数组不能作返回类型
+			method.ReturnType = p.checkArrayReturnType(method.ReturnType)
 		}
 	}
 
@@ -3371,6 +3625,10 @@ func (p *Parser) parseConstructorStatementIterative() *ast.ConstructorStatement 
 				p.log("跳过 QUESTION token")
 				p.nextToken()
 				p.log("当前 token: %s, 值：%s", lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
+			}
+			// 数组参数写成 "Type[N] name"：报错并归一成前缀 "[N]Type"
+			if p.curTok.Type == lexer.TOKEN_LBRACKET {
+				param.Type = p.checkArrayTypeSuffix(param.Type, true)
 			}
 			if p.curTok.Type != lexer.TOKEN_IDENT {
 				p.error(fmt.Sprintf("expected parameter name, got %s", lexer.TokenTypeToString(p.curTok.Type)))
@@ -4761,19 +5019,26 @@ func (p *Parser) parseExtractStatementIterative() ast.Statement {
 
 // error 报告错误
 func (p *Parser) error(message string) {
+	p.errorAt(p.curTok.Line, p.curTok.Column, message)
+}
+
+// errorAt 报告位于指定行列的语法错误。
+// 用于报错点与当前 token 不一致的场景：变量声明里先消费了 "[N]" 才确认是声明，
+// 需要把错误回填到 '[' 的位置，否则下标会指向后面的变量名。
+func (p *Parser) errorAt(line, column int, message string) {
 	suggestion := errors.GenerateSuggestion(message)
-	context, sourceLine, lineNumStr := errors.ExtractSourceContext(p.lexer.GetSource(), p.curTok.Line, p.curTok.Column)
+	context, sourceLine, lineNumStr := errors.ExtractSourceContext(p.lexer.GetSource(), line, column)
 	err := &errors.Error{
 		Type:          errors.ErrorSyntax,
 		Message:       message,
-		Line:          p.curTok.Line,
-		Column:        p.curTok.Column,
+		Line:          line,
+		Column:        column,
 		File:          p.file,
 		Suggestion:    suggestion,
 		SourceContext: context,
 		SourceLine:    sourceLine,
 		LineNumberStr: lineNumStr,
-		Highlight:     errors.BuildHighlight(p.lexer.GetSource(), p.curTok.Line, p.curTok.Column, 0, p.file, errors.ErrorSyntax, message),
+		Highlight:     errors.BuildHighlight(p.lexer.GetSource(), line, column, 0, p.file, errors.ErrorSyntax, message),
 	}
 	p.errorCollector.AddErrorInstance(err)
 }

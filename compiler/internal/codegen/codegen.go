@@ -1864,13 +1864,8 @@ static inline String string_concat_float(String s, double v) {
 					cType = "void*"
 				}
 				// 函数指针类型参数：R (*)(args) name → R (*name)(args)
-				if strings.Contains(cType, "(*)") {
-					forwardDecls.WriteString(formatCVarDecl(cType, fnStmt.Params[i]))
-				} else {
-					forwardDecls.WriteString(cType)
-					forwardDecls.WriteByte(' ')
-					forwardDecls.WriteString(fnStmt.Params[i])
-				}
+				// 数组类型参数：T[N] name → T name[N]（C 要求声明符在后）
+				forwardDecls.WriteString(formatCVarDecl(cType, fnStmt.Params[i]))
 			}
 			forwardDecls.WriteString(");\n")
 		}
