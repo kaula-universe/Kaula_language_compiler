@@ -310,7 +310,10 @@ func (sg *StatementGenerator) isHandleVar(name string, sym *symbol.Symbol) bool 
 		return false
 	}
 	switch strings.ToLower(sym.Type) {
-	case "handle", "future", "task":
+	// 兜底只认 Handle：语言层 spawn 的类型恒为 Handle（sema.go），不存在
+	// Future/Task 句柄。`task` 会撞上 std.concurrent 的 Task 结构体，
+	// 导致作用域出口对 Task 误发 kaula_handle_release（编译错误）。
+	case "handle":
 		return true
 	}
 	return false
