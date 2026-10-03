@@ -25,6 +25,8 @@ const (
 	SuspendAwait
 	// SuspendSleep 是定时器
 	SuspendSleep
+	// SuspendBlocked 是 #[hint(blocking)] 调用：Worker 让出、Block Lane 接管
+	SuspendBlocked
 )
 
 func (k SuspendKind) String() string {
@@ -35,6 +37,8 @@ func (k SuspendKind) String() string {
 		return "await"
 	case SuspendSleep:
 		return "sleep"
+	case SuspendBlocked:
+		return "blocked"
 	default:
 		return "none"
 	}
@@ -321,7 +325,12 @@ func (a *BodyAnalysis) recordSuspends(expr ast.Expression, cur *int) {
 	if call, ok := expr.(*ast.CallExpression); ok {
 		name := CalleeName(call)
 		if name != "" {
-			if k := Lookup(name); k != SuspendNone {
+			k := Lookup(name)
+			if k == SuspendNone && IsBlocking(name) {
+				// #[hint(blocking)]：不可插桩，走阻塞车道（BLOCKED 形态）
+				k = SuspendBlocked
+			}
+			if k != SuspendNone {
 				ord := len(a.SuspendSites)
 				a.SuspendSites = append(a.SuspendSites, SuspendSite{
 					Call:    call,
@@ -387,6 +396,37 @@ func HasSuspendCall(expr ast.Expression) bool {
 	cur := -1
 	a.recordSuspends(expr, &cur)
 	return len(a.SuspendSites) > 0
+}
+
+// hasBlockingCall 递归探测表达式内是否调用被 #[hint(blocking)] 标记的函数。
+// 与 recordSuspends 同构，但只查 blockingHints —— 不登记 SuspendSite。
+func hasBlockingCall(expr ast.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	if call, ok := expr.(*ast.CallExpression); ok {
+		name := CalleeName(call)
+		if name != "" && IsBlocking(name) {
+			return true
+		}
+		for _, arg := range call.Args {
+			if hasBlockingCall(arg) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, sub := range ChildExprs(expr) {
+		if hasBlockingCall(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasBlockingCall 判断表达式内是否含 #[hint(blocking)] 调用
+func HasBlockingCall(expr ast.Expression) bool {
+	return hasBlockingCall(expr)
 }
 
 // CalleeName 提取被调用者名字；无法确定时返回 ""

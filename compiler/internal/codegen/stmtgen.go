@@ -2173,12 +2173,48 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 
 	// 使用 do-while(0) 包裹，便于 body 中 break/continue 正常工作
 	// 同时保持与 KMM scope 插入逻辑兼容
-	code := "for (" + idxType + " _i_ = (" + startExpr + "); " + cond + "; _i_ += (" + stepExpr + ")) {\n"
+	//
+	// 守卫模式（循环体含挂起点）：迭代下标/上下界提升到 Frame
+	// （loop_i[d]/loop_end[d]/loop_step[d]），恢复从 Frame 继续，
+	// 循环体只执行正确轮次 —— 不会"从头再数一遍"重复执行。
+	var code string
+	guardDepth := -1
+	restoreGuard := func() {}
+	if sg.codegen.concGuardActive() && stmtsHaveSuspend(stmt.Body) {
+		restoreGuard = sg.codegen.concGuardEnter()
+		guardDepth = sg.codegen.concGuardDepth
+		f := sg.codegen.concFrameVar
+		d := guardDepth
+		// init 槽（循环外，只执行一次）：start/end/step 求值入 Frame。
+		// 槽位分配：init=0、循环头=1、body 语句 2+；每轮末尾 sub[d]=1
+		// 回到循环头（跳过 init），恢复点落在 body 槽 >= 2。
+		code = sg.concGuardSlot(func() string {
+			return fmt.Sprintf("%s->loop_i[%d] = (%s);\n"+
+				"%s->loop_end[%d] = (%s);\n"+
+				"%s->loop_step[%d] = (%s);\n",
+				f, d, startExpr, f, d, endExpr, f, d, stepExpr)
+		})
+		code += "for (;;) {\n"
+		// 循环头槽：判条件（引用 Frame 的迭代状态，不再每轮求值表达式）
+		condFrame := fmt.Sprintf(
+			"(%s->loop_step[%d] >= 0 ? %s->loop_i[%d] < %s->loop_end[%d] : %s->loop_i[%d] > %s->loop_end[%d])",
+			f, d, f, d, f, d, f, d, f, d)
+		code += sg.concGuardLoopHead(condFrame)
+	} else {
+		code = "for (" + idxType + " _i_ = (" + startExpr + "); " + cond + "; _i_ += (" + stepExpr + ")) {\n"
+	}
 
 	sg.codegen.indent++
 	sg.codegen.EnterScope("forrange_body")
-	code += sg.codegen.indentString()
-	code += idxType + " " + stmt.Variable.Name + " = _i_;\n"
+	if guardDepth >= 0 {
+		// 守卫：迭代变量从 Frame 恢复
+		code += sg.codegen.indentString()
+		code += fmt.Sprintf("%s %s = %s->loop_i[%d];\n",
+			idxType, stmt.Variable.Name, sg.codegen.concFrameVar, guardDepth)
+	} else {
+		code += sg.codegen.indentString()
+		code += idxType + " " + stmt.Variable.Name + " = _i_;\n"
+	}
 
 	// KMM scope 处理：与 while 循环一致，循环体内分配的内存在每次迭代结束时回卷
 	// Phase 1+2 优化：区分 survivor 类型变量和 bump 分配
@@ -2247,6 +2283,19 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 		code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__for_surv_cp); /* survivor: for-range scope reclaim */\n"
 	} else {
 		code += bodyCode.String()
+	}
+
+	// 守卫模式：每轮末尾步进迭代下标并回到循环头槽（sub[d] = 1：
+	// 跳过 init 槽 0、命中循环头槽 1）。continue 落到这里（与 C for
+	// 的步进语义一致）；break/return 提前离开循环，无需归位。
+	if guardDepth >= 0 {
+		code += sg.codegen.indentString() +
+			fmt.Sprintf("%s->loop_i[%d] += %s->loop_step[%d];\n",
+				sg.codegen.concFrameVar, guardDepth,
+				sg.codegen.concFrameVar, guardDepth)
+		code += sg.codegen.indentString() +
+			fmt.Sprintf("%s->sub[%d] = 1;\n", sg.codegen.concFrameVar, guardDepth)
+		restoreGuard()
 	}
 
 	sg.codegen.indent--

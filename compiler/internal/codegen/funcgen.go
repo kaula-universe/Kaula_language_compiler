@@ -838,6 +838,17 @@ func generateFuncAttributes(stmt *ast.FunctionStatement) string {
 			// asm 是语义标记，由 generateAsmFunction 单独处理，不映射到 C __attribute__
 		case "no_kmm", "sor", "prefix", "tree", "root":
 			// 这些是语义注解，不映射到 C __attribute__，跳过
+		case "hint":
+			/*
+			 * #[hint(blocking)]：登记到阻塞车道白名单（kl 语法入口）。
+			 *
+			 * 登记发生在函数生成时；spawn 该函数 / 在 conc fn 内调用
+			 * 它的代码都在本 TU 内、且出现在定义之后，能查到这份登记。
+			 * 多编译单元场景（blockingHints 是进程内 map）暂不跨 TU 共享。
+			 */
+			if len(attr.Args) > 0 && attr.Args[0] == "blocking" {
+				conc.MarkBlocking(stmt.Name)
+			}
 		case "naked":
 			parts = append(parts, "__attribute__((naked))")
 		case "section":
@@ -1477,6 +1488,67 @@ func statementHasSuspend(s ast.Statement) bool {
 	return false
 }
 
+// statementHasBlocking 判断语句内是否调用被 #[hint(blocking)] 标记的函数。
+// 结构与 statementHasSuspend 一致 —— 这类调用也是挂起点（BLOCKED 形态），
+// 只是提交时不构造 KaulaIoRequest，而是让 Worker 把任务移交 Block Lane。
+func statementHasBlocking(s ast.Statement) bool {
+	switch v := s.(type) {
+	case *ast.ExpressionStatement:
+		return conc.HasBlockingCall(v.Expression)
+	case *ast.ReturnStatement:
+		return conc.HasBlockingCall(v.Value)
+	case *ast.VariableDeclaration:
+		return conc.HasBlockingCall(v.Value)
+	case *ast.YieldStatement:
+		return conc.HasBlockingCall(v.Source)
+	case *ast.IfStatement:
+		if conc.HasBlockingCall(v.Condition) {
+			return true
+		}
+		for _, x := range v.Body {
+			if statementHasBlocking(x) {
+				return true
+			}
+		}
+		for _, x := range v.Else {
+			if statementHasBlocking(x) {
+				return true
+			}
+		}
+	case *ast.WhileStatement:
+		if conc.HasBlockingCall(v.Condition) {
+			return true
+		}
+		for _, x := range v.Body {
+			if statementHasBlocking(x) {
+				return true
+			}
+		}
+	case *ast.ForStatement:
+		if conc.HasBlockingCall(v.Condition) {
+			return true
+		}
+		for _, x := range v.Body {
+			if statementHasBlocking(x) {
+				return true
+			}
+		}
+	case *ast.ForInStatement:
+		for _, x := range v.Body {
+			if statementHasBlocking(x) {
+				return true
+			}
+		}
+	case *ast.BlockStatement:
+		for _, x := range v.Statements {
+			if statementHasBlocking(x) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // concSuspendReturn 产出"保存状态并挂起返回"的 C 片段。
 //
 // idx 是即将挂起的段序号，同时作为 pc 的下一站。
@@ -1486,7 +1558,7 @@ func statementHasSuspend(s ast.Statement) bool {
 // —— 外层这里的作用域看不到循环体/分支体里生成的 IO 请求局部量，
 // 强行引用就是 use of undeclared identifier（见 conc_io_rewrite.go）。
 func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx int,
-	analysis *conc.BodyAnalysis, subNext int) string {
+	analysis *conc.BodyAnalysis, subNext int, blocked bool) string {
 
 	var b strings.Builder
 
@@ -1518,8 +1590,15 @@ func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx 
 	 * 用最近一个 __kaula_io_N：submit 形态生成的就是那个具名局部量，
 	 * 生命周期覆盖到这条 return。没有它，IoDriver 收到的是空请求 ——
 	 * 类型 0 不是任何合法 op，会直接被拒。
+	 *
+	 * blocked 形态（#[hint(blocking)]）：不构造请求，返回
+	 * KAULA_RESUME_BLOCKED —— Worker 读到后把任务移交 Block Lane
+	 * （I5），由专用线程就地执行阻塞操作。
 	 */
-	if fg.lastIoVar != "" {
+	if blocked {
+		b.WriteString("    return (KaulaResumeResult){ .status = KAULA_RESUME_BLOCKED, "+
+			".io_request = {0}, .value = NULL };\n")
+	} else if fg.lastIoVar != "" {
 		b.WriteString(fmt.Sprintf("    return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, "+
 			".io_request = %s, .value = NULL };\n", fg.lastIoVar))
 	} else {
@@ -1660,7 +1739,8 @@ func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analy
 			if !cg.concGuardActive() {
 				// 前半段：实参求值 + 请求构造 + 提交
 				current.WriteString(fg.concGenerateStmts(concIoSubmit, []ast.Statement{s}))
-				current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1, analysis, 0))
+				current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1, analysis, 0,
+					statementHasBlocking(s)))
 				finishSegment()
 				splitInGroup = true
 				cg.concSegmentPC = len(segments)
