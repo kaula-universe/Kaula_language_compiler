@@ -137,6 +137,25 @@ KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, si
     atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1, memory_order_relaxed);
     kaula_conc_metrics_inc_spawned();
 
+    /*
+     * 置 READY 必须在投递**之前**。
+     *
+     * 反过来（先投递、后置 READY）会抹掉完成：
+     *   投递方   post() 把 task 放进队列 —— 此刻它已经对 Worker 可见
+     *   Worker   pop → resume_fn → kaula_task_complete 写 state=DONE
+     *   投递方   atomic_store(state, READY) —— 把 DONE 覆盖回 READY
+     *
+     * 完成被抹掉之后没有任何补救：kaula_task_wake_waiters 是在完成那一刻
+     * 发的信号，那时还没有等待者（waiters==0），所以不发；等 await 注册
+     * 上去时看到的是 READY，不是 DONE，于是 park 到 done_event 上再也醒不来。
+     *
+     * 窗口只有 post 与 store 之间的几条指令，但 Worker 热的时候
+     * resume_fn 只要几十纳秒就能跑完 —— 实测 10 万次 spawn 里命中约 100 次
+     * （0.1% 量级），表现为 spawn 之后的第一个 await 永久阻塞：
+     * 压测随机挂死、test_task 卡在 test_await_spawned、test_phase4 随机挂。
+     */
+    atomic_store_explicit(&task->state, KAULA_TASK_READY, memory_order_release);
+
     /* 投递：内部已实现三级背压 */
     if (kaula_conc_worker_post(owner, task) != 0) {
         /*
@@ -173,7 +192,6 @@ KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, si
         return kaula_handle_from_task(task);
     }
 
-    atomic_store_explicit(&task->state, KAULA_TASK_READY, memory_order_release);
     return kaula_handle_from_task(task);
 }
 
@@ -266,6 +284,9 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
 
     atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1, memory_order_relaxed);
 
+    /* 与 kaula_spawn_to 同理：READY 必须在投递之前置，否则会覆盖 DONE */
+    atomic_store_explicit(&task->state, KAULA_TASK_READY, memory_order_release);
+
     if (kaula_conc_worker_post(NULL, task) != 0) {
         /* 全部队列都满：就地执行，保证 spawn 语义不退化 */
         void* r = fn(frame);
@@ -278,7 +299,6 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
         return kaula_handle_from_task(task);
     }
 
-    atomic_store_explicit(&task->state, KAULA_TASK_READY, memory_order_release);
     return kaula_handle_from_task(task);
 }
 
