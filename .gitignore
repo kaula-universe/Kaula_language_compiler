@@ -8,6 +8,11 @@ compiler/cache/
 # pkglib 依赖目录（本地放库即用，不入库）
 pkglib/
 
+# Rust cargo 构建产物（test/bench/tokio/bench）
+# Rust cargo 构建产物。裸 target/ 而非 test/bench/tokio/bench/target/：
+# 将来再加别的 crate 不用回来改这里（已确认仓库内无同名源码目录）。
+target/
+
 # 本地生成的中间产物和测试执行文件
 build/
 compiler/build/

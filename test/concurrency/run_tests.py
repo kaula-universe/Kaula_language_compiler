@@ -225,14 +225,28 @@ def run_one(exe, verbose, timeout=180, env=None):
         proc = subprocess.run([str(exe)], capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=timeout,
                               env=env)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # 超时也可能有输出，而且那部分输出往往正是定位的线索
+        # （"挂在前面的某个用例里" 与 "跑完了才挂" 是完全不同的两个 bug）。
+        # 不打出来的话，超时一律呈现为"无输出"，很容易被误读成静默崩溃。
+        print(_decode(e.stdout), end="")
+        print(_decode(e.stderr), end="")
         print(f"[TIMEOUT] {exe.name} 超过 {timeout}s 未结束（疑似死锁）")
+        print("        ↑ 以上是被打断时已产生的输出；最后一条通常就是卡住的位置")
         return 124
     if proc.stdout:
         print(proc.stdout.rstrip())
     if proc.stderr:
         print(proc.stderr.rstrip())
     return proc.returncode
+
+
+def _decode(raw):
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return raw
 
 
 def main():

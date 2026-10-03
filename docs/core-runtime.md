@@ -231,12 +231,55 @@ case KAULA_IO_WRITE: return (int)write(req->fd, req->buf, req->buf_len);
 代价是内核不再需要 socket 头与库：`winsock2.h`（必须排在 `windows.h` 之前，
 是个顺序陷阱）与 `ws2_32.lib` 都不再是构建前提。
 
-`net_*` 一律不在插桩表里。`net_recv` / `net_send` 在 POSIX 上本来就能靠
-`KAULA_IO_READ` / `WRITE` 走通，但登记它们会让 Windows 上同一段代码静默退化
-（SOCKET 不是 CRT fd，`_read` 对它无效）；`net_connect` / `net_accept` 更是
-socket 专属，`read`/`write` 表达不了。它们统一退回普通阻塞调用：行为正确，
-只是那个 Worker 会真的卡住。这比登记成操作码再让内核回 `ENOSYS` 好 ——
-后者是把「退化成阻塞」换成了「静默给出操作失败」。
+### 两种事件模型：就绪式与完成式
+
+IO 复用后端有两类，接口因此分成两支。这不是风格选择，是正确性要求：
+
+| | 就绪式（epoll / kqueue） | 完成式（IOCP） |
+|---|---|---|
+| 内核给什么 | 「这个 fd 现在可读了」 | 「你上次投递的操作做完了，读了 N 字节」 |
+| IO 何时发生 | 驱动唤醒之后调 `do_io` | 投递的那一刻，系统就做了 |
+| 结果怎么拿 | `next_event` 给 fd → `do_io` 执行 | `next_completion` 直接给 Task 与结果 |
+| 挂起表 | 需要（fd → Task 链表） | 不需要（完成包带着 Task 回来） |
+
+完成式下**绝不能再调 `do_io`**：数据已经在完成包里读进缓冲区了，
+再读一次拿到的是「没有更多数据」，第二次读的那批数据被静默丢掉。
+所以 `next_completion` 存在，`next_event` 在 IOCP 后端恒返回 0，
+驱动循环两个分支各自空转，不需要额外的平台宏。
+
+同一 fd 上多个等待者的差别也源于此：就绪式只需注册一次、事件来了唤醒整条链；
+完成式是每个等待者一次独立投递，各带各的 Task。挂起表对完成式不只是多余 ——
+硬塞进去会导致完成时按 fd 一次唤醒整条链，把还没投递的兄弟等待者也叫醒。
+
+### Windows 上 fd 的口径
+
+`KaulaIoFd` 在 Windows 上是 `intptr_t`，POSIX 上是 `int`。因为 Windows 要装的是
+`HANDLE`，它是指针宽的，用 `int` 存会把高位截掉，拿到一个看似合法的野指针。
+
+Windows 分支拿到的其实是 **CRT fd**（`fopen` / `_pipe` 的产物），不是裸 `HANDLE`。
+`_read` / `_write` 与 `_get_osfhandle` 都以 CRT fd 为入口，这是三者之间唯一自洽的
+口径。编译器生成的代码写 `(KaulaIoFd)(...)`，转型宽度由内核头的 typedef 决定。
+
+IOCP 投递要求句柄带 `FILE_FLAG_OVERLAPPED`，否则操作同步执行、根本不排完成包，
+驱动会永远等不到东西。`CreatePipe` / `_pipe` 都不满足 —— Windows 上要造可异步读的
+通道只能用 `CreateNamedPipe`。这一点在测试里体现：Windows 分支走命名管道，
+POSIX 分支走 `pipe`。
+
+### `net_*` 不进插桩表
+
+`net_connect` / `net_accept` 是 socket 专属操作，`read`/`write` 表达不了，内核不实现。
+它们不在插桩表里，调用点退回普通阻塞语义：行为正确，只是那个 Worker 会真的卡住。
+
+这比登记成操作码再让内核回 `ENOSYS` 好 —— 后者是把「退化成阻塞」换成了
+「静默给出操作失败」。两张表（`conc/analysis.go` 的注册表与 `concIoTypeOf` 的
+操作码映射）必须逐项一致：只在一侧登记的后果是「状态机切好了、调用却没改写」，
+生成的 C 编译得过、跑得动，只是 Worker 原地阻塞，I4 静默失效且无诊断。
+
+Windows 上 `SOCKET` 不是 CRT fd，`_read` 对它返回 `ENOTSOCK`，所以走内核的
+socket IO 在 Windows 上不可用（`net_recv` / `net_send` 同理）。要支持得按句柄
+类型分派：`CRT fd → _read/_write`，`SOCKET → recv/send`，代价是内核重新依赖
+`winsock2` 与 `ws2_32`。当前取舍是不依赖 —— `std/net` 与 `std/web` 直接调 libc
+socket，不走内核的 IO 驱动。
 
 ### I4 的具体形态
 
@@ -457,13 +500,13 @@ python test/concurrency/run_tests.py --only worker   # 单跑一个
 python test/concurrency/run_tests.py --asan          # AddressSanitizer
 ```
 
-1245 个断言，7 个用例文件：
+1319 个断言，7 个用例文件：
 
 | 用例 | 断言数 | 覆盖 |
 |---|---|---|
 | `test_worker.c` | 476 | 预算、自适应、窃取、状态机 |
 | `test_task.c` | 451 | Task 生命周期、await、退休、**Handle drop 的 pin 归还** |
-| `test_iodriver.c` | 150 | 挂起表、定时器、IO 分派、阻塞车道伸缩 |
+| `test_iodriver.c` | 173 | 挂起表、定时器、IO 分派、fd 往返、同 fd 多等待者、阻塞车道伸缩 |
 | `test_mpsc_queue.c` | 107 | Vyukov 队列并发正确性 |
 | `test_epoch.c` | 27 | epoch 回收 |
 | `test_platform.c` | 21 | 平台抽象 |
@@ -659,7 +702,7 @@ slab 位图用 `KMM_V4_ALIGN64`（`__attribute__((aligned(8)))`）显式对齐�
 | **`for .. in` 体内的挂起点** | 迭代下标是编译器生成的局部量，不在 Frame 里，恢复后会从头再数一遍 | 编译期报诊断 |
 | **条件里的挂起点** | `while read() < n`：条件每轮求值，「恢复时该不该重算条件」没有确定答案 | 编译期报诊断 |
 | **一条语句里多个挂起点** | 一次挂起要占掉两个相邻槽位（提交 / 取回结果），放不下第二对 | 编译期报诊断 |
-| **Windows IOCP 后端** | 当前是简化实现：只处理唤醒包，未投递 overlapped 读写。补齐后 Windows 才能做 IO 复用 | 测试已跳过 |
+| **Windows socket 异步 IO** | SOCKET 不是 CRT fd，`_read` 对它返回 ENOTSOCK。走内核的 socket IO 在 Windows 上不可用，需按句柄类型分派 | 已知边界，见 §1.4 |
 | **形式化验证** | 只有 ASan 与 C 断言覆盖 | TSan / loom / TLA+ 未做 |
 
 前三类新增缺口都来自「循环体 / 分支体里的挂起点」那一条的收尾：守卫槽位
