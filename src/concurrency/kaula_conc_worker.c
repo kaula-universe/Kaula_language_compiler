@@ -1,5 +1,5 @@
 /*
- * Kaula 并发内核 · Worker 实现
+ * Kaula 并发内核（CONC）· Worker 实现
  */
 
 #include "kaula_conc_worker.h"

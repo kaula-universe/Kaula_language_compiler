@@ -1,5 +1,5 @@
 /*
- * Kaula 并发内核 · IoDriver 实现
+ * Kaula 并发内核（CONC）· IoDriver 实现
  */
 
 #include "kaula_conc_iodriver.h"

@@ -1,5 +1,5 @@
 /*
- * Kaula 并发内核 · IoDriver（可插桩 IO 驱动）
+ * Kaula 并发内核（CONC）· IoDriver（可插桩 IO 驱动）
  *
  * I4：可插桩 IO 不占线程 —— 提交后 Worker 立即转做别的事。
  *
