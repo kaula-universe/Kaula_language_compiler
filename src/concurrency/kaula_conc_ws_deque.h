@@ -112,15 +112,14 @@ static inline struct KaulaTask* kaula_ws_deque_pop(KaulaWSDeque* q) {
     atomic_store_explicit(&q->bottom, b, memory_order_relaxed);
 
     /*
-     * P1-3：以 acquire 读 top 替代 seq_cst 栅栏（Le et al. 弱内存变体）。
-     *
-     * 原实现用 `fence(seq_cst) + load top(relaxed)`。Chase-Lev 在弱内存
-     * 模型下的正确变体是 `load top(acquire)` 无栅栏：acquire 读保证
-     * "本 owner 已释放这个位置"（bottom store）对随后 thief 的
-     * bottom load 可见，同时禁止把 top 读重排到 bottom 写之前。
-     * 末元素裁决仍走 seq_cst CAS —— 竞争路径保持最强序。
+     * 与 batch steal 的 fence(seq_cst) 配对，构成全局序仲裁点：
+     * 若 owner 栅栏在全局序中先于 thief 栅栏，owner 已取的槽会反映在 thief 的
+     * b2 读取里，thief 据此截断；反之 thief 栅栏先于 owner 栅栏，则 owner 随后
+     * 读 top 必见 thief 已推进的 t+n，发现空、不取任何 <t+n 的槽。
      */
-    int64_t t = atomic_load_explicit(&q->top, memory_order_acquire);
+    atomic_thread_fence(memory_order_seq_cst);
+
+    int64_t t = atomic_load_explicit(&q->top, memory_order_relaxed);
 
     struct KaulaTask* task = NULL;
 
@@ -212,6 +211,79 @@ static inline struct KaulaTask* kaula_ws_deque_steal(KaulaWSDeque* q) {
         return NULL; /* CAS 失败：别的 thief 或 owner 先动了 */
     }
     return task;
+}
+
+/*
+ * 批量窃取（DESIGN 8.1 第 1 条）：一次 CAS 把 top 前移 n 格，批量拿走
+ * [t, t+n) 这 n 个最老的任务（FIFO），out[0..n) 按队列顺序填入。
+ *
+ * 两条正确性支柱（缺一不可，否则会双重取任务）：
+ *   ① 永远在受害者队列里留 ≥1 项：n = min(max_n, size-1)。
+ *      size = b - t。size < 2 时直接返回 0，调用方退回单任务 steal ——
+ *      末元素由单偷的 seq_cst CAS 与 owner 仲裁。绝不能一次偷整队：
+ *      owner 从 bottom 端 pop、thief 从 top 端 steal，只有"偷整队"时两端
+ *      会撞上同一个槽。
+ *   ② owner pop 对 bottom 的写必须是 release（见 kaula_ws_deque_pop），
+ *      否则这里 acquire 读 bottom 可能拿到偏大的旧值、高估 size。
+ *
+ * 返回值：实际窃取数 n（1..max_n），0 = 空/竞争失败/不足两项（退回单偷）。
+ * 调用方负责：改写这 n 个任务的 owner、统计、并把 out[1..n) 挪进自己队列。
+ */
+static inline int kaula_ws_deque_steal_batch(KaulaWSDeque* q,
+                                             struct KaulaTask** out, int max_n) {
+    if (max_n <= 0) return 0;
+
+    int64_t t = atomic_load_explicit(&q->top, memory_order_acquire);
+    int64_t b = atomic_load_explicit(&q->bottom, memory_order_acquire);
+    int64_t s = b - t;
+    if (s < 2) {
+        return 0;   /* 不足两项：留给单任务 steal 仲裁末元素 */
+    }
+
+    int64_t n = s - 1;          /* 支柱①：永远留最后 1 项 */
+    if (n > max_n) n = max_n;
+    if (n <= 0) return 0;
+
+    /*
+     * ★关键：n 个槽的内容必须在 CAS（claim）**之前**投机读入 out。
+     *
+     * 经典单偷是「读 buffer[t] → CAS top」，读在 claim 之前。批量必须同构：
+     * claim 一旦把 top 从 t 推进到 t+n，若 deque 原本接近满，owner 的下一次
+     * push 几乎立刻就会写进这些刚释放的低物理槽（bottom 已在 +CAP 附近，
+     * 例如 bottom=CAP 时 push 直接写 slot0=逻辑CAP）。若把读放在 CAS 之后，
+     * thief 就会读到 owner 新写入的任务 → 双重取、真正的旧任务反成未消费。
+     *
+     * 投机读发生在 top=t 未变期间：此刻 owner 只能从 back（>=t+n，被 n=s-1
+     * 排除在本范围外）pop/push，不会触碰 [t,t+n)，故读到的是当前内容。
+     */
+    for (int64_t i = 0; i < n; i++) {
+        out[i] = atomic_load_explicit(
+            &q->buffer[(t + i) & KAULA_WS_DEQUE_MASK], memory_order_acquire);
+    }
+
+    /* 一次 CAS 抢占 [t, t+n)；竞争失败（别的 thief/owner 动了 top）返回 0 重试。
+     * 失败时 out 内容是投机垃圾，调用方按返回 0 丢弃。 */
+    int64_t expected = t;
+    if (!atomic_compare_exchange_strong_explicit(
+            &q->top, &expected, t + n,
+            memory_order_seq_cst, memory_order_relaxed)) {
+        return 0;
+    }
+
+    /*
+     * 与 owner pop 的 fence(seq_cst) 配对，构成全局序仲裁点。
+     * fence 后只读一次 bottom：
+     * - owner 栅栏在本 fence 之前：owner 已从 back 取走的槽（可能使 bottom 落入
+     *   [t,t+n)）反映在 b2，只返回前 safe 个，其余投机读丢弃（归 owner 执行）。
+     * - owner 栅栏在本 fence 之后：owner 随后读 top 必见 t+n，发现空、不取。
+     */
+    atomic_thread_fence(memory_order_seq_cst);
+    int64_t b2 = atomic_load_explicit(&q->bottom, memory_order_acquire);
+    int64_t safe = b2 - t;
+    if (safe > n) safe = n;
+    if (safe <= 0) return 0;
+
+    return (int)safe;   /* out[0..safe) 是 CAS 前读入、经仲裁仍有效的任务 */
 }
 
 /* ========== 查询 ========== */

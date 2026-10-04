@@ -297,6 +297,7 @@ typedef struct {
     uint64_t         stall_threshold_ns;
     int              enable_evict_monitor;
     uint32_t         max_tasks;
+    uint32_t         steal_batch_max;   /* 批量窃取每受害者一次偷几个；0=关闭批量 */
     _Atomic(int)     shutdown;
     _Atomic(uint64_t) active_task_count;
     _Atomic(uint64_t) next_task_id;

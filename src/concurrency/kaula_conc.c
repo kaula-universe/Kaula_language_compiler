@@ -135,6 +135,18 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
     g_conc_runtime.stall_threshold_ns = cfg.stall_threshold_ns;
     g_conc_runtime.enable_evict_monitor = cfg.enable_evict_monitor;
     g_conc_runtime.max_tasks = cfg.max_tasks;
+    /* 批量窃取批量大小：环境变量 KAULA_STEAL_BATCH，init 时读一次缓存。
+     * 默认 8；0 = 关闭批量、全走单任务 steal（不重编即可 A/B 隔离 k=1/4/8）。 */
+    {
+        uint32_t batch = 8;
+        const char* env = kaula_p_get_env("KAULA_STEAL_BATCH");
+        if (env && *env) {
+            long v = strtol(env, NULL, 10);
+            if (v < 0) v = 0;
+            batch = (uint32_t)v;
+        }
+        g_conc_runtime.steal_batch_max = batch;
+    }
     atomic_store_explicit(&g_conc_runtime.shutdown, 0, memory_order_relaxed);
     atomic_store_explicit(&g_conc_runtime.active_task_count, 0, memory_order_relaxed);
     atomic_store_explicit(&g_conc_runtime.next_task_id, 1, memory_order_relaxed);
