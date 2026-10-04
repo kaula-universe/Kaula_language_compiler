@@ -388,6 +388,7 @@ KaulaHandle kaula_spawn_enter_flags(KaulaResumeFn resume_fn, KaulaResumeFn enter
 KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
                                 void* frame, size_t frame_size) {
     conc_ensure_init();
+    (void)frame_size;  /* 公开 ABI 形参；simple 路径固定 sizeof(KaulaSimpleFrame) */
     if (atomic_load_explicit(&g_conc_runtime.shutdown, memory_order_acquire)) {
         return spawn_failed(KAULA_ERR_SHUTDOWN);
     }
