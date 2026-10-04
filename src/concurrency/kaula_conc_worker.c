@@ -57,10 +57,23 @@ void kaula_conc_advance_epoch_if_needed(void) {
      * 配合 retire 时记录 epoch，回收条件为"所有活跃 Worker 的
      * local_epoch > 退休 epoch"，因此实际延迟至少两轮，
      * 足以覆盖任何 enter → 访问 → exit 的时序。
+     *
+     * P-opt：计数放 Worker 本地（独占缓存行、无原子、无跨线程争用）。
+     * 旧实现用全局 g_epoch_exit_counter 每任务一次 relaxed RMW ——
+     * 多 Worker 在同一个 cacheline 上乒乓，spawn/await 热路径
+     * 每任务赔一次原子写。本地化后该原子写完全消失；
+     * 代价是每个 Worker 各自每 256 次退出推进一次全局 epoch
+     * （推进频率只升不降，回收只会更积极，属于安全方向）。
      */
+    KaulaWorker* w = kaula_conc_current_worker();
+    if (w != NULL) {
+        if ((++w->epoch_exit_count & 0xFF) != 0xFF) return;
+        atomic_fetch_add_explicit(&g_conc_epoch.global_epoch, 1, memory_order_acq_rel);
+        return;
+    }
+    /* 非 Worker 线程（main 的 await 同步路径）：退化用全局计数 */
     uint64_t n = atomic_fetch_add_explicit(&g_epoch_exit_counter, 1, memory_order_relaxed);
     if ((n & 0xFF) != 0xFF) return;
-
     atomic_fetch_add_explicit(&g_conc_epoch.global_epoch, 1, memory_order_acq_rel);
 }
 
