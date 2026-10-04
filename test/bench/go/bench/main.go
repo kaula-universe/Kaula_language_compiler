@@ -87,14 +87,15 @@ func runCurve(curve string, withSleep bool) int64 {
 	}
 }
 
-// percentile 取排序后样本的分位值，与 Kaula 模板的 (n*pct)/100 下标一致。
-// 夹到 n-1：n 很小时 (n*999)/1000 可能落到 n 上。
-func percentile(sorted []int64, pct int) int64 {
+// percentile 取排序后样本的千分位值（permille：500=p50, 990=p99, 999=p99.9,
+// 1000=max），与 Kaula 模板的下标公式统一口径。
+// 夹到 n-1：n 很小时 (n*permille)/1000 可能落到 n 上。
+func percentile(sorted []int64, permille int) int64 {
 	n := len(sorted)
 	if n == 0 {
 		return 0
 	}
-	idx := (n * pct) / 100
+	idx := (n * permille) / 1000
 	if idx >= n {
 		idx = n - 1
 	}
@@ -218,7 +219,7 @@ func main() {
 	// 单行输出：多行调用与自动补分号的脚本会互相干扰。
 	fmt.Printf("RESULT curve=%s tps=%d elapsed_ns=%d p50=%d p95=%d p99=%d p999=%d max=%d n=%d win=%d errors=%d checksum=%d\n",
 		curve, tps, elapsed,
-		percentile(sorted, 50), percentile(sorted, 95),
-		percentile(sorted, 99), percentile(sorted, 999),
-		percentile(sorted, 100), n, conc, errors, checksum)
+		percentile(sorted, 500), percentile(sorted, 950),
+		percentile(sorted, 990), percentile(sorted, 999),
+		percentile(sorted, 1000), n, conc, errors, checksum)
 }
