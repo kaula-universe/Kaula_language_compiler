@@ -3,16 +3,26 @@
 Kaula Version Generator / Kaula 版本号生成器
 
 Generates snapshot version from git: YY.M.DD-branch-hash
-Generates release version: v1.0.x (x = commit count since v1.0)
+Generates release version (方案 A 严格减法 / strict subtraction):
+    v<MAJOR>.<MINOR>.<PATCH>
+    PATCH = 仓库总提交数 (git rev-list --count HEAD) − 当前 minor 的减法基准 base_total
+    base_total 归档在 scripts/version_history.json，是版本基准的唯一权威来源（不依赖 git tag）。
+    每个 minor 的第 1 个提交 PATCH = 1（注意不是 0）。
+
+切换 minor / Cut a new minor:
+    python scripts/version.py --cut-minor 1.1
+    在“切版提交”创建之前运行：它把旧 minor 最后一个提交的总提交数作为新 minor 的 base_total 归档；
+    随后创建的切版提交（总提交 = base_total + 1）即 v<new>.1。
 
 Usage / 用法:
     python scripts/version.py              # Print version / 打印版本
     python scripts/version.py --update     # Update version.json / 更新 version.json
     python scripts/version.py --json       # Output JSON / 输出 JSON
+    python scripts/version.py --cut-minor 1.1  # Archive & switch minor / 归档并切换 minor
 
 Output / 输出:
     Snapshot: 26.8.23-master-67ffac3
-    Release:  v1.0.42
+    Release:  v1.1.1
 """
 
 import argparse
@@ -55,33 +65,11 @@ def get_commit_hash(cwd: Path = None) -> str:
 
 def get_commit_short(cwd: Path = None) -> str:
     """Get current commit hash (7 chars)."""
-    full = get_commit_hash(cwd)
-    return full[:7]
+    return get_commit_hash(cwd)[:7]
 
 
-def get_commit_count_since_v1_0(cwd: Path = None) -> int:
-    """Count commits since v1.0 tag. If tag doesn't exist, count all commits."""
-    # Try to find v1.0 tag
-    tag_ref = run_git(["rev-parse", "v1.0", "--quiet"], cwd)
-    if tag_ref:
-        # Count commits since v1.0
-        count = run_git(["rev-list", "--count", "v1.0..HEAD"], cwd)
-        try:
-            return int(count)
-        except ValueError:
-            pass
-    
-    # Try any v1.0.x tags and use the latest
-    tags = run_git(["tag", "-l", "v1.0.*"], cwd)
-    if tags:
-        latest_tag = sorted(tags.split("\n"))[-1]
-        count = run_git(["rev-list", "--count", f"{latest_tag}..HEAD"], cwd)
-        try:
-            return int(count)
-        except ValueError:
-            pass
-    
-    # No v1.0 tag yet, count all commits
+def get_total_commit_count(cwd: Path = None) -> int:
+    """Total number of commits in repository history (strict subtraction operand)."""
     count = run_git(["rev-list", "--count", "HEAD"], cwd)
     try:
         return int(count)
@@ -89,104 +77,137 @@ def get_commit_count_since_v1_0(cwd: Path = None) -> int:
         return 0
 
 
-def get_remote_commit_count(cwd: Path = None) -> int:
-    """Get remote commit count to sync with remote."""
-    remote = get_branch(cwd)
-    remote_ref = run_git(["rev-parse", f"origin/{remote}", "--quiet"], cwd)
-    if not remote_ref:
-        return 0
-    
-    count = run_git(["rev-list", "--count", f"origin/{remote}"], cwd)
-    try:
-        return int(count)
-    except ValueError:
-        return 0
+def get_history_path(project_root: Path) -> Path:
+    return project_root / "scripts" / "version_history.json"
 
 
-def get_merged_pr_count(cwd: Path = None) -> int:
-    """Count merged PRs (merge commits)."""
-    if cwd is None:
-        cwd = Path.cwd()
-    
-    # Count merge commits (PRs merged into main branches)
-    # Merge commits have 2+ parents
-    count = run_git(["rev-list", "--count", "--merges", "HEAD"], cwd)
-    try:
-        return int(count)
-    except ValueError:
-        return 0
+def load_history(project_root: Path) -> dict:
+    """Load the minor baseline archive. Raises on missing/corrupt file (must exist)."""
+    path = get_history_path(project_root)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def get_push_count(cwd: Path = None) -> int:
-    """Count pushed direct commits (non-merge, excluding unpushed)."""
-    if cwd is None:
-        cwd = Path.cwd()
-    
+def save_history(project_root: Path, data: dict):
+    path = get_history_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def get_current_minor(history: dict) -> str:
+    return history.get("current_minor", "1.0")
+
+
+def get_base_total(history: dict, minor: str) -> int:
+    """Return archived subtraction baseline for a minor."""
+    for entry in history.get("versions", []):
+        if entry.get("minor") == minor:
+            try:
+                return int(entry.get("base_total", 0))
+            except (TypeError, ValueError):
+                return 0
+    raise KeyError(f"minor {minor} 未在 version_history.json 归档")
+
+
+def get_local_ahead(cwd: Path = None) -> int:
+    """Commits locally ahead of origin/<branch> (for the optional +N display)."""
     branch = get_branch(cwd)
-    # 只统计已推送到远程的非 merge 提交
-    count = run_git(["rev-list", "--count", "--no-merges", f"origin/{branch}"], cwd)
+    ahead = run_git(["rev-list", "--count", f"origin/{branch}..HEAD"], cwd)
     try:
-        return int(count)
+        return int(ahead)
     except ValueError:
         return 0
+
+
+def cut_minor(project_root: Path, new_minor: str) -> dict:
+    """Archive the old minor baseline and switch current_minor to new_minor.
+
+    Must be run BEFORE creating the cut commit: base_total is the total commit
+    count at the old minor's last commit. The cut commit (base_total + 1) then
+    computes to v<new_minor>.1.
+    """
+    history = load_history(project_root)
+    old_minor = get_current_minor(history)
+
+    if new_minor == old_minor:
+        raise SystemExit(f"当前 minor 已是 {new_minor}，无需切换")
+
+    existing = {e.get("minor") for e in history.get("versions", [])}
+    if new_minor in existing:
+        raise SystemExit(f"minor {new_minor} 已归档，不能重复归档")
+
+    # 旧 minor 最后一个提交的总提交数 = 新 minor 的减法基准
+    base_total = get_total_commit_count(project_root)
+
+    history.setdefault("versions", []).append({
+        "minor": new_minor,
+        "base_total": base_total,
+        "cut_date": datetime.now().strftime("%Y-%m-%d"),
+        "note": f"v{new_minor} 减法基准 = 切换前 v{old_minor} 最后总提交数 {base_total}"
+    })
+    history["current_minor"] = new_minor
+    save_history(project_root, history)
+
+    print(f"已归档 minor 基准：v{new_minor} base_total={base_total}（来源 v{old_minor} 最后总提交数）")
+    print(f"current_minor: {old_minor} -> {new_minor}")
+    print("下一步：创建切版提交；提交后 v" + new_minor + ".1 = 总提交 "
+          f"{base_total + 1} − 基准 {base_total}")
+    return history
 
 
 def generate_snapshot_version(cwd: Path = None) -> str:
     """Generate snapshot version: YY.M.DD-branch-hash"""
     if cwd is None:
         cwd = Path.cwd()
-    
+
     now = datetime.now()
     year = now.year % 100  # Last 2 digits
     month = now.month      # No leading zero
     day = now.day          # No leading zero
-    
+
     branch = get_branch(cwd)
     commit_hash = get_commit_short(cwd)
-    
+
     return f"{year}.{month}.{day}-{branch}-{commit_hash}"
 
 
 def generate_release_version(cwd: Path = None) -> tuple:
-    """Generate release version: v1.0.x and optional +N for unpushed commits
-    Returns: (version_str, local_ahead)"""
+    """Generate release version via strict subtraction.
+    Returns: (version_str, local_ahead)
+    """
     if cwd is None:
         cwd = Path.cwd()
-    
-    # 先 fetch 获取最新远程状态
-    run_git(["fetch", "--quiet"], cwd)
-    
-    pr_count = get_merged_pr_count(cwd)
-    push_count = get_push_count(cwd)
-    
-    # x = PR + push
-    x = pr_count + push_count
-    
-    # 本地领先远程的提交数（未推送）
-    local_ahead = run_git(["rev-list", "--count", f"origin/{get_branch(cwd)}..HEAD"], cwd)
-    try:
-        local_ahead = int(local_ahead)
-    except ValueError:
-        local_ahead = 0
-    
-    return f"v1.0.{x}", local_ahead
+
+    project_root = cwd
+    history = load_history(project_root)
+    minor = get_current_minor(history)
+    base_total = get_base_total(history, minor)
+
+    total = get_total_commit_count(cwd)
+    patch = total - base_total
+    if patch < 0:
+        patch = 0
+
+    return f"v{minor}.{patch}", get_local_ahead(cwd)
 
 
 def update_version_json(project_root: Path, snapshot: str, release: str, codename: str = "kaula"):
     """Update compiler/version.json with new versions."""
     version_file = project_root / "compiler" / "version.json"
-    
+
     data = {
         "version": release,
         "snapshot": snapshot,
         "codename": codename
     }
-    
+
     version_file.parent.mkdir(parents=True, exist_ok=True)
     with open(version_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    
+
     return version_file
 
 
@@ -201,7 +222,8 @@ Examples / 示例:
   python scripts/version.py --json       # Output JSON / 输出 JSON
   python scripts/version.py --snapshot   # Only snapshot / 仅快照版本
   python scripts/version.py --release    # Only release / 仅发布版本
-  python scripts/version.py --get-version  # Release version without 'v' (CI auto-tag) / 无 v 前缀发布版本（CI 打 tag）
+  python scripts/version.py --get-version  # Release version without 'v' / 无 v 前缀发布版本
+  python scripts/version.py --cut-minor 1.1  # Archive & switch minor / 归档并切换 minor
         """
     )
     parser.add_argument("--update", action="store_true",
@@ -213,25 +235,33 @@ Examples / 示例:
     parser.add_argument("--release", action="store_true",
                         help="Print only release version / 仅打印发布版本")
     parser.add_argument("--get-version", action="store_true",
-                        help="Print release version without 'v' prefix (for CI auto-tag) / 输出无 v 前缀的发布版本号（供 CI 自动打 tag）")
+                        help="Print release version without 'v' prefix / 输出无 v 前缀发布版本")
+    parser.add_argument("--cut-minor", metavar="MINOR", default=None,
+                        help="Archive old minor baseline and switch to MINOR (e.g. 1.1) / 归档旧 minor 基准并切换")
     parser.add_argument("--codename", default="kaula",
                         help="Version codename / 版本代号 (default: kaula)")
-    
+
     args = parser.parse_args()
-    
+
     project_root = Path(__file__).parent.parent.resolve()
-    
+
+    # --cut-minor 只负责归档与切换；切版提交创建后再用 --update 刷新 version.json
+    if args.cut_minor:
+        cut_minor(project_root, args.cut_minor)
+        return
+
     snapshot = generate_snapshot_version(project_root)
     release, local_ahead = generate_release_version(project_root)
-    
+
     if args.update:
         version_file = update_version_json(project_root, snapshot, release, args.codename)
         print(f"Updated {version_file}")
         print(f"  release:  {release}")
         print(f"  snapshot: {snapshot}")
-        print(f"  ahead:    +{local_ahead}" if local_ahead > 0 else "")
+        if local_ahead > 0:
+            print(f"  ahead:    +{local_ahead}")
         return
-    
+
     if args.json:
         data = {
             "release": release,
@@ -242,20 +272,19 @@ Examples / 示例:
             data["ahead"] = local_ahead
         print(json.dumps(data, indent=2))
         return
-    
+
     if args.snapshot:
         print(snapshot)
         return
-    
+
     if args.release:
         print(release)
         return
-    
+
     if args.get_version:
-        # CI 自动打 tag 用：输出不带 v 前缀的版本号（auto-tag.yml 拼 TAG="v$VERSION"）
         print(release[1:] if release.startswith("v") else release)
         return
-    
+
     # Default: print both with +N if unpushed
     ahead_str = f" +{local_ahead}" if local_ahead > 0 else ""
     print(f"kaulac {release}{ahead_str} ({snapshot})")

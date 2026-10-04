@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "current_minor": "1.1",
+  "description": "Kaula 版本号减法基准归档（方案 A 严格减法）。切换 minor 前用 `python scripts/version.py --cut-minor <new>` 归档：把旧 minor 最后一个提交的仓库总提交数(git rev-list --count HEAD) 作为新 minor 的 base_total；新 minor 的版本号 v<minor>.N，N = 仓库总提交数 − base_total，每个 minor 的第 1 个提交 N=1（不是 0）。本文件是版本基准的唯一权威来源，不依赖 git tag。",
+  "versions": [
+    {
+      "minor": "1.0",
+      "base_total": 0,
+      "cut_date": "2026-03-08",
+      "note": "初始 minor。v1.0 历史与现有 tag(v1.0.185/194/195，位于 develop/feat 分支、非 master 祖先) 一律保持不变；v1.0.N 的 N 即仓库总提交数。"
+    },
+    {
+      "minor": "1.1",
+      "base_total": 440,
+      "cut_date": "2026-10-05",
+      "note": "v1.1 减法基准 = 切换前 v1.0 最后总提交数 440"
+    }
+  ]
+}
