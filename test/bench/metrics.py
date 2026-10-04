@@ -21,6 +21,17 @@
     python test/bench/metrics.py --runtimes kaula,go,tokio
     python test/bench/metrics.py --full              # 阶梯加压 + 长稳
     python test/bench/metrics.py --json out.json
+    python test/bench/metrics.py --runtimes kaula --repeat 11   # 重复采样测离散度
+
+测量口径（与 ab_compiler.py 一致，对应 FINDINGS F10）:
+  - 本机实测噪声底 8%~49%，单样本对比无效。--repeat N 让同一配置
+    (runtime/curve/conc) 重复跑 N 次，报告 tps/p99 的**中位数**作主值，
+    并附两种离散度：
+      spread% = max/min - 1（轮内极差，「自己跟自己比」的噪声量级）；
+      cv%     = 标准差/均值（量级无关，跨配置可比）。
+  - 跨配置/跨运行时比较：差值必须大过两边 spread% 才算显著，否则判「噪声内」。
+    正式结论建议 --repeat>=11（奇数取中位稳健）；默认 --repeat 1 为旧行为。
+  - 跑基准时机器须安静：测量期间不要同时编译/跑别的负载，否则自行灌噪声。
 """
 from __future__ import annotations
 
@@ -42,6 +53,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 IS_WINDOWS = platform.system() == "Windows"
+
+# 可执行文件后缀：Windows 带 .exe，Linux/macOS 无扩展名（与 run_bench 保持一致）。
+# 注意 kaulac 在 Linux 产出无后缀的二进制，硬编码 .exe 会找不到产物。
+from run_bench import EXE_SUFFIX  # noqa: E402
 
 # 事务常量：三边必须一致（TRANSACTION.md）
 EXPECTED_CHECKSUM = 13356499072
@@ -350,6 +365,8 @@ class CaseRecord:
     # 只报成功那次的数字而不报挂死率，等于把 bug 藏起来。
     attempts: int = 1
     hangs: int = 0
+    # 重复采样（--repeat N）：本配置实际成功跑了几次、关键指标的离散度。
+    n_repeat: int = 1
 
 
 def run_case(exe: Path, args: list[str], runtime: str, curve: str,
@@ -564,13 +581,79 @@ def _rss_at_phase(rec: CaseRecord, name: str) -> int | None:
     return None
 
 
+def run_with_retries(exe, args, rt, curve, conc, total, *, interval, timeout,
+                     stop_loss, retries) -> CaseRecord:
+    """跑一次配置（含 F1 概率性死锁的挂死重试），返回一条 CaseRecord。"""
+    attempts = hangs = 0
+    while True:
+        attempts += 1
+        try:
+            rec = run_case(exe, args, rt, curve, conc, total,
+                           interval=interval, timeout=timeout, stop_loss=stop_loss)
+        except SystemExit as e:
+            rec = CaseRecord(rt, curve, conc, total, error=str(e))
+        except Exception as e:      # noqa: BLE001
+            rec = CaseRecord(rt, curve, conc, total, error=repr(e))
+        # 只对「挂死」重试：构建失败/止损/缺 RESULT 重试没用，只会把 bug 藏起来。
+        hung = bool(rec.error) and "超时" in rec.error
+        if hung and hangs < retries:
+            hangs += 1
+            log(f"  挂死（F1 概率性死锁）-> 重试 {hangs}/{retries}")
+            continue
+        rec.attempts = attempts
+        rec.hangs = hangs
+        return rec
+
+
+def _repeat_stats(xs: list[int]) -> dict:
+    """一组重复采样的离散度统计。xs 非空（调用方保证）。
+
+    median   中位数（主报告用这个，不用均值——对单轮离群值免疫）
+    spread%  轮内极差 = max/min - 1。本机噪声底 8%~49%，spread 就是该配置
+             「自己跟自己比」的噪声量级：跨配置比较时，差值若小于两边 spread，
+             落在噪声内，不能下结论。
+    cv%      变异系数 = 标准差/均值。对量级不敏感，跨配置可比。
+    """
+    if len(xs) < 2:
+        return {"n": len(xs), "median": statistics.median(xs) if xs else 0,
+                "spread_pct": 0.0, "cv_pct": 0.0, "samples": xs}
+    med = statistics.median(xs)
+    mean = statistics.mean(xs)
+    sd = statistics.pstdev(xs)
+    spread = (max(xs) / min(xs) - 1) * 100 if min(xs) else 0.0
+    cv = sd / mean * 100 if mean else 0.0
+    return {"n": len(xs), "median": med,
+            "spread_pct": round(spread, 1), "cv_pct": round(cv, 1),
+            "samples": xs}
+
+
+def aggregate_repeats(recs: list[CaseRecord]) -> CaseRecord:
+    """把同一配置的多次重复采样聚合成一行。
+
+    代表行的 tps/p99_ns 改写为多次中位数；离散度（spread%/cv%）挂在
+    values["tps_repeat"] / values["p99_repeat"] 里，供报告与 JSON 输出。
+    其余进程级指标（cpu/rss…）取代表行那一次，不做重复聚合。
+    """
+    rep = recs[0]
+    tps_list = [r.values["tps"] for r in recs if r.values.get("tps")]
+    p99_list = [r.values["p99_ns"] for r in recs if r.values.get("p99_ns")]
+    rep.values["tps_repeat"] = _repeat_stats(tps_list)
+    rep.values["p99_repeat"] = _repeat_stats(p99_list)
+    if tps_list:
+        rep.values["tps"] = statistics.median(tps_list)
+    if p99_list:
+        rep.values["p99_ns"] = statistics.median(p99_list)
+    rep.n_repeat = len(recs)
+    return rep
+
+
 # ==========================================================================
 # 构建
 # ==========================================================================
 
 def build_go() -> Path:
     src = HERE / "go" / "bench"
-    exe = src / "bench_go.exe"
+    exe = src / f"bench_go{EXE_SUFFIX}"
     # encoding 显式指定：text=True 在 Windows 上按 locale（GBK）解码，
     # 而编译器诊断常是 UTF-8 —— 混用会在子线程抛 UnicodeDecodeError，
     # 主流程只剩半截输出。errors="replace" 保证拿不到干净文本也不崩。
@@ -583,7 +666,7 @@ def build_go() -> Path:
 
 def build_tokio() -> Path:
     src = HERE / "tokio" / "bench"
-    exe = src / "target" / "release" / "bench_tokio.exe"
+    exe = src / "target" / "release" / f"bench_tokio{EXE_SUFFIX}"
     r = subprocess.run(["cargo", "build", "--release"], cwd=str(src),
                        capture_output=True, encoding="utf-8", errors="replace")
     if not exe.exists():
@@ -595,8 +678,8 @@ def build_kaula(curve: str, conc: int, total: int) -> Path:
     from run_bench import render_kaula          # 复用同一份模板渲染
     src = HERE / "kaula" / "bench_gen.kl"
     src.write_text(render_kaula(curve, conc, total), encoding="utf-8")
-    exe = HERE / "kaula" / "bench_gen.exe"
-    kaulac = REPO / "build" / "bin" / "kaulac.exe"
+    exe = HERE / "kaula" / f"bench_gen{EXE_SUFFIX}"
+    kaulac = REPO / "build" / "bin" / f"kaulac{EXE_SUFFIX}"
     if not kaulac.exists():
         raise SystemExit(f"找不到 {kaulac}，先跑 python toolkit_build.py --target compiler")
     # 先删旧产物：下面只判 exists()。若上一次的 exe 正在运行导致本次链接失败，
@@ -678,6 +761,26 @@ def print_report(records: list[CaseRecord]) -> None:
         print("   注意：上表该行的数字来自成功的那一次，"
               "不代表该运行时能稳定跑出这个数。")
 
+    # 重复采样离散度（--repeat N，对应 FINDINGS F10 未完成项）。
+    # 上表 tps/p99 已是 N 次中位数；这里把「这格自己晃多厉害」显式列出来，
+    # 否则跨配置/跨运行时比较时无法判断差值是否大过噪声。
+    repeated = [r for r in ok if r.n_repeat > 1]
+    if repeated:
+        print()
+        print("重复采样离散度（--repeat；spread%=轮内极差 max/min-1，cv%=标准差/均值）:")
+        print(f"   {'case':<26}{'n':>4}{'tps中位':>11}{'tps spread%':>12}"
+              f"{'tps cv%':>9}{'p99中位':>11}{'p99 spread%':>12}")
+        for r in repeated:
+            tr = r.values.get("tps_repeat", {})
+            pr = r.values.get("p99_repeat", {})
+            print(f"   {r.runtime + '/' + r.curve + '/' + str(r.conc):<26}"
+                  f"{r.n_repeat:>4}{tr.get('median', 0):>11,.0f}"
+                  f"{tr.get('spread_pct', 0):>11.1f}%{tr.get('cv_pct', 0):>8.1f}%"
+                  f"{pr.get('median', 0) / 1000:>10.1f}u"
+                  f"{pr.get('spread_pct', 0):>11.1f}%")
+        print("   判定：跨配置差值若小于两边 spread% 即落在噪声内（本机噪声底 8%~49%）；"
+              "正式结论需 --repeat>=11。")
+
     # 校验：同一条曲线的 checksum 三边必须一致，不一致说明算的不是同一件事。
     #
     # 必须按曲线分组：light/suspend/mixed 与 degrade 的期望值本来就不同
@@ -730,6 +833,11 @@ def main() -> int:
                     help="挂死（超时强杀）后重试次数。F1 是概率性死锁，"
                          "不重试的话 Kaula 的 suspend/mixed 整列都是空的；"
                          "设 0 关闭重试。挂死率会单独报出来，不会被藏掉。")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="同一 (runtime/curve/conc) 配置重复采样 N 次，报告 tps/p99 "
+                         "的中位数 + 离散度（spread%=轮内极差、cv%=变异系数）。"
+                         "本机噪声底 8%~49%，单样本对比无效：正式结论至少 --repeat 11。"
+                         "默认 1 = 旧行为（每格一个样本）。")
     ap.add_argument("--json", default="")
     ap.add_argument("--full", action="store_true",
                     help="完整协议：阶梯加压 + 长稳 + 止损")
@@ -800,42 +908,42 @@ def main() -> int:
                     log(f"  失败: {rec.error[:160]}")
                     continue
 
-                attempts = 0
-                hangs = 0
-                while True:
-                    attempts += 1
-                    try:
-                        rec = run_case(exe, args, rt, curve, conc, a.total,
-                                       interval=a.interval, timeout=a.timeout,
-                                       stop_loss=stop_loss)
-                    except SystemExit as e:
-                        rec = CaseRecord(rt, curve, conc, a.total, error=str(e))
-                    except Exception as e:  # noqa: BLE001
-                        rec = CaseRecord(rt, curve, conc, a.total, error=repr(e))
+                repeat = max(1, a.repeat)
+                rep_records: list[CaseRecord] = []
+                for r_i in range(repeat):
+                    rec = run_with_retries(
+                        exe, args, rt, curve, conc, a.total,
+                        interval=a.interval, timeout=a.timeout,
+                        stop_loss=stop_loss, retries=a.retries)
+                    if rec.error:
+                        # 任何一次采样失败（挂死重试耗尽/构建后报错）：停止本配置采样，
+                        # 用已成功的样本聚合；一个都没成就把这条 error 记录进表。
+                        break
+                    rep_records.append(rec)
+                    if repeat > 1:
+                        log(f"  样本 {r_i + 1}/{repeat}: "
+                            f"tps={rec.values.get('tps')} "
+                            f"p99={rec.values.get('p99_ns', 0) / 1000:.1f}us")
 
-                    # 只对「挂死」重试：F1 是概率性死锁，单次失败不代表该用例
-                    # 无解。构建失败 / 止损 / 缺 RESULT 行都不重试——那些重试
-                    # 没用，重试只会把要修的问题藏起来。
-                    hung = bool(rec.error) and "超时" in rec.error
-                    if hung and hangs < a.retries:
-                        hangs += 1
-                        log(f"  挂死（F1 概率性死锁）-> 重试 {hangs}/{a.retries}")
-                        continue
-                    break
-
-                rec.attempts = attempts
-                rec.hangs = hangs
-                records.append(rec)
-                if rec.error:
+                if not rep_records:
+                    records.append(rec)
                     log(f"  失败: {rec.error[:160]}")
-                else:
-                    retry_note = (f" ({hangs} 次挂死后成功，共 {attempts} 次)"
-                                  if hangs else "")
-                    log(f"  tps={rec.values.get('tps')} "
-                        f"p99={rec.values.get('p99_ns', 0)/1000:.1f}us "
-                        f"err={rec.values.get('errors')} "
-                        f"cpu={(rec.values.get('cpu_user_s',0)+rec.values.get('cpu_sys_s',0)):.2f}s"
-                        f"{retry_note}")
+                    continue
+                # 代表行：tps/p99 改写为多次中位数，离散度挂在 values["*_repeat"]。
+                rec = aggregate_repeats(rep_records) if repeat > 1 else rep_records[0]
+                records.append(rec)
+                tps_rep = rec.values.get("tps_repeat", {})
+                p99_rep = rec.values.get("p99_repeat", {})
+                disp_note = (f" tpsσ={tps_rep.get('spread_pct')}%/"
+                             f"cv={tps_rep.get('cv_pct')}% "
+                             f"p99σ={p99_rep.get('spread_pct')}%/"
+                             f"cv={p99_rep.get('cv_pct')}%"
+                             if rec.n_repeat > 1 else "")
+                log(f"  tps={rec.values.get('tps')} "
+                    f"p99={rec.values.get('p99_ns', 0) / 1000:.1f}us "
+                    f"err={rec.values.get('errors')} "
+                    f"cpu={(rec.values.get('cpu_user_s', 0) + rec.values.get('cpu_sys_s', 0)):.2f}s"
+                    f" n={rec.n_repeat}{disp_note}")
 
     print_report(records)
 
@@ -843,6 +951,7 @@ def main() -> int:
         out = [{"runtime": r.runtime, "curve": r.curve, "conc": r.conc,
                 "total": r.total, "wall_s": r.wall_s, "error": r.error,
                 "attempts": r.attempts, "hangs": r.hangs,
+                "n_repeat": r.n_repeat,
                 "values": r.values,
                 "series": [{"t": s.t, **s.d} for s in r.series]}
                for r in records]
