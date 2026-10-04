@@ -26,6 +26,14 @@
 
 A/B 两边都必须是**已提交的干净状态**。工作区里的未提交改动不在测量范围内 ——
 否则测的是「基线 vs 基线+WIP」，问题会说不清。
+
+报表演化（对应 FINDINGS F12：补 p99 离散度列）：
+  - tps / p99 均取各变体 reps 轮的中位数；
+  - tps B/A、p99 B/A 是**逐轮配对比值的中位数**（不是两个中位数相除）；
+  - tpsAσ%/tpsBσ%、p99Aσ%/p99Bσ% 是各变体 reps 轮内极差（max/min-1），
+    即「自己跟自己比」的噪声量级。判定规则：B/A 改善幅度必须 > max(两边σ%)，
+    否则该格差异落在噪声内（本机噪声底 8%~49%，reps 建议 ≥11）。
+  - 跑基准时机器须安静，不要同时编译/跑别的负载。
 """
 from __future__ import annotations
 
@@ -39,7 +47,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from run_bench import CURVES, RESULT_RE, render_kaula  # noqa: E402
+from run_bench import CURVES, EXE_SUFFIX, RESULT_RE, render_kaula  # noqa: E402
 
 REPO = HERE.parent.parent
 
@@ -63,13 +71,13 @@ def build(worktree: Path, kl_text: str, stem: str, outdir: Path,
 
     outdir.mkdir(parents=True, exist_ok=True)
     # 旧产物必须删：下面只判 exists()，上次残留的 exe 会被当成本次结果。
-    for stale in outdir.glob(f"{stem}.exe"):
+    for stale in outdir.glob(f"{stem}{EXE_SUFFIX}"):
         stale.unlink()
 
     r = subprocess.run([str(kaulac), "-output-dir", str(outdir), str(src)],
                        capture_output=True, encoding="utf-8", errors="replace",
                        cwd=str(worktree), timeout=900)
-    exe = outdir / f"{stem}.exe"
+    exe = outdir / f"{stem}{EXE_SUFFIX}"
     if not exe.exists():
         raise SystemExit(f"{worktree.name}: kaulac 失败\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
     if verbose:
@@ -167,6 +175,7 @@ def main() -> int:
             eb = build(wb, kl, stem, out / args.label_b, args.verbose)
 
             sa, sb = [], []
+            pairs = []   # 同一 rep 内 (A轮, B轮)，用于逐轮配对比值
             sums = set()
             errs = []
             for rep in range(args.reps):
@@ -175,13 +184,18 @@ def main() -> int:
                 order = [("A", ea), ("B", eb)]
                 if rep % 2:
                     order.reverse()
+                round_res = {}
                 for tag, exe in order:
                     r = run(exe, args.timeout)
                     if "error" in r:
                         errs.append(f"{tag}: {r['error']}")
                         continue
                     sums.add(r["checksum"])
+                    round_res[tag] = r
                     (sa if tag == "A" else sb).append(r)
+                # 只有该 rep 两个变体都成功，才配成一对进逐轮比值
+                if "A" in round_res and "B" in round_res:
+                    pairs.append((round_res["A"], round_res["B"]))
 
             if errs:
                 print(f"[ab] {curve}/conc={conc} 失败：{errs[0][:160]}")
@@ -192,33 +206,57 @@ def main() -> int:
             if len(sums) != 1:
                 print(f"[ab] {curve}/conc={conc} checksum 不一致：{sums} —— 数据不可用")
 
+            def med(xs):
+                return statistics.median(xs) if xs else None
+
+            def spread(xs):
+                """轮内极差离散度 = max/min - 1（百分比）。
+
+                同一变体在 reps 轮里最快与最慢之比。实测噪声底 8%~49%，
+                这个数就是该格「自己跟自己比」的噪声量级：
+                若 B/A 改善幅度 ≤ 本格 A 或 B 的 spread，差异落在噪声内，不能下结论。
+                """
+                lo, hi = min(xs), max(xs)
+                return (hi / lo - 1) * 100 if lo else 0.0
+
             tps_a = med([r["tps"] for r in sa])
             tps_b = med([r["tps"] for r in sb])
             p99_a = med([r["p99"] for r in sa])
             p99_b = med([r["p99"] for r in sb])
-            # 每轮比值的中位数：对单轮离群值免疫，比「两个中位数相除」稳
-            ratios = sorted(rb["tps"] / ra["tps"] for ra, rb in zip(sa, sb) if ra["tps"])
-            rows.append((curve, conc, tps_a, tps_b, med(ratios), p99_a, p99_b,
-                         min(sa, key=lambda r: r["tps"])["tps"],
-                         max(sa, key=lambda r: r["tps"])["tps"]))
+            # 逐轮配对比值的中位数：对单轮离群值免疫，比「两个中位数相除」稳。
+            # tps 越大越好、p99 越小越好，统一报 B/A（p99 的 <1 即 B 更快）。
+            tps_ratio = med([rb["tps"] / ra["tps"]
+                             for ra, rb in pairs if ra["tps"]])
+            p99_ratio = med([rb["p99"] / ra["p99"]
+                             for ra, rb in pairs if ra["p99"]])
+            rows.append((curve, conc,
+                         tps_a, tps_b, tps_ratio,
+                         spread([r["tps"] for r in sa]),
+                         spread([r["tps"] for r in sb]),
+                         p99_a, p99_b, p99_ratio,
+                         spread([r["p99"] for r in sa]),
+                         spread([r["p99"] for r in sb])))
 
     if not rows:
         print("[ab] 没有可用数据")
         return 1
 
-    print("=" * 104)
-    print(f"{'curve/conc':<18}{'A tps':>11}{'B tps':>11}{'B/A':>9}"
-          f"{'A p99':>11}{'B p99':>11}{'p99 B/A':>10}{'A 轮内极差':>13}")
-    print("-" * 104)
-    for curve, conc, ta, tb, rm, pa, pb, lo, hi in rows:
-        spread = (hi / lo - 1) * 100 if lo else 0
-        print(f"{curve + '/' + str(conc):<18}{ta:>11,.0f}{tb:>11,.0f}"
-              f"{fmt_ratio(tb, ta):>9}{pa / 1000:>10.1f}u{pb / 1000:>10.1f}u"
-              f"{fmt_ratio(pb, pa):>10}{spread:>12.0f}%")
-    print("=" * 104)
-    print("tps / p99 取各变体 reps 轮的中位数；B/A 列是**每轮比值的中位数**。")
-    print("A 轮内极差 = A 自身最快/最慢之比，用来判断这个格的噪声量级：")
-    print("极差与 B/A 同量级时，该格的差异不能当结论。")
+    print("=" * 132)
+    print(f"{'curve/conc':<16}{'A tps':>10}{'B tps':>10}{'tps B/A':>9}"
+          f"{'tpsAσ%':>8}{'tpsBσ%':>8}{'A p99':>9}{'B p99':>9}"
+          f"{'p99 B/A':>9}{'p99Aσ%':>8}{'p99Bσ%':>8}")
+    print("-" * 132)
+    for (curve, conc, ta, tb, tr, ts_a, ts_b,
+         pa, pb, pr, ps_a, ps_b) in rows:
+        print(f"{curve + '/' + str(conc):<16}{ta:>10,.0f}{tb:>10,.0f}"
+              f"{(tr - 1) * 100:>+8.0f}%{ts_a:>7.0f}%{ts_b:>7.0f}%"
+              f"{pa / 1000:>8.1f}u{pb / 1000:>8.1f}u"
+              f"{(pr - 1) * 100:>+8.0f}%{ps_a:>7.0f}%{ps_b:>7.0f}%")
+    print("=" * 132)
+    print("tps / p99 取各变体 reps 轮的中位数；tps B/A、p99 B/A 是**逐轮配对比值的中位数**。")
+    print("σ% = 该变体 reps 轮内极差（max/min - 1），即「自己跟自己比」的噪声量级。")
+    print("判定：B/A 改善幅度必须 > max(tpsAσ%, tpsBσ%)（p99 同理比 p99Aσ/p99Bσ）才算显著；")
+    print("      否则该格差异落在噪声内。p99 B/A 为负 = B 尾延迟更低（更好）。")
     return 0
 
 
