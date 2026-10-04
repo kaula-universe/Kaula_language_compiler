@@ -193,6 +193,9 @@ struct KaulaTask {
 
     /* ---- 执行体 ---- */
     KaulaResumeFn       resume_fn;
+    /* 首跑直通入口（B：enter 无 switch 无守卫，只跑入口段到第一个挂起点）。
+     * NULL = 无直通（首跑也走 resume_fn）。 */
+    KaulaResumeFn       enter_fn;
     void*               frame;
     size_t              frame_size;
 
@@ -353,7 +356,8 @@ void kaula_task_wake_waiters(KaulaTask* task);
 /* ========== 任务生命周期 API ========== */
 
 KaulaTask*  kaula_task_alloc(void);
-void        kaula_task_init(KaulaTask* task, KaulaResumeFn fn, void* frame, size_t frame_size);
+void        kaula_task_init(KaulaTask* task, KaulaResumeFn fn, KaulaResumeFn enter_fn,
+                            void* frame, size_t frame_size);
 void        kaula_task_complete(KaulaTask* task, void* result);
 void        kaula_task_fail(KaulaTask* task, KaulaError err);
 void        kaula_task_recycle(KaulaTask* task);

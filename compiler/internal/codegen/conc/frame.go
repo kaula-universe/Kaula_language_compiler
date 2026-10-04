@@ -54,6 +54,7 @@ type Emitter struct {
 // 生成的标识符
 func (e *Emitter) FrameType() string { return e.CName + "_Frame" }
 func (e *Emitter) ResumeFn() string  { return e.CName + "_resume" }
+func (e *Emitter) EnterFn() string   { return e.CName + "_enter" }
 func (e *Emitter) ShimFn() string    { return e.CName + "_as_fn" }
 
 // SimpleEntryFn 是单一形态下 spawn 用的 void*(void*) 入口
@@ -75,8 +76,8 @@ func (e *Emitter) FrameVarCType(name string) string {
 // Generate 为一个 conc fn 产出全部 C 定义。
 //
 // segments 是按挂起点切开的函数体分段；第 i 段对应 resume 的 case i。
-// 分段而不是整段，是为了让每段末尾能插入"保存状态并挂起返回"。
-func (e *Emitter) Generate(analysis *BodyAnalysis, segments []string, body []ast.Statement) string {
+// enterSegment 是守卫形态的首跑直通入口段（去守卫版，非空则生成 enter）。
+func (e *Emitter) Generate(analysis *BodyAnalysis, segments []string, enterSegment string, body []ast.Statement) string {
 	var out strings.Builder
 	e.stateful = analysis.NeedsSuspend
 
@@ -97,8 +98,35 @@ func (e *Emitter) Generate(analysis *BodyAnalysis, segments []string, body []ast
 	// 双形态：pc + Frame 字段
 	out.WriteString(e.generateStatefulFrame(analysis))
 	out.WriteString(e.generateStatefulResume(analysis, segments))
+	if enterSegment != "" {
+		out.WriteString(e.generateEnterFn(enterSegment, analysis))
+	}
 	out.WriteString(e.generateShim(joined, true))
 	return out.String()
+}
+
+// generateEnterFn 生成首跑直通入口：无 switch 无守卫，
+// 无条件执行入口段（去守卫版）到第一个挂起点。
+func (e *Emitter) generateEnterFn(entryCode string, analysis *BodyAnalysis) string {
+	var b strings.Builder
+	b.WriteString("/* Enter for conc fn " + e.FuncName +
+		"（首跑直通：无 switch 无守卫，跑入口段到第一个挂起点） */\n")
+	b.WriteString("KaulaResumeResult " + e.EnterFn() + "(void* frame_ptr) {\n")
+	b.WriteString("    " + e.FrameType() + "* f = (" + e.FrameType() + "*)frame_ptr;\n")
+	// 参数恢复：spawn 时已写入 Frame，首跑安全读。
+	// 跨段局部变量只声明不读 —— 首跑 Frame 字段尚未初始化，读了是 UB；
+	// 入口段的守卫槽在首跑无条件执行，赋值会覆盖它们。
+	for _, p := range e.Params {
+		b.WriteString(fmt.Sprintf("    %s %s = f->%s;\n", e.CTypeOfParamByName(p), p, p))
+	}
+	for _, v := range e.frameVarsLiveAt(analysis, 0) {
+		b.WriteString(fmt.Sprintf("    %s %s;\n", e.FrameVarCType(v.Name), v.Name))
+	}
+	b.WriteString(entryCode)
+	// 防御兜底：入口段理论上必以 SUSPEND/DONE return 结尾，兜底防漏。
+	b.WriteString("    return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
+	b.WriteString("}\n\n")
+	return b.String()
 }
 
 // ---------- Frame ----------
@@ -578,7 +606,22 @@ func (e *Emitter) GenerateSpawn(argExprs []string, flags uint32) string {
 				b.WriteString(fmt.Sprintf("        __frame->%s = %s;\n", e.Params[i], arg))
 			}
 		}
-		if flags != 0 {
+		if e.HasGuard() {
+			/*
+			 * 守卫形态：首跑直通（B）。enter 无 switch 无守卫，
+			 * 无条件执行入口段到第一个挂起点；Worker 首跑选 enter，
+			 * 挂起后恢复一律走 resume。flags 仍需在可见前设好（同下）。
+			 */
+			if flags != 0 {
+				b.WriteString(fmt.Sprintf(
+					"        __h = kaula_spawn_enter_flags(%s, %s, __frame, sizeof(*__frame), %du);\n",
+					e.ResumeFn(), e.EnterFn(), flags))
+			} else {
+				b.WriteString(fmt.Sprintf(
+					"        __h = kaula_spawn_enter(%s, %s, __frame, sizeof(*__frame));\n",
+					e.ResumeFn(), e.EnterFn()))
+			}
+		} else if flags != 0 {
 			/*
 			 * #[hint(blocking)]：用 kaula_spawn_flags 在任务对 Worker
 			 * 可见之前设好标志 —— 事后写 flags 与 Worker 读 flags 是数据竞争。

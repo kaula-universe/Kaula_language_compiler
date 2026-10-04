@@ -306,8 +306,17 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
             return;
         }
 
+        /*
+         * 首跑直通（B）：resume_count==0 且提供 enter_fn 时走 enter ——
+         * 无 switch(pc) 无守卫判断，无条件执行入口段到第一个挂起点。
+         * 挂起/让出后 resume_count>0，一律走 resume_fn 恢复。
+         */
+        KaulaResumeFn fn = task->resume_fn;
+        if (task->enter_fn != NULL && task->resume_count == 0) {
+            fn = task->enter_fn;
+        }
         task->resume_count++;
-        KaulaResumeResult result = task->resume_fn(task->frame);
+        KaulaResumeResult result = fn(task->frame);
 
         switch (result.status) {
         case KAULA_RESUME_DONE:

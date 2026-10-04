@@ -89,7 +89,7 @@ func TestFrameContract_ResumeRestoresByValue(t *testing.T) {
 
 	e := newEmitter("n")
 	e.FrameVarCTypes = map[string]string{"p": "K_Point"}
-	res := e.Generate(analysis, []string{"", ""}, body)
+	res := e.Generate(analysis, []string{"", ""}, "", body)
 
 	// 恢复形态：`<ctype> <name> = f-><name>;` —— 按值
 	if !strings.Contains(res, "K_Point p = f->p;") {

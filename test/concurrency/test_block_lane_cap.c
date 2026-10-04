@@ -102,7 +102,7 @@ void test_block_lane_thread_cap(void) {
          */
         KaulaTask* t = kaula_task_alloc();
         if (t == NULL) break;
-        kaula_task_init(t, block_resume, f, sizeof(BlockFrame));
+        kaula_task_init(t, block_resume, NULL, f, sizeof(BlockFrame));
         t->flags |= KAULA_TASK_FLAG_HINT_BLOCKING;
         atomic_store_explicit(&t->state, KAULA_TASK_READY, memory_order_release);
         atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1,
