@@ -63,17 +63,26 @@ def render_kaula(curve: str, conc: int, total: int) -> str:
 
     if curve == "light":
         submit = "in_flight[j] = spawn curve_light()"
+        # expected 用同一条 spawn 路径取，避免模板里硬编码期望值导致
+        # 「源码改了但期望值没改」这类静默错配。
+        expected = "spawn curve_light()"
     elif curve == "suspend":
         submit = "in_flight[j] = spawn curve_suspend()"
+        expected = "spawn curve_suspend()"
     elif curve == "mixed":
         # 按 issued 的奇偶决定这一单是否带挂起：50% 且不需要随机源
         submit = "in_flight[j] = spawn curve_mixed(issued % 2 == 0)"
+        # Go 侧 expected = runCurve(curve, false) —— 同样取「不带挂起」那支，
+        # 带不带挂起只影响时序不影响返回值，两边必然相等。
+        expected = "spawn curve_mixed(false)"
     else:  # degrade
         submit = "in_flight[j] = spawn curve_degrade(%d)" % DEGRADE_SPIN
+        expected = "spawn curve_degrade(%d)" % DEGRADE_SPIN
 
     out = (tmpl
            .replace("@@CURVE@@", curve)
            .replace("@@SUBMIT@@", submit)
+           .replace("@@EXPECTED@@", expected)
            .replace("@@TOTAL@@", str(total))
            .replace("@@CONC@@", str(conc))
            .replace("@@MAX_CONC@@", str(conc))
@@ -93,7 +102,15 @@ def build_kaula(curve: str, conc: int, total: int) -> Path:
     kaulac = KAULA_HOME / "bin" / "kaulac.exe"
     if not kaulac.exists():
         raise SystemExit(f"找不到 {kaulac}，先跑 python toolkit_build.py --target compiler")
-    r = subprocess.run([str(kaulac), str(src)], capture_output=True, text=True, cwd=str(REPO))
+    # 先删旧产物：下面只判 exists()。若上一次的 exe 正在运行导致本次链接
+    # 失败，旧文件仍在 —— 会把上一条曲线的二进制当成本次结果跑出来。
+    # 实测踩过：suspend 进程挂着，后续 sweep 全部复用它，误判成「全线超时」。
+    exe.unlink(missing_ok=True)
+    # encoding 显式指定：text=True 在 Windows 上按 locale（GBK）解码，
+    # 而 kaulac 的诊断是 UTF-8 —— 混用会在 _readerthread 里抛
+    # UnicodeDecodeError，且发生在子线程，主流程只剩半截输出。
+    r = subprocess.run([str(kaulac), str(src)], capture_output=True,
+                       encoding="utf-8", errors="replace", cwd=str(REPO))
     if not exe.exists():
         raise SystemExit(f"kaulac 失败:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
     return exe
@@ -105,7 +122,7 @@ def build_go() -> Path:
     src = HERE / "go" / "bench"
     exe = src / "bench_go.exe"
     r = subprocess.run(["go", "build", "-o", str(exe), "."], cwd=str(src),
-                       capture_output=True, text=True)
+                       capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         raise SystemExit(f"go build 失败:\n{r.stdout}\n{r.stderr}")
     return exe
@@ -115,7 +132,7 @@ def build_tokio() -> Path:
     src = HERE / "tokio" / "bench"
     exe = src / "target" / "release" / "bench_tokio.exe"
     r = subprocess.run(["cargo", "build", "--release"], cwd=str(src),
-                       capture_output=True, text=True)
+                       capture_output=True, encoding="utf-8", errors="replace")
     if not exe.exists():
         raise SystemExit(f"cargo build 失败:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
     return exe
@@ -130,8 +147,13 @@ DIAG_RE = re.compile(r"^(BENCH_ERROR|MISMATCH|\S+\s*=.*)$")
 
 
 def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
-             env: dict | None = None) -> dict:
-    """跑一个用例，解析 RESULT 行。返回一条记录（含外部采样的 CPU/内存）。"""
+             env: dict | None = None, case_timeout: float = 300.0) -> dict:
+    """跑一个用例，解析 RESULT 行。返回一条记录（含外部采样的 CPU/内存）。
+
+    case_timeout 是整个用例的硬上限。缺了它，一旦被测程序死锁（例如
+    F1 的丢任务），下面那个 while 会永远转下去 —— 整个工具挂死且不留
+    任何输出，比跑出错误数据更难排查。
+    """
     cmd = [str(exe)]
     if runtime != "kaula":       # Kaula 的参数已编译进源码
         cmd += [curve, str(conc), str(total)]
@@ -141,9 +163,16 @@ def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
 
     t_wall = time.perf_counter()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, env=full_env, cwd=str(exe.parent))
+                            encoding="utf-8", errors="replace",
+                            env=full_env, cwd=str(exe.parent))
     samples = []
+    timed_out = False
     while proc.poll() is None:
+        if time.perf_counter() - t_wall > case_timeout:
+            # 必须杀进程树，否则被测程序会一直挂着污染后续用例
+            timed_out = True
+            proc.kill()
+            break
         # 外部采样：不问运行时自己报（三个运行时口径不同），统一用 OS 视角
         try:
             out = subprocess.run(
@@ -155,11 +184,21 @@ def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
         except Exception:
             pass
         time.sleep(0.05)
-    stdout = proc.stdout.read() if proc.stdout else ""
+    # 进程已退出或已被 kill；communicate 负责读完管道并回收
+    try:
+        stdout, _ = proc.communicate(timeout=15)
+    except Exception:
+        stdout = proc.stdout.read() if proc.stdout else ""
+    stdout = stdout or ""
     wall = time.perf_counter() - t_wall
 
     rec = {"runtime": runtime, "curve": curve, "conc": conc, "total": total,
            "rc": proc.returncode, "wall_s": round(wall, 3)}
+
+    if timed_out:
+        rec["error"] = (f"超时 {case_timeout:g}s 强杀，被测程序死锁，"
+                        f"rc={proc.returncode}")
+        return rec
 
     if proc.returncode != 0 or "RESULT" not in stdout:
         rec["error"] = stdout.strip()[-800:] or f"rc={proc.returncode} 无输出"
@@ -244,6 +283,8 @@ def main() -> int:
     ap.add_argument("--conc", default="1000,10000")
     ap.add_argument("--total", type=int, default=20000)
     ap.add_argument("--json", default="", help="把原始记录写到该 JSON 文件")
+    ap.add_argument("--case-timeout", type=float, default=300.0,
+                    help="单个用例的硬超时秒数；被测程序死锁时强杀并记为失败")
     ap.add_argument("--list", action="store_true")
     a = ap.parse_args()
 
@@ -284,7 +325,8 @@ def main() -> int:
                         exe = build_kaula(curve, conc, a.total)
                     else:
                         exe = built[rt]
-                    rec = run_case(exe, rt, curve, conc, a.total)
+                    rec = run_case(exe, rt, curve, conc, a.total,
+                                   case_timeout=a.case_timeout)
                 except SystemExit as e:
                     rec = {"runtime": rt, "curve": curve, "conc": conc, "error": str(e)}
                 except Exception as e:            # noqa: BLE001

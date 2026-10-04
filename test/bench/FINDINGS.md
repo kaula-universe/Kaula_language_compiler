@@ -552,3 +552,31 @@ F10 量出噪声底 8%~49%，意味着任何单样本对比都不可用。本节
 - 单样本矩阵（`metrics.py` 快跑）**只能用于差距 ≥2× 的排序判断**，
   且因为按运行时分批，跨运行时的比较一律无效。
 - 报告里凡出现百分比，必须附「该格噪声底」；没有这一列的百分比应当删掉。
+
+
+## F13：kl 双形态 spawn 在 Windows 上确定性堆损坏（0xC0000379），与 9160 行改动无关
+
+**复现**：spawn 一个含挂起点（sleep 定时器）的 conc fn，await 取结果。任意规模都崩，单任务必现。
+
+`
+conc fn slow_i(i64 x) -> i64 {
+    std.time.time_sleep(1)   // 挂起点
+    return x + 1
+}
+fn main() -> i32 {
+    Handle h = spawn slow_i(41)
+    i64 r = h.await
+    return 0
+}
+`
+
+**证据链**：
+- HEAD（0f0ca87，无任何未提交改动）编译同一用例同样崩 → 与本次 9160 行改动无关（git stash 对照）。
+- 顺序调用（coercion shim → kaula_iodriver_blocking_wait）正常，rc=0 输出正确 → 崩在**并发投递路径**（Worker → SUSPEND → IoDriver 定时器 → resume_task → Worker）。
+- C 层并发测试（epoch/mpsc/ws_deque/iodriver）全部通过，但**没有任一 C 测试覆盖 KAULA_IO_SLEEP 定时器路径** → 这条路径只有 kl 用例在走。
+- ASan 版时过时崩（0xC0000409 fastfail）→ 疑似竞态型 UAF；普通版每次必崩。
+- Linux 上同批 kl 用例全过（22 用例回归）→ 平台相关。
+
+**已排查**：注入队列（F1 修复在位）、MPSC submit 队列、io_timer_add/fire 内存管理、Worker SUSPEND 提交、resume_task、KMM alloc_global（单形态同路径通过）、KaulaResumeResult/io_request ABI（同头同 clang）。
+
+**未定**：Windows 上 Worker/Driver/await 三线程的单任务竞态窗口（ASan 时崩时不崩提示有未初始化/提前回收路径）。需要 PageHeap 或竞态插桩进一步定位。**当前 kl 并发回归在 Windows 上的有效范围仅限单形态用例**。

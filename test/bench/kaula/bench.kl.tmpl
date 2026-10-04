@@ -7,7 +7,14 @@
 // 事务定义见 TRANSACTION.md。
 //
 // 输出固定格式的一行 RESULT，run_bench.py 按 key=value 解析：
-//   RESULT tps=... elapsed_ns=... p50=... p95=... p99=... max=... n=... win=... checksum=...
+//   RESULT tps=... elapsed_ns=... p50=... p95=... p99=... p999=... max=... n=... win=... errors=... checksum=...
+//
+// 键集与 Go/Tokio 三边完全一致，缺一个 metrics.py 就要为这个运行时
+// 单开一列 N/A。
+//
+// 另外输出三行 PHASE，供外部采样器对齐「负载区」与「静置区」：
+//   PHASE load_start  /  PHASE load_end  /  PHASE settle
+// 分别在计时开始、计时结束、静置期结束后打出。
 
 import std.io
 import std.time
@@ -92,10 +99,16 @@ fn main() -> i32 {
         return 1;
     }
 
-    // 延迟样本：单事务客户端侧延迟（提交 -> 拿到结果），含调度
+    // 这条曲线的期望值：degrade 走 acc^parse 路径，与上面纯 parse 不同。
+    // 与 Go/Tokio 一致 —— 两边也是在计时区之外先跑一次拿 expected。
+    Handle he = @@EXPECTED@@;
+    i64 expected = he.await;
+
+    // 延迟样本：内核打点的 submit -> complete 服务时间（见文件头注释）
     [@@MAX_SAMPLES@@]i64 lat;
     i64 n = 0;
     i64 checksum = 0;
+    i64 errors = 0;
 
     i64 issued = 0;
     i64 done = 0;
@@ -105,6 +118,7 @@ fn main() -> i32 {
     [@@MAX_CONC@@]i64 submit_ts;
     [@@MAX_CONC@@]i64 submitted;
 
+    std.io.println("PHASE load_start");
     i64 t0 = std.time.time_now_ns();
 
     // 窗口式：先填满 win 个在途，再逐个 await。
@@ -140,7 +154,16 @@ fn main() -> i32 {
             i64 r = in_flight[j].await;
             // 服务时间由内核记录（submit -> complete），与取回顺序无关
             i64 svc = kaula_conc_last_latency_ns();
-            checksum = (checksum + r) % 9223372036854775807;
+            // 累加器必须三边同式且都不溢出。原来的 (checksum + r) % P 在
+            // degrade 上必溢出：r ≈ 9.8e18，第 10 次累加就越过有符号 64 位。
+            // Go/Rust 静默回绕，Kaula 的乘加是检查溢出并陷阱 —— 同一行代码
+            // 三个目标语义不同，Kaula 直接 KAULA FATAL 退出。
+            // 改成滚动散列：先把两边压到 2^30，最大中间值 32*(2^30-1) < 2^35，
+            // 远离 2^63。与事务本体用的是同一种写法。
+            checksum = ((checksum % 1073741824) * 31 + (r % 1073741824)) % 9223372036854775807;
+            if r != expected {
+                errors = errors + 1;
+            }
             if n < @@MAX_SAMPLES@@ {
                 lat[n] = svc;
                 n = n + 1;
@@ -152,10 +175,17 @@ fn main() -> i32 {
 
     i64 elapsed = std.time.time_now_ns() - t0;
 
+    // 静置期：给运行时一点时间回收，之后才测 RSS 回落。
+    // 与 Go 的 time.Sleep / Tokio 的 sleep 对齐 —— 400ms 同一个数。
+    std.io.println("PHASE load_end");
+    std.time.time_sleep_us(400000);
+    std.io.println("PHASE settle");
+
     // 分位数在计时区之外算：排序本身不该污染被测量的时间
     i64 p50 = 0;
     i64 p95 = 0;
     i64 p99 = 0;
+    i64 p999 = 0;
     i64 mx = 0;
     if n > 0 {
         // 就地选择排序：n <= 2000，O(n^2) 在计时区外跑，代价可忽略。
@@ -173,14 +203,20 @@ fn main() -> i32 {
             }
             a = a + 1;
         }
+        // 下标公式 (n*pct)/100 与 Go 的 percentile 逐字一致；p999 用 /1000。
+        // 上界夹到 n-1：Go 侧同位置有夹，这里 n 很小时两边才不会分叉。
         p50 = lat[(n * 50) / 100];
         p95 = lat[(n * 95) / 100];
         p99 = lat[(n * 99) / 100];
+        p999 = lat[(n * 999) / 1000];
+        if (n * 999) / 1000 >= n {
+            p999 = lat[n - 1];
+        }
         mx = lat[n - 1];
     }
 
     // 输出固定格式的一行，run_bench.py 按 key=value 解析。
     // 写成单行：多行调用与自动补分号的脚本会互相干扰。
-    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed, " elapsed_ns=", elapsed, " p50=", p50, " p95=", p95, " p99=", p99, " max=", mx, " n=", n, " win=", win, " checksum=", checksum);
+    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed, " elapsed_ns=", elapsed, " p50=", p50, " p95=", p95, " p99=", p99, " p999=", p999, " max=", mx, " n=", n, " win=", win, " errors=", errors, " checksum=", checksum);
     return 0;
 }
