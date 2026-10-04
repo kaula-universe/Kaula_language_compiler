@@ -70,6 +70,7 @@ typedef struct KaulaWorker {
 
     /* ---- epoch ---- */
     _Atomic(uint64_t) local_epoch;
+    uint64_t          epoch_exit_count;  /* 临界区退出计数（本 Worker 独占，无原子） */
     KaulaRetireList   retired;
 
     /*
