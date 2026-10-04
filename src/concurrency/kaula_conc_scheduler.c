@@ -93,6 +93,43 @@ int kaula_inject_queue_push(KaulaTask* task) {
     return ok;
 }
 
+/*
+ * P2.1：批量注入。
+ *
+ * 一次拿锁 → 连续写 n 个 payload → 一次 release 推 tail。
+ * 比逐个 push 少 n-1 次锁争抢 + n-1 次 tail store。
+ *
+ * 空间不足时只接纳 m ≤ n 个，返回 m；调用方用剩余 n-m 个重试。
+ * Worker 持续排空队列，重试不会死循环。
+ */
+int kaula_inject_queue_push_batch(KaulaTask** tasks, int n) {
+    if (n <= 0) return 0;
+
+    while (atomic_flag_test_and_set_explicit(&g_inject_push_lock,
+                                             memory_order_acquire)) {
+    }
+
+    uint64_t tail = atomic_load_explicit(&g_inject_queue.tail, memory_order_relaxed);
+    uint64_t head = atomic_load_explicit(&g_inject_queue.head, memory_order_acquire);
+
+    uint64_t avail = KAULA_INJECT_QUEUE_CAPACITY - (tail - head);
+    int m = (int)avail;
+    if (m > n) m = n;
+    if (m < 0) m = 0;
+
+    for (int i = 0; i < m; i++) {
+        atomic_store_explicit(
+            &g_inject_queue.buffer[(tail + i) & KAULA_INJECT_QUEUE_MASK],
+            tasks[i], memory_order_relaxed);
+    }
+    if (m > 0) {
+        atomic_store_explicit(&g_inject_queue.tail, tail + m, memory_order_release);
+    }
+
+    atomic_flag_clear_explicit(&g_inject_push_lock, memory_order_release);
+    return m;
+}
+
 KaulaTask* kaula_inject_queue_pop(void) {
     /*
      * 多个 Worker 可能同时 pop。用 CAS 竞争 head：

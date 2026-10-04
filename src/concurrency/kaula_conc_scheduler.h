@@ -27,6 +27,11 @@ typedef struct {
 
 void kaula_inject_queue_init(void);
 int  kaula_inject_queue_push(KaulaTask* task);
+/*
+ * P2.1：批量注入。一次拿锁、连续写 n 个 payload、一次 release 推 tail。
+ * 返回实际接纳数（≤n）。剩余空间不足时返回 < n，调用方重试到全部入队。
+ */
+int  kaula_inject_queue_push_batch(KaulaTask** tasks, int n);
 KaulaTask* kaula_inject_queue_pop(void);
 int  kaula_inject_queue_empty(void);
 uint64_t kaula_inject_queue_size(void);
