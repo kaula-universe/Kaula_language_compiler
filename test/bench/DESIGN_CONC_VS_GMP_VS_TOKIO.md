@@ -1,4 +1,9 @@
-# Kaula conc fn vs Go GMP vs Rust Tokio — 并发内核对比设计
+# Kaula 并发内核 vs Go GMP vs Rust Tokio — 对比设计
+
+> **术语定义**：CONC（Continuation-Oriented Native Co-runtime，面向续延的原生协同运行时，以下简称并发内核/CONC）。
+> Continuation-Oriented：以续延为中心（conc fn 的 CPS/状态机 lowering）；
+> Native：编译到原生 C/机器码，无 VM、无解释器；
+> Co-runtime：协同式运行时（协作调度 + 预算抢占）。
 
 > 基于已有 benchmark 框架（`TRANSACTION.md` + `run_bench.py`）和实测数据（`FINDINGS.md`），
 > 对三种并发内核做架构级对比。重点是**设计差异**，不是跑分。
