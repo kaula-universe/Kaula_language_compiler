@@ -149,6 +149,30 @@ RESULT_RE = re.compile(r"(\w+)=(-?\d+)")
 DIAG_RE = re.compile(r"^(BENCH_ERROR|MISMATCH|\S+\s*=.*)$")
 
 
+def sample_proc_linux(pid: int) -> dict | None:
+    """OS 视角采样：CPU 秒、当前 RSS(KB)、峰值 HWM(KB)。读 /proc，不依赖运行时自报。"""
+    try:
+        text = Path(f"/proc/{pid}/status").read_text()
+    except Exception:
+        return None
+    fields = {}
+    for line in text.splitlines():
+        if line.startswith(("VmRSS:", "VmHWM:")):
+            k, v = line.split(":", 1)
+            fields[k] = int(v.strip().split()[0])  # 单位 KB
+    # CPU：/proc/<pid>/stat 第 14、15 列 utime+stime（clock ticks）
+    cpu_s = None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text().split()
+        ticks = os.sysconf("SC_CLK_TCK")
+        cpu_s = (int(stat[13]) + int(stat[14])) / ticks
+    except Exception:
+        pass
+    return {"cpu_s": cpu_s,
+            "rss_kb": fields.get("VmRSS"),
+            "hwm_kb": fields.get("VmHWM")}
+
+
 def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
              env: dict | None = None, case_timeout: float = 300.0) -> dict:
     """跑一个用例，解析 RESULT 行。返回一条记录（含外部采样的 CPU/内存）。
@@ -169,6 +193,8 @@ def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
                             encoding="utf-8", errors="replace",
                             env=full_env, cwd=str(exe.parent))
     samples = []
+    peak_rss_kb = 0
+    peak_hwm_kb = 0
     timed_out = False
     while proc.poll() is None:
         if time.perf_counter() - t_wall > case_timeout:
@@ -177,15 +203,23 @@ def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
             proc.kill()
             break
         # 外部采样：不问运行时自己报（三个运行时口径不同），统一用 OS 视角
-        try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "$p=Get-Process -Id %d -ErrorAction SilentlyContinue;"
-                 "if($p){'{0:N1}' -f $p.CPU}" % proc.pid],
-                capture_output=True, text=True, timeout=5)
-            samples.append(float(out.stdout.strip() or 0))
-        except Exception:
-            pass
+        if sys.platform.startswith("linux"):
+            res = sample_proc_linux(proc.pid)
+            if res:
+                if res["cpu_s"] is not None:
+                    samples.append(res["cpu_s"])
+                peak_rss_kb = max(peak_rss_kb, res["rss_kb"] or 0)
+                peak_hwm_kb = max(peak_hwm_kb, res["hwm_kb"] or 0)
+        else:
+            try:
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "$p=Get-Process -Id %d -ErrorAction SilentlyContinue;"
+                     "if($p){'{0:N1}' -f $p.CPU}" % proc.pid],
+                    capture_output=True, text=True, timeout=5)
+                samples.append(float(out.stdout.strip() or 0))
+            except Exception:
+                pass
         time.sleep(0.05)
     # 进程已退出或已被 kill；communicate 负责读完管道并回收
     try:
@@ -210,7 +244,7 @@ def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
     line = [l for l in stdout.splitlines() if l.startswith("RESULT")][-1]
     kv = dict((k, int(v)) for k, v in RESULT_RE.findall(line))
     rec.update({k: kv[k] for k in
-                ("tps", "elapsed_ns", "p50", "p95", "p99", "max", "n", "checksum")
+                ("tps", "elapsed_ns", "p50", "p95", "p99", "p999", "max", "n", "checksum")
                 if k in kv})
 
     if rec.get("checksum") and kv.get("checksum", 0) % 1 == 0:
@@ -220,6 +254,8 @@ def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
 
     cpu = [s for s in samples if s > 0]
     rec["cpu_s"] = round(max(cpu), 2) if cpu else None
+    rec["peak_rss_kb"] = peak_rss_kb or None
+    rec["peak_hwm_kb"] = peak_hwm_kb or None
     return rec
 
 
@@ -250,27 +286,30 @@ def print_report(records: list[dict]) -> None:
     print("=" * 96)
     print("TPS 曲线（单事务延迟含调度，与用户感知一致）")
     print("=" * 96)
-    hdr = f"{'runtime':<8}{'curve':<10}{'conc':>8}{'TPS':>12}{'p50(us)':>10}{'p95(us)':>10}{'p99(us)':>10}{'p99/p50':>10}"
+    hdr = f"{'runtime':<8}{'curve':<10}{'conc':>8}{'TPS':>12}{'p50(us)':>10}{'p95(us)':>10}{'p99(us)':>10}{'p999(us)':>11}{'p99/p50':>10}"
     print(hdr)
-    print("-" * 96)
+    print("-" * 107)
     for r in ok:
         p50 = (r.get("p50") or 0) / 1000
         p95 = (r.get("p95") or 0) / 1000
         p99 = (r.get("p99") or 0) / 1000
+        p999 = (r.get("p999") or 0) / 1000
         rr = ratios(r)
         print(f"{r['runtime']:<8}{r['curve']:<10}{r['conc']:>8}{r['tps']:>12}"
-              f"{p50:>10.1f}{p95:>10.1f}{p99:>10.1f}{rr['p99_over_p50'] or 0:>10.2f}")
+              f"{p50:>10.1f}{p95:>10.1f}{p99:>10.1f}{p999:>11.1f}{rr['p99_over_p50'] or 0:>10.2f}")
 
     print()
     print("=" * 96)
-    print("单位开销（跨运行时比这个，不比 TPS 绝对值）")
+    print("内存占用（OS 视角峰值常驻集，VmHWM；越大越费内存）")
     print("=" * 96)
-    print(f"{'runtime':<8}{'curve':<10}{'conc':>8}{'TPS/conc':>12}{'TPS/CPU-s':>12}")
+    print(f"{'runtime':<8}{'curve':<10}{'conc':>8}{'peakRSS(MB)':>13}{'KB/任务':>11}{'CPU-s':>10}{'TPS/CPU-s':>12}")
     print("-" * 96)
     for r in ok:
+        hwm = r.get("peak_hwm_kb") or 0
+        per_task = hwm / r["conc"] if r.get("conc") else 0
         rr = ratios(r)
-        print(f"{r['runtime']:<8}{r['curve']:<10}{r['conc']:>8}"
-              f"{rr['tps_per_conc']:>12.3f}{(rr['tps_per_cpu_s'] or 0):>12.1f}")
+        print(f"{r['runtime']:<8}{r['curve']:<10}{r['conc']:>8}{hwm/1024:>13.2f}"
+              f"{per_task:>11.2f}{(r.get('cpu_s') or 0):>10.2f}{(rr['tps_per_cpu_s'] or 0):>12.1f}")
 
     if bad:
         print()
