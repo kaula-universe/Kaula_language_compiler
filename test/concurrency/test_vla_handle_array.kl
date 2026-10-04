@@ -1,0 +1,131 @@
+// Kaula 并发内核 · 运行期长度 Handle 数组 × 四种 await 形态
+//
+// 本用例合并了三个曾经独立暴露的缺陷，作为它们的回归防护：
+//
+//  1. 运行期长度的局部数组原本是**栈** VLA（`KaulaHandle hs[n]`）。
+//     尺寸在编译期无上界，栈预算却有限 —— 同样的声明，一个变体通过、
+//     另一个变体 0xC00000FD，差别只是调用链深了几帧。
+//     现在走堆（kmm_v4_alloc_global，对大块有 malloc 兜底）。
+//
+//  2. 表达式位置的 await 只在句柄是**裸标识符**时才推得出结果类型。
+//     `hs[i].await` 是下标表达式，于是落进兜底分支，而那个兜底只是往
+//     生成的 C 里塞一句注释 —— 注释不阻止编译，于是代码编得过、跑得动、
+//     **答案错**：解引用的是已 retire 的 Frame 地址。
+//     现在下标形态也能推出结果类型；真推不出时报编译错误。
+//
+//  3. 守卫组尾的顶层挂起曾留在本段不推进 pc，而组尾又另起一段，
+//     新段因此没有任何 pc 写入 —— 不可达段，其语句永不执行。
+//
+// 判据：四种写法（for..in/while × 声明位置/表达式位置）都必须给出
+// 精确的 n(n-1)/2。任何一种偏差都是回归。
+
+import std.io
+import std.time
+
+conc fn noop(i64 x) -> i64 { return x }
+
+// for..in + 声明位置 await
+fn v_forin_decl(i64 n) -> i64 {
+    Handle hs[n]
+    for i in range(n) {
+        hs[i] = spawn noop(i)
+    }
+    i64 acc = 0
+    for i in range(n) {
+        i64 r = hs[i].await
+        acc = acc + r
+    }
+    return acc
+}
+
+// while + 声明位置 await
+fn v_while_decl(i64 n) -> i64 {
+    Handle hs[n]
+    i64 i = 0
+    while i < n {
+        hs[i] = spawn noop(i)
+        i = i + 1
+    }
+    i64 acc = 0
+    i = 0
+    while i < n {
+        i64 r = hs[i].await
+        acc = acc + r
+        i = i + 1
+    }
+    return acc
+}
+
+// for..in + 表达式位置 await（曾经返回垃圾值）
+fn v_forin_expr(i64 n) -> i64 {
+    Handle hs[n]
+    for i in range(n) {
+        hs[i] = spawn noop(i)
+    }
+    i64 acc = 0
+    for i in range(n) {
+        acc = acc + hs[i].await
+    }
+    return acc
+}
+
+// while + 表达式位置 await
+fn v_while_expr(i64 n) -> i64 {
+    Handle hs[n]
+    i64 i = 0
+    while i < n {
+        hs[i] = spawn noop(i)
+        i = i + 1
+    }
+    i64 acc = 0
+    i = 0
+    while i < n {
+        acc = acc + hs[i].await
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() -> i32 {
+    i64 err = 0
+
+    // 20000 个并发在途：1.6MB 的数组换成堆分配后仍在可控范围，
+    // 且足够大到「栈 VLA」那条路一定会溢出。
+    i64 n = 20000
+    i64 expect = n * (n - 1) / 2
+
+    i64 a = v_forin_decl(n)
+    if a != expect {
+        err += 1
+        std.io.println("ERR forin_decl got=", a, " want=", expect)
+    }
+
+    i64 b = v_while_decl(n)
+    if b != expect {
+        err += 1
+        std.io.println("ERR while_decl got=", b, " want=", expect)
+    }
+
+    i64 c = v_forin_expr(n)
+    if c != expect {
+        err += 1
+        std.io.println("ERR forin_expr got=", c, " want=", expect)
+    }
+
+    i64 d = v_while_expr(n)
+    if d != expect {
+        err += 1
+        std.io.println("ERR while_expr got=", d, " want=", expect)
+    }
+
+    // 小规模也要对：确认不是"规模大了恰好蒙对"
+    i64 m = 10
+    i64 expect_m = m * (m - 1) / 2
+    if v_forin_expr(m) != expect_m {
+        err += 1
+        std.io.println("ERR forin_expr small got=", v_forin_expr(m), " want=", expect_m)
+    }
+
+    std.io.println("vla_handle_array ok err=", err)
+    return 0
+}

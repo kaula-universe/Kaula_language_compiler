@@ -154,9 +154,21 @@ type CodeGenerator struct {
 	concAnalysis *conc.BodyAnalysis
 	concParams   []string
 
-	// handleResultTypes：Handle 变量名 → 其任务结果的 C 类型。
+	// handleResultTypes：Handle **变量**名 → 其任务结果的 C 类型。
 	// 由 `Handle h = spawn f()` 的声明处登记，表达式位置的 await 查它来解引用。
+	//
+	// 只登记标量句柄：isHandleVar 据此判断"这个局部量本身是 Handle"，
+	// 从而在作用域出口发 kaula_handle_release(name)。容器（数组/字段）
+	// 登记到这里会让它被当成标量句柄，生成 kaula_handle_release(hs) ——
+	// 而 hs 是数组，类型不符。
 	handleResultTypes map[string]string
+
+	// handleContainerResultTypes：Handle **容器**名（数组变量 / 结构体字段）
+	// → 其元素的 spawn 结果 C 类型。
+	//
+	// 与 handleResultTypes 分开是为了不混淆"标量句柄"与"装着句柄的容器"：
+	// 前者要发 handle_release，后者不发，但两者的 await 都要能推出结果类型。
+	handleContainerResultTypes map[string]string
 
 	// concFuncMap：conc fn 的 C 名 → 其 C 侧签名。
 	// 随 CodeGenerator 走，不做包级全局 —— 一次编译有多个 CodeGenerator
@@ -1252,6 +1264,17 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 }
 
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
+	/*
+	 * 复位「本 TU 是否用到并发内核」。
+	 *
+	 * codeUsesConcurrency 是包级全局，供 Generate 末尾决定要不要
+	 * #include "concurrency/kaula_conc.h"。它是跨调用的，不复位就会
+	 * 泄漏：同一个 kaulac 进程里先编一个带 conc fn 的文件，之后每个
+	 * 文件都会被塞进内核头 —— 包括一行 conc 都没有的裸机目标。
+	 * 那正是这条注释原本要防的事，所以复位必须发生在这里。
+	 */
+	codeUsesConcurrency = false
+
 	// 嵌套 conc fn 调用：AST 层内联展开（Future 扁平化，见 conc_inline.go）。
 	// 必须在 FlattenDeclarations 之前：内联产生的新声明需要统一展平。
 	cg.inlineConcFns(program)

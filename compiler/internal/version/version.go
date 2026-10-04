@@ -140,6 +140,16 @@ func colorEnabled() bool {
 	return true
 }
 
+// ColorEnabled 导出 colorEnabled，供其他包复用同一套判定。
+//
+// 为什么需要导出：errors 包原本自己复制了一份 colorEnabled，那份漏了
+// isTerminal 检查，于是管道/重定向下照样输出 ANSI 转义。后果是
+// test/concurrency/run_tests.py 按字面匹配 "Status: Success" 永远失败，
+// 11 个 kl 用例被误判成编译失败、从未真正执行。判定逻辑只能有一份。
+func ColorEnabled() bool {
+	return colorEnabled()
+}
+
 // Logo 返回带 24-bit 渐变 ANSI 的 logo 字符串。
 // 渐变方向: 水平 cyan (#00FFFF) → magenta (#FF00FF), 每字符一色。
 // 当 colorEnabled() 为 false 时返回纯 LogoText 文本 (与管道/重定向/NO_COLOR 兼容)。
