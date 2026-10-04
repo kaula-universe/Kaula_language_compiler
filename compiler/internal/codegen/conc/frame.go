@@ -553,16 +553,17 @@ func (e *Emitter) GenerateSpawn(argExprs []string, flags uint32) string {
 	 *   pc/参数      spawn 时全量赋值
 	 *   result       由 resume/simple 在 DONE 前写入
 	 *   io_request   经 KaulaResumeResult 返回，不在 Frame 内
-	 * 唯一需要显式归零的是守卫槽（恢复时首次进入读 sub[d]==0 判定
-	 * 「从头开始」）与 needs_free 预留位。整帧 memset 在 Frame 160B
-	 * 时代每任务白付一次，纯开销。
+	 *   branch[d]    守卫里先写（f->branch[d] = cond）后读；恢复时读的
+	 *                 是挂起前保留的值，spawn 时无需清零
+	 *   needs_free   预留位，当前无任何读（grep src/ 无引用）
+	 * 唯一必须显式归零的是 sub[d]（恢复时首次进入读 sub[d]==0 判定
+	 * 「从头开始」）。整帧 memset 在 Frame 160B 时代每任务白付一次。
 	 */
 	if e.IsStateful() {
 		b.WriteString("        __frame->pc = 0;\n")
 		if e.HasGuard() {
 			for d := 0; d < e.GuardDepth(); d++ {
 				b.WriteString(fmt.Sprintf("        __frame->sub[%d] = 0;\n", d))
-				b.WriteString(fmt.Sprintf("        __frame->branch[%d] = 0;\n", d))
 			}
 			if e.HasForIn() {
 				for d := 0; d < e.GuardDepth(); d++ {
@@ -572,7 +573,6 @@ func (e *Emitter) GenerateSpawn(argExprs []string, flags uint32) string {
 				}
 			}
 		}
-		b.WriteString("        __frame->needs_free = 0;\n")
 		for i, arg := range argExprs {
 			if i < len(e.Params) {
 				b.WriteString(fmt.Sprintf("        __frame->%s = %s;\n", e.Params[i], arg))
