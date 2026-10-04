@@ -1,0 +1,28 @@
+// A 方案（spawn 实参常量特化）触发验证 —— 守卫形态同款：
+// spawn task(7, 0)：实参全字面量 → 克隆特化版 task_spc_0（pct=0 代入、
+// input=7 代入），与 test_full 同款双形态守卫。校验 7%100<0 恒假 → compute 7+1=8。
+import std.io
+import std.time
+
+fn main() -> i32 {
+    Handle h = spawn task(7, 0)
+    i64 r = h.await
+    std.io.println("result: ", r)
+    return 0
+}
+
+conc fn compute(i64 input) -> i64 {
+    return input + 1
+}
+
+conc fn slow(i64 input) -> i64 {
+    std.time.time_sleep(2)
+    return input + 1000
+}
+
+conc fn task(i64 input, i64 pct) -> i64 {
+    if input % 100 < pct {
+        return slow(input)
+    }
+    return compute(input)
+}
