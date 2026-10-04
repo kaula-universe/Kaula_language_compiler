@@ -148,9 +148,11 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 	 * 不变量：离开某个复合语句时 sub[d] 必须回到 0。
 	 * 生成代码靠「每轮末尾写回 0」维持它，所以进入任一层时读到的都是 0。
 	 */
-	b.WriteString("    /* 复合语句内的恢复槽位与 if 分支选择 */\n")
-	b.WriteString("    int             sub[KAULA_CONC_SUB_DEPTH];\n")
-	b.WriteString("    int             branch[KAULA_CONC_SUB_DEPTH];\n")
+	if analysis.HasCompound {
+		b.WriteString("    /* 复合语句内的恢复槽位与 if 分支选择 */\n")
+		b.WriteString("    int             sub[KAULA_CONC_SUB_DEPTH];\n")
+		b.WriteString("    int             branch[KAULA_CONC_SUB_DEPTH];\n")
+	}
 
 	/*
 	 * for..in(range) 循环守卫的迭代状态（按深度，同 sub/branch）。
@@ -160,10 +162,12 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 	 * 把 start/end/step 求值一次存入 Frame，恢复从 f->loop_i[d] 继续，
 	 * 循环体只执行正确轮次。
 	 */
-	b.WriteString("    /* for..in 守卫：迭代下标 / 上界 / 步长 */\n")
-	b.WriteString("    long long       loop_i[KAULA_CONC_SUB_DEPTH];\n")
-	b.WriteString("    long long       loop_end[KAULA_CONC_SUB_DEPTH];\n")
-	b.WriteString("    long long       loop_step[KAULA_CONC_SUB_DEPTH];\n")
+	if analysis.HasForIn {
+		b.WriteString("    /* for..in 守卫：迭代下标 / 上界 / 步长 */\n")
+		b.WriteString("    long long       loop_i[KAULA_CONC_SUB_DEPTH];\n")
+		b.WriteString("    long long       loop_end[KAULA_CONC_SUB_DEPTH];\n")
+		b.WriteString("    long long       loop_step[KAULA_CONC_SUB_DEPTH];\n")
+	}
 
 	// 参数：函数入口时写入，跨所有挂起点存活
 	if len(e.Params) > 0 {
