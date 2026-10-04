@@ -7,7 +7,7 @@
 **更现代、更好用的 C**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8.svg?logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8.svg?logo=go)](https://go.dev/)
 [![Language](https://img.shields.io/badge/runtime-C-A8B9CC.svg?logo=c)](https://en.wikipedia.org/wiki/C_(programming_language))
 
 </div>
@@ -32,8 +32,8 @@ Kaula 是一门**静态类型的系统级编程语言**，编译到 C，由 Clan
 # 构建编译器
 python toolkit_build.py
 
-# 或手动构建
-cd compiler && go build -o ../bin/kaulac ./cmd/kaulac/
+# 或手动构建（产物须与 stdlib.json 同目录 build/bin/）
+cd compiler && go build -o ../build/bin/kaulac ./cmd/kaulac/
 ```
 
 依赖：Python 3.8+、Go 1.21+、LLVM-mingw 或 MSVC（Windows）/ Clang（Linux/macOS）
@@ -62,7 +62,7 @@ kaulac --release main.kl
 
 # 查看版本
 kaulac --version
-# 输出: kaulac v1.0.42 (26.8.23-master-67ffac3, sor-oxide)
+# 输出: kaulac v1.1.1 (26.10.5-master-xxxxxxx)
 ```
 
 ---
@@ -81,7 +81,7 @@ Kaula 使用双版本号系统：
 ```bash
 # 查看当前版本
 python scripts/version.py
-# 输出: kaulac v1.0.42 (26.8.23-master-67ffac3, sor-oxide)
+# 输出: kaulac v1.1.1 (+N) (26.10.5-master-xxxxxxx)
 
 # 更新 version.json（构建时自动调用）
 python scripts/version.py --update
@@ -320,7 +320,7 @@ kaulac --init
 
 ## 标准库
 
-62 个模块，800+ 函数，覆盖从系统编程到 Web 开发：
+67 个模块，1500+ 函数，覆盖从系统编程到 Web 开发：
 
 | 分类 | 模块 |
 |------|------|
@@ -408,7 +408,7 @@ kaula/
 │   ├── concurrency/           # 并发内核（work-stealing 调度器）
 │   └── ...
 ├── test/                      # 测试（.kl 冒烟 / 压力 / C / 内核回归）
-├── std/                       # 标准库（C 实现，62 个模块）
+├── std/                       # 标准库（C 实现，67 个模块）
 ├── pkglib/                    # 第三方库
 ├── scripts/
 │   └── version.py             # 版本号生成工具
