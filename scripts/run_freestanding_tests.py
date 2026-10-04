@@ -37,6 +37,9 @@ import sys
 import time
 from pathlib import Path
 
+# 与 toolkit_build.py 对齐：Windows 产出 kaula_freestanding.lib，其余平台 libkaula_freestanding.a
+FS_LIB_NAME = "kaula_freestanding.lib" if sys.platform.startswith("win") else "libkaula_freestanding.a"
+
 # Windows 控制台默认 GBK，报告里的箭头/勾叉会直接抛 UnicodeEncodeError
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -282,7 +285,7 @@ def build_c_test(mode, outdir: Path):
     rc, out = run(cflags + ["-c", C_DIR / "main.c", "-o", main_o])
     if rc != 0:
         return None, f"compile test main failed:\n{out}"
-    lib = PROJECT_ROOT / "build" / "lib" / "kaula_freestanding.lib"
+    lib = PROJECT_ROOT / "build" / "lib" / FS_LIB_NAME
     if not lib.is_file():
         return None, f"missing {lib}; run: python toolkit_build.py --target freestanding"
     rc, out = run(["clang", main_o, lib, "-o", outdir / "fs_test_hosted.exe"])
@@ -854,7 +857,7 @@ def layer_config(rep: Report):
                 f"declared in {header.name} but missing from stdlib.json: {missing}" if missing else "")
 
     # 3) 归档里必须有这些符号
-    lib = PROJECT_ROOT / "build" / "lib" / "kaula_freestanding.lib"
+    lib = PROJECT_ROOT / "build" / "lib" / FS_LIB_NAME
     if not lib.is_file():
         rep.add("L6", "archive-symbols", False,
                 f"missing {lib}; run: python toolkit_build.py --target freestanding")
