@@ -266,6 +266,14 @@ struct KaulaTask {
 
     /* ---- 属性 ---- */
     uint32_t            flags;
+
+    /*
+     * 内联结果槽：kaula_handle_complete() 用它存标量结果，
+     * 避免为每个已完成句柄额外分配一块结果内存。
+     * result 原子指针指向 &inline_result，await_into 拷走。
+     * 只在 completed-handle 路径使用；正常任务的结果仍在 Frame->result。
+     */
+    uint64_t            inline_result;
 };
 
 /* ========== Handle（文档 §3.3） ========== */
@@ -374,6 +382,16 @@ int         kaula_handle_is_null(KaulaHandle h);
 void*       kaula_handle_await(KaulaHandle h);
 void*       kaula_handle_try_await(KaulaHandle h, uint64_t timeout_ns);
 int         kaula_handle_poll(KaulaHandle h);
+
+/*
+ * kaula_handle_complete：构造一个"已完成"的 Handle。
+ *
+ * 用途：编译器把「常量实参 + 无 suspend」的 conc fn spawn 完全内联为
+ * 直接函数调用时，需要返回一个立即就绪的 Handle 承载结果。
+ * 从 task 池分配一个最小已完成任务，结果存在 inline_result 槽里。
+ * 比正常 spawn 路径少一次 Frame 堆分配。
+ */
+KaulaHandle kaula_handle_complete(uint64_t result_val);
 
 /*
  * await_into：把任务结果写进调用者的缓冲区。编译器生成的代码只应走这条。
