@@ -1,4 +1,4 @@
-// Kaula 并发内核 · conc fn lowering 的静态分析
+// Kaula 并发内核（CONC）· conc fn lowering 的静态分析
 //
 // 在生成 C 代码之前必须先知道两件事：
 //  1. 函数体里哪些调用是"可插桩 IO"（suspend 点）

@@ -1,4 +1,4 @@
-// Kaula 并发内核 · 嵌套 conc fn 调用的 AST 层内联（Future 扁平化）
+// Kaula 并发内核（CONC）· 嵌套 conc fn 调用的 AST 层内联（Future 扁平化）
 //
 // 设计说明书 §2.6：conc fn 内顺序调用另一个 conc fn 时，两个状态机应
 // 合并为一个（挂起点提升）。旧实现把嵌套 conc fn 调用重定向到 coercion
