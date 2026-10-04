@@ -34,6 +34,9 @@ EXPECTED_CHECKSUM = 13356499072
 # 采样上限：延迟样本存不下无限多，超过部分按固定间隔抽样
 MAX_SAMPLES = 2000
 
+# 可执行文件后缀：Windows 带 .exe，Linux/macOS 无扩展名
+EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
+
 # 四个曲线。suspend_us 是挂起时长；mixed/degrade 的比例由模板填。
 CURVES = {
     "light":    {"suspend_us": 0,    "mixed_sleep_pct": 0,   "degrade_pct": 0},
@@ -98,8 +101,8 @@ def render_kaula(curve: str, conc: int, total: int) -> str:
 def build_kaula(curve: str, conc: int, total: int) -> Path:
     src = HERE / "kaula" / "bench_gen.kl"
     src.write_text(render_kaula(curve, conc, total), encoding="utf-8")
-    exe = HERE / "kaula" / "bench_gen.exe"
-    kaulac = KAULA_HOME / "bin" / "kaulac.exe"
+    exe = HERE / "kaula" / f"bench_gen{EXE_SUFFIX}"
+    kaulac = KAULA_HOME / "bin" / f"kaulac{EXE_SUFFIX}"
     if not kaulac.exists():
         raise SystemExit(f"找不到 {kaulac}，先跑 python toolkit_build.py --target compiler")
     # 先删旧产物：下面只判 exists()。若上一次的 exe 正在运行导致本次链接
@@ -120,7 +123,7 @@ def build_kaula(curve: str, conc: int, total: int) -> Path:
 
 def build_go() -> Path:
     src = HERE / "go" / "bench"
-    exe = src / "bench_go.exe"
+    exe = src / f"bench_go{EXE_SUFFIX}"
     r = subprocess.run(["go", "build", "-o", str(exe), "."], cwd=str(src),
                        capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
@@ -130,7 +133,7 @@ def build_go() -> Path:
 
 def build_tokio() -> Path:
     src = HERE / "tokio" / "bench"
-    exe = src / "target" / "release" / "bench_tokio.exe"
+    exe = src / "target" / "release" / f"bench_tokio{EXE_SUFFIX}"
     r = subprocess.run(["cargo", "build", "--release"], cwd=str(src),
                        capture_output=True, encoding="utf-8", errors="replace")
     if not exe.exists():
