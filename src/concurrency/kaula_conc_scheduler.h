@@ -1,5 +1,5 @@
 /*
- * Kaula 并发内核 · 调度器
+ * Kaula 并发内核（CONC）· 调度器
  *
  * 职责（文档 §4）：
  * - spawn：把 Task 提交到当前 Worker 的本地队列

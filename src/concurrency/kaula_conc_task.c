@@ -1,5 +1,5 @@
 /*
- * Kaula 并发内核 · 任务生命周期
+ * Kaula 并发内核（CONC）· 任务生命周期
  *
  * 修复记录：
  * - 原 kaula_handle_await 是轮询 `while (!done_flag) sleep_us(10)`，

@@ -1,5 +1,5 @@
 /*
- * Kaula 并发内核 · Worker
+ * Kaula 并发内核（CONC）· Worker
  *
  * Worker 是执行 Task 的 OS 线程（文档 §2）。
  *

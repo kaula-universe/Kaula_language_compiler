@@ -1,5 +1,5 @@
 /*
- * Kaula 并发内核 · 调度器实现
+ * Kaula 并发内核（CONC）· 调度器实现
  */
 
 #include "kaula_conc_scheduler.h"
