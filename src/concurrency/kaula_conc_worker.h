@@ -86,6 +86,8 @@ typedef struct KaulaWorker {
      * done_event 跨复用保留（epoch 期间从未被 destroy）。
      */
     KaulaTask*        task_pool;
+    /* task_pool 当前长度（owner 独占维护）。归还时据此判定高水位收缩。 */
+    uint32_t          task_pool_len;
 
     /* ---- 统计（独占缓存行） ---- */
     KaulaWorkerStats  stats;

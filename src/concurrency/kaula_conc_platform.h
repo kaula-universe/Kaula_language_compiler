@@ -128,9 +128,15 @@
 /* ========== 单调时钟（纳秒） ========== */
 
 #if KAULA_PLATFORM_WINDOWS
+static BOOL CALLBACK kaula_p_qpc_freq_init(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)ctx;
+    QueryPerformanceFrequency((LARGE_INTEGER*)param);
+    return TRUE;
+}
 static inline uint64_t kaula_p_now_ns(void) {
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
     static LARGE_INTEGER freq;
-    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    InitOnceExecuteOnce(&once, kaula_p_qpc_freq_init, &freq, NULL);
     LARGE_INTEGER c;
     QueryPerformanceCounter(&c);
 
@@ -150,7 +156,7 @@ static inline uint64_t kaula_p_now_ns(void) {
 #elif defined(CLOCK_MONOTONIC)
 static inline uint64_t kaula_p_now_ns(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 #else

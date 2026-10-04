@@ -10,11 +10,21 @@ static void spend_panic(const char* msg) {
 
 Spendable* spendable_create(size_t capacity) {
     Spendable* sp = (Spendable*)fast_alloc(sizeof(Spendable));
+    if (sp == NULL) return NULL;
     if (capacity < 1) {
         capacity = 1;
     }
     sp->components = (void**)fast_calloc(capacity, sizeof(void*));
+    if (sp->components == NULL) {
+        fast_free(sp);
+        return NULL;
+    }
     sp->consumed = (uint8_t*)fast_calloc(capacity, sizeof(uint8_t));
+    if (sp->consumed == NULL) {
+        fast_free(sp->components);
+        fast_free(sp);
+        return NULL;
+    }
     sp->count = 0;
     sp->capacity = capacity;
     sp->remaining = 0;

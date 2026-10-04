@@ -133,6 +133,8 @@ typedef struct Spendable {
     uint8_t* consumed; // 消费标记位（consumed[i]=1 表示第 i 个元素已被消费）
     size_t remaining;  // 剩余未消费元素数
     bool is_locked;    // 是否已锁定（spend_lock 后为 true）
+    /* ABI 预留：后续加字段不破坏栈分配尺寸 */
+    uint64_t reserved[4];
 } Spendable;
 
 Spendable* spendable_create(size_t size);
@@ -199,6 +201,8 @@ void time_destroy(TimeModule* tm);
 typedef struct FastAllocator {
     uint8_t* base;
     size_t offset;
+    /* ABI 预留 */
+    uint64_t reserved[4];
 } FastAllocator;
 
 extern FastAllocator global_allocator;
