@@ -521,8 +521,30 @@ func (e *Emitter) generateShim(bodyCode string, stateful bool) string {
 
 	/* 顺序调用路径：帧在调用者栈上，不堆分配、不进调度器。 */
 	b.WriteString("    " + e.FrameType() + " frame;\n")
-	b.WriteString("    memset(&frame, 0, sizeof(frame));\n")
+	/*
+	 * P1.2：免全帧 memset，改为靶向清零（与 GenerateSpawn 同口径）。
+	 *
+	 * Frame 里所有字段都是先写后读：
+	 *   pc/参数    下面显式赋值
+	 *   result     resume 里 DONE 前写入
+	 *   io_request 经 KaulaResumeResult 返回，不在 Frame 内
+	 *   branch[d]  守卫里先写后读
+	 * 唯一必须显式归零的是 sub[d]（恢复时首次进入读 sub[d]==0 判定「从头开始」）。
+	 * 整帧 memset 在 Frame ~296B 时代每次顺序调用白付一次。
+	 */
 	b.WriteString("    frame.pc = 0;\n")
+	if e.HasGuard() {
+		for d := 0; d < e.GuardDepth(); d++ {
+			b.WriteString(fmt.Sprintf("    frame.sub[%d] = 0;\n", d))
+		}
+		if e.HasForIn() {
+			for d := 0; d < e.GuardDepth(); d++ {
+				b.WriteString(fmt.Sprintf("    frame.loop_i[%d] = 0;\n", d))
+				b.WriteString(fmt.Sprintf("    frame.loop_end[%d] = 0;\n", d))
+				b.WriteString(fmt.Sprintf("    frame.loop_step[%d] = 0;\n", d))
+			}
+		}
+	}
 	for _, p := range e.Params {
 		b.WriteString(fmt.Sprintf("    frame.%s = %s;\n", p, p))
 	}
