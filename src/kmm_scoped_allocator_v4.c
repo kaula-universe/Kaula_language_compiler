@@ -235,7 +235,7 @@ void kmm_v4_pool_commit(size_t needed) {
 static KMM_ATOMIC_TYPE g_survivor_init_flag = 0;
 
 // 动态池（方案 A）：survivor 元数据由 header 的 kmm_v4_survivor_lazy_init
-// 一次性建立（49 档 bucket_size/slots_count，slots=NULL 懒分配）。
+// 一次性建立（50 档 bucket_size/slots_count，slots=NULL 懒分配）。
 // 这里只做线程安全的双检包装，不再 mmap 大对象区、不再预分配桶。
 static void survivor_ensure_init(void) {
     if (g_kmm_v4_survivor.initialized) return;
@@ -254,7 +254,7 @@ static void survivor_ensure_init(void) {
 #endif
 }
 
-// 懒分配指定桶的 slots 内存（首次使用时才分配，49 档不全预分配）
+// 懒分配指定桶的 slots 内存（首次使用时才分配，50 档不全预分配）
 // 线程安全：CAS 双检，多线程并发 alloc 同一桶只分配一次。
 int kmm_v4_survivor_bucket_ensure(int idx) {
     kmm_slab_bucket_t* b = &g_kmm_v4_survivor.buckets[idx];
@@ -553,7 +553,7 @@ void kmm_v4_survivor_flush(void) {
         return;
     }
 
-    // 大批量：每桶聚合 word 掩码（49 桶 × 4 words，栈上临时数组）
+    // 大批量：每桶聚合 word 掩码（50 桶 × 4 words，栈上临时数组）
     uint64_t masks[KMM_V4_SLAB_BUCKETS][KMM_V4_SLAB_BITMAP_WORDS];
     size_t   per_bucket[KMM_V4_SLAB_BUCKETS];
     memset(masks, 0, sizeof(masks));
