@@ -1579,7 +1579,11 @@ func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx 
 	b.WriteString(fg.codegen.concSaveLiveVars(bound))
 
 	b.WriteString(fmt.Sprintf("    f->pc = %d;\n", idx))
-	b.WriteString(fmt.Sprintf("    f->sub[0] = %d;\n", subNext))
+	// 复合语句守卫槽位归零只在 Frame 含 sub[] 时生成（Frame 瘦身：
+	// 无 if/while/for/for-in 的函数省略 sub/branch，顶层挂起点无需归零）
+	if analysis.HasCompound {
+		b.WriteString(fmt.Sprintf("    f->sub[0] = %d;\n", subNext))
+	}
 
 	/*
 	 * 把 IO 请求交给 Worker → IoDriver。

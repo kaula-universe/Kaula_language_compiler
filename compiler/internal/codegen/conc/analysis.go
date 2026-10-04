@@ -101,6 +101,16 @@ type BodyAnalysis struct {
 	// 既不需要 pc 字段，也不需要 resume 的 switch（文档 §2.7）
 	NeedsSuspend bool
 
+	// HasCompound：函数体含 if/while/for/for-in 复合语句（需要 sub/branch
+	// 守卫槽位）。无复合语句时省略，Frame 从 296B 瘦到 ~32B ——
+	// KMM 分配从 512B 档（slots 少、桶满频繁）降到小档，spawn 热路径
+	// 每任务省一次大分配 + 大 memset。
+	HasCompound bool
+
+	// HasForIn：函数体含 for..in 守卫（需要 loop_i/loop_end/loop_step）。
+	// 无 for-in 时省略 192B 迭代状态数组。
+	HasForIn bool
+
 	/*
 	 * SegmentRestoreOrdinals[i] 是第 i 段的 Frame 变量恢复界（挂起点序号）。
 	 * 第 i 段要恢复的是 DeclOrdinal < 该值的变量；-1 = 本段不需要恢复副本。
@@ -283,13 +293,16 @@ func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
 			case *ast.BlockStatement:
 				walk(s.Statements)
 			case *ast.IfStatement:
+				res.HasCompound = true
 				note(s.Condition)
 				walk(s.Body)
 				walk(s.Else)
 			case *ast.WhileStatement:
+				res.HasCompound = true
 				note(s.Condition)
 				walk(s.Body)
 			case *ast.ForStatement:
+				res.HasCompound = true
 				note(s.Condition)
 				if vd, ok := s.Init.(*ast.VariableDeclaration); ok && vd != nil {
 					note(vd.Value)
@@ -297,6 +310,8 @@ func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
 				}
 				walk(s.Body)
 			case *ast.ForInStatement:
+				res.HasCompound = true
+				res.HasForIn = true
 				if s.Variable != nil {
 					// ForIn 的循环变量是 ast.Identifier，没有类型标注
 					addDecl(s.Variable.Name, s.Pos.Line, nil, "")
