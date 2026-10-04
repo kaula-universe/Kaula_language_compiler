@@ -929,6 +929,7 @@ def main():
         config.bin_dir = config.build_dir / "bin"
         config.lib_dir = config.build_dir / "lib"
         config.include_dir = config.build_dir / "include"
+        config.hash_dir = config.build_dir / "hash"
 
     if args.clean:
         clean_all(config)

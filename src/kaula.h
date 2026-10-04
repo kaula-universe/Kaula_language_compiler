@@ -210,6 +210,11 @@ extern FastAllocator global_allocator;
 void fast_allocator_init();
 void* fast_alloc(size_t size);
 void* fast_calloc(size_t num, size_t size);
+/*
+ * @deprecated fast_allocator 是 bump 分配器，不支持单个对象释放；
+ * fast_free 当前为 no-op（仅保留符号兼容）。内存通过 fast_allocator_reset()
+ * 批量回收。请勿依赖逐个 free 语义。
+ */
 void fast_free(void* ptr);
 
 #include "kaula_runtime.h"
