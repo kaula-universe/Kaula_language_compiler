@@ -2,7 +2,7 @@
 
 Kaula 的核心运行时由两部分构成：
 
-- **并发内核**（`src/concurrency/`）—— 任务、Worker、调度、IO 驱动、内存回收
+- **并发内核（CONC，Continuation-Oriented Native Co-runtime，面向续延的原生协同运行时）**（`src/concurrency/`）—— 任务、Worker、调度、IO 驱动、内存回收
 - **KMM V4**（`src/kmm_scoped_allocator_v4.{h,c}`）—— 编译期配置探测 + 运行时内存分配
 
 两者的实现、接口、验证方式**完全独立**：并发内核不要求 KMM，KMM 也不知道有个
