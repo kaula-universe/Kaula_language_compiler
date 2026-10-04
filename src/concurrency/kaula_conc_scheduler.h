@@ -64,6 +64,19 @@ KaulaHandle kaula_spawn_flags(KaulaResumeFn resume_fn, void* frame,
                               size_t frame_size, uint32_t flags);
 
 /*
+ * kaula_spawn_enter：带首跑直通入口的提交（守卫形态专用）。
+ *
+ * 守卫形态的 resume 首跑要过 switch(pc) + sub 守卫判断；这些在首跑时
+ * 必然命中（spawn 时 sub 槽清零），是纯浪费。enter_fn 是编译期生成的
+ * 去守卫入口：无条件执行入口段到第一个挂起点，此后恢复一律走 resume_fn。
+ * enter_fn == NULL 时等价于 kaula_spawn。
+ */
+KaulaHandle kaula_spawn_enter(KaulaResumeFn resume_fn, KaulaResumeFn enter_fn,
+                              void* frame, size_t frame_size);
+KaulaHandle kaula_spawn_enter_flags(KaulaResumeFn resume_fn, KaulaResumeFn enter_fn,
+                                    void* frame, size_t frame_size, uint32_t flags);
+
+/*
  * kaula_spawn_simple 提交一个"无挂起"的 conc fn。
  *
  * 单一形态的 conc fn 没有状态机：它的 coercion shim 就是普通 C 函数。

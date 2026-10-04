@@ -92,8 +92,9 @@ KaulaTask* kaula_task_alloc(void) {
     return task;
 }
 
-void kaula_task_init(KaulaTask* task, KaulaResumeFn fn, void* frame, size_t frame_size) {
+void kaula_task_init(KaulaTask* task, KaulaResumeFn fn, KaulaResumeFn enter_fn, void* frame, size_t frame_size) {
     task->resume_fn = fn;
+    task->enter_fn = enter_fn;
     task->frame = frame;
     task->frame_size = frame_size;
     task->inner_frame = NULL;

@@ -162,13 +162,15 @@ static KaulaHandle spawn_failed(KaulaError err) {
 }
 
 static KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
+                                        KaulaResumeFn enter_fn,
                                         void* frame, size_t frame_size, uint32_t flags);
 
 KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, size_t frame_size) {
-    return kaula_spawn_to_flags(owner, fn, frame, frame_size, 0);
+    return kaula_spawn_to_flags(owner, fn, NULL, frame, frame_size, 0);
 }
 
 KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
+                                 KaulaResumeFn enter_fn,
                                  void* frame, size_t frame_size, uint32_t flags) {
     if (atomic_load_explicit(&g_conc_runtime.shutdown, memory_order_acquire)) {
         return spawn_failed(KAULA_ERR_SHUTDOWN);
@@ -188,7 +190,7 @@ KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
     if (task == NULL) {
         return spawn_failed(KAULA_ERR_OOM);
     }
-    kaula_task_init(task, fn, frame, frame_size);
+    kaula_task_init(task, fn, enter_fn, frame, frame_size);
     /*
      * Frame 由调用方（生成代码）堆分配，随任务退休释放。
      *
@@ -311,6 +313,7 @@ static void conc_ensure_init(void) {
 }
 
 static KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
+                                        KaulaResumeFn enter_fn,
                                         void* frame, size_t frame_size, uint32_t flags);
 
 KaulaHandle kaula_spawn(KaulaResumeFn resume_fn, void* frame, size_t frame_size) {
@@ -326,7 +329,23 @@ KaulaHandle kaula_spawn_flags(KaulaResumeFn resume_fn, void* frame,
     }
 
     KaulaWorker* w = kaula_conc_current_worker();
-    return kaula_spawn_to_flags(w, resume_fn, frame, frame_size, flags);
+    return kaula_spawn_to_flags(w, resume_fn, NULL, frame, frame_size, flags);
+}
+
+KaulaHandle kaula_spawn_enter(KaulaResumeFn resume_fn, KaulaResumeFn enter_fn,
+                              void* frame, size_t frame_size) {
+    return kaula_spawn_enter_flags(resume_fn, enter_fn, frame, frame_size, 0);
+}
+
+KaulaHandle kaula_spawn_enter_flags(KaulaResumeFn resume_fn, KaulaResumeFn enter_fn,
+                                    void* frame, size_t frame_size, uint32_t flags) {
+    conc_ensure_init();
+    if (atomic_load_explicit(&g_conc_runtime.shutdown, memory_order_acquire)) {
+        return spawn_failed(KAULA_ERR_SHUTDOWN);
+    }
+
+    KaulaWorker* w = kaula_conc_current_worker();
+    return kaula_spawn_to_flags(w, resume_fn, enter_fn, frame, frame_size, flags);
 }
 
 KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
@@ -350,7 +369,7 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
     wrapper->fn = (void*)fn;
     wrapper->user_frame = frame;
 
-    kaula_task_init(task, simple_trampoline, wrapper, sizeof(KaulaSimpleFrame));
+    kaula_task_init(task, simple_trampoline, NULL, wrapper, sizeof(KaulaSimpleFrame));
     /*
      * 用户帧挂在 inner_frame 上，随任务退休一起释放。
      *

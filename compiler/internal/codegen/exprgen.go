@@ -4115,7 +4115,20 @@ func (fg *FunctionGenerator) EmitResume(stmt *ast.FunctionStatement, emitter *co
 	cg.kmmScopeDepth = 0
 	cg.inFunctionBody = true
 
-	segments := fg.concBodySegments(stmt, analysis)
+	segments := fg.concBodySegments(stmt, analysis, false)
+
+	/*
+	 * enter 首跑直通（B）：守卫形态额外生成去守卫入口段。
+	 * 只取入口段（segments[0]）—— 执行到第一个挂起点即返回，
+	 * 挂起后恢复一律走 resume（segments 全量版）。
+	 */
+	enterSegment := ""
+	if analysis.NeedsSuspend && analysis.HasCompound {
+		enterSegs := fg.concBodySegments(stmt, analysis, true)
+		if len(enterSegs) > 0 {
+			enterSegment = enterSegs[0]
+		}
+	}
 
 	cg.currentFunctionReturnType = prevReturnType
 	cg.inConcResume = prevInResume
@@ -4132,7 +4145,7 @@ func (fg *FunctionGenerator) EmitResume(stmt *ast.FunctionStatement, emitter *co
 	 */
 	emitter.FrameVarCTypes = fg.frameVarCTypes(analysis)
 
-	return emitter.Generate(analysis, segments, stmt.Body)
+	return emitter.Generate(analysis, segments, enterSegment, stmt.Body)
 }
 
 // frameVarCTypes 把 analysis 里的变量名映射到 C 类型

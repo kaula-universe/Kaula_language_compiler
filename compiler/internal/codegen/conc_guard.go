@@ -115,8 +115,14 @@ func (sg *StatementGenerator) concGuardSlotAdvance(inner func() string, advanceF
 	k := cg.concGuardSeqNext()
 
 	var b strings.Builder
-	b.WriteString(cg.indentString())
-	b.WriteString(fmt.Sprintf("if (%s->sub[%d] == %d) {\n", f, d, k))
+	if cg.concFirstRun {
+		// enter 首跑直通：sub 槽已被 spawn 清零，判断必然命中 → 省略，
+		// 但进度写入保留（恢复时 resume 靠它跳过已执行语句）。
+		b.WriteString(cg.indentString() + "{\n")
+	} else {
+		b.WriteString(cg.indentString())
+		b.WriteString(fmt.Sprintf("if (%s->sub[%d] == %d) {\n", f, d, k))
+	}
 
 	cg.indent++
 	advance := func() {
@@ -154,8 +160,12 @@ func (sg *StatementGenerator) concGuardLoopHead(condCode string) string {
 	k := cg.concGuardSeqNext()
 
 	var b strings.Builder
-	b.WriteString(cg.indentString())
-	b.WriteString(fmt.Sprintf("if (%s->sub[%d] == %d) {\n", f, d, k))
+	if cg.concFirstRun {
+		b.WriteString(cg.indentString() + "{\n")
+	} else {
+		b.WriteString(cg.indentString())
+		b.WriteString(fmt.Sprintf("if (%s->sub[%d] == %d) {\n", f, d, k))
+	}
 	cg.indent++
 	b.WriteString(cg.indentString())
 	b.WriteString(fmt.Sprintf("%s->sub[%d] = %d;\n", f, d, k+1))
@@ -177,8 +187,12 @@ func (sg *StatementGenerator) concGuardCondPrologue(condCode string) string {
 	k := cg.concGuardSeqNext()
 
 	var b strings.Builder
-	b.WriteString(cg.indentString())
-	b.WriteString(fmt.Sprintf("if (%s->sub[%d] == %d) {\n", f, d, k))
+	if cg.concFirstRun {
+		b.WriteString(cg.indentString() + "{\n")
+	} else {
+		b.WriteString(cg.indentString())
+		b.WriteString(fmt.Sprintf("if (%s->sub[%d] == %d) {\n", f, d, k))
+	}
 	cg.indent++
 	b.WriteString(cg.indentString())
 	b.WriteString(fmt.Sprintf("%s->sub[%d] = %d;\n", f, d, k+1))
@@ -246,9 +260,13 @@ func (sg *StatementGenerator) concGuardedDecl(vd *ast.VariableDeclaration) strin
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	// 恢复副本：无条件执行 —— 恢复路径跳过初始化槽，靠它拿到值
-	b.WriteString(cg.indentString())
-	b.WriteString(fmt.Sprintf("%s = %s->%s;\n", vd.Name, cg.concFrameVar, vd.Name))
+	// 恢复副本：无条件执行 —— 恢复路径跳过初始化槽，靠它拿到值。
+	// enter 首跑直通：Frame 的跨段字段尚未初始化，恢复副本会读到垃圾，
+	// 省略它 —— 槽内 init 在首跑无条件执行，直接覆盖。
+	if !cg.concFirstRun {
+		b.WriteString(cg.indentString())
+		b.WriteString(fmt.Sprintf("%s = %s->%s;\n", vd.Name, cg.concFrameVar, vd.Name))
+	}
 	b.WriteString(sg.concGuardSlot(func() string { return assign }))
 	return b.String()
 }

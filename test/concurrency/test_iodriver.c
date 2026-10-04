@@ -528,7 +528,7 @@ static void test_block_lane_isolation(void) {
 
             KaulaTask* t = kaula_task_alloc();
             if (t == NULL) { TEST_FAIL("Task 分配失败"); all_ok = 0; break; }
-            kaula_task_init(t, block_resume, f, sizeof(BlockFrame));
+            kaula_task_init(t, block_resume, NULL, f, sizeof(BlockFrame));
             t->flags |= KAULA_TASK_FLAG_HINT_BLOCKING;
             atomic_store_explicit(&t->state, KAULA_TASK_READY, memory_order_release);
             atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1,
@@ -604,7 +604,7 @@ static void test_block_lane_direct_submit(void) {
     ASSERT_NOT_NULL(t, "Task 分配应成功");
     if (t == NULL) { kaula_runtime_shutdown(); return; }
 
-    kaula_task_init(t, block_resume, f, sizeof(BlockFrame));
+    kaula_task_init(t, block_resume, NULL, f, sizeof(BlockFrame));
     t->flags |= KAULA_TASK_FLAG_HINT_BLOCKING;
     atomic_store(&t->state, KAULA_TASK_BLOCKED);
 
@@ -658,7 +658,7 @@ static void test_evict_stalled_worker(void) {
 
     KaulaTask* t = kaula_task_alloc();
     if (t == NULL) { kaula_runtime_shutdown(); TEST_FAIL("Task 分配失败"); return; }
-    kaula_task_init(t, spin_resume, &spin, sizeof(spin));
+    kaula_task_init(t, spin_resume, NULL, &spin, sizeof(spin));
 
     w->current_task = t;
     w->current_task_start_ns = kaula_p_now_ns() - 50000000ULL;  /* 50ms 前 */

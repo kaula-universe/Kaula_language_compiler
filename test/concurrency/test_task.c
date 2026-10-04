@@ -75,7 +75,7 @@ static void test_alloc_init_complete(void) {
     SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
     f->pc = 0; f->input = 5; f->result = 0;
 
-    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    kaula_task_init(t, simple_resume, NULL, f, sizeof(SimpleFrame));
     ASSERT_TRUE(t->resume_fn == simple_resume, "resume_fn 应被记录");
     ASSERT_EQ(t->frame_size, (long long)sizeof(SimpleFrame), "frame_size 应记录");
 
@@ -100,7 +100,7 @@ static void test_await_completed(void) {
     KaulaTask* t = kaula_task_alloc();
     SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
     f->pc = 0; f->input = 10; f->result = 0;
-    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    kaula_task_init(t, simple_resume, NULL, f, sizeof(SimpleFrame));
     kaula_task_complete(t, (void*)(intptr_t)31);
 
     KaulaHandle h = kaula_handle_from_task(t);
@@ -175,7 +175,7 @@ static void test_handle_release_returns_pin(void) {
     if (t == NULL) return;
     SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
     f->pc = 0; f->input = 1; f->result = 0;
-    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    kaula_task_init(t, simple_resume, NULL, f, sizeof(SimpleFrame));
     kaula_task_complete(t, (void*)(intptr_t)5);
 
     KaulaHandle h = kaula_handle_from_task(t);
@@ -209,7 +209,7 @@ static void test_await_into_releases_pin(void) {
     if (t == NULL) return;
     SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
     f->pc = 0; f->input = 4; f->result = 13;
-    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    kaula_task_init(t, simple_resume, NULL, f, sizeof(SimpleFrame));
     /*
      * 结果必须是**真实地址**：await_into 会从 result 拷 dst_size 字节。
      * 本文件里其它用例用 (void*)(intptr_t)N 那种假指针是可以的 ——
@@ -243,7 +243,7 @@ static void test_await_expr_defers_release(void) {
     if (t == NULL) return;
     SimpleFrame* f = (SimpleFrame*)kmm_v4_alloc_global(sizeof(SimpleFrame));
     f->pc = 0; f->input = 9; f->result = 0;
-    kaula_task_init(t, simple_resume, f, sizeof(SimpleFrame));
+    kaula_task_init(t, simple_resume, NULL, f, sizeof(SimpleFrame));
     kaula_task_complete(t, (void*)(intptr_t)28);
 
     KaulaHandle h = kaula_handle_from_task(t);

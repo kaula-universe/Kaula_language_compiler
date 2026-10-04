@@ -141,6 +141,10 @@ type CodeGenerator struct {
 	concGuardSeq   int
 	concSegmentPC  int
 
+	// concFirstRun：enter 首跑直通模式。true 时守卫生成省略 sub 槽判断
+	// （spawn 时 sub 槽清零，判断必然命中），只保留进度写入与 branch 判断。
+	concFirstRun bool
+
 	// concSlotAwaits 是当前语句里已生成的可插桩调用数。
 	// 一条语句含多个挂起点时，一个槽位放不下两段结果 ——
 	// 那时必须报错，不能让第二个挂起点覆盖第一个的恢复位置。

@@ -53,12 +53,16 @@ fn main() -> i32 {
 		t.Errorf("不应报错，实际：%s", e)
 	}
 
-	// 累加语句只应出现一次：出现两次就意味着循环体会被跑两遍
-	if n := countOf(c, "total = kaula_add_i64"); n != 1 {
-		t.Errorf("循环体内的累加必须只生成一次，实际 %d 次：\n%s", n, c)
+	/*
+	 * 守卫形态现在生成两份：resume（带守卫）与 enter（首跑直通去守卫）。
+	 * 循环体各出现一次，共 2 次 —— 不是「跑两遍」，是两个函数，
+	 * 首跑走 enter、恢复走 resume。
+	 */
+	if n := countOf(c, "total = kaula_add_i64"); n != 2 {
+		t.Errorf("循环体应分别在 resume 与 enter 各生成一次（共 2 次），实际 %d 次：\n%s", n, c)
 	}
-	if n := countOf(c, "i = kaula_add_i64"); n != 1 {
-		t.Errorf("循环体内的自增必须只生成一次，实际 %d 次：\n%s", n, c)
+	if n := countOf(c, "i = kaula_add_i64"); n != 2 {
+		t.Errorf("循环体自增应分别在 resume 与 enter 各生成一次（共 2 次），实际 %d 次：\n%s", n, c)
 	}
 }
 

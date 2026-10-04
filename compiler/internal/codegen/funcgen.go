@@ -1646,7 +1646,7 @@ func minInt(a, b int) int {
  * 在恢复时会被重新执行（`i64 i = 0` 再跑一遍就是循环从头数），必须同样被
  * 槽位挡住。所以守卫与否是**整段**的属性，生成之前先分组、判定完再动手。
  */
-func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analysis *conc.BodyAnalysis) []string {
+func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analysis *conc.BodyAnalysis, firstRun bool) []string {
 	cg := fg.codegen
 	sg := cg.statementGenerator
 
@@ -1657,6 +1657,7 @@ func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analy
 	// 挂起返回需要知道此刻活跃的变量；内联挂起需要知道当前段号
 	cg.concAnalysis = analysis
 	cg.concParams = stmt.Params
+	cg.concFirstRun = firstRun
 	defer func() {
 		cg.concAnalysis = nil
 		cg.concParams = nil
@@ -1664,6 +1665,7 @@ func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analy
 		cg.concGuardSeq = 0
 		cg.concSegmentPC = 0
 		cg.concSlotAwaits = 0
+		cg.concFirstRun = false
 	}()
 
 	segments := make([]string, 0, len(analysis.SuspendSites)+1)
