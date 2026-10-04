@@ -49,12 +49,80 @@ void kaula_epoch_init(void) {
  */
 static _Atomic(uint32_t) g_ext_pins = 0;
 
+/*
+ * 全局延迟退休溢出队列。
+ *
+ * 背景：per-Worker 退休列表容量硬上限 KAULA_EPOCH_MAX_RETIRED。当 main 等
+ * 外部线程持续持有 pin（g_ext_pins>0）时，try_reclaim 为安全起见一个都不
+ * 回收，列表很快灌满。灌满后的旧做法是「直接丢弃指针」——对象既不入列也不
+ * 释放，永久泄漏直到 shutdown（soak 下表现为 RSS 随任务数线性上涨）。
+ *
+ * 正确做法：有 pin 挡着时不丢，而是把溢出对象暂存到这个全局延迟队列；
+ * 等最后一个外部 pin 释放（g_ext_pins→0，此刻没有任何外部读者）时统一排空。
+ * 排空发生在 unpin 线程上，对象要么 survivor_free，要么彻底回收 Task
+ * （不复用进 Worker 池——跨线程 push 别人的池会与 owner 撞车）。
+ *
+ * 队列有界：两个 drain 周期之间最多积压「一个并发窗口 × 每任务退休数」，
+ * 远低于容量；真打满时退回旧的「安全丢弃」兜底（不可能在常态发生）。
+ */
+#define KAULA_EPOCH_DEFERRED_CAP (1u << 18)  /* 262144 */
+typedef struct {
+    void*  ptr;
+    void** pool;
+} KaulaDeferredEntry;
+static KaulaDeferredEntry g_deferred[KAULA_EPOCH_DEFERRED_CAP];
+static _Atomic(uint32_t) g_deferred_count = 0;
+static _Atomic(uint32_t) g_deferred_lock = 0;
+
+static void deferred_lock(void) {
+    while (__atomic_exchange_n(&g_deferred_lock, 1, __ATOMIC_ACQUIRE) != 0) {
+        while (__atomic_load_n(&g_deferred_lock, __ATOMIC_RELAXED) != 0) { }
+    }
+}
+static void deferred_unlock(void) {
+    __atomic_store_n(&g_deferred_lock, 0, __ATOMIC_RELEASE);
+}
+
+/* 排空延迟队列：调用时必须保证 g_ext_pins==0（无外部读者）。 */
+static void kaula_epoch_deferred_drain(void) {
+    deferred_lock();
+    uint32_t n = g_deferred_count;
+    g_deferred_count = 0;
+    deferred_unlock();
+    if (n == 0) return;
+
+    for (uint32_t i = 0; i < n; i++) {
+        void* ptr = g_deferred[i].ptr;
+        void** pool = g_deferred[i].pool;
+        g_deferred[i].ptr = NULL;
+        g_deferred[i].pool = NULL;
+        if (pool != NULL) {
+            /* Task：frame/inner_frame 已由 retire_frames 单独退休（此时为 NULL），
+             * 这里只彻底回收 Task 本身（销毁同步原语 + survivor_free）。
+             * 不复用进 Worker 池：跨线程 push 别人的 owner 池会撞车。 */
+            KaulaTask* t = (KaulaTask*)ptr;
+            if (kaula_p_event_is_valid(&t->done_event)) {
+                kaula_p_event_destroy(&t->done_event);
+                kaula_p_event_invalidate(&t->done_event);
+            }
+            kmm_v4_survivor_free(t);
+        } else {
+            kmm_v4_survivor_free(ptr);
+        }
+        atomic_fetch_add_explicit(&g_reclaimed_total, 1, memory_order_relaxed);
+    }
+}
+
 void kaula_epoch_pin(void) {
     atomic_fetch_add_explicit(&g_ext_pins, 1, memory_order_seq_cst);
 }
 
 void kaula_epoch_unpin(void) {
-    atomic_fetch_sub_explicit(&g_ext_pins, 1, memory_order_seq_cst);
+    uint32_t prev = atomic_fetch_sub_explicit(&g_ext_pins, 1, memory_order_seq_cst);
+    /* 最后一个外部 pin 释放：此刻没有外部读者，安全排空延迟队列。 */
+    if (prev == 1) {
+        kaula_epoch_deferred_drain();
+    }
 }
 
 void kaula_epoch_enter(void) {
@@ -129,8 +197,23 @@ void kaula_epoch_retire_to(void* ptr, void** pool) {
              * 这是"慢/多占内存"对"悬垂读"的正确取舍 —— 宁可泄漏不可 UAF。
              */
             if (atomic_load_explicit(&g_ext_pins, memory_order_seq_cst) > 0) {
-                atomic_fetch_add_explicit(&g_epoch_pin_forced_leaks, 1,
-                                          memory_order_relaxed);
+                /*
+                 * 列表满且仍有外部 pin：不能回收（会 UAF），也不能再丢
+                 * （旧实现丢指针 = 永久泄漏，soak 下 RSS 线性上涨）。
+                 * 改为暂存到全局延迟队列，等最后一个 pin 释放时排空。
+                 */
+                deferred_lock();
+                uint32_t dn = g_deferred_count;
+                if (dn < KAULA_EPOCH_DEFERRED_CAP) {
+                    g_deferred[dn].ptr = ptr;
+                    g_deferred[dn].pool = pool;
+                    g_deferred_count = dn + 1;
+                } else {
+                    /* 真打满（常态不可能）：退回安全丢弃兜底 */
+                    atomic_fetch_add_explicit(&g_epoch_pin_forced_leaks, 1,
+                                              memory_order_relaxed);
+                }
+                deferred_unlock();
                 return;
             }
             if (pool != NULL) {
@@ -256,6 +339,9 @@ void kaula_epoch_reclaim_all(void) {
 }
 
 void kaula_epoch_shutdown(void) {
+    /* shutdown 时所有 Worker 已 join、外部 pin 应为 0：先排空延迟队列 */
+    kaula_epoch_deferred_drain();
+
     /* shutdown 时所有 Worker 已 join，单线程上下文下全部释放 */
     kaula_epoch_reclaim_all();
 
