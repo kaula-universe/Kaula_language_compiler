@@ -1256,6 +1256,15 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	// 必须在 FlattenDeclarations 之前：内联产生的新声明需要统一展平。
 	cg.inlineConcFns(program)
 
+	// spawn 实参常量特化（A）：字面量实参 → 克隆特化版 conc fn，
+	// 去参数化 + 重分析。也必须在 FlattenDeclarations 之前
+	// （特化 fn 的新声明需要统一展平）。
+	cg.specializeSpawnConsts(program)
+
+	// 预注册全部 conc fn 的 emitter：顺序调用（A 调 B、B 定义在后）
+	// 与特化 fn（插入头部）生成时能查到 shim，避免生成裸 C 调用。
+	cg.preRegisterConcFns(program)
+
 	// 单语句多变量声明（i64 a = 1, b = 2）展平为独立声明（幂等；
 	// 未经过语义阶段的直连代码生成路径也能正确输出全部声明符）
 	astutil.FlattenDeclarations(program)
@@ -1830,6 +1839,28 @@ static inline String string_concat_float(String s, double v) {
 		forwardDecls.WriteString("void __kaula_test_assert(int cond, const char* expr, const char* file, int line);\n")
 		forwardDecls.WriteString("void __kaula_test_assert_eq_i64(long long a, long long b, const char* file, int line);\n")
 		forwardDecls.WriteString("void __kaula_test_assert_str_eq(const char* a, const char* b, const char* file, int line);\n")
+	}
+	// conc fn 的 coercion shim 前置声明：顺序调用方（或 spawn 常量特化
+	// 插到头部、先于目标 fn 生成的函数）调用 shim 时需要原型，
+	// 否则 C 隐式声明（int()）与后面定义冲突。
+	for _, em := range cg.concFuncs() {
+		if em.CReturnType == "" {
+			continue
+		}
+		forwardDecls.WriteString(em.CReturnType)
+		forwardDecls.WriteString(em.ShimFn())
+		forwardDecls.WriteString("(")
+		for i := range em.Params {
+			if i > 0 {
+				forwardDecls.WriteString(", ")
+			}
+			if i < len(em.ParamCTypes) {
+				forwardDecls.WriteString(em.ParamCTypes[i])
+			} else {
+				forwardDecls.WriteString("int64_t")
+			}
+		}
+		forwardDecls.WriteString(");\n")
 	}
 	for _, stmt := range program.Statements {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.Name != "main" {
