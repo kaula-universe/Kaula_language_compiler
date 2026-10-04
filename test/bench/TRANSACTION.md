@@ -47,21 +47,49 @@ for k in 0..STEPS:
 ```
 checksum = 0
 state = SEED
-for k in 0..STEPS:                        # 生成 256 个值
+for k in 0..STEPS:                              # 生成 256 个值
     state = ((state % SHIFT) * MULT + ADD) % P
     b = state % 256
-    checksum = (checksum * 31 + b) % P     # 滚动散列
+    checksum = ((checksum % 1073741824) * 31 + b) % P   # 滚动散列
 return checksum
 ```
+
+> **本文档早先写的是 `checksum = (checksum * 31 + b) % P`，与三边实现不符。**
+> 真实实现是 `((checksum % 1073741824) * 31 + b) % P`：先把散列压到 2^30
+> 再乘 31，中间值 < 2^35。不压的话 `9.2e18 * 31` 会溢出有符号 64 位，
+> 三边的溢出语义又各不相同（Go 静默回绕 / Rust release 回绕 / Kaula 检查
+> 并陷阱），差异会直接变成「checksum 不一致」。**以代码为准。**
 
 选它的理由：
 
 - **无分配**：结果是一个整数。绕开三个运行时分配器能力的差异 ——
   否则测出来的是 allocator 差异，不是内核差异。
 - **有真实数据依赖**：`* MULT`、`* 31` 的依赖链保证顺序性，
-  编译器不会把循环折叠成常量，也不会向量化。
+  不会向量化。
 - **工作量恒定**：256 步，与并发度无关，所以 TPS 差异只能来自调度与挂起。
 - **无分支**：避免分支预测器命中率成为噪声来源。
+
+### 但「编译器不会把循环折叠成常量」这一条只对 Go 成立
+
+原假设是数据依赖链足以阻止常量折叠。实测证伪：
+
+- **Rust / LLVM**：`parse_and_checksum` 是无参数纯函数，函数特化会推断出
+  「返回值是常量」，把 256 次循环整个搬到编译期。实测 20000 次事务
+  耗时 **0 ns** —— 等于什么都没测。`black_box(f())` 也挡不住（函数指针
+  会被去虚化后再折叠），**必须 `black_box(初值)`**，把入口值声明为编译期
+  不可知。
+- **Go / gc**：不做这种跨过程常量折叠，实测 2341.7 ns/次是真实执行，
+  无需防护。
+
+三边最终都在运行时真跑 256 步，checksum 逐位一致（期望值
+`13356499072`）。Rust 侧的 `black_box` 只作用于入口值，返回值不变，
+语义上不是差异项；但它也是下面那条代码生成差异的来源之一：
+
+> **caveat**：同一事务源码，Go (gc) 实测 2341.7 ns/次，Rust (LLVM)
+> 1010.9 ns/次（`txn_state_only` 1836.5 vs 809.7）。checksum 逐位一致
+> 但算术慢 2.3 倍，是真实代码生成差异（Go 循环体 ~60 条指令/迭代、无
+> IDIV、用魔术数乘法；Rust ~12 cycles/迭代），**不是测量 bug**。
+> `light` 曲线的 TPS 差值里含这一项，报告需作为 caveat / 归一化项说明。
 
 ## 四个曲线
 
@@ -83,23 +111,100 @@ return checksum
 | 运行时 | suspend 原语 | 语义 | 占住执行资源？ |
 |---|---|---|---|
 | Kaula | `time_sleep_us(200)` | IoDriver 定时器堆，挂起后 Worker 立即转做别的事 | 否 |
-| Tokio | `tokio::time::sleep(200µs)` | 定时器唤醒，协作式让出 | 否 |
-| Go | 自旋 + `runtime.Gosched()` 到 deadline | **Go 没有用户态定时器**，`time.Sleep` 会占住一个 OS 线程 | 否 |
+| Go | `time.Sleep(200µs)` | 运行时定时器，OS 线程挂起等待 | 否 |
+| Tokio | `tokio::time::sleep(200µs)` | 定时器轮盘唤醒，协作式让出 | 否 |
 
-Go 这一栏是刻意的：直接用 `time.Sleep` 会让它占住一个 OS 线程，
-那测的是「Go 的线程数够不够」，而不是「挂起开销」—— 对 Go 不公平，
-结论会偏向 Kaula。用 `Gosched` 自旋到 deadline 才是等价物。
+> **本文档早先写的是「Go 没有用户态定时器，`time.Sleep` 会占住一个 OS 线程」，
+> 并据此规定 Go 走 `Gosched` 自旋到 deadline。该前提已被实测证伪。**
+> 实测 `time.Sleep(200µs)`×5000 真挂起：**CPU/wall = 7.1%**，不是自旋。
+> 自旋版反而会把 Go 这一档凭空变慢，结论偏向 Kaula。**以代码为准** ——
+> Go 侧走 `time.Sleep`。
 
-**代价**：Go 这一档会比另两个慢，因为自旋有 CPU 成本，而 Kaula/Tokio 是真睡。
-这一档不要用绝对值下结论，只用于看三者相对形态是否合理。
+### 三边 sleep 的实际超额（同一 `timeBeginPeriod(1)` 条件下实测）
+
+| 原语 | p50 | 超额 |
+|---|---|---|
+| Go `time.Sleep(200µs)` | 623800 ns | 3.1× |
+| `std::thread::sleep(200µs)` | 983500 ns | 4.9× |
+| `tokio::time::sleep(200µs)` | **2001100 ns** | 10× |
+
+Tokio 比裸 `std::thread::sleep` 还多一倍，这一层是 Tokio 自己的：
+`src/runtime/time/source.rs` 的 `deadline_to_tick` 注释直接写着
+**"Round up to the end of a ms"**，`tick_to_duration` 也是
+`Duration::from_millis` —— 轮盘粒度 1 ms，再叠 Windows `Sleep` 自身的
+1 ms 取整。
+
+这是**运行时属性，不是基准口径问题**：三边都调了 `timeBeginPeriod(1)`
+（Kaula 在 792960d，Go/Tokio 各自补调），用的都是各自契约规定的 sleep
+原语，同一请求时长、同一时钟。`suspend` / `mixed` 两条曲线的差值里
+含这一项，属可比的真实差异。
+
+**代价**：`suspend` 的绝对值主要反映定时器粒度而非调度质量，
+不要用它单独下结论；看三者相对形态即可。
 
 ## 计时口径
 
-- **单事务延迟**：客户端侧从「提交」到「拿到结果」的墙钟时间，含调度。
-  这正是 P99 该测的东西——用户感知的延迟，不是内核内部耗时。
-- **Kaula 实现**：主线程在 `spawn` 前取时间戳，`await` 返回后取差，
-  与 Go 的「提交—channel 收到」、Tokio 的「提交—await 完成」口径一致。
+- **单事务延迟**：内核打点 `submit_ns → complete_ns`，即服务时间，
+  含任务创建/入队/排队/执行，**不含调用方顺序取回**。
+  见 `kaula_conc_task.c`：`submit_ns` 在 `kaula_task_init` 打（进队列之前），
+  `complete_ns` 在 `kaula_task_complete` 打（置 DONE 之前）。
+- **为什么不是「提交 → 拿到结果」**：并发窗口里按调用方视角量到的是
+  排队 + 顺序取回，与服务时间能差两个数量级 —— 实测 p50 = 3.15 s 而整轮
+  只用 26 ms（p50 大于总耗时）。该口径由 e55adb9 判定为错误。
+- **三边复刻方式**：
+  - Kaula：内核打点，`kaula_conc_last_latency_ns()` 取「上一次 await 的服务时间」。
+  - Go：`nowTicks()` 取在 `go` 语句之前，任务体算完那一刻取差。
+  - Tokio：`Instant::now()` 取在 `tokio::spawn` 之前，任务体 `.await`
+    完成那一刻取差。
+- **计时源必须单调且三边同源**：Kaula `kaula_p_now_ns` 走 QPC
+  （`kaula_conc_platform.h:121-139`）；Go 走原始 QPC（`nowTicks()`）；
+  Tokio 用 `std::time::Instant`（Windows 上走 QPC）。三者 100 ns 粒度。
+  **Go 的 `time.Now()` 在 Windows 上不可用于延迟打点** —— 其单调分量读
+  `KUSER_SHARED_DATA.InterruptTime`，粒度 10~40 µs，连续读 200 万次有
+  1999922 次同值，会把四条曲线的 p50 全读成 0。
 - **CPU / 内存**：由 orchestrator 从**外部**采样，不用各自语言的 API。
   三个运行时能报告的指标口径不同，外部采样反而更可比。
-- **结果校验**：每次运行累加所有返回值的低位，任何一个运行时算错都会
-  在 checksum 上暴露，避免「跑得飞快但算错了」。
+- **结果校验**：每次运行累加所有返回值，任何一个运行时算错都会
+  在 checksum 上暴露，避免「跑得飞快但算错了」。同时自报 `errors`
+  （与该曲线 `expected` 不符的事务数），期望值取 `run_curve(curve, false)`。
+
+## 输出契约（三边键集必须一致）
+
+被测程序输出一行 `RESULT` 与三行 `PHASE`：
+
+```
+RESULT curve=... tps=... elapsed_ns=... p50=... p95=... p99=... p999=... \
+       max=... n=... win=... errors=... checksum=...
+PHASE load_start     # 计时开始前
+PHASE load_end       # 计时结束后
+PHASE settle         # 静置 400ms 后（RSS 回落测量点）
+```
+
+缺一个键 `metrics.py` 就要为该运行时单开一列 `N/A`。分位下标统一
+`(n*pct)/100`，`p999` 用 `/1000`，均夹到 `n-1`。
+
+### checksum 累加器（三边同式，且必须不溢出）
+
+```
+checksum = ((checksum % 1073741824) * 31 + (r % 1073741824)) % P
+```
+
+> **本文档早先写的是「累加所有返回值的低位」，实现是
+> `checksum = (checksum + r) % P` —— 那个式子在 `degrade` 上必溢出。**
+> `r = acc ^ parse ≈ 9.8e18`，第 10 次累加就越过有符号 64 位。Go/Rust
+> 静默回绕（同一值 `-4466393588697188912`），Kaula 乘加检查溢出并陷阱
+> → `KAULA FATAL: integer overflow in addition`，三边永远对不齐。
+> 已改为上面的滚动散列（与事务本体同写法），最大中间值 `32*(2^30-1)`
+> 远离 `2^63`。**以代码为准。**
+
+n=2000 的期望值（三边逐位一致，`errors=0`）：
+
+| 曲线 | checksum |
+|---|---|
+| light / suspend / mixed | `30376099840` |
+| degrade | `3162242304` |
+
+单次事务的期望值仍是 `13356499072`（不变，三边预热期各自校验）。
+
+**通用教训**：跨语言基准里任何算术都要先问「三个目标的溢出语义是否一致」。
+Go 与 Rust 的静默回绕会掩盖问题，只有检查溢出的目标会把它炸出来。
