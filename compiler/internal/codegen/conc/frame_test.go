@@ -266,7 +266,7 @@ func TestGeneratedCommentsAreClosed(t *testing.T) {
 func TestGenerateSpawn_UsesParameterNamesNotArgN(t *testing.T) {
 	e := newEmitter("url", "count")
 	e.SetStateful(true) // 双形态：Frame 有字段
-	code := e.GenerateSpawn([]string{"\"a\"", "42"})
+	code := e.GenerateSpawn([]string{"\"a\"", "42"}, 0)
 
 	if !strings.Contains(code, `__frame->url = "a";`) {
 		t.Error("spawn 应按参数名写 Frame 字段")
@@ -282,7 +282,7 @@ func TestGenerateSpawn_UsesParameterNamesNotArgN(t *testing.T) {
 func TestGenerateSpawn_CallsResumeAndKernel(t *testing.T) {
 	e := newEmitter("url")
 	e.SetStateful(true)
-	code := e.GenerateSpawn([]string{"x"})
+	code := e.GenerateSpawn([]string{"x"}, 0)
 
 	if !strings.Contains(code, "kaula_spawn(K_fetch_resume, __frame, sizeof(*__frame))") {
 		t.Error("双形态 spawn 应调用 resume 函数与内核")
@@ -302,7 +302,7 @@ func TestGenerateSpawn_CallsResumeAndKernel(t *testing.T) {
 func TestGenerateSpawn_ReturnsHandle(t *testing.T) {
 	e := newEmitter("url")
 	e.SetStateful(true)
-	code := e.GenerateSpawn([]string{"x"})
+	code := e.GenerateSpawn([]string{"x"}, 0)
 
 	if !strings.Contains(code, "KaulaHandle __h") {
 		t.Error("spawn 必须构造并返回 KaulaHandle")
@@ -316,7 +316,7 @@ func TestGenerateSpawn_ReturnsHandle(t *testing.T) {
 func TestGenerateSpawn_SimpleFormNoPC(t *testing.T) {
 	e := newEmitter("url")
 	e.SetStateful(false)
-	code := e.GenerateSpawn([]string{"x"})
+	code := e.GenerateSpawn([]string{"x"}, 0)
 
 	if strings.Contains(code, "__frame->pc") {
 		t.Error("单一形态的 Frame 无 pc 字段，不应写 __frame->pc")
@@ -330,7 +330,7 @@ func TestGenerateSpawn_SimpleFormNoPC(t *testing.T) {
 func TestGenerateSpawn_HandlesOOM(t *testing.T) {
 	e := newEmitter()
 	e.SetStateful(true)
-	code := e.GenerateSpawn([]string{"x"})
+	code := e.GenerateSpawn([]string{"x"}, 0)
 
 	if !strings.Contains(code, "if (__frame != NULL)") {
 		t.Error("spawn 应检查分配失败（I3：不崩溃）")
