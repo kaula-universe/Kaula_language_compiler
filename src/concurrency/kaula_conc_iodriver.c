@@ -104,6 +104,7 @@ static int io_bucket_has_fd(KaulaIoDriver* drv, int fd) {
 }
 
 /* 摘除某个 Task 的挂起记录；返回 1 = 找到并摘除 */
+__attribute__((unused))
 static int io_unregister_task(KaulaIoDriver* drv, KaulaTask* task,
                               uint32_t* got_out) {
     uint32_t b = io_bucket(task->io_request.fd);
