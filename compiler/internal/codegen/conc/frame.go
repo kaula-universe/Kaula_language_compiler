@@ -1,4 +1,4 @@
-// Kaula 并发内核 · conc fn 的 C 代码生成
+// Kaula 并发内核（CONC）· conc fn 的 C 代码生成
 //
 // 产物（文档 §9.1）：
 //  1. Frame 结构体 —— pc + 跨 suspend 存活的变量
