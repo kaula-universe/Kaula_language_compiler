@@ -1,7 +1,8 @@
 /*
- * Kaula 并发内核 · 统一对外头文件
+ * Kaula 并发内核（CONC，Continuation-Oriented Native Co-runtime，
+ * 面向续延的原生协同运行时，以下简称并发内核/CONC）
  *
- * 用户代码与编译器生成的 C 代码只需包含此文件。
+ * 统一对外头文件。用户代码与编译器生成的 C 代码只需包含此文件。
  *
  * 用法：
  *     KaulaRuntimeConfig cfg = {0};
