@@ -188,6 +188,22 @@ static void io_timer_add(KaulaIoDriver* drv, KaulaTask* task, uint64_t delay_ns)
     }
 }
 
+/*
+ * P2.1：批量注入 flush —— 把收集到的任务批量推入注入队列。
+ * 队列空间不足时 sched_yield 重试到全部入队（Worker 持续排空，不丢任务）。
+ */
+static void kaula_inject_batch_flush(KaulaTask** tasks, int n) {
+    int off = 0;
+    while (off < n) {
+        int accepted = kaula_inject_queue_push_batch(tasks + off, n - off);
+        if (accepted <= 0) {
+            sched_yield();
+            continue;
+        }
+        off += accepted;
+    }
+}
+
 /* 处理到期定时器；返回距离下一个到期的纳秒数（无定时器时返回 KAULA_P_WAIT_FOREVER） */
 static uint64_t io_timers_fire(KaulaIoDriver* drv) {
     if (drv->timers == NULL) {
@@ -246,22 +262,6 @@ static uint64_t io_timers_fire(KaulaIoDriver* drv) {
 }
 
 /* ========== 主循环 ========== */
-
-/*
- * P2.1：批量注入 flush —— 把收集到的任务批量推入注入队列。
- * 队列空间不足时 sched_yield 重试到全部入队（Worker 持续排空，不丢任务）。
- */
-static void kaula_inject_batch_flush(KaulaTask** tasks, int n) {
-    int off = 0;
-    while (off < n) {
-        int accepted = kaula_inject_queue_push_batch(tasks + off, n - off);
-        if (accepted <= 0) {
-            sched_yield();
-            continue;
-        }
-        off += accepted;
-    }
-}
 
 static void iodriver_loop(void* arg) {
     KaulaIoDriver* drv = (KaulaIoDriver*)arg;
