@@ -2,6 +2,7 @@
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"kaula/internal/ast"
 	"kaula/internal/core"
@@ -88,6 +89,15 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		if s == nil || s.Expression == nil {
 			return ""
 		}
+		/*
+		 * `hs[i] = spawn f(...)` / `obj.h = spawn f(...)` 也要登记结果类型。
+		 *
+		 * noteHandleResultType 原先只在**声明**处调用
+		 * （`Handle x = spawn f()`），于是数组/字段形式的赋值登记不上，
+		 * 后续 `hs[i].await` 推不出结果类型 → 退到解引用已 retire
+		 * Frame 的老路上，安静返回垃圾值。
+		 */
+		sg.noteSpawnAssignedToTarget(s.Expression)
 		// 检查是否是 PrefixCallExpression
 		if prefixCall, ok := s.Expression.(*ast.PrefixCallExpression); ok {
 			return sg.generatePrefixCallBody(prefixCall)
@@ -205,6 +215,44 @@ func (sg *StatementGenerator) initProvidesPointer(expr ast.Expression) bool {
 	}
 }
 
+/*
+ * noteSpawnAssignedToTarget 处理 `target = spawn f(...)` 形态的结果类型登记。
+ *
+ * 声明形态（`Handle x = spawn f()`）由 noteHandleResultType 在声明处登记。
+ * 赋值形态的目标不是新句柄，而是已存在的容器：
+ *
+ *   hs[i] = spawn f()  →  登记到 handleContainerResultTypes["hs"]
+ *   obj.h = spawn f()  →  登记到 handleContainerResultTypes["h"]
+ *   h = spawn f()      →  登记到 handleResultTypes["h"]（标量句柄）
+ *
+ * 容器**不能**登记进 handleResultTypes：isHandleVar 据那个表判断
+ * "这个局部量本身是 Handle"并据此发 kaula_handle_release(name)，
+ * 容器进去就会生成 kaula_handle_release(hs) —— hs 是数组，类型不符，
+ * 编译直接失败。
+ */
+func (sg *StatementGenerator) noteSpawnAssignedToTarget(expr ast.Expression) {
+	bin, ok := expr.(*ast.BinaryExpression)
+	if !ok || bin.Operator != "=" {
+		return
+	}
+	sp, ok := bin.Right.(*ast.SpawnExpression)
+	if !ok {
+		return
+	}
+	switch target := bin.Left.(type) {
+	case *ast.IndexExpression:
+		if id, ok := target.Object.(*ast.Identifier); ok {
+			sg.codegen.noteHandleContainerResultType(id.Name, sp)
+		}
+	case *ast.MemberAccessExpression:
+		if target.Member != "" {
+			sg.codegen.noteHandleContainerResultType(target.Member, sp)
+		}
+	case *ast.Identifier:
+		sg.codegen.noteHandleResultType(target.Name, sp)
+	}
+}
+
 // generateVariableDeclaration 生成变量声明代码
 func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDeclaration) string {
 	if stmt.IsAuto {
@@ -252,6 +300,20 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		fmt.Printf("[DEBUG-VARDECL] name=%s type=%q nullable=%v cType=%q classTypes[Tensor]=%v\n",
 			stmt.Name, stmt.Type, stmt.Nullable, cType, sg.codegen.typeGenerator.classTypes[stmt.Type])
 	}
+
+	/*
+	 * 声明 Handle（含数组）就必须引入并发内核头。
+	 *
+	 * KaulaHandle 由 concurrency/kaula_conc.h 定义，而 codeUsesConcurrency
+	 * 原本只在**用到** spawn / await / 可插桩调用时才置位。于是
+	 * 「只声明 Handle 数组、本 TU 不 spawn」的生成物里 KaulaHandle
+	 * 是个未声明标识符，clang 报 use of undeclared identifier ——
+	 * 报错误导用户去查类型拼写，而真实原因是类型定义没被引入。
+	 */
+	if stmt.Type == "Handle" || strings.HasSuffix(strings.TrimSpace(stmt.Type), "]Handle") {
+		sg.codegen.expressionGenerator.noteConcurrencyUse()
+	}
+
 	// class 类型变量: 引用语义, C 类型为指针 (K_A*)
 	if sg.codegen.typeGenerator != nil && sg.codegen.typeGenerator.classTypes[stmt.Type] && !strings.HasSuffix(cType, "*") {
 		cType += "*"
@@ -315,6 +377,44 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	//    固定数组），该处理在下面的基础层路径里，直接走 SOR 会生成
 	//    "int arr[10] = ((int64_t[]){...})" → clang 报类型不匹配。
 	isArray := strings.Contains(cType, "[") && strings.HasSuffix(cType, "]")
+
+	/*
+	 * 运行期长度的局部数组走**堆**，不是栈。
+	 *
+	 * `[n]T buf` 的 n 是运行期变量：编译期算不出字节数，而局部数组
+	 * 默认是栈声明 → C 侧成了变长数组（VLA），占的是栈。栈预算不随
+	 * n 增长，于是这是一条**编译期无法拦截**的越界。
+	 *
+	 * 实测（test/concurrency/test_vla_stack_probe.kl，Handle 16 字节）：
+	 *
+	 *     [100000]Handle hs + 只 spawn 不 await      通过
+	 *     [100000]Handle hs + for..in + await        0xC00000FD
+	 *     [100000]Handle hs + while  + await        0xC00000FD
+	 *
+	 * 同样的数组声明，一个通过一个崩，差别只是调用链深了几帧。
+	 * 「这段代码会不会崩」取决于无关代码的改动 —— 最坏的一类缺陷。
+	 *
+	 * 定长（字面量长度）留在栈上（小数组没有分配开销），另由
+	 * _Static_assert 兜住超预算的情形。
+	 */
+	if isArray && !stmt.IsStatic && !stmt.IsExported {
+		if elem, count, ok := splitArrayCType(cType); ok && !isDecimalLiteral(count) {
+			return sg.generateRuntimeSizedArrayAlloc(stmt, elem, count)
+		}
+	}
+
+	/*
+	 * 定长数组是**栈**分配，超大尺寸必须在编译期拦住。
+	 *
+	 * `[100000]Handle hs` → C 侧 `KaulaHandle hs[100000];`，Handle 16 字节
+	 * → 1.6 MB。Windows 默认线程栈 1 MB，于是进 main 之前就
+	 * STATUS_STACK_OVERFLOW (0xC00000FD / rc=3221225725)，全程零输出 ——
+	 * 失败形态是"程序莫名崩了"，而不是"这行写错了"，极难定位。
+	 *
+	 * 用 _Static_assert 让 **clang** 判：字节数由 sizeof 算出，
+	 * 不必在 Go 侧维护一张类型尺寸表，任何元素类型都覆盖。
+	 */
+	builder.WriteString(sg.stackArrayStaticAssert(stmt, cType, isArray))
 
 	// SOR 智能分配路由
 	adapter := sg.codegen.GetSORAdapter()
@@ -485,8 +585,223 @@ func isCharArrayDecl(cType string) bool {
 	return false
 }
 
-// formatCVarDecl 生成 C 变量声明字符串，处理固定大小数组类型和函数指针类型
-// 例如 [128]u8 → C 类型 "uint8_t[128]" → 声明 "uint8_t dst[128]"
+/*
+ * generateRuntimeSizedArrayAlloc 为「运行期长度」的局部数组生成堆分配。
+ *
+ * 生成物是一个元素指针，`buf[i]` 的写法完全不变 —— C 里数组与指针
+ * 的下标语法同形，所以调用点无需改动。
+ *
+ * 恒用 kmm_v4_alloc_global（survivor），不用 kmm_v4_alloc_auto（TLAB bump）：
+ *
+ *   - TLAB 是**固定额度**的 bump 区，超出即行为未定义
+ *   - survivor 段对大块有 malloc 兜底（见 kmm_scoped_allocator_v4.c 的
+ *     paged 路径），而运行期长度的数组尺寸在编译期**无上界**
+ *
+ * 实测（test/concurrency/test_vla_stack_probe.kl，KaulaHandle 16 字节，
+ * 池 2 MB）：TLAB 路径下 n=60000（960 KB）正确，n=100000（1.6 MB）
+ * 起答案全错 —— 静默数据损坏，比崩更糟。
+ */
+func (sg *StatementGenerator) generateRuntimeSizedArrayAlloc(stmt *ast.VariableDeclaration, elem, count string) string {
+	cg := sg.codegen
+
+	// thread_create 的实参需要提升到 survivor 段（与指针变量同款处理）
+	promotePrefix := ""
+	if stmt.Value != nil {
+		if callExpr, ok := stmt.Value.(*ast.CallExpression); ok {
+			if prefix, okSpawn := sg.handleThreadSpawnEscape(callExpr); okSpawn {
+				promotePrefix = prefix
+			}
+		}
+	}
+
+	/*
+	 * 变量类型 = 元素类型 + 一层指针。
+	 *
+	 *   [n]i64    → 元素 int64_t     → 变量 int64_t*
+	 *   [n]i64*   → 元素 int64_t*    → 变量 int64_t**
+	 *
+	 * C 里数组与指针的下标语法同形，所以 buf[i] 的写法不用改。
+	 */
+	elemType := strings.TrimSpace(elem)
+	varType := elemType + "*"
+
+	const allocFn = "kmm_v4_alloc_global"
+	const allocTag = "structural: BumpPool alloc (survivor; runtime-sized array, unbounded)"
+
+	cg.recordAllocSizeHint(stmt.Name, fmt.Sprintf("sizeof(%s) * (%s)", elemType, count))
+
+	decl := fmt.Sprintf("%s %s = (%s)%s(sizeof(%s) * (%s)); /* %s */\n",
+		varType, stmt.Name, varType, allocFn, elemType, count, allocTag)
+
+	// 有初始值时用初始值覆盖（尊重用户意图），但仍需保留分配语句
+	if stmt.Value != nil {
+		prevCtx := cg.pendingEnumCtxType
+		cg.pendingEnumCtxType = stmt.Type
+		initValue := cg.expressionGenerator.GenerateExpression(stmt.Value)
+		cg.pendingEnumCtxType = prevCtx
+		if initValue != "" {
+			return promotePrefix + decl +
+				fmt.Sprintf("%s = %s;\n", stmt.Name, initValue)
+		}
+	}
+	return promotePrefix + decl
+}
+
+/*
+ * stackArrayStaticAssert 为超预算的局部数组生成一条编译期断言。
+ *
+ * 返回 "" 表示不需要断言（非数组 / 静态 / 导出 / 长度非编译期常量）。
+ *
+ * 为什么用 _Static_assert 而不是 Go 侧查表报错：
+ *   - 字节数由 C 的 sizeof 算出，不需要在 Go 侧维护类型尺寸表；
+ *     Handle、String、自定义 struct 的 sizeof 都不会算错
+ *   - 判据由 clang 给，措辞与实际 ABI 一致
+ *   - 对 freestanding 目标同样有效（只需 C11）
+ *
+ * 长度必须是整数字面量：字节数要出现在常量表达式里。
+ * `[n]T`（n 是运行期变量）算不出来就放过 —— 误报会拒掉正常代码。
+ */
+func (sg *StatementGenerator) stackArrayStaticAssert(stmt *ast.VariableDeclaration, cType string, isArray bool) string {
+	if !isArray || stmt == nil || stmt.Name == "" {
+		return ""
+	}
+	// static / exported 落在 .data/.bss，不是栈
+	if stmt.IsStatic || stmt.IsExported {
+		return ""
+	}
+
+	elem, count, ok := splitArrayCType(cType)
+	if !ok {
+		return ""
+	}
+	if !isDecimalLiteral(count) {
+		return ""
+	}
+
+	n, okCount := new(big.Int).SetString(strings.ReplaceAll(count, "_", ""), 10)
+	if okCount {
+		if sz, known := cScalarSizeBytes(elem); known {
+			total := new(big.Int).Mul(n, big.NewInt(int64(sz)))
+			if total.IsInt64() && total.Int64() > kaulaStackArrayBudgetBytes {
+				/*
+				 * 尺寸算得出 → 直接给 kaulac 自己的诊断。
+				 * 比让 clang 报错好：措辞可控，且能带上确切字节数。
+				 */
+				sg.codegen.error(fmt.Sprintf(
+					"%s:%d: 局部数组 %s 占 %d 字节（%d 个 %s × %d），"+
+						"超过栈预算 %d 字节。局部数组是栈分配，默认线程栈只有 1MB，"+
+						"运行时会 STATUS_STACK_OVERFLOW 且没有任何输出。请改用堆分配。",
+					sg.codegen.currentFunctionName, stmt.Pos.Line, stmt.Name,
+					total.Int64(), n.Int64(), elem, sz,
+					kaulaStackArrayBudgetBytes))
+			}
+		}
+	}
+
+	/*
+	 * 无论 Go 侧算不算得出，都留一条 _Static_assert：
+	 * 元素类型是 Handle / String / 自定义 struct 时 Go 侧没有尺寸表，
+	 * 由 clang 用 sizeof 兜底，避免这类数组静默通过。
+	 */
+	msg := fmt.Sprintf(
+		"局部数组 %s 超过栈预算 %d 字节：局部数组是栈分配，"+
+			"而默认线程栈只有 1MB，运行时会 STATUS_STACK_OVERFLOW 且没有任何输出。"+
+			"请改用堆分配",
+		stmt.Name, kaulaStackArrayBudgetBytes)
+
+	return fmt.Sprintf("_Static_assert(sizeof(%s) * (%s) <= %d, %q);\n",
+		elem, count, kaulaStackArrayBudgetBytes, msg)
+}
+
+// cScalarSizeBytes 返回已知标量 C 类型的字节数。
+//
+// 只覆盖内建标量与指针 —— 这些尺寸由 C 标准固定，不需要看 kaula.h。
+// struct / Handle / String 一律返回 false：那类尺寸取决于生成的
+// typedef，由 clang 的 sizeof 判定更可靠。
+func cScalarSizeBytes(cType string) (int, bool) {
+	base := strings.TrimSpace(cType)
+	// 指针数组的元素类型带 *
+	if strings.HasSuffix(base, "*") {
+		return 8, true
+	}
+	switch base {
+	case "int8_t", "uint8_t", "signed char", "unsigned char", "char", "_Bool":
+		return 1, true
+	case "int16_t", "uint16_t", "short", "unsigned short":
+		return 2, true
+	case "int32_t", "uint32_t", "int", "unsigned int", "float":
+		return 4, true
+	case "int64_t", "uint64_t", "long long", "unsigned long long",
+		"long", "unsigned long", "double":
+		return 8, true
+	}
+	return 0, false
+}
+
+// kaulaStackArrayBudgetBytes 局部数组的栈预算。
+//
+// 取 256 KB：Windows 默认栈 1 MB，留足余量给递归与调用链；
+// Linux 默认 8 MB 但受 RLIMIT_STACK 约束，线程里往往更小。
+const kaulaStackArrayBudgetBytes = 256 * 1024
+
+/*
+ * splitArrayCType 把 C 数组类型拆成（元素类型, 长度表达式）。
+ *
+ * 支持 C 数组的两种拼法（Kaula 的 `[N]T` 会落到这两种）：
+ *   T[N]   元素在前，长度在后 —— 如 "int64_t[128]"
+ *   *[N]   指针数组           —— 如 "int64_t*[2]"
+ *
+ * 长度可以是字面量，也可以是运行期表达式（"int64_t[n]"）。
+ * 调用方据 isDecimalLiteral 区分二者：字面量走栈 + _Static_assert 兜预算，
+ * 运行期表达式走堆（栈预算不随 n 增长）。
+ */
+func splitArrayCType(cType string) (elem, count string, ok bool) {
+	t := strings.TrimSpace(cType)
+	if !strings.HasSuffix(t, "]") {
+		return "", "", false
+	}
+	lb := strings.IndexByte(t, '[')
+	if lb <= 0 {
+		return "", "", false
+	}
+	count = strings.TrimSpace(t[lb+1 : len(t)-1])
+	if count == "" {
+		return "", "", false
+	}
+	elem = strings.TrimSpace(t[:lb])
+	if elem == "" {
+		return "", "", false
+	}
+	return elem, count, true
+}
+
+// isDecimalLiteral 判断是否纯十进制整数字面量（允许下划线分隔）。
+//
+// 刻意排除表达式：sizeof(T) * (2*3) 之类的虽然 clang 也算得出，
+// 但那不是"用户写的长度"，按变量长度处理更稳妥。
+func isDecimalLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	digits := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			digits++
+		case c == '_':
+			// 允许 1_000_000，但不能是首尾或连续
+			if i == 0 || i == len(s)-1 || s[i-1] == '_' {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}
+
+// formatCVarDecl 生成 C 变量声明字符串，处理固定大小数组类型和函数指针类型// 例如 [128]u8 → C 类型 "uint8_t[128]" → 声明 "uint8_t dst[128]"
 // 指针数组 [2]int* → C 类型 "int64_t*[2]" → 声明 "int64_t* dst[2]"
 // 函数指针 void(int,int)int → C 类型 "int64_t (*)(int64_t,int64_t)" → 声明 "int64_t (*f)(int64_t,int64_t)"
 // 此函数为包级函数，供 SOR 和非 SOR 路径共用，确保数组后缀与函数指针声明符搬运一致。

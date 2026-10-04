@@ -329,10 +329,30 @@ func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
 				if depth+1 > res.CompoundDepth {
 					res.CompoundDepth = depth + 1
 				}
-				if s.Variable != nil {
-					// ForIn 的循环变量是 ast.Identifier，没有类型标注
-					addDecl(s.Variable.Name, s.Pos.Line, nil, "")
-				}
+				/*
+				 * 迭代下标**不**提升到 Frame（addDecl 已删除）。
+				 *
+				 * guard 模式已经把它持久化在 loop_i[depth] 里：
+				 *   init   f->loop_i[d] = start
+				 *   循环头 条件读 f->loop_i[d] / loop_end[d] / loop_step[d]
+				 *   循环体 long long i = f->loop_i[d]   ← 从 Frame 恢复成本地
+				 *   轮末   f->loop_i[d] += f->loop_step[d]
+				 * 挂起发生在循环体内，此时 loop_i[d] 仍是本轮的值，
+				 * 恢复后重新从它读出的 i 与挂起前一致。
+				 *
+				 * 早期版本在这里也 addDecl，于是：
+				 *   1. Frame 多一个纯冗余字段
+				 *   2. for-in 下标是 ast.Identifier，没有类型标注 →
+				 *      frameVarCTypes 跳过 → FrameVarCType 兜底成 void*
+				 *      → 生成的 `f->i = i;` 把 long long 赋给 void*，
+				 *        clang: incompatible integer to pointer conversion，
+				 *        整个 conc fn 编译失败
+				 *   3. resume 顶部多一句 `void* i = f->i;`，与循环体里的
+				 *      `long long i = f->loop_i[d];` 同名遮蔽
+				 *
+				 * 注意别把 C 风格 for（ForStatement）的 init 变量一起删掉：
+				 * 那条路径没有 loop_i 兜底，必须留在 FrameVars 里。
+				 */
 				walk(s.Body, depth+1)
 			case *ast.CallStatement:
 				walk(s.Body, depth+1)

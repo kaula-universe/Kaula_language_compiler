@@ -4233,6 +4233,29 @@ func (cg *CodeGenerator) noteHandleResultType(varName string, e *ast.SpawnExpres
 	cg.handleResultTypes[varName] = emitter.CReturnType
 }
 
+/*
+ * noteHandleContainerResultType 登记「容器里的句柄」的结果 C 类型。
+ *
+ * 与 noteHandleResultType 的区别是**不**进 handleResultTypes：
+ * 那张表还兼任 isHandleVar 的判据（"这个局部量本身是 Handle"），
+ * 容器混进去会让作用域出口生成 kaula_handle_release(<容器>)，
+ * 而容器是数组/结构体，类型不符。
+ */
+func (cg *CodeGenerator) noteHandleContainerResultType(containerName string, e *ast.SpawnExpression) {
+	ident, ok := e.Function.(*ast.Identifier)
+	if !ok {
+		return
+	}
+	emitter := cg.LookupConcFunc(cg.UserFuncCName(ident.Name))
+	if emitter == nil {
+		return
+	}
+	if cg.handleContainerResultTypes == nil {
+		cg.handleContainerResultTypes = make(map[string]string)
+	}
+	cg.handleContainerResultTypes[containerName] = emitter.CReturnType
+}
+
 // generateAwaitExpression 生成 await 表达式代码
 // await h → kaula_handle_await(h)
 //
@@ -4264,15 +4287,90 @@ func (eg *ExpressionGenerator) generateAwaitExpression(e *ast.AwaitExpression) s
 	 * 用 GNU 语句表达式 `({ ... })` 包住，与 closure.go 的既有写法一致：
 	 * 语句表达式的值是最后一条语句的值，因此可以安全地嵌在表达式里。
 	 */
-	if ident, ok := e.Handle.(*ast.Identifier); ok {
-		if cType, known := eg.codegen.handleResultTypes[ident.Name]; known && cType != "" && cType != "void" {
-			eg.codegen.lambdaCounter++
-			return fmt.Sprintf("({ %[1]s __t; kaula_handle_await_into(%[2]s, &__t, sizeof(%[1]s)); __t; })",
-				cType, handleCode)
-		}
+	if cType, known := eg.inferAwaitResultCType(e.Handle); known && cType != "" && cType != "void" {
+		eg.codegen.lambdaCounter++
+		return fmt.Sprintf("({ %[1]s __t; kaula_handle_await_into(%[2]s, &__t, sizeof(%[1]s)); __t; })",
+			cType, handleCode)
 	}
-	// 结果类型未知：无法确定拷贝大小，不能瞎拷。显式落成编译错误，
-	// 而不是静默返回一个可能悬垂的地址。
-	return fmt.Sprintf("((%s)kaula_handle_await(%s) /* 错误：await 的结果类型未知，无法安全取值；请改为声明式 `T x = h.await` */)",
-		eg.codegen.typeGenerator.convertType("i64", false), handleCode)
+	/*
+	 * 结果类型推不出来 → **编译错误**。
+	 *
+	 * 早先这里只往生成的 C 里塞一句注释：
+	 *
+	 *     ((int64_t)kaula_handle_await(hs[i]) /* 错误：请改为声明式 ... *​/)
+	 *
+	 * 注释不阻止编译，于是这份代码编得过、跑得动、**答案错**：
+	 * 解引用的是已 retire 的 Frame 地址，安静返回残留旧值。
+	 *
+	 * 实测（test/concurrency/test_vla_stack_probe.kl，n=10，期望 45）：
+	 *
+	 *     i64 r = hs[i].await; acc += r   →  45          正确
+	 *     acc += hs[i].await              →  98125744    垃圾
+	 *
+	 * 类型推断原本只认 *ast.Identifier，所以 Handle 数组元素、字段、
+	 * 函数返回值全都落到了这条兜底路上。
+	 */
+	eg.codegen.error(fmt.Sprintf(
+		"表达式位置的 await 无法确定结果类型（%s）："+
+			"kaula_handle_await 返回的是「结果所在内存的地址」，"+
+			"而那块内存（Task 的 Frame）在任务完成时就已 retire，"+
+			"解引用它会安静地返回残留旧值 —— 不崩，只是答案错。"+
+			"请改为声明式：`%s x = %s.await`",
+		exprShape(e.Handle), "T", eg.GenerateExpression(e.Handle)))
+	return "0"
+}
+
+// inferAwaitResultCType 从句柄表达式反推 spawn 的结果 C 类型。
+//
+// 认三种形态：
+//   - 标识符           h.await        查 handleResultTypes[h]
+//   - 下标             hs[i].await    查 handleResultTypes[hs]（元素类型即登记类型）
+//   - 成员访问         obj.h.await    查 handleResultTypes[h]
+//
+// 下标这一支是数组场景的关键：`Handle hs[n]` 在 spawn 时按变量名 hs
+// 登记了结果类型，而 await 出现在 `hs[i]` 上 —— 只认 Identifier 会漏掉它。
+func (eg *ExpressionGenerator) inferAwaitResultCType(handle ast.Expression) (string, bool) {
+	switch h := handle.(type) {
+	case *ast.Identifier:
+		// 标量句柄：`Handle x = spawn f()` / `h = spawn f()`
+		t, ok := eg.codegen.handleResultTypes[h.Name]
+		return t, ok
+	case *ast.IndexExpression:
+		// 数组元素：`hs[i]`，结果类型登记在**容器** hs 上
+		id, ok := h.Object.(*ast.Identifier)
+		if !ok {
+			return "", false
+		}
+		t, ok := eg.codegen.handleContainerResultTypes[id.Name]
+		return t, ok
+	case *ast.MemberAccessExpression:
+		// 字段：`obj.h`，结果类型登记在**字段名**上
+		if h.Member == "" {
+			return "", false
+		}
+		t, ok := eg.codegen.handleContainerResultTypes[h.Member]
+		return t, ok
+	default:
+		return "", false
+	}
+}
+
+// exprShape 描述表达式形态，供诊断使用（不求值，避免二次生成副作用）
+func exprShape(e ast.Expression) string {
+	switch e.(type) {
+	case *ast.Identifier:
+		return "标识符"
+	case *ast.IndexExpression:
+		return "下标表达式"
+	case *ast.MemberAccessExpression:
+		return "成员访问"
+	case *ast.CallExpression:
+		return "函数调用返回值"
+	case *ast.ParenExpression:
+		return "括号表达式"
+	case nil:
+		return "缺失"
+	default:
+		return "复杂表达式"
+	}
 }

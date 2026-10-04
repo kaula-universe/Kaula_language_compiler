@@ -1,0 +1,123 @@
+// Kaula 并发内核 · 跨段守卫槽位残留探针
+//
+// 假设：顶层挂起点切段时只复位 sub[0]，而 break 跳出的循环把 sub[0]
+// 留在非 0 值上。若之后没有顶层挂起点去复位，紧随其后的顶层 if/while
+// 读到的就是上一段遗留的槽位 → `if (f->sub[d] == 0)` 不成立 → 整条
+// 复合语句被**跳过**。
+//
+// 这类 bug 不崩、不报错，只是静默返回错值，所以必须用返回值判据钉死。
+//
+// 用例 A：循环里挂起 + break 跳出，之后跟一个顶层 if
+//   期望 acc = 42（if 体必须执行）
+//   若 if 被跳过 → acc = 0
+//
+// 用例 B：同上，但循环后**加**一个顶层挂起点
+//   concSuspendReturn 会复位 sub[0] → 期望 acc = 42
+//   两个用例的差值就是"是否真的漏复位"的证据。
+
+import std.io
+import std.time
+
+// A：循环挂起后 break，后面直接跟顶层 if
+conc fn case_break_then_if(i64 n) -> i64 {
+    i64 acc = 0
+    i64 i = 0
+    while i < n {
+        std.time.time_sleep(1)
+        i = i + 1
+        if i >= n {
+            break
+        }
+    }
+    if acc == 0 {
+        acc = 42
+    }
+    return acc
+}
+
+// B：同样结构，但循环与顶层 if 之间插一个顶层挂起点（触发 sub[0] 复位）
+conc fn case_break_then_suspend_then_if(i64 n) -> i64 {
+    i64 acc = 0
+    i64 i = 0
+    while i < n {
+        std.time.time_sleep(1)
+        i = i + 1
+        if i >= n {
+            break
+        }
+    }
+    std.time.time_sleep(1)
+    if acc == 0 {
+        acc = 42
+    }
+    return acc
+}
+
+// C：循环正常跑完（不走 break），槽位由"每轮末尾写回 0"复位
+conc fn case_normal_loop_then_if(i64 n) -> i64 {
+    i64 acc = 0
+    i64 i = 0
+    while i < n {
+        std.time.time_sleep(1)
+        i = i + 1
+    }
+    if acc == 0 {
+        acc = 42
+    }
+    return acc
+}
+
+// D：顶层 if 嵌套在另一个顶层 if 里，检查 branch[] 是否也会残留
+conc fn case_nested_if_after_break(i64 n) -> i64 {
+    i64 acc = 0
+    i64 i = 0
+    while i < n {
+        std.time.time_sleep(1)
+        i = i + 1
+        if i >= n {
+            break
+        }
+    }
+    if acc == 0 {
+        if n > 0 {
+            acc = 42
+        }
+    }
+    return acc
+}
+
+fn main() -> i32 {
+    i64 err = 0
+    i64 n = 3
+
+    Handle ha = spawn case_break_then_if(n)
+    i64 ra = ha.await
+    if ra != 42 {
+        err += 1
+        std.io.println("ERR A break_then_if got=", ra, " want 42")
+    }
+
+    Handle hb = spawn case_break_then_suspend_then_if(n)
+    i64 rb = hb.await
+    if rb != 42 {
+        err += 1
+        std.io.println("ERR B break_suspend_if got=", rb, " want 42")
+    }
+
+    Handle hc = spawn case_normal_loop_then_if(n)
+    i64 rc = hc.await
+    if rc != 42 {
+        err += 1
+        std.io.println("ERR C normal_loop_if got=", rc, " want 42")
+    }
+
+    Handle hd = spawn case_nested_if_after_break(n)
+    i64 rd = hd.await
+    if rd != 42 {
+        err += 1
+        std.io.println("ERR D nested_if got=", rd, " want 42")
+    }
+
+    std.io.println("guard_slot_residue ok err=", err)
+    return 0
+}

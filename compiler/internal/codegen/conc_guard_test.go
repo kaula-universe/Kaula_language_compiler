@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -170,8 +171,80 @@ fn main() -> i32 {
 	if strings.Contains(c, "f->sub[") {
 		t.Errorf("顶层挂起点不需要守卫槽位：\n%s", c)
 	}
+	/*
+	 * 补一条字段存在性的检查：上面的 `f->sub[` 只查**引用**，
+	 * 查不到 Frame 里是否还留着 sub[]/branch[] 字段本身
+	 * （字段声明形如 `int sub[2];`，不含 "f->sub["）。
+	 *
+	 * delayed 没有任何复合语句，按需瘦身后不该有这两个字段；
+	 * 留着就是纯粹的死重量。有复合语句时的复位判据见
+	 * TestConcGuard_TopLevelSuspendResetsSlots。
+	 */
+	if regexp.MustCompile(`\bsub\[\d*\]`).MatchString(c) {
+		t.Errorf("delayed 无复合语句，Frame 不应有 sub[] 字段：\n%s", c)
+	}
+	if regexp.MustCompile(`\bbranch\[\d*\]`).MatchString(c) {
+		t.Errorf("delayed 无复合语句，Frame 不应有 branch[] 字段：\n%s", c)
+	}
+	if regexp.MustCompile(`\bloop_i\[\d*\]`).MatchString(c) {
+		t.Errorf("delayed 无 for..in，Frame 不应有 loop_i[] 字段：\n%s", c)
+	}
 	if !strings.Contains(c, "f->pc = 1;") {
 		t.Errorf("顶层挂起点仍应切段：\n%s", c)
+	}
+}
+
+/*
+ * 有复合语句时，跨段必须把守卫槽位复位到 0。
+ *
+ * 槽位 sub[d] 的语义是「第 d 层复合语句本轮已执行到第几个语句」，
+ * 进入任一层时必须读到 0（frame.go 里的不变量）。
+ *
+ * 顶层挂起点切段时（concSuspendReturn）只复位 sub[0]：
+ *   - 切段发生在**顶层**，此刻身处深度 0
+ *   - 更深的槽位在离开各自复合语句时已由「每轮末尾写回 0」复位
+ * 所以复位 sub[0] 就够了，但**必须有** —— 否则下一段里的顶层 if/while
+ * 会读到上一段遗留的非 0 槽位，整条语句被跳过。这类 bug 不崩，
+ * 只是静默给错答案。
+ */
+func TestConcGuard_TopLevelSuspendResetsSlots(t *testing.T) {
+	src := `
+import std.time
+
+conc fn mixed(i64 ms) -> i64 {
+    i64 acc = 0
+    if ms > 0 {
+        acc = 1
+    }
+    std.time.time_sleep(ms)
+    if acc > 0 {
+        acc = acc + 1
+    }
+    return acc
+}
+
+fn main() -> i32 {
+    return 0
+}
+`
+	c, _ := genConc(t, src)
+
+	/*
+	 * Frame 里的 sub/branch 现在按实际守卫深度定尺寸
+	 * （frame.go：depth = CompoundDepth+1，形如 `int sub[2];`），
+	 * 判据不能写死 KAULA_CONC_SUB_DEPTH —— 那样恒不成立。
+	 */
+	if !strings.Contains(c, "sub[") {
+		t.Fatalf("有 if 的 conc fn，Frame 应有 sub[] 字段：\n%s", c)
+	}
+	/*
+	 * 跨段必须复位 sub[0]。实现有两种等价形态，都接受：
+	 *   - 切段处复位   f->sub[0] = 0;      （concSuspendReturn）
+	 *   - 段入口复位   __frame->sub[0] = 0;（enterSegment）
+	 * 两者都在"新段开始执行前"把槽位归零；缺了就整段被跳过。
+	 */
+	if !strings.Contains(c, "sub[0] = 0;") {
+		t.Errorf("跨段必须复位 sub[0]（切段处或段入口均可），否则下一段的 if 会被跳过：\n%s", c)
 	}
 }
 

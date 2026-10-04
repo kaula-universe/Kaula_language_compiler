@@ -1717,7 +1717,7 @@ func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analy
 		// 本组是否已经因为一条顶层挂起语句而切过段（切过就不能在组尾再收一次）
 		splitInGroup := false
 
-		for _, s := range grp.stmts {
+		for gi, s := range grp.stmts {
 			cg.concSegmentPC = len(segments)
 
 			if !statementHasSuspend(s) {
@@ -1743,9 +1743,49 @@ func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analy
 				continue
 			}
 
-			if !cg.concGuardActive() {
-				// 前半段：实参求值 + 请求构造 + 提交
+			/*
+			 * 这条语句是不是本组的最后一条？
+			 *
+			 * 组是「遇到顶层挂起语句就闭合」的（见 concGroupBody），所以
+			 * 组尾恰好是顶层挂起时，组尾的 finishSegment 会另起一段。
+			 * 而守卫模式下这条挂起若走下面的「两个相邻槽位」形态，
+			 * pc 留在**本段**不推进 —— 新段就没有任何 pc 写入，
+			 * 成了不可达段：它的语句永远不执行。
+			 *
+			 * 实测（test/concurrency/test_guard_slot_residue.kl 用例 B）：
+			 *
+			 *     while i < n { time_sleep(1); ... }   守卫组
+			 *     time_sleep(1)                         组尾顶层挂起
+			 *     if acc == 0 { acc = 42 }             下一组 → 不可达
+			 *
+			 * 表现为静默返回错值（acc 得 0，期望 42）：不崩、不报错。
+			 *
+			 * 所以组尾的顶层挂起必须走**切段**形态：pc 推进到新段，
+			 * result 半生成进新段（与 !concGuardActive 分支同一套机制）。
+			 */
+			endsGroup := gi == len(grp.stmts)-1
+
+			if !cg.concGuardActive() || endsGroup {
+				/*
+				 * 前半段：实参求值 + 请求构造 + 提交。
+				 *
+				 * 守卫组切段时必须**先关掉槽位包装**：submit 半生成的
+				 * `KaulaIoRequest __kaula_io_N` 是这条语句的局部量，
+				 * 而紧随其后的 concSuspendReturn 要引用它。包在
+				 * `if (f->sub[d]==k) { ... }` 的花括号里，那个局部量
+				 * 就跑出了作用域 —— clang: use of undeclared identifier。
+				 *
+				 * 这正是守卫模式内联挂起要"就地发挂起返回"的原因；
+				 * 切段形态的挂起返回在外层，作用域天然够不到。
+				 */
+				if endsGroup && cg.concGuardActive() {
+					cg.concGuardDepth = -1
+				}
 				current.WriteString(fg.concGenerateStmts(concIoSubmit, []ast.Statement{s}))
+				if endsGroup && grp.guarded {
+					cg.concGuardDepth = 0
+					cg.concGuardSeq = 0
+				}
 				current.WriteString(fg.concSuspendReturn(stmt, len(segments)+1, analysis, 0,
 					statementHasBlocking(s)))
 				finishSegment()

@@ -2,10 +2,10 @@ package errors
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"kaula/internal/i18n"
+	"kaula/internal/version"
 )
 
 // 终端 ANSI 颜色常量（用于终端高亮错误/警告/成功）
@@ -17,25 +17,40 @@ const (
 	ansiYellow = "\x1b[33m"
 )
 
-// 导出别名 (供 main 包 printSummary 使用)
-const (
-	ColorReset  = ansiReset
-	ColorRed    = ansiRed
-	ColorGreen  = ansiGreen
-	ColorYellow = ansiYellow
+// 导出别名 (供 main 包 printSummary 等使用)
+//
+// 这里是 var 而不是 const，且在颜色关闭时全部置空。这样 main 里那 19 处
+// Printf("%s%s%s", errors.ColorRed, ...) 在管道/重定向下会自动输出纯文本，
+// 不必在每个调用点补 if。
+//
+// 为什么必须这么做：这些别名原本是原始 ANSI 常量，而 printSummary 从头到尾
+// 没查过 colorEnabled —— 无条件拼接颜色码。于是 kaulac 被重定向时仍然输出
+// "Status: \x1b[32mSuccess\x1b[0m"，test/concurrency/run_tests.py 按字面匹配
+// "Status: Success" 永远失败，11 个 kl 用例被误判成编译失败、从未真正执行。
+var (
+	ColorReset  = colorOrEmpty(ansiReset)
+	ColorRed    = colorOrEmpty(ansiRed)
+	ColorGreen  = colorOrEmpty(ansiGreen)
+	ColorYellow = colorOrEmpty(ansiYellow)
 )
 
-// colorEnabled 是否启用终端颜色高亮
-// 设置 NO_COLOR 环境变量或 TERM=dumb 时自动关闭
-var colorEnabled = func() bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
+// colorOrEmpty 在颜色被禁用（NO_COLOR / TERM=dumb / stdout 非 tty）时返回空串。
+//
+// Go 的包级变量初始化按依赖排序，colorEnabled 会被先求值，这里可以安全读它。
+func colorOrEmpty(code string) string {
+	if colorEnabled {
+		return code
 	}
-	if os.Getenv("TERM") == "dumb" {
-		return false
-	}
-	return true
-}()
+	return ""
+}
+
+// colorEnabled 是否启用终端颜色高亮。
+//
+// 判定统一走 version.ColorEnabled，这里不再复制一份。
+// 曾经复制过一份，那份漏了 isTerminal 检查 —— 管道/重定向下仍然输出 ANSI，
+// 导致按字面匹配 "Status: Success" 的脚本（test/concurrency/run_tests.py）
+// 永远匹配失败，11 个 kl 用例被误判为编译失败而从未执行。
+var colorEnabled = version.ColorEnabled()
 
 // HighlightSpan 表示错误在源码中的高亮区间（用于终端/IDE 专门高亮错误）
 type HighlightSpan struct {
