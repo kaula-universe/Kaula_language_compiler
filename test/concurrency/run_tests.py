@@ -18,6 +18,7 @@ Kaula 并发内核 · 测试构建与运行脚本
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,16 @@ TEST_DIR = PROJECT_ROOT / "test" / "concurrency"
 SRC_DIR = PROJECT_ROOT / "src"
 CONC_DIR = SRC_DIR / "concurrency"
 BUILD_DIR = PROJECT_ROOT / "build" / "concurrency_tests"
+
+# kl 用例的可执行文件跑在主线程上，Windows 默认栈 1MB。
+#
+# test_full_concurrency 用 `Handle hs[n]` 且 n=100000 —— 10 万个 Handle 落栈，
+# 必然溢出（实测 rc=0xC00000FD = STATUS_STACK_OVERFLOW，确定性复现）。
+# 这里统一把 kl 用例的栈抬到 32MB，不改任何用例的规模。
+#
+# 这是给测试用的权宜之计，不是给 VLA 开脱：语言层面 `T v[n]` 在 n 很大时
+# 迟早该有上限检查或堆提升。若编译器将来补上，这个 flag 可以撤掉。
+KL_CFLAGS = "-Xlinker /STACK:33554432"
 
 
 def detect_platform():
@@ -198,6 +209,17 @@ def runtime_sources():
     return sources
 
 
+# 编译器走管道时本不该输出 ANSI，但 errors 包的 colorEnabled 漏了 tty 检查，
+# 于是 kaulac 打出的是 "Status: \x1b[32mSuccess\x1b[0m" —— 转义码夹在中间，
+# 按字面匹配 "Status: Success" 永远失败，kl 用例被整片误判成编译失败。
+# 这里统一剥壳再匹配，两侧都不再依赖对方是否上色。
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text or "")
+
+
 def build_one(cc, test_file, extra, verbose):
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     exe = BUILD_DIR / (test_file.stem + (".exe" if sys.platform.startswith("win") else ""))
@@ -210,13 +232,17 @@ def build_one(cc, test_file, extra, verbose):
             print(f"[-] kaulac 不存在（先构建编译器）: {kaulac}")
             return None
         outdir = PROJECT_ROOT / "build" / "kl-hosted" / test_file.stem
-        cmd = [str(kaulac), "-output-dir", str(outdir), str(test_file)]
+        cmd = [str(kaulac), "-output-dir", str(outdir)]
+        if KL_CFLAGS:
+            cmd += ["-cflags", KL_CFLAGS]
+        cmd.append(str(test_file))
         if verbose:
             print("[kaulac]", " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=900)
         diag = (proc.stderr or "") + (proc.stdout or "")
-        if proc.returncode != 0 or "Status: Success" not in diag and "成功" not in diag:
+        plain = strip_ansi(diag)
+        if proc.returncode != 0 or "Status: Success" not in plain and "成功" not in plain:
             print(f"[-] kl 编译失败: {test_file.name}")
             print(diag[-8000:])
             return None
