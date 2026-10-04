@@ -17,6 +17,10 @@
 #include "kaula_conc_ws_deque.h"
 #include "kaula_conc_mpsc_queue.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ========== 编译期硬上限（I3：一切有界） ========== */
 
 #define KAULA_MAX_WORKERS            256
@@ -447,4 +451,8 @@ void        kaula_handle_release(KaulaHandle h);
 /* 当前还欠多少个 epoch pin（未归还的句柄数）；测试与诊断用 */
 int         kaula_handle_pin_debt(KaulaHandle h);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_TASK_H */

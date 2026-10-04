@@ -17,6 +17,10 @@
 #include "kaula_conc_platform.h"
 #include "kaula_conc_task.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 开关：关闭时全部 inline 空实现 */
 extern _Atomic(int) kaula_conc_metrics_enabled;
 
@@ -89,4 +93,8 @@ static inline void kaula_conc_metrics_inc_failed(void) {
     }
 }
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_METRICS_H */

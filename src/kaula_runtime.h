@@ -9,6 +9,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // ===== 致命错误上报 =====
 // 托管模式: 直接 fprintf(stderr) + abort()。
 // 裸机模式: 调用弱钩子 kaula_fatal（用户可覆写为串口/LED 指示），随后 __builtin_trap 停机。
@@ -97,5 +101,9 @@ static inline uint64_t kaula_mul_u64(uint64_t a, uint64_t b) {
     }
     return result;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -3,7 +3,7 @@
 // ==================== 跨平台优先级队列实现 ====================
 
 typedef struct Task {
-    void* (*func)(void*);
+    void (*func)(void*);
     void* arg;
     int priority;
 } Task;
@@ -93,19 +93,22 @@ void priority_queue_destroy(PriorityQueue* pq) {
 }
 
 void priority_queue_add(PriorityQueue* pq, int priority, void (*func)(void*), void* arg) {
+    if (!pq) return;
     if (priority < 0 || priority >= PRIORITY_LEVELS) {
         priority = 0;
     }
-    Task task = {(void*(*)(void*))func, arg, priority};
+    Task task = {func, arg, priority};
     simple_queue_enqueue(pq->queues[priority], task);
 }
 
 void* priority_queue_execute_next(PriorityQueue* pq) {
+    if (!pq) return NULL;
     for (int i = 0; i < PRIORITY_LEVELS; i++) {
-        if (!simple_queue_is_empty(pq->queues[i])) {
+        if (pq->queues[i] && !simple_queue_is_empty(pq->queues[i])) {
             Task* task = simple_queue_dequeue(pq->queues[i]);
             if (task && task->func) {
-                return task->func(task->arg);
+                task->func(task->arg);
+                return (void*)1;
             }
         }
     }
@@ -113,10 +116,14 @@ void* priority_queue_execute_next(PriorityQueue* pq) {
 }
 
 int priority_queue_batch_add(PriorityQueue* pq, int priority, void (*func)(void*), void** args, int count) {
+    if (!pq || count <= 0) return 0;
+    if (priority < 0 || priority >= PRIORITY_LEVELS) {
+        priority = 0;
+    }
     int added = 0;
     for (int i = 0; i < count; i++) {
         if (!simple_queue_is_full(pq->queues[priority])) {
-            Task task = {(void*(*)(void*))func, args[i], priority};
+            Task task = {func, args[i], priority};
             simple_queue_enqueue(pq->queues[priority], task);
             added++;
         }
@@ -125,6 +132,7 @@ int priority_queue_batch_add(PriorityQueue* pq, int priority, void (*func)(void*
 }
 
 int priority_queue_batch_execute(PriorityQueue* pq, int max_tasks) {
+    if (!pq || max_tasks <= 0) return 0;
     int executed = 0;
     while (executed < max_tasks) {
         void* result = priority_queue_execute_next(pq);

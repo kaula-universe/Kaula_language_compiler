@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <string.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // ==================== 基础类型 ====================
 // String 类型由 std/base/types.h 提供（SSO 优化：<=15 字节零堆分配）
 
@@ -205,5 +209,9 @@ void* fast_calloc(size_t num, size_t size);
 void fast_free(void* ptr);
 
 #include "kaula_runtime.h"
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // KAULA_H

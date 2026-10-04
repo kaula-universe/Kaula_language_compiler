@@ -26,6 +26,10 @@
 
 #include "kaula_conc_task.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ========== 全局 epoch 域 ========== */
 
 typedef struct {
@@ -101,4 +105,8 @@ void kaula_epoch_reclaim_all(void);
 uint64_t kaula_epoch_retired_total(void);
 uint64_t kaula_epoch_reclaimed_total(void);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_EPOCH_H */

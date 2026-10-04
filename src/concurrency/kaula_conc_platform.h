@@ -230,6 +230,10 @@ static inline const char* kaula_p_get_env(const char* name) {
 }
 #else
 #include <stdlib.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 static inline const char* kaula_p_get_env(const char* name) {
     return getenv(name);
 }
@@ -564,4 +568,8 @@ void kaula_p_io_drain_wake(kaula_p_io_wait_t w);
  */
 int kaula_p_io_arm_timer(kaula_p_io_wait_t w, uint64_t delay_ns);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_PLATFORM_H */

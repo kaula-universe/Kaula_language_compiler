@@ -39,6 +39,10 @@
 #include "kaula_conc_evict.h"
 #include "kaula_conc_metrics.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ========== 生命周期 ========== */
 
 /* config 可为 NULL（走默认值）。幂等：重复调用安全。 */
@@ -74,4 +78,8 @@ extern void kaula_metrics_enable(int on);
  * 内部用 kaula_iodriver_blocking_wait() 就地等待，不经过调度器。
  */
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_H */

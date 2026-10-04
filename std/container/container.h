@@ -191,8 +191,9 @@ typedef struct PriorityQueue {
     size_t capacity;
 } PriorityQueue;
 
-extern PriorityQueue* priority_queue_create(size_t initial_capacity);
-extern void priority_queue_destroy(PriorityQueue* pq);
+// 注意：std.container 对外暴露的优先级队列创建/销毁入口由 src/queue.c 提供，
+// 这里仅保留二叉堆辅助操作（push/pop/peek/...），create/destroy 已在
+// container.c 中改为内部链接，避免与 runtime 归档同名符号冲突。
 extern void priority_queue_push(PriorityQueue* pq, void* element, int priority);
 extern void* priority_queue_pop(PriorityQueue* pq);
 extern void* priority_queue_peek(PriorityQueue* pq);

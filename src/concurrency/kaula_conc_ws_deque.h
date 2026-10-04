@@ -53,6 +53,10 @@
 
 #include "kaula_conc_platform.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 容量必须为 2 的幂（I3：一切有界） */
 #ifndef KAULA_WS_DEQUE_CAPACITY
     #define KAULA_WS_DEQUE_CAPACITY 4096
@@ -301,4 +305,8 @@ static inline int kaula_ws_deque_empty(const KaulaWSDeque* q) {
     return kaula_ws_deque_size(q) <= 0;
 }
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_WS_DEQUE_H */

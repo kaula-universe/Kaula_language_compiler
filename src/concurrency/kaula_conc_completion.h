@@ -20,6 +20,10 @@
 
 #include "kaula_conc_task.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define KAULA_COMPLETION_CAPACITY_PER_SHARD 1024
 
 typedef struct {
@@ -52,4 +56,8 @@ KaulaTask* kaula_completion_take(uint64_t task_id);
 uint64_t kaula_completion_count(void);
 uint64_t kaula_completion_drops(void);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_COMPLETION_H */
