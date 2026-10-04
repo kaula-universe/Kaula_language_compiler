@@ -437,6 +437,22 @@ KaulaHandle kaula_handle_null(void) {
     return h;
 }
 
+/*
+ * kaula_handle_complete：构造一个"已完成"的 Handle。
+ *
+ * 从 task 池分配一个最小任务，直接置 DONE，结果存在 inline_result。
+ * await/poll 走正常路径（task_is_done 即返回），无需额外特殊处理。
+ */
+KaulaHandle kaula_handle_complete(uint64_t result_val) {
+    kaula_runtime_ensure_init();
+    KaulaTask* t = kaula_task_alloc();
+    if (t == NULL) return kaula_handle_null();
+    t->state = KAULA_TASK_DONE;
+    t->inline_result = result_val;
+    atomic_store_explicit(&t->result, &t->inline_result, memory_order_release);
+    return kaula_handle_from_task(t);
+}
+
 int kaula_handle_is_null(KaulaHandle h) {
     return h.task == NULL;
 }
