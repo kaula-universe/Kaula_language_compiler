@@ -1,8 +1,9 @@
-name: Auto Tag on Push
+name: Manual Tag (was Auto Tag on Push)
 
+# v1.1 发布准备期间停用“push master 自动打 tag”：当前只推进到可发布状态，
+# 不自动产生 tag、不发 Release。需要打 tag 时在 GitHub Actions 手动触发本工作流。
 on:
-  push:
-    branches: [ master ]
+  workflow_dispatch:
 
 jobs:
   create-tag:
