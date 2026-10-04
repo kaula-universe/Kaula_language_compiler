@@ -102,9 +102,8 @@ class BuildConfig:
         else:
             self.common_flags.append("-D_CRT_SECURE_NO_WARNINGS")
 
-        self.skip_files = {
-            "kmm_scoped_allocator.c",
-        }
+        # v4 旧全局定义 TU kmm_scoped_allocator.c 已删除；v4.h 自供全部全局。
+        self.skip_files = set()
 
         self.is_windows = sys.platform.startswith("win")
         self.is_macos = sys.platform == "darwin"
