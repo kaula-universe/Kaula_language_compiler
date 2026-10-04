@@ -247,6 +247,22 @@ static uint64_t io_timers_fire(KaulaIoDriver* drv) {
 
 /* ========== 主循环 ========== */
 
+/*
+ * P2.1：批量注入 flush —— 把收集到的任务批量推入注入队列。
+ * 队列空间不足时 sched_yield 重试到全部入队（Worker 持续排空，不丢任务）。
+ */
+static void kaula_inject_batch_flush(KaulaTask** tasks, int n) {
+    int off = 0;
+    while (off < n) {
+        int accepted = kaula_inject_queue_push_batch(tasks + off, n - off);
+        if (accepted <= 0) {
+            sched_yield();
+            continue;
+        }
+        off += accepted;
+    }
+}
+
 static void iodriver_loop(void* arg) {
     KaulaIoDriver* drv = (KaulaIoDriver*)arg;
 
@@ -338,6 +354,10 @@ static void iodriver_loop(void* arg) {
          * 后端恒返回 0，所以两条分支各自空转，不需要额外的平台宏。
          */
         if (nready > 0) {
+            /* P2.1：批量收集完成任务，一次批量注入 */
+            KaulaTask* done_batch[KAULA_IO_BATCH_SIZE * 2];
+            int done_n = 0;
+
             /* 完成式：结果已就绪，直接交回 */
             KaulaTask* ctask;
             int cresult;
@@ -346,7 +366,15 @@ static void iodriver_loop(void* arg) {
                 ctask->io_result = cresult;
                 atomic_fetch_add_explicit(&drv->total_completions, 1,
                                           memory_order_relaxed);
-                kaula_scheduler_resume_task(ctask);
+                atomic_store_explicit(&ctask->state, KAULA_TASK_READY,
+                                      memory_order_release);
+                if (done_n < KAULA_IO_BATCH_SIZE * 2) {
+                    done_batch[done_n++] = ctask;
+                } else {
+                    /* 批次已满：先排空 */
+                    kaula_inject_batch_flush(done_batch, done_n);
+                    done_n = 0;
+                }
             }
 
             /* 就绪式：唤醒等待者，由 do_io 执行 IO */
@@ -369,9 +397,20 @@ static void iodriver_loop(void* arg) {
                     task->io_result = r;
                     atomic_fetch_add_explicit(&drv->total_completions, 1,
                                               memory_order_relaxed);
-                    /* 交回原 owner 的队列（亲和性），失败则走注入队列 */
-                    kaula_scheduler_resume_task(task);
+                    atomic_store_explicit(&task->state, KAULA_TASK_READY,
+                                          memory_order_release);
+                    if (done_n < KAULA_IO_BATCH_SIZE * 2) {
+                        done_batch[done_n++] = task;
+                    } else {
+                        kaula_inject_batch_flush(done_batch, done_n);
+                        done_n = 0;
+                    }
                 }
+            }
+
+            /* 批量注入剩余任务 */
+            if (done_n > 0) {
+                kaula_inject_batch_flush(done_batch, done_n);
             }
         }
 
