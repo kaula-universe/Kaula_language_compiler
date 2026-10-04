@@ -107,6 +107,11 @@ type BodyAnalysis struct {
 	// 每任务省一次大分配 + 大 memset。
 	HasCompound bool
 
+	// CompoundDepth：复合语句最大守卫深度（1-based；0=无复合语句）。
+	// Frame 里的 sub/branch 数组大小为 CompoundDepth+1（含 body 层 sub[0]），
+	// 不再无条件生成 KAULA_CONC_SUB_DEPTH=8 的固定数组。
+	CompoundDepth int
+
 	// HasForIn：函数体含 for..in 守卫（需要 loop_i/loop_end/loop_step）。
 	// 无 for-in 时省略 192B 迭代状态数组。
 	HasForIn bool
@@ -273,8 +278,8 @@ func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
 		res.recordSuspends(expr, &cur)
 	}
 
-	var walk func(stmts []ast.Statement)
-	walk = func(stmts []ast.Statement) {
+	var walk func(stmts []ast.Statement, depth int)
+	walk = func(stmts []ast.Statement, depth int) {
 		for _, st := range stmts {
 			if st == nil {
 				continue
@@ -291,38 +296,50 @@ func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
 			case *ast.YieldStatement:
 				note(s.Source)
 			case *ast.BlockStatement:
-				walk(s.Statements)
+				walk(s.Statements, depth+1)
 			case *ast.IfStatement:
 				res.HasCompound = true
+				if depth+1 > res.CompoundDepth {
+					res.CompoundDepth = depth + 1
+				}
 				note(s.Condition)
-				walk(s.Body)
-				walk(s.Else)
+				walk(s.Body, depth+1)
+				walk(s.Else, depth+1)
 			case *ast.WhileStatement:
 				res.HasCompound = true
+				if depth+1 > res.CompoundDepth {
+					res.CompoundDepth = depth + 1
+				}
 				note(s.Condition)
-				walk(s.Body)
+				walk(s.Body, depth+1)
 			case *ast.ForStatement:
 				res.HasCompound = true
+				if depth+1 > res.CompoundDepth {
+					res.CompoundDepth = depth + 1
+				}
 				note(s.Condition)
 				if vd, ok := s.Init.(*ast.VariableDeclaration); ok && vd != nil {
 					note(vd.Value)
 					addDecl(vd.Name, vd.Pos.Line, vd.Value, vd.Type)
 				}
-				walk(s.Body)
+				walk(s.Body, depth+1)
 			case *ast.ForInStatement:
 				res.HasCompound = true
 				res.HasForIn = true
+				if depth+1 > res.CompoundDepth {
+					res.CompoundDepth = depth + 1
+				}
 				if s.Variable != nil {
 					// ForIn 的循环变量是 ast.Identifier，没有类型标注
 					addDecl(s.Variable.Name, s.Pos.Line, nil, "")
 				}
-				walk(s.Body)
+				walk(s.Body, depth+1)
 			case *ast.CallStatement:
-				walk(s.Body)
+				walk(s.Body, depth+1)
 			}
 		}
 	}
-	walk(body)
+	walk(body, 0)
 
 	res.NeedsSuspend = len(res.SuspendSites) > 0
 

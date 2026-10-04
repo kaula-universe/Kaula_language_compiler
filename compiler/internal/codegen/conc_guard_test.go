@@ -85,7 +85,7 @@ fn main() -> i32 {
 	c, _ := genConc(t, src)
 
 	for _, want := range []string{
-		"KAULA_CONC_SUB_DEPTH", // Frame 里的槽位数组
+		"sub[2]",               // 守卫深度自适应：while 一层 → sub[2]（body 层 + 循环体层）
 		"f->sub[1] == 0",       // 循环头
 		"f->sub[1] == 1",       // 循环体第一条语句
 		"return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .io_request", // 就地挂起
@@ -161,12 +161,10 @@ fn main() -> i32 {
 `
 	c, _ := genConc(t, src)
 
-	// 不该出现守卫槽位的判断（只有 sub[0] 被复位，没有 == 比较）
-	if strings.Contains(c, "f->sub[0] ==") {
+	// 不该出现守卫槽位的判断（无复合语句的 Frame 已省略 sub/branch 字段，
+	// 顶层挂起点靠 pc 切段即可，不需要任何 sub 引用）
+	if strings.Contains(c, "f->sub[") {
 		t.Errorf("顶层挂起点不需要守卫槽位：\n%s", c)
-	}
-	if !strings.Contains(c, "f->sub[0] = 0;") {
-		t.Errorf("跨段时仍须把槽位复位到 0：\n%s", c)
 	}
 	if !strings.Contains(c, "f->pc = 1;") {
 		t.Errorf("顶层挂起点仍应切段：\n%s", c)

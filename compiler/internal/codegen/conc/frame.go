@@ -44,6 +44,11 @@ type Emitter struct {
 
 	// stateful 由 Generate 设置：true 表示双形态（有挂起点）
 	stateful bool
+
+	// guardLayout 由 SetGuardLayout 固化（analysis.CompoundDepth / HasForIn）。
+	// GenerateSpawn 读它决定免 memset 时要显式清零哪些守卫槽。
+	compoundDepth int
+	hasForIn      bool
 }
 
 // 生成的标识符
@@ -149,9 +154,16 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 	 * 生成代码靠「每轮末尾写回 0」维持它，所以进入任一层时读到的都是 0。
 	 */
 	if analysis.HasCompound {
+		// 数组按实际守卫深度（CompoundDepth+1，含 body 层 sub[0]），
+		// 不再固定 KAULA_CONC_SUB_DEPTH=8：task Frame 的 sub/branch 从
+		// 64B 降到 2×depth 个 int，KMM 分配档位随之下移。
+		depth := analysis.CompoundDepth + 1
+		if depth > 8 {
+			depth = 8 // 防御：超深嵌套与固定上限持平，不引入新越界
+		}
 		b.WriteString("    /* 复合语句内的恢复槽位与 if 分支选择 */\n")
-		b.WriteString("    int             sub[KAULA_CONC_SUB_DEPTH];\n")
-		b.WriteString("    int             branch[KAULA_CONC_SUB_DEPTH];\n")
+		b.WriteString(fmt.Sprintf("    int             sub[%d];\n", depth))
+		b.WriteString(fmt.Sprintf("    int             branch[%d];\n", depth))
 	}
 
 	/*
@@ -163,10 +175,14 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 	 * 循环体只执行正确轮次。
 	 */
 	if analysis.HasForIn {
+		depth := analysis.CompoundDepth + 1
+		if depth > 8 {
+			depth = 8
+		}
 		b.WriteString("    /* for..in 守卫：迭代下标 / 上界 / 步长 */\n")
-		b.WriteString("    long long       loop_i[KAULA_CONC_SUB_DEPTH];\n")
-		b.WriteString("    long long       loop_end[KAULA_CONC_SUB_DEPTH];\n")
-		b.WriteString("    long long       loop_step[KAULA_CONC_SUB_DEPTH];\n")
+		b.WriteString(fmt.Sprintf("    long long       loop_i[%d];\n", depth))
+		b.WriteString(fmt.Sprintf("    long long       loop_end[%d];\n", depth))
+		b.WriteString(fmt.Sprintf("    long long       loop_step[%d];\n", depth))
 	}
 
 	// 参数：函数入口时写入，跨所有挂起点存活
@@ -239,6 +255,28 @@ func (e *Emitter) IsStateful() bool { return e.stateful }
 
 // SetStateful 由 codegen 在 lowering 开始时设置形态判定
 func (e *Emitter) SetStateful(v bool) { e.stateful = v }
+
+// SetGuardLayout 固化守卫数组布局；GenerateSpawn 可能先于 Generate 被调用，
+// 所以深度与 for-in 标记必须随 SetStateful 一起提前登记。
+func (e *Emitter) SetGuardLayout(compoundDepth int, hasForIn bool) {
+	e.compoundDepth = compoundDepth
+	e.hasForIn = hasForIn
+}
+
+// GuardDepth 返回守卫数组深度（CompoundDepth+1，含 body 层 sub[0]）
+func (e *Emitter) GuardDepth() int {
+	d := e.compoundDepth + 1
+	if d > 8 {
+		d = 8
+	}
+	return d
+}
+
+// HasForIn 返回是否需要生成 for..in 迭代状态数组
+func (e *Emitter) HasForIn() bool { return e.hasForIn }
+
+// HasGuard 返回 Frame 是否含 sub/branch 守卫槽（compoundDepth > 0）
+func (e *Emitter) HasGuard() bool { return e.compoundDepth > 0 }
 
 // ---------- resume ----------
 
@@ -510,9 +548,31 @@ func (e *Emitter) GenerateSpawn(argExprs []string, flags uint32) string {
 		e.FrameType(), e.FrameType(), e.FrameType()))
 	b.WriteString("    KaulaHandle __h = kaula_handle_null();\n")
 	b.WriteString("    if (__frame != NULL) {\n")
-	b.WriteString("        memset(__frame, 0, sizeof(*__frame));\n")
+	/*
+	 * 免 memset：Frame 里所有字段都是先写后读 ——
+	 *   pc/参数      spawn 时全量赋值
+	 *   result       由 resume/simple 在 DONE 前写入
+	 *   io_request   经 KaulaResumeResult 返回，不在 Frame 内
+	 * 唯一需要显式归零的是守卫槽（恢复时首次进入读 sub[d]==0 判定
+	 * 「从头开始」）与 needs_free 预留位。整帧 memset 在 Frame 160B
+	 * 时代每任务白付一次，纯开销。
+	 */
 	if e.IsStateful() {
 		b.WriteString("        __frame->pc = 0;\n")
+		if e.HasGuard() {
+			for d := 0; d < e.GuardDepth(); d++ {
+				b.WriteString(fmt.Sprintf("        __frame->sub[%d] = 0;\n", d))
+				b.WriteString(fmt.Sprintf("        __frame->branch[%d] = 0;\n", d))
+			}
+			if e.HasForIn() {
+				for d := 0; d < e.GuardDepth(); d++ {
+					b.WriteString(fmt.Sprintf("        __frame->loop_i[%d] = 0;\n", d))
+					b.WriteString(fmt.Sprintf("        __frame->loop_end[%d] = 0;\n", d))
+					b.WriteString(fmt.Sprintf("        __frame->loop_step[%d] = 0;\n", d))
+				}
+			}
+		}
+		b.WriteString("        __frame->needs_free = 0;\n")
 		for i, arg := range argExprs {
 			if i < len(e.Params) {
 				b.WriteString(fmt.Sprintf("        __frame->%s = %s;\n", e.Params[i], arg))
