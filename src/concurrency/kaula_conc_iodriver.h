@@ -27,6 +27,10 @@
 #include "kaula_conc_task.h"
 #include "kaula_conc_mpsc_queue.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 前向声明：后端头文件需要它 */
 typedef struct KaulaIoDriver KaulaIoDriver;
 
@@ -110,4 +114,8 @@ uint32_t kaula_iodriver_pending_count(void);
 /* 定时器测试钩子：直接触发一个 Task 的挂起定时器到期 */
 void kaula_iodriver_fire_timer(KaulaTask* task, uint64_t delay_ns);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_IODRIVER_H */

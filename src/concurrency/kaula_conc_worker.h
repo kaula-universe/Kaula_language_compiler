@@ -28,6 +28,10 @@
 #include "kaula_conc_budget.h"
 #include "kaula_conc_epoch.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 每个 Worker 的统计（文档 §12.1） */
 typedef struct {
     _Atomic(uint64_t) tasks_executed;
@@ -147,4 +151,8 @@ KaulaTask* kaula_conc_worker_find_work(KaulaWorker* w);
  */
 int kaula_conc_worker_post(KaulaWorker* w, KaulaTask* task);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_WORKER_H */

@@ -82,6 +82,22 @@
     #include <time.h>  // CLOCK_MONOTONIC / clock_gettime（供 kaula_get_ticks 等使用）
 #endif
 
+// Windows：函数内 static env 缓冲会被多线程互相覆盖，改为线程局部缓冲
+#if KAULA_PLATFORM_WINDOWS
+static __declspec(thread) char kaula_env_thread_buf[1024];
+#endif
+
+// macOS：mach_timebase 多线程首次 lazy-init 数据竞争，改 pthread_once 一次性初始化
+#if KAULA_PLATFORM_MACOS
+static pthread_once_t kaula_tb_once = PTHREAD_ONCE_INIT;
+static mach_timebase_info_data_t kaula_tb_info;
+static void kaula_tb_init(void) { (void)mach_timebase_info(&kaula_tb_info); }
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // ==================== 跨平台线程支持 ====================
 #if KAULA_PLATFORM_WINDOWS
     typedef HANDLE kaula_thread_t;
@@ -182,11 +198,8 @@ static inline double kaula_get_tick_frequency(void) {
     QueryPerformanceFrequency(&frequency);
     return (double)frequency.QuadPart;
 #elif KAULA_PLATFORM_MACOS
-    static mach_timebase_info_data_t info = {0, 0};
-    if (info.denom == 0) {
-        mach_timebase_info(&info);
-    }
-    return (double)info.numer / (double)info.denom;
+    pthread_once(&kaula_tb_once, kaula_tb_init);
+    return (double)kaula_tb_info.numer / (double)kaula_tb_info.denom;
 #else
     return 1000000000.0; // 纳秒
 #endif
@@ -215,7 +228,7 @@ static inline void kaula_sleep_us(int microseconds) {
     LARGE_INTEGER frequency, start, target;
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&start);
-    target.QuadPart = start.QuadPart + (frequency.QuadPart * microseconds / 1000000);
+    target.QuadPart = start.QuadPart + ((LONGLONG)frequency.QuadPart * (LONGLONG)microseconds / 1000000);
     while (1) {
         QueryPerformanceCounter(&start);
         if (start.QuadPart >= target.QuadPart) break;
@@ -226,7 +239,7 @@ static inline void kaula_sleep_us(int microseconds) {
         LARGE_INTEGER frequency, start, target;
         QueryPerformanceFrequency(&frequency);
         QueryPerformanceCounter(&start);
-        target.QuadPart = start.QuadPart + (frequency.QuadPart * microseconds / 1000000);
+        target.QuadPart = start.QuadPart + ((LONGLONG)frequency.QuadPart * (LONGLONG)microseconds / 1000000);
         while (1) {
             QueryPerformanceCounter(&start);
             if (start.QuadPart >= target.QuadPart) break;
@@ -240,9 +253,8 @@ static inline void kaula_sleep_us(int microseconds) {
 // ==================== 跨平台环境变量 ====================
 static inline const char* kaula_get_env(const char* name) {
 #if KAULA_PLATFORM_WINDOWS
-    static char buffer[1024];
-    if (GetEnvironmentVariableA(name, buffer, sizeof(buffer)) > 0) {
-        return buffer;
+    if (GetEnvironmentVariableA(name, kaula_env_thread_buf, sizeof(kaula_env_thread_buf)) > 0) {
+        return kaula_env_thread_buf;
     }
     return NULL;
 #else
@@ -259,5 +271,9 @@ static inline int kaula_set_env(const char* name, const char* value) {
     return setenv(name, value, 1);
 #endif
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // KAULA_PLATFORM_H

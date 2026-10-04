@@ -41,6 +41,12 @@ size_t strlen(const char* s);
 #include <stdio.h>
 #endif
 
+#ifdef __cplusplus
+// C++ 没有 C11 的 _Static_assert 关键字，统一映射为 static_assert
+#define _Static_assert(cond, msg) static_assert(cond, msg)
+extern "C" {
+#endif
+
 // ==================== 辅助宏（必须在配置信息输出之前定义） ====================
 #define KMM_V4_STRINGIFY_IMPL(x) #x
 #define KMM_V4_STRINGIFY(x) KMM_V4_STRINGIFY_IMPL(x)
@@ -1887,5 +1893,9 @@ void  kmm_v4_destroy_pool(void);
 // ==================== 编译期检查 ====================
 _Static_assert(KMM_V4_POOL_SIZE > 0, "Pool size must be positive");
 _Static_assert((KMM_V4_ALIGNMENT & (KMM_V4_ALIGNMENT - 1)) == 0, "Alignment must be power of 2");
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // KMM_SCOPED_ALLOCATOR_V4_H

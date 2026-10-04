@@ -28,6 +28,10 @@
 
 #include "kaula_conc_platform.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 容量必须为 2 的幂（I3） */
 #ifndef KAULA_MPSC_CAPACITY
     #define KAULA_MPSC_CAPACITY 131072
@@ -136,4 +140,8 @@ static inline int kaula_mpsc_queue_empty(const kaula_mpsc_queue_t* q) {
     return kaula_mpsc_queue_size(q) == 0;
 }
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_MPSC_QUEUE_H */

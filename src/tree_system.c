@@ -29,6 +29,7 @@ TreeSystem* create_tree_system() {
     
     system->root = (TreeNode*)kmm_v4_malloc(sizeof(TreeNode));
     if (!system->root) {
+        kmm_v4_free(system);
         return NULL;
     }
     
@@ -43,7 +44,7 @@ TreeSystem* create_tree_system() {
 
 void free_tree_node(TreeNode* node) {
     if (!node) return;
-    
+
     if (node->type == NODE_TYPE_OBJECT || node->type == NODE_TYPE_ARRAY) {
         TreeNode* child = node->data.children;
         while (child) {
@@ -54,11 +55,15 @@ void free_tree_node(TreeNode* node) {
     } else if (node->type == NODE_TYPE_VALUE) {
         (void)node->data.value;
     }
+
+    kmm_v4_free(node->key);
+    kmm_v4_free(node);
 }
 
 void destroy_tree_system(TreeSystem* system) {
     if (!system) return;
     free_tree_node(system->root);
+    kmm_v4_free(system);
 }
 
 TreeNode* find_tree_child(TreeNode* parent, const char* key) {
@@ -120,10 +125,7 @@ int set_tree_node_value(TreeNode* node, void* value) {
     if (!node || node->type != NODE_TYPE_VALUE) {
         return 0;
     }
-    
-    if (node->data.value) {
-    }
-    
+
     node->data.value = value;
     return 1;
 }
@@ -132,31 +134,76 @@ void* get_tree_node_value(TreeNode* node) {
     if (!node || node->type != NODE_TYPE_VALUE) {
         return NULL;
     }
-    
+
     return node->data.value;
+}
+
+// ==================== 公开 API thin wrapper（kaula.h 声明名转发到内部实现） ====================
+// find_tree_node 定义在本块之后，这里前向声明以满足 C89 旧式隐式声明规则
+TreeNode* find_tree_node(TreeNode* root, const char* path);
+
+Tree* tree_create(void) {
+    return (Tree*)create_tree_system();
+}
+
+void tree_destroy(Tree* tree) {
+    destroy_tree_system((TreeSystem*)tree);
+}
+
+void tree_set_root(Tree* tree, void* value) {
+    TreeSystem* sys = (TreeSystem*)tree;
+    if (!sys || !sys->root) return;
+    set_tree_node_value(sys->root, value);
+}
+
+void tree_add_node(Tree* tree, const char* parent_name, const char* node_name, void* value) {
+    TreeSystem* sys = (TreeSystem*)tree;
+    if (!sys || !node_name) return;
+
+    TreeNode* parent = sys->root;
+    if (parent_name && parent_name[0] != '\0') {
+        parent = find_tree_node(sys->root, parent_name);
+    }
+    if (!parent) return;
+
+    TreeNode* child = create_tree_node(node_name, NODE_TYPE_VALUE);
+    if (!child) return;
+    add_tree_child(parent, child);
+    set_tree_node_value(child, value);
+}
+
+void* tree_get_node(Tree* tree, const char* node_name) {
+    TreeSystem* sys = (TreeSystem*)tree;
+    if (!sys || !node_name) return NULL;
+
+    TreeNode* node = find_tree_node(sys->root, node_name);
+    return node ? get_tree_node_value(node) : NULL;
 }
 
 TreeNode* find_tree_node(TreeNode* root, const char* path) {
     if (!root || !path) return NULL;
-    
+
     if (strcmp(path, "") == 0) {
         return root;
     }
-    
+
     char* path_copy = kmm_v4_strdup(path);
     if (!path_copy) return NULL;
-    
-    char* token = strtok(path_copy, ".");
+
+    char* saveptr = NULL;
+    char* token = strtok_r(path_copy, ".", &saveptr);
     TreeNode* current = root;
-    
+
     while (token) {
         current = find_tree_child(current, token);
         if (!current) {
+            kmm_v4_free(path_copy);
             return NULL;
         }
-        token = strtok(NULL, ".");
+        token = strtok_r(NULL, ".", &saveptr);
     }
-    
+
+    kmm_v4_free(path_copy);
     return current;
 }
 

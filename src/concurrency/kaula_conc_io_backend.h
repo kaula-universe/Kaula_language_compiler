@@ -36,6 +36,10 @@
 #include "kaula_conc_task.h"
 #include "kaula_conc_iodriver.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 事件位（跨后端统一） */
 #define KAULA_IO_EV_READ   0x1
 #define KAULA_IO_EV_WRITE  0x2
@@ -106,4 +110,8 @@ void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv);
  */
 int kaula_iodriver_do_io(const KaulaIoRequest* req);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_IO_BACKEND_H */

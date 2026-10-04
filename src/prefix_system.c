@@ -21,6 +21,7 @@ PrefixSystem* create_prefix_system() {
     
     system->root = (PrefixNode*)kmm_v4_malloc(sizeof(PrefixNode));
     if (!system->root) {
+        kmm_v4_free(system);
         return NULL;
     }
     
@@ -36,18 +37,22 @@ PrefixSystem* create_prefix_system() {
 
 void free_prefix_node(PrefixNode* node) {
     if (!node) return;
-    
+
     PrefixNode* child = node->children;
     while (child) {
         PrefixNode* next = child->next;
         free_prefix_node(child);
         child = next;
     }
+
+    kmm_v4_free(node->name);
+    kmm_v4_free(node);
 }
 
 void destroy_prefix_system(PrefixSystem* system) {
     if (!system) return;
     free_prefix_node(system->root);
+    kmm_v4_free(system);
 }
 
 PrefixNode* find_child(PrefixNode* parent, const char* name) {
@@ -106,8 +111,8 @@ int enter_prefix(PrefixSystem* system, const char* name) {
 }
 
 int exit_prefix(PrefixSystem* system) {
-    if (!system || !system->current->parent) return 0;
-    
+    if (!system || !system->current || !system->current->parent) return 0;
+
     system->current = system->current->parent;
     return 1;
 }
@@ -124,21 +129,41 @@ void* get_prefix_data(PrefixSystem* system) {
 
 PrefixNode* find_prefix(PrefixSystem* system, const char* path) {
     if (!system || !path) return NULL;
-    
+
     PrefixNode* node = system->root;
     char* path_copy = kmm_v4_strdup(path);
     if (!path_copy) return NULL;
-    
-    char* token = strtok(path_copy, ".");
+
+    char* saveptr = NULL;
+    char* token = strtok_r(path_copy, ".", &saveptr);
     while (token) {
         node = find_child(node, token);
         if (!node) {
+            kmm_v4_free(path_copy);
             return NULL;
         }
-        token = strtok(NULL, ".");
+        token = strtok_r(NULL, ".", &saveptr);
     }
-    
+
+    kmm_v4_free(path_copy);
     return node;
+}
+
+// ==================== 公开 API thin wrapper（kaula.h 声明名转发到内部实现） ====================
+PrefixSystem* prefix_system_create(void) {
+    return create_prefix_system();
+}
+
+void prefix_system_destroy(PrefixSystem* ps) {
+    destroy_prefix_system(ps);
+}
+
+void prefix_enter(PrefixSystem* ps, const char* name) {
+    enter_prefix(ps, name);
+}
+
+void prefix_leave(PrefixSystem* ps) {
+    exit_prefix(ps);
 }
 
 void print_prefix_system(PrefixNode* node, int depth) {

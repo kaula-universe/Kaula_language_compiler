@@ -985,7 +985,10 @@ void tree_map_remove(TreeMap* map, void* key) {
 }
 
 // PriorityQueue 实现
-PriorityQueue* priority_queue_create(size_t initial_capacity) {
+// 注意：std.container 对外暴露的优先级队列 C 入口（create/add/execute_next/batch_*）
+// 由 src/queue.c 提供。本文件内的二叉堆实现仅为内部使用，故 create/destroy 改为
+// 内部链接(static)，避免与 libkaula_runtime.a(src/queue.c) 的同名符号跨归档重复定义。
+static PriorityQueue* priority_queue_create(size_t initial_capacity) {
     PriorityQueue* pq = (PriorityQueue*)kmm_v4_malloc(sizeof(PriorityQueue));
     if (pq) {
         pq->capacity = initial_capacity > 0 ? initial_capacity : 16;
@@ -995,7 +998,7 @@ PriorityQueue* priority_queue_create(size_t initial_capacity) {
     return pq;
 }
 
-void priority_queue_destroy(PriorityQueue* pq) {
+static void priority_queue_destroy(PriorityQueue* pq) {
     // KMM 管理内存，无需手动释放
 }
 

@@ -15,6 +15,10 @@
 
 #include "kaula_conc_task.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ========== 全局注入队列（MPMC 有界） ========== */
 
 typedef struct {
@@ -105,4 +109,8 @@ int kaula_scheduler_resume_task(KaulaTask* task);
 /* 窃取：从其他 Worker 偷（供测试与内部调用） */
 KaulaTask* kaula_scheduler_steal(KaulaWorker* w);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_SCHEDULER_H */

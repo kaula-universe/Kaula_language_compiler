@@ -28,6 +28,10 @@
 #include "kaula_conc_task.h"
 #include "kaula_conc_mpsc_queue.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     /* 线程池：固定数组，按需伸缩（文档 §7.2） */
     kaula_p_thread_t   threads[KAULA_BLOCK_LANE_MAX_THREADS];
@@ -96,4 +100,8 @@ uint32_t kaula_block_lane_thread_count(void);
  */
 uint32_t kaula_block_lane_thread_cap(void);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_BLOCK_LANE_H */

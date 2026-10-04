@@ -32,6 +32,10 @@
 
 #include "kaula_conc_task.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 停滞阈值：单次执行超过该时长视为疑似卡住 */
 #ifndef KAULA_DEFAULT_STALL_NS
     #define KAULA_DEFAULT_STALL_NS (10 * 1000000ULL)
@@ -55,4 +59,8 @@ void kaula_evict_scan(void);
 /* 统计 */
 uint64_t kaula_evict_total(void);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_EVICT_H */

@@ -20,6 +20,10 @@
 
 #include "kaula_conc_platform.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 预算计数器：thread-local，无需锁 */
 typedef struct {
     int32_t  remaining;       /* 剩余 tick */
@@ -76,4 +80,8 @@ int kaula_budget_adaptor_update(KaulaBudgetAdaptor* a, uint64_t sample_ns);
 /* 读取当前推荐量子 */
 int32_t kaula_budget_adaptor_quantum(const KaulaBudgetAdaptor* a);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* KAULA_CONC_BUDGET_H */
