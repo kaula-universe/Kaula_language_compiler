@@ -38,7 +38,19 @@ BUILD_DIR = PROJECT_ROOT / "build" / "concurrency_tests"
 #
 # 这是给测试用的权宜之计，不是给 VLA 开脱：语言层面 `T v[n]` 在 n 很大时
 # 迟早该有上限检查或堆提升。若编译器将来补上，这个 flag 可以撤掉。
-KL_CFLAGS = "-Xlinker /STACK:33554432"
+#
+# 栈尺寸链接标志按平台区分（kaulac 会把 -cflags 按空格和逗号拆成多个 argv，
+# 所以不能用逗号形式的 -Wl,-z,stack-size=...，要用 -Xlinker 成对形式）：
+#   Windows MSVC : /STACK:N          （经 -Xlinker 透传）
+#   Linux GNU ld : -Xlinker -z -Xlinker stack-size=N
+#   macOS ld     : -Xlinker -stack_size -Xlinker 0x2000000（32MB，hex）
+# 之前硬编码 Windows 的 /STACK，Linux ld 会把它当输入文件名而链接失败。
+if sys.platform.startswith("win"):
+    KL_CFLAGS = "-Xlinker /STACK:33554432"
+elif sys.platform == "darwin":
+    KL_CFLAGS = "-Xlinker -stack_size -Xlinker 0x2000000"
+else:
+    KL_CFLAGS = "-Xlinker -z -Xlinker stack-size=33554432"
 
 
 def detect_platform():
