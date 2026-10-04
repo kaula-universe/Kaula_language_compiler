@@ -448,8 +448,16 @@ bool kmm_v4_survivor_paged_free(void* ptr) {
     // （kmm_v4_paged_pool_index 把 <1MB 全归 0 档，但复用时还有
     // old_sz >= size 的检查兜着），直接还给 glibc 没有任何损失。
     size_t pb = __atomic_load_n(&g_paged_pool_bytes, __ATOMIC_RELAXED);
+    /*
+     * 容量闸门：当前池字节低于上限才入池，否则直接 free 归还 glibc。
+     *
+     * 旧写法 `sz <= CAP - pb` 在 pb 因大小混桶记账漂移而超过 CAP 时，
+     * CAP-pb 发生 size_t 无符号下溢 → 条件恒真 → 永远入池、永不 free，
+     * Treiber 栈无限累积块（soak 下 RSS 随任务数线性上涨的根因）。
+     * 改为 `pb < CAP` 闸门：到顶即停池化、超额块直还给 glibc，池量封顶。
+     */
     if (sz >= sizeof(kmm_paged_pool_node_t) &&
-        KMM_V4_LIKELY(sz <= KMM_V4_PAGED_POOL_CAP - pb)) {
+        KMM_V4_LIKELY(pb < KMM_V4_PAGED_POOL_CAP)) {
         __atomic_store_n(&hdr->pooled, 1, __ATOMIC_RELAXED);
         kmm_paged_pool_node_t* node = (kmm_paged_pool_node_t*)ptr;  // 复用 payload 前 16B
         node->size = sz;
