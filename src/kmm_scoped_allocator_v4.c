@@ -3,6 +3,11 @@
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE
 #endif
+#else
+/* glibc 在严格 -std=cNN 下需 _GNU_SOURCE（隐含 _DEFAULT_SOURCE）才暴露 MAP_ANONYMOUS */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #endif
 
 #include "kmm_scoped_allocator_v4.h"
