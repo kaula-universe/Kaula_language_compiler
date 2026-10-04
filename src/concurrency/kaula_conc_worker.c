@@ -212,12 +212,46 @@ KaulaTask* kaula_conc_worker_find_work(KaulaWorker* w) {
 
     atomic_fetch_add_explicit(&w->stats.steal_attempts, 1, memory_order_relaxed);
 
+    /* 批量窃取批量大小（init 时由 KAULA_STEAL_BATCH 读入缓存）。
+     * 栈数组上限 16：实测 k=1/4/8，超出则截断，避免栈溢出。 */
+    int batch_max = (int)g_conc_runtime.steal_batch_max;
+    if (batch_max > 16) batch_max = 16;
+
     uint32_t start = (uint32_t)(worker_rand(w) % n);
     for (uint32_t i = 0; i < n; i++) {
         uint32_t idx = (start + i) % n;
         if (idx == w->worker_id) continue;
 
-        KaulaTask* victim = kaula_ws_deque_steal(&g_conc_workers[idx].local_queue);
+        KaulaWSDeque* victim_q = &g_conc_workers[idx].local_queue;
+
+        /* 先尝试批量偷：一次 CAS 拿 n 个最老任务。 */
+        if (batch_max > 0) {
+            KaulaTask* grabbed[16];
+            int got = kaula_ws_deque_steal_batch(victim_q, grabbed, batch_max);
+            if (got > 0) {
+                /* 全部 n 个改写 owner=w；out[0] 立即返回，out[1..n) 回填本地队列 */
+                for (int j = 0; j < got; j++) {
+                    atomic_store_explicit(&grabbed[j]->owner, w, memory_order_release);
+                    grabbed[j]->steal_count++;
+                }
+                atomic_fetch_add_explicit(&w->stats.steal_count, got,
+                                          memory_order_relaxed);
+                for (int j = 1; j < got; j++) {
+                    /* 本地队列刚被 pop 空、容量 4096、n≤8，正常不会满；
+                     * 万一满则退回全局注入队列，绝不丢任务。 */
+                    if (!kaula_ws_deque_push_owner(&w->local_queue, grabbed[j])) {
+                        if (!kaula_scheduler_inject_push(grabbed[j])) {
+                            /* 注入也满：兜底唤醒，由 worker 排空后自举 */
+                            kaula_scheduler_notify_one();
+                        }
+                    }
+                }
+                return grabbed[0];
+            }
+            /* got==0：空/不足两项/CAS 竞争失败，退回单任务 steal 仲裁末元素 */
+        }
+
+        KaulaTask* victim = kaula_ws_deque_steal(victim_q);
         if (victim != NULL) {
             /*
              * I2：改写 owner。

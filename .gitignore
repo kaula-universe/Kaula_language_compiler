@@ -76,3 +76,7 @@ test/runtime/test_phase1
 test/runtime/test_phase2
 test/runtime/test_phase3
 test/bench/kaula/bench_gen.*
+test/bench/results_*.json
+test/bench/kaula/ab_*.kl
+test/bench/kaula/bench_gen
+scratch/
