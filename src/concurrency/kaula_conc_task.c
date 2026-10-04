@@ -33,9 +33,18 @@ KaulaTask* kaula_task_alloc(void) {
     /*
      * P0-2：优先从本 Worker 的复用池取 Task。
      *
-     * 池是 owner 独占的单链表（epoch 判定安全后由本 Worker 自己 push），
-     * 取用零原子操作、零系统分配 —— 高频 spawn/join 场景避开
-     * 全局 survivor slab 的 bitmap CAS 竞争。
+     * 池是 owner 独占的单链表：Task 只由「把它 retire 进去的那个 Worker」
+     * 回收（kaula_task_complete 把 pool 指针传成 &cw->task_pool），
+     * 回收也只在该 Worker 的 epoch_exit 里发生（kaula_epoch_try_reclaim）。
+     * 非 Worker 线程（IoDriver / Block Lane）完成的任务传的是 NULL，
+     * 走 survivor_free，不会混进任何池。
+     *
+     * 于是从池里取出的 Task 在此刻**只有本 Worker 能访问**，字段重置
+     * 用普通读写即可 —— 12 条原子 store 全是白付的缓存一致性代价。
+     *
+     * 跨线程可见性不靠这里的 store：kaula_spawn_to_flags 在投递之前
+     * 有一条 `state = KAULA_TASK_READY`（memory_order_release），
+     * 它把上面所有字段的写入一并发布出去。
      *
      * done_event 跨复用保留（池内 Task 的 event 从未被 destroy），
      * 因此此处不 memset 整个结构，只重置业务字段。
@@ -47,19 +56,20 @@ KaulaTask* kaula_task_alloc(void) {
 
         task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
                                                   memory_order_relaxed);
-        atomic_store_explicit(&task->state, KAULA_TASK_CREATED, memory_order_relaxed);
+        /* owner 独占：以下全部是普通读写，与原子 store 语义等价 */
+        task->state = KAULA_TASK_CREATED;
         task->resume_fn = NULL;
         task->frame = NULL;
         task->frame_size = 0;
         task->inner_frame = NULL;
-        atomic_store_explicit(&task->owner, NULL, memory_order_relaxed);
+        task->owner = NULL;
         task->submit_ns = 0;
         task->complete_ns = 0;
-        atomic_store_explicit(&task->result, NULL, memory_order_relaxed);
+        task->result = NULL;
         task->error = 0;
-        atomic_store_explicit(&task->cancelled, 0, memory_order_relaxed);
-        atomic_store_explicit(&task->pin_refs, 0, memory_order_relaxed);
-        atomic_store_explicit(&task->waiters, 0, memory_order_relaxed);
+        task->cancelled = 0;
+        task->pin_refs = 0;
+        task->waiters = 0;
         memset(&task->io_request, 0, sizeof(task->io_request));
         task->io_result = 0;
         task->next = NULL;
