@@ -727,13 +727,14 @@ extern void kmm_v4_thread_heap_invalidate(void);
 #define KMM_V4_SLAB_MAX_SIZE     2048   // 2 倍档位覆盖上限
 #define KMM_V4_SLAB_SLOTS        256    // bitmap 容量（每桶最大槽位数）
 #define KMM_V4_SLAB_BITMAP_WORDS ((KMM_V4_SLAB_SLOTS + 63) / 64)  // bitmap 字数
-// 动态池：9 档（8..2048，2 倍）+ 40 档（2K..1M，每 2 倍区间 4 档插值）= 49 档
+// 动态池：11 小档（8..2048，2 倍档基础上补 48、384 两个 1.5x 档）
+//         + 39 密档（2.5K..1M，每 2 倍区间 4 档插值）= 50 档
 // 插值档位：区间 [B, 2B) 内 B, 1.25B, 1.5B, 1.75B（B = 2^k，k=11..20）
 #define KMM_V4_SLAB_PAGED_THRESHOLD (1024 * 1024)  // 超过走页式分配
 #ifdef KMM_V4_STATIC_POOL
 #define KMM_V4_SLAB_BUCKETS 9
 #else
-#define KMM_V4_SLAB_BUCKETS 49
+#define KMM_V4_SLAB_BUCKETS 50
 #endif
 
 // 8 字节对齐属性：32 位目标（i386）上 uint64_t 的自然对齐只有 4 字节，
@@ -866,13 +867,21 @@ static inline void kmm_v4_offset_restore(size_t saved) {
 // 用于 SOR 在 yield/extract/return 边界实现真正的跨作用域所有权转移。
 
 // 内部：由 bucket index 计算 size class（档位表）
-// idx<9：8..2048（2 倍）；idx>=9：区间 [2^k, 2^k·2) 内 4 档插值 B·(4+i)/4
+// 动态池小档 idx 0..10：8..2048，2 倍档基础上补 48、384 两个 1.5x 档；
+// 动态池密档 idx>=11：区间 [2^k, 2^k·2) 内 4 档插值 B·(4+i)/4。
+// 静态池（freestanding）保持 8..2048 九档 2 倍递增不变。
 static inline size_t kmm_v4_slab_bucket_size(int idx) {
-    if (idx < 9) return (size_t)KMM_V4_SLAB_MIN_SIZE << idx;
-    int q = idx - 9;
-    int k = 11 + q / 4;      // k=11..20，对应 2K..1M 区间
-    int i = q % 4;           // 区间内插值 0..3
+#ifdef KMM_V4_STATIC_POOL
+    return (size_t)KMM_V4_SLAB_MIN_SIZE << idx;
+#else
+    static const size_t small[11] =
+        { 8, 16, 32, 48, 64, 128, 256, 384, 512, 1024, 2048 };
+    if (idx <= 10) return small[idx];
+    int q = idx - 10;       // 密档 q=1..39
+    int k = 11 + q / 4;     // k=11..20，对应 2K..1M 区间
+    int i = q % 4;          // 区间内插值 0..3
     return ((size_t)1 << (k - 2)) * (size_t)(4 + i);
+#endif
 }
 
 // 内部：每档槽位数（小档密、大档少，控制单桶内存）
@@ -898,11 +907,18 @@ static inline int kmm_v4_slab_bucket_index(size_t size) {
     // 写第 2 个 8 字节时越界覆盖相邻槽（16B slot 并发场景实测错位）。
     return (int)((sizeof(size_t) * 8) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
 #else
-    if (size <= KMM_V4_SLAB_MAX_SIZE) {
-        if (size <= KMM_V4_SLAB_MIN_SIZE) return 0;
-        // 同静态池：64 - clzll 为位长，63 - clzll 为最高位索引（差 1 会错档）
-        return (int)((sizeof(size_t) * 8) - __builtin_clzll((unsigned long long)(size - 1))) - 3;
-    }
+    // 小档区 idx 0..10（含 48/384 插值）：显式边界，O(1) 且无 clz off-by-one
+    if (size <= 8)    return 0;
+    if (size <= 16)   return 1;
+    if (size <= 32)   return 2;
+    if (size <= 48)   return 3;
+    if (size <= 64)   return 4;
+    if (size <= 128)  return 5;
+    if (size <= 256)  return 6;
+    if (size <= 384)  return 7;
+    if (size <= 512)  return 8;
+    if (size <= 1024) return 9;
+    if (size <= KMM_V4_SLAB_MAX_SIZE) return 10;
     if (size > KMM_V4_SLAB_PAGED_THRESHOLD) return -1;  // 页式
     // 密档：k = floor(log2(size))（B=2^k ≤ size，k≥11），区间内 4 档插值
     int k = (int)((sizeof(size_t) * 8 - 1) - __builtin_clzll((unsigned long long)size));
@@ -910,7 +926,7 @@ static inline int kmm_v4_slab_bucket_index(size_t size) {
     size_t step = B / 4;
     size_t i = (size - B + step - 1) / step;  // ceil((size-B)/step)，0..4
     if (i > 3) { k++; i = 0; }                // 落入区间端点 → 下一区间首档
-    return 9 + (k - 11) * 4 + (int)i;
+    return 9 + (k - 11) * 4 + (int)i + 1;     // 旧编号 +1 对齐新小档表
 #endif
 }
 
