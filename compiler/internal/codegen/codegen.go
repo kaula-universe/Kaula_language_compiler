@@ -1248,6 +1248,10 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 }
 
 func (cg *CodeGenerator) Generate(program *ast.Program) string {
+	// 嵌套 conc fn 调用：AST 层内联展开（Future 扁平化，见 conc_inline.go）。
+	// 必须在 FlattenDeclarations 之前：内联产生的新声明需要统一展平。
+	cg.inlineConcFns(program)
+
 	// 单语句多变量声明（i64 a = 1, b = 2）展平为独立声明（幂等；
 	// 未经过语义阶段的直连代码生成路径也能正确输出全部声明符）
 	astutil.FlattenDeclarations(program)
