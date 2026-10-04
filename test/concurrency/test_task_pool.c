@@ -127,12 +127,12 @@ static void test_alloc_always_clean_across_shapes(void) {
         void* inner = NULL;   /* t->inner_frame，形态 2 才有 */
         void* written_to = NULL; /* resume 实际写入的那块：即 t->frame */
         if (shape == 0) {
-            kaula_task_init(t, plain_resume, NULL, 0);
+            kaula_task_init(t, plain_resume, NULL, NULL, 0);
         } else if (shape == 1) {
             written_to = malloc(sizeof(result_frame));
             if (written_to == NULL) { TEST_FAIL("malloc 失败"); release_task(t); return; }
             ((result_frame*)written_to)->result = -1;
-            kaula_task_init(t, result_resume, written_to, sizeof(result_frame));
+            kaula_task_init(t, result_resume, NULL, written_to, sizeof(result_frame));
             t->flags |= KAULA_TASK_FLAG_FRAME_ON_HEAP;
         } else {
             written_to = malloc(sizeof(result_frame));
@@ -142,7 +142,7 @@ static void test_alloc_always_clean_across_shapes(void) {
             }
             ((result_frame*)written_to)->result = -1;
             ((result_frame*)inner)->result = -1;
-            kaula_task_init(t, result_resume, written_to, sizeof(result_frame));
+            kaula_task_init(t, result_resume, NULL, written_to, sizeof(result_frame));
             t->inner_frame = inner;
             t->flags |= KAULA_TASK_FLAG_FRAME_ON_HEAP;
         }
