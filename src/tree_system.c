@@ -166,10 +166,19 @@ void tree_add_node(Tree* tree, const char* parent_name, const char* node_name, v
     }
     if (!parent) return;
 
-    TreeNode* child = create_tree_node(node_name, NODE_TYPE_VALUE);
+    /*
+     * value == NULL 视为容器(OBJECT)节点：之后可在其下继续 add 子节点；
+     * value != NULL 视为叶子(VALUE)节点。底层 add_tree_child 只允许
+     * OBJECT/ARRAY 作父节点，故容器必须建为 OBJECT——此前一律建 VALUE
+     * 导致挂不上子节点、只能产出扁平树。
+     */
+    TreeNodeType type = (value == NULL) ? NODE_TYPE_OBJECT : NODE_TYPE_VALUE;
+    TreeNode* child = create_tree_node(node_name, type);
     if (!child) return;
     add_tree_child(parent, child);
-    set_tree_node_value(child, value);
+    if (type == NODE_TYPE_VALUE) {
+        set_tree_node_value(child, value);
+    }
 }
 
 void* tree_get_node(Tree* tree, const char* node_name) {
