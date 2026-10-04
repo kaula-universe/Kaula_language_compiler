@@ -179,6 +179,12 @@ typedef struct TreeNode TreeNode;
 Tree* tree_create(void);
 void tree_destroy(Tree* tree);
 void tree_set_root(Tree* tree, void* value);
+/*
+ * 在 parent_name 下新增节点 node_name。
+ * parent_name 为点分路径（如 "user.skills"），空串表示根。
+ * value == NULL 时建容器(OBJECT)节点，可继续在其下 add 子节点；
+ * value != NULL 时建叶子(VALUE)节点并写入该值。
+ */
 void tree_add_node(Tree* tree, const char* parent_name, const char* node_name, void* value);
 void* tree_get_node(Tree* tree, const char* node_name);
 
