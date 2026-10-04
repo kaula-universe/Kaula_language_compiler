@@ -161,7 +161,13 @@ static void io_take_fd(KaulaIoDriver* drv, int fd, uint32_t events,
 
 static void io_timer_add(KaulaIoDriver* drv, KaulaTask* task, uint64_t delay_ns) {
     KaulaTimer* t = (KaulaTimer*)malloc(sizeof(KaulaTimer));
-    if (t == NULL) return;
+    if (t == NULL) {
+        /* 定时器分配失败：不能静默丢弃——否则挂起等待定时器的任务永远不会
+         * 被唤醒（await 永久挂起）。立即把任务标错并恢复到 READY。 */
+        task->io_result = -ENOMEM;
+        kaula_scheduler_resume_task(task);
+        return;
+    }
 
     uint64_t deadline = kaula_p_now_ns() + delay_ns;
     t->deadline_ns = deadline;

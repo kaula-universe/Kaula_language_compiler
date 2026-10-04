@@ -52,12 +52,14 @@ static uint32_t env_uint(const char* name, uint32_t fallback) {
     char* end = NULL;
     unsigned long parsed = strtoul(v, &end, 10);
     if (end == v) return fallback;
+    if (parsed > UINT32_MAX) return fallback;
     return (uint32_t)parsed;
 }
 
+/* 仅在非 NULL 的局部副本上填充默认值；绝不 memset(NULL)，也不改写用户 const 配置。 */
 static void apply_defaults(KaulaRuntimeConfig* cfg) {
     if (cfg == NULL) {
-        memset(cfg, 0, sizeof(*cfg));
+        return;
     }
 
     if (cfg->worker_count == 0) {
@@ -118,15 +120,18 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
         return g_conc_initialized ? 0 : -1;
     }
 
-    /* 关键修复：config 可以为 NULL */
+    /* 关键修复：config 可为 NULL；先拷到局部 cfg，再在局部上填默认值。
+     * 绝不就地改写用户 const 配置，也不 memset(NULL)。 */
     KaulaRuntimeConfig cfg;
-    apply_defaults(config != NULL ? (KaulaRuntimeConfig*)config : &cfg);
-    /* apply_defaults 对 NULL 分支会填好 defaults；非 NULL 时补齐零值字段 */
     if (config != NULL) {
-        KaulaRuntimeConfig merged = *config;
-        apply_defaults(&merged);
-        cfg = merged;
+        cfg = *config;
+    } else {
+        memset(&cfg, 0, sizeof(cfg));
     }
+    apply_defaults(&cfg);
+
+    /* 读取 Task 复用池高水位（环境变量可配，init 时读一次） */
+    kaula_task_pool_high_water_init();
 
     /* ---- 全局状态 ---- */
     g_conc_runtime.worker_count = cfg.worker_count;
@@ -322,7 +327,7 @@ void kaula_runtime_shutdown(void) {
     KaulaTask* orphan;
     uint32_t drained = 0;
     while ((orphan = kaula_inject_queue_pop()) != NULL) {
-        if (!kaula_handle_is_null((KaulaHandle){0, orphan})) {
+        if (!kaula_handle_is_null((KaulaHandle){0, orphan, {0}})) {
             orphan->error = KAULA_ERR_SHUTDOWN;
             kaula_task_wake_waiters(orphan);
             /* 不走 kaula_task_complete：那会递减计数并 retire，

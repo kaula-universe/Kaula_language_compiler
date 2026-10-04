@@ -290,19 +290,29 @@ FS_WEAK void* fs_alloc(size_t size) {
     size = (size + 7) & ~(size_t)7;
     if (size == 0) size = 8;
 
-    if (g_fs_offset + size > sizeof(g_fs_pool)) {
-        return NULL; // 池满
+    /* 多核裸机下 bump 偏移必须 CAS 原子推进，否则两核可能拿到重叠地址。
+     * 用 __sync 内建，不依赖 stdatomic.h（freestanding 环境）。 */
+    for (;;) {
+        size_t off = g_fs_offset;
+        if (off + size > sizeof(g_fs_pool)) {
+            return NULL; // 池满
+        }
+        if (__sync_bool_compare_and_swap(&g_fs_offset, off, off + size)) {
+            return &g_fs_pool[off];
+        }
     }
-    void* ptr = &g_fs_pool[g_fs_offset];
-    g_fs_offset += size;
-    return ptr;
 }
 
 FS_WEAK void* fs_calloc(size_t count, size_t size) {
-    size_t total = count * size;
-    if (count != 0 && total / count != size) {
+    /* 先查溢出再乘，避免 count*size 回绕后误判池内可用。 */
+    if (count == 0 || size == 0) {
+        count = 1;
+        size = 1;
+    }
+    if (size > 0 && count > SIZE_MAX / size) {
         return NULL; // 溢出
     }
+    size_t total = count * size;
     void* ptr = fs_alloc(total);
     if (ptr) {
         memset(ptr, 0, total);

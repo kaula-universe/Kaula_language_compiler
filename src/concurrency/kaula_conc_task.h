@@ -40,6 +40,19 @@ extern "C" {
 /* try_reclaim 最小回收阈值（摊销频率限制，见 kaula_conc_epoch.c 说明） */
 #define KAULA_EPOCH_RECLAIM_THRESHOLD 256
 
+/*
+ * 每个 Worker Task 复用池的高水位。
+ *
+ * 背景：非 Worker 线程（main）spawn 的任务由 Worker 完成，完成后 Task 被
+ * 归还到该 Worker 独占的 task_pool；而 main 永不复用 Worker 池、Worker 也
+ * 很少反向 spawn —— 池只增不减，长跑下 RSS 线性上涨直至 OOM。
+ *
+ * 对策：归还时若池长已达高水位，超出的 Task 不再入池，改为彻底回收
+ * （销毁同步原语 + survivor_free）。默认 256/Worker，可用环境变量
+ * KAULA_TASK_POOL_HIGH_WATER 覆盖（init 时读一次）。
+ */
+#define KAULA_TASK_POOL_HIGH_WATER_DEFAULT 256
+
 /* 默认预算与停滞阈值（文档 §5.3、§7.4） */
 #define KAULA_DEFAULT_BUDGET_QUANTUM 256
 #define KAULA_DEFAULT_STALL_NS       (10 * 1000000ULL)   /* 10ms */
@@ -159,6 +172,8 @@ struct KaulaResumeResult {
     KaulaIoRequest    io_request;   /* SUSPEND 时的 IO 请求 */
     void*             block_fn;     /* BLOCKED 时的阻塞函数 */
     void*             block_arg;    /* BLOCKED 时的阻塞参数 */
+    /* ABI 预留 */
+    uint64_t          reserved[4];
 };
 
 /* ========== 复合语句恢复深度 ========== */
@@ -186,8 +201,14 @@ typedef enum {
     KAULA_TASK_FLAG_FRAME_ON_HEAP= 1 << 2,  /* 帧需回收（顺序调用在栈上） */
 } KaulaTaskFlags;
 
-/* ========== 任务结构（文档 §3.1） ========== */
-
+/* ========== 任务结构（文档 §3.1） ==========
+ *
+ * !!! 内部结构，非稳定 ABI（B10）!!!
+ * 本结构当前整体暴露在安装头中。其内部字段（state/owner/result/pin_refs/
+ * io_request/...）随 v1.x 任意调整，用户代码不得直接读写，只能经 Handle API
+ * （kaula_handle_*）访问。真正的不透明化（仅保留前向声明、完整定义仅内部 TU
+ * 可见）推迟到 v1.2。reserved[4] 已预留，缓解加字段导致的尺寸漂移。
+ */
 struct KaulaTask {
     /* ---- 身份 ---- */
     uint64_t            task_id;
@@ -278,6 +299,9 @@ struct KaulaTask {
      * 只在 completed-handle 路径使用；正常任务的结果仍在 Frame->result。
      */
     uint64_t            inline_result;
+
+    /* ABI 预留（见 B10：本结构当前仍整体暴露于安装头，v1.2 才不透明化） */
+    uint64_t            reserved[4];
 };
 
 /* ========== Handle（文档 §3.3） ========== */
@@ -285,6 +309,8 @@ struct KaulaTask {
 typedef struct {
     uint64_t task_id;
     KaulaTask* task;
+    /* ABI 预留 */
+    uint64_t reserved[4];
 } KaulaHandle;
 
 /* ========== 运行时配置（文档 §12.2） ========== */
@@ -298,6 +324,8 @@ typedef struct {
     int      enable_metrics;         /* < 0 = 默认关 */
     uint32_t inject_queue_capacity;  /* 0 = 默认 8192 */
     uint32_t max_tasks;              /* 0 = 默认 KAULA_MAX_TASKS */
+    /* ABI 预留：用户栈分配 cfg={0}，后续加字段不破坏尺寸 */
+    uint64_t reserved[4];
 } KaulaRuntimeConfig;
 
 /* ========== 全局运行时状态 ========== */
@@ -374,6 +402,20 @@ void        kaula_task_init(KaulaTask* task, KaulaResumeFn fn, KaulaResumeFn ent
 void        kaula_task_complete(KaulaTask* task, void* result);
 void        kaula_task_fail(KaulaTask* task, KaulaError err);
 void        kaula_task_recycle(KaulaTask* task);
+
+/*
+ * epoch 安全后把完成的 Task 归还到 Worker 复用池。
+ *
+ * 池长未达高水位 → 入池复用（维护 w->task_pool_len）；
+ * 已达高水位   → 彻底回收（destroy done_event + survivor_free），
+ *                避免非 Worker 线程持续 spawn 时 Worker 池只增不减导致 OOM。
+ * pool 必须是 &worker->task_pool（owner 独占，单线程访问）。
+ */
+void        kaula_task_pool_return(KaulaTask* task, void** pool);
+
+/* 读取/设置池高水位（init 时从环境变量读一次） */
+uint32_t    kaula_task_pool_high_water(void);
+void        kaula_task_pool_high_water_init(void);
 
 /* 标记任务需要取消：在下一个 await/suspend 点生效 */
 int         kaula_task_cancel(KaulaTask* task);

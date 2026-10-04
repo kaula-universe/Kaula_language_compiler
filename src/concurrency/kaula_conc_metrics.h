@@ -55,6 +55,9 @@ typedef struct {
     /* ---- 内存（epoch） ---- */
     uint64_t epoch_retired;
     uint64_t epoch_reclaimed;
+
+    /* ABI 预留 */
+    uint64_t reserved[4];
 } KaulaMetrics;
 
 /* 取一份快照 */

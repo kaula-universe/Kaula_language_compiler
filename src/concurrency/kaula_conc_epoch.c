@@ -134,10 +134,8 @@ void kaula_epoch_retire_to(void* ptr, void** pool) {
                 return;
             }
             if (pool != NULL) {
-                /* 列表满时的强制路径也走复用池（保持单链表） */
-                KaulaTask* t = (KaulaTask*)ptr;
-                t->next_free = *(KaulaTask**)pool;
-                *(KaulaTask**)pool = t;
+                /* 列表满时的强制路径也走复用池（高水位时由 helper 彻底回收） */
+                kaula_task_pool_return((KaulaTask*)ptr, pool);
             } else {
                 kmm_v4_survivor_free(ptr);
                 atomic_fetch_add_explicit(&g_reclaimed_total, 1, memory_order_relaxed);
@@ -219,10 +217,8 @@ uint32_t kaula_epoch_try_reclaim(void) {
     uint32_t i = 0;
     while (i < list->count && min_active > list->items[i].epoch) {
         if (list->items[i].pool != NULL) {
-            /* P0-2：推进复用池而非释放（pool 由调用方保证单线程访问） */
-            KaulaTask* t = (KaulaTask*)list->items[i].ptr;
-            t->next_free = *(KaulaTask**)list->items[i].pool;
-            *(KaulaTask**)list->items[i].pool = t;
+            /* P0-2：推进复用池而非释放；池达高水位时 helper 彻底回收 */
+            kaula_task_pool_return((KaulaTask*)list->items[i].ptr, list->items[i].pool);
         } else {
             kmm_v4_survivor_free(list->items[i].ptr);
         }

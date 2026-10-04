@@ -53,6 +53,7 @@ KaulaTask* kaula_task_alloc(void) {
         KaulaTask* task = w->task_pool;
         w->task_pool = task->next_free;
         task->next_free = NULL;
+        w->task_pool_len--;
 
         task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
                                                   memory_order_relaxed);
@@ -223,16 +224,34 @@ void kaula_task_complete(KaulaTask* task, void* result) {
 }
 
 void kaula_task_fail(KaulaTask* task, KaulaError err) {
+    /*
+     * 幂等：与 kaula_task_complete 完全对称，用 CAS 把 state 从非 DONE
+     * 推到 DONE。complete 与 fail 并发调用时，恰好一个线程赢，只有赢者
+     * 递减 active_task_count / 唤醒 / retire —— 杜绝旧裸 store 实现下
+     * complete+fail 各减一次导致 active_task_count 下溢、背压误触发、
+     * await 永久挂起。
+     */
+    int prev = atomic_load_explicit(&task->state, memory_order_relaxed);
+    if (prev == KAULA_TASK_DONE) {
+        return; /* 已被完成/失败：忽略 */
+    }
     atomic_store_explicit(&task->result, NULL, memory_order_release);
     task->error = (int)err;
-    task->complete_ns = kaula_p_now_ns();   /* 失败路径同样打点 */
+    task->complete_ns = kaula_p_now_ns();
 
-    atomic_store_explicit(&task->state, KAULA_TASK_DONE, memory_order_release);
-    kaula_task_wake_waiters(task);
+    if (!atomic_compare_exchange_weak_explicit(
+            &task->state, &prev, KAULA_TASK_DONE,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        /* 输者：另一线程已 complete/fail，统计/唤醒/retire 由赢者完成，
+         * 此处不得重复递减计数，否则 active_task_count 下溢。 */
+        return;
+    }
 
     atomic_fetch_sub_explicit(&g_conc_runtime.active_task_count, 1,
                               memory_order_acq_rel);
     kaula_conc_metrics_inc_failed();
+
+    kaula_task_wake_waiters(task);
 
     retire_frames(task);
     KaulaWorker* cw = kaula_conc_current_worker();
@@ -368,11 +387,66 @@ void kaula_task_recycle(KaulaTask* task) {
         kmm_v4_survivor_free(task->frame);
         task->frame = NULL;
     }
+    if (task->inner_frame != NULL) {
+        kmm_v4_survivor_free(task->inner_frame);
+        task->inner_frame = NULL;
+    }
     if (kaula_p_event_is_valid(&task->done_event)) {
         kaula_p_event_destroy(&task->done_event);
         kaula_p_event_invalidate(&task->done_event);
     }
     kmm_v4_survivor_free(task);
+}
+
+/* ========== Task 复用池高水位收缩 ========== */
+
+static uint32_t g_task_pool_high_water = KAULA_TASK_POOL_HIGH_WATER_DEFAULT;
+
+uint32_t kaula_task_pool_high_water(void) {
+    return g_task_pool_high_water;
+}
+
+void kaula_task_pool_high_water_init(void) {
+    const char* v = kaula_p_get_env("KAULA_TASK_POOL_HIGH_WATER");
+    if (v != NULL && *v != '\0') {
+        char* end = NULL;
+        unsigned long parsed = strtoul(v, &end, 10);
+        if (end != v && parsed > 0 && parsed <= 1000000) {
+            g_task_pool_high_water = (uint32_t)parsed;
+        }
+    }
+}
+
+void kaula_task_pool_return(KaulaTask* task, void** pool) {
+    if (task == NULL || pool == NULL) return;
+
+    /* pool == &worker->task_pool，由偏移反推 worker 以维护长度计数 */
+    KaulaWorker* w = (KaulaWorker*)((char*)pool - offsetof(KaulaWorker, task_pool));
+
+    if (w->task_pool_len < g_task_pool_high_water) {
+        task->next_free = *pool;
+        *pool = task;
+        w->task_pool_len++;
+    } else {
+        /* 超水位：彻底回收，不再入池。
+         * frame/inner_frame 已由 retire_frames 单独退休（这里兜底 free 残留），
+         * done_event 必须 destroy+invalidate，否则同步原语泄漏。 */
+        if (task->flags & KAULA_TASK_FLAG_FRAME_ON_HEAP) {
+            if (task->inner_frame != NULL) {
+                kmm_v4_survivor_free(task->inner_frame);
+                task->inner_frame = NULL;
+            }
+            if (task->frame != NULL && task->frame_size > 0) {
+                kmm_v4_survivor_free(task->frame);
+                task->frame = NULL;
+            }
+        }
+        if (kaula_p_event_is_valid(&task->done_event)) {
+            kaula_p_event_destroy(&task->done_event);
+            kaula_p_event_invalidate(&task->done_event);
+        }
+        kmm_v4_survivor_free(task);
+    }
 }
 
 /* ========== Handle ========== */
@@ -433,7 +507,7 @@ int kaula_handle_pin_debt(KaulaHandle h) {
 }
 
 KaulaHandle kaula_handle_null(void) {
-    KaulaHandle h = {0, NULL};
+    KaulaHandle h = {0, NULL, {0}};
     return h;
 }
 
