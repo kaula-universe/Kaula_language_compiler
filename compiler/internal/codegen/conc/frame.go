@@ -186,10 +186,10 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 		fields = append(fields, field{alignOfCType(cType), cType, name, comment})
 	}
 
-	// pc
-	addField("int", "pc", "程序计数：0=入口，N=第 N 个 suspend 点之后，-1=已完成")
+	// pc（P2.3：int8_t 代替 int，挂起点数通常 < 128，省 3B + 对齐填充）
+	addField("int8_t", "pc", "程序计数：0=入口，N=第 N 个 suspend 点之后，-1=已完成")
 
-	// sub/branch 守卫数组
+	// sub/branch 守卫数组（P2.3：int8_t 代替 int，守卫值通常 < 128）
 	if analysis.HasCompound {
 		// P2.2：守卫深度 = 挂起点所在最大深度 + 1（含 body 层），
 		// 而非全函数体最大深度。深层复合语句恢复时从头执行，不需守卫。
@@ -200,8 +200,8 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 		if depth < 1 {
 			depth = 1
 		}
-		subType := fmt.Sprintf("int[%d]", depth)
-		brType := fmt.Sprintf("int[%d]", depth)
+		subType := fmt.Sprintf("int8_t[%d]", depth)
+		brType := fmt.Sprintf("int8_t[%d]", depth)
 		addField(subType, "sub", "复合语句内的恢复槽位")
 		addField(brType, "branch", "if 分支选择")
 	}
