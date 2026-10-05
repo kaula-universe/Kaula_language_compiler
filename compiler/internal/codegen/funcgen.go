@@ -1423,7 +1423,7 @@ func (fg *FunctionGenerator) generateConcurrentFunction(stmt *ast.FunctionStatem
 	// 登记签名：spawn 生成时需要按形参名写 Frame 字段
 	// 同时固化形态判定：GenerateSpawn 可能先于 Generate 被调用
 	emitter.SetStateful(analysis.NeedsSuspend)
-	emitter.SetGuardLayout(analysis.CompoundDepth, analysis.HasForIn)
+	emitter.SetGuardLayout(analysis.CompoundDepth, analysis.SuspendMaxDepth, analysis.HasForIn)
 	fg.codegen.RegisterConcFunc(emitter)
 
 	// 函数体在 resume 上下文中重新生成（return 需要改写）

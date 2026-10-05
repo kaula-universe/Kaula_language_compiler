@@ -102,7 +102,7 @@ func TestFrameContract_ResumeRestoresByValue(t *testing.T) {
 }
 
 // needs_free 在内嵌模型下恒为 0 —— 它是模型切换的预留位，不是活跃路径
-func TestFrameContract_NeedsFreeStaysZero(t *testing.T) {
+func TestFrameContract_NoNeedsFree(t *testing.T) {
 	e := newEmitter("n")
 	e.FrameVarCTypes = map[string]string{"p": "K_Point"}
 	analysis := &BodyAnalysis{
@@ -111,11 +111,8 @@ func TestFrameContract_NeedsFreeStaysZero(t *testing.T) {
 	}
 	res := e.generateStatefulFrame(analysis)
 
-	if !strings.Contains(res, "int             needs_free;") {
-		t.Errorf("Frame 应保留 needs_free 字段（模型切换预留位），实际:\n%s", res)
-	}
-	// 结构体字段声明处不应被初始化为非 0
-	if strings.Contains(res, "needs_free = 1") {
-		t.Errorf("内嵌模型下 needs_free 不应被置 1，实际:\n%s", res)
+	// P2.2：needs_free 字段已移除（src/ 无任何引用，纯浪费 4B + 对齐填充）
+	if strings.Contains(res, "needs_free") {
+		t.Errorf("Frame 不应含 needs_free 字段（P2.2 已移除，src/无引用），实际:\n%s", res)
 	}
 }

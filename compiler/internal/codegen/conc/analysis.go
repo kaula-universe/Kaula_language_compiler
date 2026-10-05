@@ -112,6 +112,14 @@ type BodyAnalysis struct {
 	// 不再无条件生成 KAULA_CONC_SUB_DEPTH=8 的固定数组。
 	CompoundDepth int
 
+	// SuspendMaxDepth：挂起点所在的最大复合深度（1-based；0=挂起点在顶层）。
+	//
+	// P2.2：守卫深度只需覆盖挂起点所在路径，而非全函数体最大深度。
+	// 深层复合语句（挂起点之后的 if/while）恢复时从头执行，不需要 sub/branch。
+	// Frame 的 sub/branch 数组大小 = SuspendMaxDepth+1（含 body 层），
+	// 可比 CompoundDepth+1 小数层——conn_task 从 sub[4] 降到 sub[2]，省 16B。
+	SuspendMaxDepth int
+
 	// HasForIn：函数体含 for..in 守卫（需要 loop_i/loop_end/loop_step）。
 	// 无 for-in 时省略 192B 迭代状态数组。
 	HasForIn bool
@@ -259,6 +267,8 @@ func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
 
 	// cur = 最近一次见到的挂起点序号；-1 表示还没见过挂起点
 	cur := -1
+	// curDepth = 当前 walk 深度，note 读取以记录挂起点所在深度
+	curDepth := 0
 	seen := make(map[string]bool)
 	var decls []VarInfo
 
@@ -273,13 +283,18 @@ func AnalyzeBody(body []ast.Statement) *BodyAnalysis {
 		})
 	}
 
-	// note 记录表达式里的挂起点并推进 cur
+	// note 记录表达式里的挂起点并推进 cur；同时记录挂起点所在深度
 	note := func(expr ast.Expression) {
+		before := len(res.SuspendSites)
 		res.recordSuspends(expr, &cur)
+		if len(res.SuspendSites) > before && curDepth > res.SuspendMaxDepth {
+			res.SuspendMaxDepth = curDepth
+		}
 	}
 
 	var walk func(stmts []ast.Statement, depth int)
 	walk = func(stmts []ast.Statement, depth int) {
+		curDepth = depth
 		for _, st := range stmts {
 			if st == nil {
 				continue
