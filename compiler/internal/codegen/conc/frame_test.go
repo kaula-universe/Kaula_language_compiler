@@ -32,7 +32,7 @@ func TestGenerate_Simple_FrameHasNoPC(t *testing.T) {
 	if !strings.Contains(res, "K_fetch_Frame") {
 		t.Error("应生成 Frame 类型")
 	}
-	if strings.Contains(res, "int             pc;") {
+	if strings.Contains(res, "int8_t pc;") {
 		t.Error("无挂起点时 Frame 不应有 pc 字段（单一形态）")
 	}
 	if !strings.Contains(res, "K_fetch_resume") {
@@ -105,7 +105,7 @@ func TestGenerate_Stateful_FrameHasPCAndVars(t *testing.T) {
 
 	res := e.Generate(analysis, []string{""}, "", nil)
 
-	if !strings.Contains(res, "int             pc;") {
+	if !strings.Contains(res, "int8_t pc;") {
 		t.Error("有挂起点时 Frame 应含 pc 字段")
 	}
 	if !strings.Contains(res, "int64_t url;") {
