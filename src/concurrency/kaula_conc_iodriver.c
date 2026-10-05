@@ -11,8 +11,6 @@
  */
 
 #if !KAULA_PLATFORM_WINDOWS
-    /* SIGUSR1 调试钩子用 sigaction：-std=c11 严格 ANSI 下 glibc 隐藏
-     * POSIX 声明（_DEFAULT_SOURCE 只开 MISC 不开 POSIX199309）。 */
     #ifndef _POSIX_C_SOURCE
         #define _POSIX_C_SOURCE 200809L
     #endif
@@ -28,8 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <signal.h>
-#include <stdio.h>
 
 #if !KAULA_PLATFORM_WINDOWS
     #include <unistd.h>
@@ -37,24 +33,6 @@
 #endif
 
 KaulaIoDriver g_conc_iodriver;
-
-/* ===== 临时诊断计数（定位批量断开 EOF 滞留，测后撤除） ===== */
-static _Atomic(uint64_t) g_debug_drop_events = 0;
-static _Atomic(uint64_t) g_debug_eof_completions = 0;
-static _Atomic(uint64_t) g_debug_done_injections = 0;
-static void kaula_iodriver_debug_dump(int sig) {
-    (void)sig;
-    fprintf(stderr,
-            "[iodriver-debug] drop_events=%llu eof_completions=%llu "
-            "done_injections=%llu pending_count=%u submits=%llu completions=%llu\n",
-            (unsigned long long)atomic_load(&g_debug_drop_events),
-            (unsigned long long)atomic_load(&g_debug_eof_completions),
-            (unsigned long long)atomic_load(&g_debug_done_injections),
-            atomic_load(&g_conc_iodriver.pending_count),
-            (unsigned long long)atomic_load(&g_conc_iodriver.total_submits),
-            (unsigned long long)atomic_load(&g_conc_iodriver.total_completions));
-    fflush(stderr);
-}
 
 /* 提交队列元素：Task 指针 + 请求副本 */
 typedef struct {
@@ -209,10 +187,6 @@ static void io_take_fd(KaulaIoShard* sh, int fd, uint32_t events,
         }
     }
     *n_out = n;
-
-    if (n == 0) {
-        atomic_fetch_add_explicit(&g_debug_drop_events, 1, memory_order_relaxed);
-    }
 
     if (!io_bucket_has_fd(sh, fd)) {
         kaula_iodriver_backend_del(sh, fd);
@@ -478,15 +452,6 @@ static void iodriver_loop(void* arg) {
         kaula_iodriver_backend_begin(sh);
 
         int nready = kaula_iodriver_backend_wait(sh, wait_ns);
-        { static _Atomic(int) dbg_init = 0; static int dbg_fd = -1;
-          if (atomic_exchange_explicit(&dbg_init, 1, memory_order_relaxed) == 0) {
-              dbg_fd = open("/tmp/iodriver_trace", O_WRONLY|O_CREAT|O_TRUNC, 0644);
-          }
-          if (dbg_fd >= 0 && nready >= 0) {
-              char c = 'A' + (char)(nready > 0 ? 1 : 0);
-              (void)!write(dbg_fd, &c, 1);
-          }
-        }
 
         if (nready < 0) {
             if (errno == EINTR) continue;
@@ -547,23 +512,10 @@ static void iodriver_loop(void* arg) {
 
                 int n = 0;
                 io_take_fd(sh, fd, events, woken, KAULA_IO_BATCH_SIZE, &n);
-                { static _Atomic(int) dbg2 = 0; static int dbg_fd2 = -1;
-                  if (atomic_exchange_explicit(&dbg2, 1, memory_order_relaxed) == 0) {
-                      dbg_fd2 = open("/tmp/iodriver_trace", O_WRONLY|O_APPEND, 0644);
-                  }
-                  if (dbg_fd2 >= 0) {
-                      char c = 'a' + (char)(n > 0 ? 2 : 3);
-                      (void)!write(dbg_fd2, &c, 1);
-                  }
-                }
 
                 for (int j = 0; j < n; j++) {
                     KaulaTask* task = woken[j];
                     int r = kaula_iodriver_do_io(&task->io_request);
-                    if (r == 0) {
-                        atomic_fetch_add_explicit(&g_debug_eof_completions, 1,
-                                                  memory_order_relaxed);
-                    }
                     task->io_result = r;
                     atomic_fetch_add_explicit(&drv->total_completions, 1,
                                               memory_order_relaxed);
@@ -634,11 +586,6 @@ static uint32_t iodriver_shard_count(void) {
 int kaula_iodriver_init(void) {
     KaulaIoDriver* drv = &g_conc_iodriver;
     memset(drv, 0, sizeof(*drv));
-
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = kaula_iodriver_debug_dump;
-    sigaction(SIGUSR1, &sa, NULL);
 
     drv->shard_count = iodriver_shard_count();
 
