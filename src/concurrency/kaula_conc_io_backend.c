@@ -565,19 +565,27 @@ int kaula_iodriver_do_io(const KaulaIoRequest* req) {
 
 #if KAULA_PLATFORM_WINDOWS
     switch (req->type) {
-    case KAULA_IO_READ:
-        return _read(req->fd, req->buf, (unsigned int)req->buf_len);
-    case KAULA_IO_WRITE:
-        return _write(req->fd, req->buf, (unsigned int)req->buf_len);
+    case KAULA_IO_READ: {
+        int n = _read(req->fd, req->buf, (unsigned int)req->buf_len);
+        return n >= 0 ? n : -errno;
+    }
+    case KAULA_IO_WRITE: {
+        int n = _write(req->fd, req->buf, (unsigned int)req->buf_len);
+        return n >= 0 ? n : -errno;
+    }
     default:
         return -ENOSYS;
     }
 #else
     switch (req->type) {
-    case KAULA_IO_READ:
-        return (int)read(req->fd, req->buf, req->buf_len);
-    case KAULA_IO_WRITE:
-        return (int)write(req->fd, req->buf, req->buf_len);
+    case KAULA_IO_READ: {
+        ssize_t n = read(req->fd, req->buf, req->buf_len);
+        return n >= 0 ? (int)n : -errno;
+    }
+    case KAULA_IO_WRITE: {
+        ssize_t n = write(req->fd, req->buf, req->buf_len);
+        return n >= 0 ? (int)n : -errno;
+    }
     default:
         return -ENOSYS;
     }

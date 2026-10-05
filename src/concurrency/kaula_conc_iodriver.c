@@ -501,7 +501,7 @@ static void iodriver_loop(void* arg) {
                 }
             }
 
-            /* 就绪式：唤醒等待者，由 do_io 执行 IO */
+            /* 就绪式：事件就绪即唤醒，IO 下沉到 Worker 自做 */
             KaulaTask* woken[KAULA_IO_BATCH_SIZE];
             for (int i = 0; i < nready; i++) {
                 int fd;
@@ -517,8 +517,16 @@ static void iodriver_loop(void* arg) {
 
                 for (int j = 0; j < n; j++) {
                     KaulaTask* task = woken[j];
-                    int r = kaula_iodriver_do_io(&task->io_request);
-                    task->io_result = r;
+                    /*
+                     * do_io 下沉（v1.2.1）：iodriver 只做事件分发，
+                     * 不代做 read/write——由 Worker 在恢复任务前自做。
+                     * 消除 iodriver 单线程 do_io 串行税（就绪式后端
+                     * 每请求 ~14us 跨线程协调，4 Worker 并行后消失）。
+                     * EAGAIN（假就绪）由 Worker 经 submit 重挂。
+                     * 完成式（IOCP）走上方 next_completion，不经过这里。
+                     */
+                    task->io_do_in_worker = 1;
+                    task->io_result = 0;
                     atomic_fetch_add_explicit(&drv->total_completions, 1,
                                               memory_order_relaxed);
                     atomic_store_explicit(&task->state, KAULA_TASK_READY,

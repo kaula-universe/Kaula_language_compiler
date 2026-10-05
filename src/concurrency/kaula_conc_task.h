@@ -278,6 +278,14 @@ struct KaulaTask {
     /* ---- IO 上下文 ---- */
     KaulaIoRequest      io_request;
     int                 io_result;    /* 字节数或 -errno */
+    /*
+     * do_io 下沉标志（v1.2.1）：就绪式后端（epoll/kqueue）下 iodriver
+     * 只做事件分发，事件就绪后由 Worker 在恢复任务前自做非阻塞 IO——
+     * 消除 iodriver 单线程 do_io 串行税（每请求 ~14us 跨线程协调）。
+     * 置 1：Worker 执行前必须自做一次 IO（EAGAIN 则重挂）。
+     * 完成式后端（IOCP）恒为 0（结果由 iodriver 直接带回）。
+     */
+    int                 io_do_in_worker;
 
     /* ---- 链接 ---- */
     struct KaulaTask*   next;         /* 完成队列 / Block Lane 链表 */

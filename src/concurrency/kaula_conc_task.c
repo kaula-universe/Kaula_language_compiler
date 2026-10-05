@@ -73,6 +73,7 @@ KaulaTask* kaula_task_alloc(void) {
         task->waiters = 0;
         memset(&task->io_request, 0, sizeof(task->io_request));
         task->io_result = 0;
+        task->io_do_in_worker = 0;
         task->next = NULL;
         task->resume_next = NULL;          /* 链指针一律归零（P-D2/P-D3 防御） */
         task->local_deadline_ns = 0;       /* P-D3：不在本地定时器链上 */
