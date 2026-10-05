@@ -28,10 +28,12 @@
 | Boost.Asio (4线程) | 137.9k | 730 | 1778 | 2946 |
 | cocoyaxi (8线程) | 151.8k | 459 | 3344 | 6360 |
 
-## 关键发现（2026-10-05）
-1. **kl 语言层惰性 init 缺口**：kl 服务默认 1 线程（spawn_enter 惰性 init 未建多 Worker）。
-   `init_ctor.c`（constructor 强制 kaula_runtime_init(NULL)）后 8 线程。
-2. **iodriver 单线程是真瓶颈**：强制多线程后无 sleep 吞吐仍 71k（Worker 20%×4 不饱和），
+## 关键发现（2026-10-05，组织 agent 复核修正 2026-10-05）
+1. **kl 语言层惰性 init**：无连接时服务 1 线程（main 阻塞 accept，首个 spawn 前惰性 init
+   未触发——正确行为，非缺口）；首个连接 spawn 后自动建满核 worker（本机 4 worker +
+   iodriver + evict + block_lane = 8 线程），与 C 版显式 kaula_runtime_init(NULL) 一致。
+   `init_ctor.c` 为预热诊断工具（constructor 提前 init，幂等，非功能必需）。
+2. **iodriver 单线程是真瓶颈**：多线程下无 sleep 吞吐仍 71k（Worker 20%×4 不饱和），
    所有 IO 完成事件走单线程 epoll（kaula_conc_iodriver.c iodriver_loop）串行分发。
    asio 4 线程 epoll / cocoyaxi 8 线程 epoll 分摊后 130-152k。
 3. kl 尾延迟 p999 三服务最低（2698us vs asio 2946 vs co 6360）。
