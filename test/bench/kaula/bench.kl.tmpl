@@ -18,6 +18,7 @@
 
 import std.io
 import std.time
+import std.memory
 
 // 取「上一次 await 的服务时间」。
 //
@@ -113,8 +114,11 @@ fn main() -> i32 {
     i64 issued = 0;
     i64 done = 0;
 
-    // 在途句柄窗口：最多 win 个
-    [@@MAX_CONC@@]Handle in_flight;
+    // 在途句柄窗口：最多 win 个。
+    // 堆分配：KaulaHandle 含 ABI 预留字段（48B），win 窗口栈数组会超
+    // 编译器 256KB 栈预算（static assert 拒绝）；堆分配与 Go 的
+    // slice（堆）对等，且不改变窗口语义。KMM scope 退出自动回收。
+    Handle* in_flight = as<Handle*>(std.memory.kmm_v4_alloc(@@MAX_CONC@@ * 48))
     [@@MAX_CONC@@]i64 submit_ts;
     [@@MAX_CONC@@]i64 submitted;
 
