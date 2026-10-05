@@ -157,56 +157,22 @@ int kaula_conc_worker_post(KaulaWorker* w, KaulaTask* task) {
     return KAULA_ERR_WOULD_BLOCK;
 }
 
-/* ========== 本地短定时器（P-D） ========== */
-
-#define KAULA_LOCAL_TIMER_POOL_MAX 4096
-
-/* 池节点复用上限：稳态峰值即短 sleep 并发数，超限直接 free 防膨胀 */
-static KaulaLocalTimer* kaula_local_timer_pool_pop(KaulaWorker* w) {
-    KaulaLocalTimer* t = w->local_timer_pool;
-    if (t != NULL) {
-        w->local_timer_pool = t->next;
-        w->local_timer_pool_len--;
-    }
-    return t;
-}
-
-static void kaula_local_timer_pool_push(KaulaWorker* w, KaulaLocalTimer* t) {
-    if (w->local_timer_pool_len >= KAULA_LOCAL_TIMER_POOL_MAX) {
-        free(t);
-        return;
-    }
-    t->next = w->local_timer_pool;
-    w->local_timer_pool = t;
-    w->local_timer_pool_len++;
-}
+/* ========== 本地短定时器（P-D3：Task 内嵌） ========== */
 
 /*
  * 登记短 sleep 到本 Worker 本地定时器。调用者必须是 owner 线程
  * （execute 的 SUSPEND 分支，此时任务正由本 Worker 执行）。
- * 分配失败不能丢任务：立即标错并交回调度器。
+ * 任务本身已在池中（生命周期由任务池管理），登记不可能失败——
+ * 直接把 deadline 写进 Task 并头插链表，省 KaulaLocalTimer 分配
+ * 与一次指针跳。链接复用 task->resume_next（见 task.h 注释：
+ * 定时器链与恢复链不共存，共享字段安全）。
  */
 static void kaula_local_timer_add(KaulaWorker* w, KaulaTask* task,
                                   uint64_t delay_ns) {
-    KaulaLocalTimer* t = kaula_local_timer_pool_pop(w);
-    if (t == NULL) {
-        t = (KaulaLocalTimer*)malloc(sizeof(KaulaLocalTimer));
-        if (t == NULL) {
-            task->io_result = -ENOMEM;
-            atomic_store_explicit(&task->state, KAULA_TASK_READY,
-                                  memory_order_release);
-            if (kaula_ws_deque_push_owner(&w->local_queue, task) == 0 &&
-                !kaula_scheduler_inject_push(task)) {
-                kaula_task_fail(task, KAULA_ERR_WOULD_BLOCK);
-            }
-            return;
-        }
-    }
     uint64_t deadline = kaula_p_now_ns() + delay_ns;
-    t->deadline_ns = deadline;
-    t->task = task;
-    t->next = w->local_timers;
-    w->local_timers = t;
+    task->local_deadline_ns = deadline;
+    task->resume_next = w->local_timers;
+    w->local_timers = task;
     if (deadline < w->local_timers_min_deadline) {
         w->local_timers_min_deadline = deadline;
     }
@@ -214,44 +180,45 @@ static void kaula_local_timer_add(KaulaWorker* w, KaulaTask* task,
 
 /*
  * 到期检查（owner 线程调度循环每轮调用，对标 Go checkTimers）。
- * 到期任务 READY 后推回本地队列（owner 写，无锁）；本地队列满则
- * 退回全局注入队列（不丢任务）。
+ * 到期任务 READY 后入恢复优先链（P-D2 FIFO，不被新任务插队）；
+ * 未到期任务留在定时器链（keep 重建，仍用 resume_next 链接）。
+ * keep 链与恢复链共享 resume_next 字段，但每个任务同一时刻只属于
+ * 其中一条链（到期任务先摘除再入恢复链），无交叉写。
  */
 static void kaula_worker_check_local_timers(KaulaWorker* w) {
     if (w->local_timers == NULL) return;
     uint64_t now = kaula_p_now_ns();
     if (w->local_timers_min_deadline > now) return; /* 最短短路 */
 
-    KaulaLocalTimer* keep = NULL;
-    KaulaLocalTimer* keep_tail = NULL;
+    KaulaTask* keep = NULL;
+    KaulaTask* keep_tail = NULL;
     uint64_t new_min = UINT64_MAX;
-    KaulaLocalTimer* cur = w->local_timers;
+    KaulaTask* cur = w->local_timers;
     while (cur != NULL) {
-        KaulaLocalTimer* next = cur->next;
-        if (cur->deadline_ns <= now) {
-            KaulaTask* task = cur->task;
-            kaula_local_timer_pool_push(w, cur);
-            task->io_result = 0;
-            atomic_store_explicit(&task->state, KAULA_TASK_READY,
+        KaulaTask* next = cur->resume_next;
+        if (cur->local_deadline_ns <= now) {
+            cur->local_deadline_ns = 0;   /* 摘除：不在定时器链上 */
+            cur->io_result = 0;
+            atomic_store_explicit(&cur->state, KAULA_TASK_READY,
                                   memory_order_release);
             /* 恢复优先（P-D2）：入 owner 专用 FIFO 链，不被新任务插队 */
-            task->resume_next = NULL;
+            cur->resume_next = NULL;
             if (w->resume_tail != NULL) {
-                w->resume_tail->resume_next = task;
+                w->resume_tail->resume_next = cur;
             } else {
-                w->resume_head = task;
+                w->resume_head = cur;
             }
-            w->resume_tail = task;
+            w->resume_tail = cur;
         } else {
-            cur->next = NULL;
+            cur->resume_next = NULL;
             if (keep == NULL) {
                 keep = cur;
                 keep_tail = cur;
             } else {
-                keep_tail->next = cur;
+                keep_tail->resume_next = cur;
                 keep_tail = cur;
             }
-            if (cur->deadline_ns < new_min) new_min = cur->deadline_ns;
+            if (cur->local_deadline_ns < new_min) new_min = cur->local_deadline_ns;
         }
         cur = next;
     }
@@ -441,7 +408,14 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
     if (w->budget.quantum > 0) quantum = w->budget.quantum;
     kaula_budget_reset(&w->budget, quantum);
 
-    uint64_t slice_start = kaula_p_now_ns();
+    /*
+     * P-D3：slice 计时只在实际需要时取 —— metrics 关闭（基准/生产默认）
+     * 时 update_budget 直接返回，clock_gettime 每任务两次纯属浪费
+     * （实测 ~60ns/任务，10k 并发下可占 8%）。开启时才计时。
+     */
+    int metrics_on = atomic_load_explicit(&kaula_conc_metrics_enabled,
+                                          memory_order_relaxed);
+    uint64_t slice_start = metrics_on ? kaula_p_now_ns() : 0;
 
     for (;;) {
         /* 预算检查：每次 resume 前消耗一个 tick */
@@ -482,7 +456,9 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
             kaula_task_complete(task, result.value);
             atomic_fetch_add_explicit(&w->stats.tasks_executed, 1, memory_order_relaxed);
             w->current_task = NULL;
-            kaula_conc_worker_update_budget(w, kaula_p_now_ns() - slice_start);
+            if (metrics_on) {
+                kaula_conc_worker_update_budget(w, kaula_p_now_ns() - slice_start);
+            }
             return;
 
         case KAULA_RESUME_BUDGET_EXHAUSTED:
@@ -602,23 +578,24 @@ void kaula_worker_loop(KaulaWorker* w) {
     }
 
     /*
-     * P-D：本地短定时器未到期任务转移给 IoDriver（保持剩余 deadline，
+     * P-D3：本地短定时器未到期任务转移给 IoDriver（保持剩余 deadline，
      * sleep 语义不变），否则随 Worker 消失 → await 死锁。
-     * 节点直接 free（不属于本 Worker 池；撤离罕见，正确性优先）。
+     * 节点内嵌在 Task 里，只需摘链并清 deadline 即可。
      */
-    KaulaLocalTimer* lt = w->local_timers;
+    KaulaTask* lt = w->local_timers;
     w->local_timers = NULL;
     w->local_timers_min_deadline = UINT64_MAX;
     uint64_t now_ns = kaula_p_now_ns();
     while (lt != NULL) {
-        KaulaLocalTimer* nx = lt->next;
-        KaulaTask* task = lt->task;
-        uint64_t rem = lt->deadline_ns > now_ns ? lt->deadline_ns - now_ns : 0;
-        free(lt);
-        task->io_request.type = KAULA_IO_SLEEP;
-        task->io_request.timeout_ns = rem;
-        if (kaula_iodriver_submit(task) != 0) {
-            kaula_task_fail(task, KAULA_ERR_WOULD_BLOCK);
+        KaulaTask* nx = lt->resume_next;
+        uint64_t rem = lt->local_deadline_ns > now_ns
+                     ? lt->local_deadline_ns - now_ns : 0;
+        lt->local_deadline_ns = 0;
+        lt->resume_next = NULL;
+        lt->io_request.type = KAULA_IO_SLEEP;
+        lt->io_request.timeout_ns = rem;
+        if (kaula_iodriver_submit(lt) != 0) {
+            kaula_task_fail(lt, KAULA_ERR_WOULD_BLOCK);
         }
         lt = nx;
     }

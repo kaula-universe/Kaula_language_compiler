@@ -282,7 +282,16 @@ struct KaulaTask {
     /* ---- 链接 ---- */
     struct KaulaTask*   next;         /* 完成队列 / Block Lane 链表 */
     struct KaulaTask*   next_free;    /* per-Worker 复用池链表（P0-2） */
-    struct KaulaTask*   resume_next;  /* 恢复优先链（P-D2）：owner 独占 FIFO */
+    /*
+     * 恢复优先链（P-D2）：owner 独占 FIFO。
+     * 同时复用为本地短定时器链表（P-D3）的链接：一个任务要么在
+     * 定时器链上、要么在恢复链上，绝不同时在两条链（check 摘除后
+     * 才入恢复链），故共享字段安全。
+     */
+    struct KaulaTask*   resume_next;
+
+    /* ---- 本地短定时器（P-D3：内嵌，省 KaulaLocalTimer 分配/指针跳） ---- */
+    uint64_t            local_deadline_ns; /* 0 = 不在本地定时器链上 */
 
     /* ---- 统计 ---- */
     uint64_t            created_ns;
