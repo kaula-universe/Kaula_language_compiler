@@ -157,6 +157,104 @@ int kaula_conc_worker_post(KaulaWorker* w, KaulaTask* task) {
     return KAULA_ERR_WOULD_BLOCK;
 }
 
+/* ========== 本地短定时器（P-D） ========== */
+
+#define KAULA_LOCAL_TIMER_POOL_MAX 4096
+
+/* 池节点复用上限：稳态峰值即短 sleep 并发数，超限直接 free 防膨胀 */
+static KaulaLocalTimer* kaula_local_timer_pool_pop(KaulaWorker* w) {
+    KaulaLocalTimer* t = w->local_timer_pool;
+    if (t != NULL) {
+        w->local_timer_pool = t->next;
+        w->local_timer_pool_len--;
+    }
+    return t;
+}
+
+static void kaula_local_timer_pool_push(KaulaWorker* w, KaulaLocalTimer* t) {
+    if (w->local_timer_pool_len >= KAULA_LOCAL_TIMER_POOL_MAX) {
+        free(t);
+        return;
+    }
+    t->next = w->local_timer_pool;
+    w->local_timer_pool = t;
+    w->local_timer_pool_len++;
+}
+
+/*
+ * 登记短 sleep 到本 Worker 本地定时器。调用者必须是 owner 线程
+ * （execute 的 SUSPEND 分支，此时任务正由本 Worker 执行）。
+ * 分配失败不能丢任务：立即标错并交回调度器。
+ */
+static void kaula_local_timer_add(KaulaWorker* w, KaulaTask* task,
+                                  uint64_t delay_ns) {
+    KaulaLocalTimer* t = kaula_local_timer_pool_pop(w);
+    if (t == NULL) {
+        t = (KaulaLocalTimer*)malloc(sizeof(KaulaLocalTimer));
+        if (t == NULL) {
+            task->io_result = -ENOMEM;
+            atomic_store_explicit(&task->state, KAULA_TASK_READY,
+                                  memory_order_release);
+            if (kaula_ws_deque_push_owner(&w->local_queue, task) == 0 &&
+                !kaula_scheduler_inject_push(task)) {
+                kaula_task_fail(task, KAULA_ERR_WOULD_BLOCK);
+            }
+            return;
+        }
+    }
+    uint64_t deadline = kaula_p_now_ns() + delay_ns;
+    t->deadline_ns = deadline;
+    t->task = task;
+    t->next = w->local_timers;
+    w->local_timers = t;
+    if (deadline < w->local_timers_min_deadline) {
+        w->local_timers_min_deadline = deadline;
+    }
+}
+
+/*
+ * 到期检查（owner 线程调度循环每轮调用，对标 Go checkTimers）。
+ * 到期任务 READY 后推回本地队列（owner 写，无锁）；本地队列满则
+ * 退回全局注入队列（不丢任务）。
+ */
+static void kaula_worker_check_local_timers(KaulaWorker* w) {
+    if (w->local_timers == NULL) return;
+    uint64_t now = kaula_p_now_ns();
+    if (w->local_timers_min_deadline > now) return; /* 最短短路 */
+
+    KaulaLocalTimer* keep = NULL;
+    KaulaLocalTimer* keep_tail = NULL;
+    uint64_t new_min = UINT64_MAX;
+    KaulaLocalTimer* cur = w->local_timers;
+    while (cur != NULL) {
+        KaulaLocalTimer* next = cur->next;
+        if (cur->deadline_ns <= now) {
+            KaulaTask* task = cur->task;
+            kaula_local_timer_pool_push(w, cur);
+            task->io_result = 0;
+            atomic_store_explicit(&task->state, KAULA_TASK_READY,
+                                  memory_order_release);
+            if (kaula_ws_deque_push_owner(&w->local_queue, task) == 0 &&
+                !kaula_scheduler_inject_push(task)) {
+                kaula_task_fail(task, KAULA_ERR_WOULD_BLOCK);
+            }
+        } else {
+            cur->next = NULL;
+            if (keep == NULL) {
+                keep = cur;
+                keep_tail = cur;
+            } else {
+                keep_tail->next = cur;
+                keep_tail = cur;
+            }
+            if (cur->deadline_ns < new_min) new_min = cur->deadline_ns;
+        }
+        cur = next;
+    }
+    w->local_timers = keep;
+    w->local_timers_min_deadline = new_min; /* keep 空时为 UINT64_MAX */
+}
+
 /* ========== 唤醒 ========== */
 
 void kaula_worker_wake(KaulaWorker* w) {
@@ -188,8 +286,22 @@ static void worker_park(KaulaWorker* w) {
      * 有限超时：即便漏了一次唤醒，最多 1ms 后自愈。
      * 这是"不空转"与"不丢唤醒"之间的折中 —— 漏唤醒最坏多等 1ms，
      * 而持续空转会烧掉一个核（P2 明确要求）。
+     *
+     * P-D：本地短定时器未到期时，park 不能超过最近到期时刻，
+     * 否则短 sleep 任务会因 Worker 长睡而错过 deadline。
+     * 超时取 min(1ms, 最近到期剩余)；已到期（正常不会到这）立即醒。
      */
-    kaula_p_event_wait(&w->park_event, 1000000ULL);
+    uint64_t park_ns = 1000000ULL;
+    if (w->local_timers_min_deadline != UINT64_MAX) {
+        uint64_t now = kaula_p_now_ns();
+        if (w->local_timers_min_deadline <= now) {
+            park_ns = 0;
+        } else {
+            uint64_t rem = w->local_timers_min_deadline - now;
+            if (rem < park_ns) park_ns = rem;
+        }
+    }
+    kaula_p_event_wait(&w->park_event, park_ns);
 
     uint64_t dt = kaula_p_now_ns() - t0;
     atomic_fetch_add_explicit(&w->stats.park_total_ns, dt, memory_order_relaxed);
@@ -371,10 +483,19 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
 
         case KAULA_RESUME_SUSPEND:
             /*
-             * IO 挂起：移交 IoDriver，Worker 立即转做别的事（I4）。
+             * IO 挂起：短 sleep 走本 Worker 本地定时器（P-D，不跨线程）；
+             * 其余移交 IoDriver，Worker 立即转做别的事（I4）。
              * 若投递失败，必须让 Task 继续而不是挂死。
              */
             task->io_request = result.io_request;
+            if (task->io_request.type == KAULA_IO_SLEEP &&
+                task->io_request.timeout_ns <= KAULA_LOCAL_TIMER_MAX_NS) {
+                atomic_store_explicit(&task->state, KAULA_TASK_SUSPENDED,
+                                      memory_order_release);
+                kaula_local_timer_add(w, task, task->io_request.timeout_ns);
+                w->current_task = NULL;
+                return;
+            }
             atomic_store_explicit(&task->state, KAULA_TASK_SUSPENDED, memory_order_release);
             if (kaula_iodriver_submit(task) != 0) {
                 /* 提交失败（如运行时就绪上限）：退回本地继续 */
@@ -425,6 +546,9 @@ void kaula_worker_loop(KaulaWorker* w) {
         /* 进入 epoch 临界区 */
         kaula_epoch_enter();
 
+        /* P-D：本地短定时器到期检查（对标 Go checkTimers） */
+        kaula_worker_check_local_timers(w);
+
         KaulaTask* task = kaula_conc_worker_find_work(w);
         if (task == NULL) {
             /* 退出临界区并 park */
@@ -449,6 +573,28 @@ void kaula_worker_loop(KaulaWorker* w) {
             /* 注入队列也满：本地找活时已经用尽，只能标记失败 */
             kaula_task_fail(leftover, KAULA_ERR_WOULD_BLOCK);
         }
+    }
+
+    /*
+     * P-D：本地短定时器未到期任务转移给 IoDriver（保持剩余 deadline，
+     * sleep 语义不变），否则随 Worker 消失 → await 死锁。
+     * 节点直接 free（不属于本 Worker 池；撤离罕见，正确性优先）。
+     */
+    KaulaLocalTimer* lt = w->local_timers;
+    w->local_timers = NULL;
+    w->local_timers_min_deadline = UINT64_MAX;
+    uint64_t now_ns = kaula_p_now_ns();
+    while (lt != NULL) {
+        KaulaLocalTimer* nx = lt->next;
+        KaulaTask* task = lt->task;
+        uint64_t rem = lt->deadline_ns > now_ns ? lt->deadline_ns - now_ns : 0;
+        free(lt);
+        task->io_request.type = KAULA_IO_SLEEP;
+        task->io_request.timeout_ns = rem;
+        if (kaula_iodriver_submit(task) != 0) {
+            kaula_task_fail(task, KAULA_ERR_WOULD_BLOCK);
+        }
+        lt = nx;
     }
     kaula_scheduler_notify_one();
 }
@@ -482,6 +628,8 @@ int kaula_worker_prepare(KaulaWorker* w, uint32_t worker_id) {
     atomic_store_explicit(&w->local_epoch, 0, memory_order_relaxed);
 
     kaula_ws_deque_init(&w->local_queue);
+    /* P-D：空定时器状态为 UINT64_MAX（memset 0 会让 park 误判为已到期） */
+    w->local_timers_min_deadline = UINT64_MAX;
     w->retired.count = 0;
 
     if (kaula_p_event_create(&w->park_event) != 0) {

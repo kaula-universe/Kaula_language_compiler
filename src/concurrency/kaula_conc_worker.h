@@ -45,6 +45,28 @@ typedef struct {
     _Atomic(uint64_t) completions_drained;
 } KaulaWorkerStats;
 
+/*
+ * ---- 本地短定时器（P-D：短 sleep 不跨线程，对标 Go checkTimers） ----
+ *
+ * 短 sleep（<= KAULA_LOCAL_TIMER_MAX_NS）不提交 IoDriver，登记到执行
+ * 它的 Worker 自己的定时器链表；调度循环每轮检查到期（check），到期
+ * 任务 READY 后直接推回本地队列（owner 写，无锁）。消除每次挂起的
+ * 跨线程往返（MPSC 提交 + iodriver 处理 + 批量注入 + notify 唤醒），
+ * 这是 suspend 落后 Go 的核心结构性差距。
+ *
+ * 链表仅 owner 线程访问（add 在 execute 的 SUSPEND 分支；check 在本
+ * Worker 调度循环；转移在退出路径），无并发，无需原子。节点走 owner
+ * 独占 freelist 池，避免高频 malloc/free。
+ */
+typedef struct KaulaLocalTimer {
+    uint64_t                deadline_ns;
+    KaulaTask*              task;
+    struct KaulaLocalTimer* next;
+} KaulaLocalTimer;
+
+/* 短 sleep 阈值：<= 此值走本地定时器；更长仍提交 IoDriver（低频跨线程可摊薄） */
+#define KAULA_LOCAL_TIMER_MAX_NS 1000000ULL /* 1ms */
+
 typedef struct KaulaWorker {
     /* ---- 身份 ---- */
     kaula_p_thread_t  thread;
@@ -88,6 +110,12 @@ typedef struct KaulaWorker {
     KaulaTask*        task_pool;
     /* task_pool 当前长度（owner 独占维护）。归还时据此判定高水位收缩。 */
     uint32_t          task_pool_len;
+
+    /* ---- 本地短定时器（P-D） ---- */
+    KaulaLocalTimer*  local_timers;
+    uint64_t          local_timers_min_deadline; /* UINT64_MAX = 空 */
+    KaulaLocalTimer*  local_timer_pool;          /* owner 独占 freelist */
+    uint32_t          local_timer_pool_len;
 
     /* ---- 统计（独占缓存行） ---- */
     KaulaWorkerStats  stats;
