@@ -304,7 +304,7 @@ func (cg *CodeGenerator) preRegisterConcFns(program *ast.Program) {
 		}
 		analysis := conc.AnalyzeBody(fn.Body)
 		emitter.SetStateful(analysis.NeedsSuspend)
-		emitter.SetGuardLayout(analysis.CompoundDepth, analysis.HasForIn)
+		emitter.SetGuardLayout(analysis.CompoundDepth, analysis.SuspendMaxDepth, analysis.HasForIn)
 		cg.RegisterConcFunc(emitter)
 	}
 }

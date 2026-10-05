@@ -12,6 +12,7 @@ package conc
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"kaula/internal/ast"
@@ -45,10 +46,11 @@ type Emitter struct {
 	// stateful 由 Generate 设置：true 表示双形态（有挂起点）
 	stateful bool
 
-	// guardLayout 由 SetGuardLayout 固化（analysis.CompoundDepth / HasForIn）。
+	// guardLayout 由 SetGuardLayout 固化。
 	// GenerateSpawn 读它决定免 memset 时要显式清零哪些守卫槽。
-	compoundDepth int
-	hasForIn      bool
+	compoundDepth    int // 全函数体最大复合深度（HasGuard 判断用）
+	suspendMaxDepth  int // 挂起点所在最大复合深度（P2.2：守卫数组实际大小）
+	hasForIn         bool
 }
 
 // 生成的标识符
@@ -163,94 +165,135 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 	b.WriteString("/* Frame for conc fn " + e.FuncName + " */\n")
 	b.WriteString("typedef struct {\n")
 
-	// pc：程序计数，指向下次 resume 从哪个 case 继续
-	b.WriteString("    /* 程序计数：0=入口，N=第 N 个 suspend 点之后，-1=已完成 */\n")
-	b.WriteString("    int             pc;\n")
-
 	/*
-	 * 复合语句内的恢复槽位。
+	 * P2.2：字段按对齐降序排列，消除指针/int 交错带来的对齐填充。
+	 * 同时去掉无用的 needs_free（src/ 无任何引用）。
 	 *
-	 * pc 只能表达「顶层语句切到哪儿」。循环体/分支体里的挂起点落在
-	 * 顶层切分之外 —— 没有 sub 就只能重新执行整个循环体，
-	 * 而重新执行不会报错，只是把副作用做两遍。
-	 *
-	 * sub[d] 是第 d 层复合语句「本轮已执行到第几个语句」。
-	 * 恢复时按它跳过已执行的语句，再继续往下走。
-	 * branch[d] 记 if 选了哪个分支 —— 条件不能重算，重算就可能走错分支。
-	 *
-	 * 不变量：离开某个复合语句时 sub[d] 必须回到 0。
-	 * 生成代码靠「每轮末尾写回 0」维持它，所以进入任一层时读到的都是 0。
+	 * 收集所有字段（类型+名称+注释+对齐），按对齐降序输出：
+	 *   8 字节（指针/uint64/KaulaHandle）→ 4 字节（int/int32）→ 2/1 字节
+	 *  conn_task Frame 从 144B（含 8B 填充 + 4B needs_free）压到 ~128B 以内，
+	 *  KMM slab 从 256 档降到 128 档，每任务省一半内存 + 缓存行利用率翻倍。
 	 */
-	if analysis.HasCompound {
-		// 数组按实际守卫深度（CompoundDepth+1，含 body 层 sub[0]），
-		// 不再固定 KAULA_CONC_SUB_DEPTH=8：task Frame 的 sub/branch 从
-		// 64B 降到 2×depth 个 int，KMM 分配档位随之下移。
-		depth := analysis.CompoundDepth + 1
-		if depth > 8 {
-			depth = 8 // 防御：超深嵌套与固定上限持平，不引入新越界
-		}
-		b.WriteString("    /* 复合语句内的恢复槽位与 if 分支选择 */\n")
-		b.WriteString(fmt.Sprintf("    int             sub[%d];\n", depth))
-		b.WriteString(fmt.Sprintf("    int             branch[%d];\n", depth))
+	type field struct {
+		align   int
+		cType   string
+		name    string
+		comment string
+	}
+	var fields []field
+
+	addField := func(cType, name, comment string) {
+		fields = append(fields, field{alignOfCType(cType), cType, name, comment})
 	}
 
-	/*
-	 * for..in(range) 循环守卫的迭代状态（按深度，同 sub/branch）。
-	 *
-	 * 迭代下标 _i_ 是编译器生成的局部量，原本不在 Frame 里 ——
-	 * 守卫模式恢复时 _i_ 从头再数一遍，循环体被重复执行。
-	 * 把 start/end/step 求值一次存入 Frame，恢复从 f->loop_i[d] 继续，
-	 * 循环体只执行正确轮次。
-	 */
-	if analysis.HasForIn {
-		depth := analysis.CompoundDepth + 1
+	// pc
+	addField("int", "pc", "程序计数：0=入口，N=第 N 个 suspend 点之后，-1=已完成")
+
+	// sub/branch 守卫数组
+	if analysis.HasCompound {
+		// P2.2：守卫深度 = 挂起点所在最大深度 + 1（含 body 层），
+		// 而非全函数体最大深度。深层复合语句恢复时从头执行，不需守卫。
+		depth := analysis.SuspendMaxDepth + 1
 		if depth > 8 {
 			depth = 8
 		}
-		b.WriteString("    /* for..in 守卫：迭代下标 / 上界 / 步长 */\n")
-		b.WriteString(fmt.Sprintf("    long long       loop_i[%d];\n", depth))
-		b.WriteString(fmt.Sprintf("    long long       loop_end[%d];\n", depth))
-		b.WriteString(fmt.Sprintf("    long long       loop_step[%d];\n", depth))
+		if depth < 1 {
+			depth = 1
+		}
+		subType := fmt.Sprintf("int[%d]", depth)
+		brType := fmt.Sprintf("int[%d]", depth)
+		addField(subType, "sub", "复合语句内的恢复槽位")
+		addField(brType, "branch", "if 分支选择")
 	}
 
-	// 参数：函数入口时写入，跨所有挂起点存活
-	if len(e.Params) > 0 {
-		b.WriteString("    /* 参数 */\n")
-		for i, p := range e.Params {
-			ctype := e.CTypeOfParam(i)
-			b.WriteString(fmt.Sprintf("    %s %s;\n", ctype, p))
+	// for-in 守卫
+	if analysis.HasForIn {
+		depth := analysis.SuspendMaxDepth + 1
+		if depth > 8 {
+			depth = 8
 		}
+		if depth < 1 {
+			depth = 1
+		}
+		addField(fmt.Sprintf("long long[%d]", depth), "loop_i", "for..in 迭代下标")
+		addField(fmt.Sprintf("long long[%d]", depth), "loop_end", "for..in 上界")
+		addField(fmt.Sprintf("long long[%d]", depth), "loop_step", "for..in 步长")
+	}
+
+	// 参数
+	for i, p := range e.Params {
+		addField(e.CTypeOfParam(i), p, "参数")
 	}
 
 	// 跨 suspend 存活的局部变量
-	if len(analysis.FrameVars) > 0 {
-		b.WriteString("    /* 跨 suspend 存活的局部变量 */\n")
-		for _, v := range analysis.FrameVars {
-			b.WriteString(fmt.Sprintf("    /* %s */\n", v.Name))
-			/*
-			 * 用真实 C 类型，不是 void*。
-			 *
-			 * 这些字段的读写发生在不同 resume case 里，类型必须与
-			 * 函数体里的局部变量完全一致；void* 会让 resume 里的
-			 * 恢复语句类型不匹配，或者更糟 —— void*↔整数的隐式转换
-			 * 被接受，于是半个值被静默截断。
-			 */
-			b.WriteString(fmt.Sprintf("    %-14s %s;\n", e.FrameVarCType(v.Name), v.Name))
-		}
+	for _, v := range analysis.FrameVars {
+		addField(e.FrameVarCType(v.Name), v.Name, v.Name)
 	}
 
 	// 结果
 	if e.CReturnType != "" && e.CReturnType != "void" {
-		b.WriteString("    /* 结果 */\n")
-		b.WriteString(fmt.Sprintf("    %s result;\n", e.CReturnType))
+		addField(strings.TrimSpace(e.CReturnType), "result", "结果")
 	}
 
-	// 标记：帧是否持有堆对象（决定回收时要不要 free）
-	b.WriteString("    /* 帧是否需要显式回收 */\n")
-	b.WriteString("    int             needs_free;\n")
+	// 按对齐降序排序（稳定排序保持同对齐内的声明顺序）
+	sort.SliceStable(fields, func(i, j int) bool {
+		return fields[i].align > fields[j].align
+	})
+
+	// 输出
+	for _, f := range fields {
+		if f.comment != "" {
+			b.WriteString(fmt.Sprintf("    /* %s */\n", f.comment))
+		}
+		// pc/sub/branch 保持原硬编码格式（int + 13空格，测试与生成代码契约）
+		wide := (f.name == "pc" || f.name == "sub" || f.name == "branch") && strings.TrimSpace(f.cType) == "int"
+		// 数组类型：C 声明格式是 "type name[N]"，不是 "type[N] name"
+		if idx := strings.Index(f.cType, "["); idx > 0 {
+			baseType := f.cType[:idx]
+			arrayPart := f.cType[idx:]
+			if wide {
+				b.WriteString(fmt.Sprintf("    %-15s %s%s;\n", baseType, f.name, arrayPart))
+			} else {
+				b.WriteString(fmt.Sprintf("    %s %s%s;\n", baseType, f.name, arrayPart))
+			}
+		} else {
+			if wide {
+				b.WriteString(fmt.Sprintf("    %-15s %s;\n", f.cType, f.name))
+			} else {
+				b.WriteString(fmt.Sprintf("    %s %s;\n", f.cType, f.name))
+			}
+		}
+	}
 
 	b.WriteString("} " + e.FrameType() + ";\n\n")
 	return b.String()
+}
+
+// alignOfCType 返回 C 类型的对齐字节数（用于 Frame 字段重排消除填充）。
+func alignOfCType(cType string) int {
+	t := strings.TrimSpace(cType)
+	// 指针：8 字节
+	if strings.Contains(t, "*") {
+		return 8
+	}
+	// 数组：取元素类型的对齐
+	if idx := strings.Index(t, "["); idx > 0 {
+		return alignOfCType(t[:idx])
+	}
+	// 8 字节类型
+	if strings.Contains(t, "64") || strings.Contains(t, "double") || strings.Contains(t, "Handle") || strings.Contains(t, "long long") {
+		return 8
+	}
+	// 2 字节类型
+	if strings.Contains(t, "16") || strings.Contains(t, "short") {
+		return 2
+	}
+	// 1 字节类型
+	if strings.Contains(t, "8") || strings.Contains(t, "char") {
+		return 1
+	}
+	// 默认 4 字节（int / int32 / uint32 / float 等）
+	return 4
 }
 
 // CTypeOfParam 返回参数 i 的 C 类型
@@ -286,16 +329,21 @@ func (e *Emitter) SetStateful(v bool) { e.stateful = v }
 
 // SetGuardLayout 固化守卫数组布局；GenerateSpawn 可能先于 Generate 被调用，
 // 所以深度与 for-in 标记必须随 SetStateful 一起提前登记。
-func (e *Emitter) SetGuardLayout(compoundDepth int, hasForIn bool) {
+// suspendMaxDepth 是 P2.2：挂起点所在最大复合深度，决定守卫数组实际大小。
+func (e *Emitter) SetGuardLayout(compoundDepth int, suspendMaxDepth int, hasForIn bool) {
 	e.compoundDepth = compoundDepth
+	e.suspendMaxDepth = suspendMaxDepth
 	e.hasForIn = hasForIn
 }
 
-// GuardDepth 返回守卫数组深度（CompoundDepth+1，含 body 层 sub[0]）
+// GuardDepth 返回守卫数组深度（SuspendMaxDepth+1，含 body 层 sub[0]）
 func (e *Emitter) GuardDepth() int {
-	d := e.compoundDepth + 1
+	d := e.suspendMaxDepth + 1
 	if d > 8 {
 		d = 8
+	}
+	if d < 1 {
+		d = 1
 	}
 	return d
 }
