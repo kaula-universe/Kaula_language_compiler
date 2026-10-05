@@ -723,22 +723,30 @@ int kaula_iodriver_submit(KaulaTask* task) {
 
 #if !KAULA_PLATFORM_WINDOWS
     /*
-     * READ fast path（v1.2，sharded epoll 的配套优化）：
+     * READ/WRITE fast path（v1.2，sharded epoll 的配套优化）：
      *
-     * 数据已到达 socket 缓冲时，Worker 直接读一次即完成，免去 iodriver
-     * 往返（submit→wake→epoll→do_io→注入→notify→Worker 醒来，实测
-     * ~25-50us/请求，是 100 连接口径吞吐落后 Asio 的主因）。
+     * 数据已到达 socket 缓冲（READ）或缓冲有空间（WRITE）时，Worker
+     * 直接做一次系统调用即完成，免去 iodriver 往返（submit→wake→
+     * epoll→do_io→注入→notify→Worker 醒来，实测 ~25-50us/请求，
+     * 是 100 连接口径吞吐落后 Asio 的主因）。
      *
      * fd 由调用方保证非阻塞（accept 时 O_NONBLOCK；backend_add 也会设置）。
-     * 语义与 iodriver 完成路径一致：一次读返回可用数据（业务自处理
-     * partial）；EAGAIN 才真正挂起交给 iodriver；其他错误以 -errno 完成。
+     * 语义与 iodriver 完成路径一致：一次调用返回可用数据/已写字节（业务
+     * 自处理 partial）；EAGAIN 才真正挂起交给 iodriver；其他错误以 -errno 完成。
      * 成功路径不占 pending 名额、不计 submits（实际未进驱动队列）。
      *
      * Windows 侧不做（IOCP 完成式模型，try 语义不适用，保持原路径）。
      */
-    if (task->io_request.type == KAULA_IO_READ) {
-        ssize_t nr = read(task->io_request.fd, task->io_request.buf,
-                          task->io_request.buf_len);
+    if (task->io_request.type == KAULA_IO_READ ||
+        task->io_request.type == KAULA_IO_WRITE) {
+        ssize_t nr;
+        if (task->io_request.type == KAULA_IO_READ) {
+            nr = read(task->io_request.fd, task->io_request.buf,
+                      task->io_request.buf_len);
+        } else {
+            nr = write(task->io_request.fd, task->io_request.buf,
+                       task->io_request.buf_len);
+        }
         if (nr >= 0) {
             task->io_result = (int)nr;
             atomic_fetch_add_explicit(&drv->total_completions, 1,
