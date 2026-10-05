@@ -160,14 +160,65 @@ static void io_take_fd(KaulaIoDriver* drv, int fd, uint32_t events,
 
 /* ========== 定时器 ========== */
 
-static void io_timer_add(KaulaIoDriver* drv, KaulaTask* task, uint64_t delay_ns) {
-    KaulaTimer* t = (KaulaTimer*)malloc(sizeof(KaulaTimer));
-    if (t == NULL) {
-        /* 定时器分配失败：不能静默丢弃——否则挂起等待定时器的任务永远不会
-         * 被唤醒（await 永久挂起）。立即把任务标错并恢复到 READY。 */
-        task->io_result = -ENOMEM;
-        kaula_scheduler_resume_task(task);
+/* ========== 定时器对象池（P2.2：suspend/mixed 落后 Go 的主因之一） ==========
+ *
+ * io_timer_add 每 200us 级 sleep 都 malloc/free 一个 KaulaTimer，高并发
+ * sleep（conc=10000、total=20000）下 20000 次系统堆分配/释放 + 堆锁争用
+ * 压在 iodriver 单线程上串行。改为无锁原子栈池化：fire 归还、add 复用。
+ * 池上限防空闲膨胀（并发 sleep 稳态下池大小 ≈ 峰值在途定时器数）。
+ *
+ * 池只在 iodriver 线程被访问（io_timer_add 仅 iodriver_loop 调用；
+ * kaula_iodriver_fire_timer 是当前无调用点的导出诊断 API，若未来被外部
+ * 线程使用，必须先走 submit_queue，不能让外部线程直接碰池）。
+ */
+#define KAULA_TIMER_POOL_MAX 4096
+static _Atomic(KaulaTimer*) g_timer_pool_head;
+static _Atomic(int)         g_timer_pool_count;
+
+static KaulaTimer* timer_pool_pop(void) {
+    KaulaTimer* h = atomic_load_explicit(&g_timer_pool_head, memory_order_relaxed);
+    while (h != NULL) {
+        KaulaTimer* n = h->next;
+        if (atomic_compare_exchange_weak_explicit(&g_timer_pool_head, &h, n,
+                                                  memory_order_acquire,
+                                                  memory_order_relaxed)) {
+            atomic_fetch_sub_explicit(&g_timer_pool_count, 1, memory_order_relaxed);
+            return h;
+        }
+        /* CAS 失败：h 已被更新为实际 head，继续 */
+    }
+    return NULL;
+}
+
+static void timer_pool_push(KaulaTimer* t) {
+    if (atomic_load_explicit(&g_timer_pool_count, memory_order_relaxed) >=
+        KAULA_TIMER_POOL_MAX) {
+        free(t);
         return;
+    }
+    KaulaTimer* h = atomic_load_explicit(&g_timer_pool_head, memory_order_relaxed);
+    for (;;) {
+        t->next = h;
+        if (atomic_compare_exchange_weak_explicit(&g_timer_pool_head, &h, t,
+                                                  memory_order_release,
+                                                  memory_order_relaxed)) {
+            atomic_fetch_add_explicit(&g_timer_pool_count, 1, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+static void io_timer_add(KaulaIoDriver* drv, KaulaTask* task, uint64_t delay_ns) {
+    KaulaTimer* t = timer_pool_pop();
+    if (t == NULL) {
+        t = (KaulaTimer*)malloc(sizeof(KaulaTimer));
+        if (t == NULL) {
+            /* 定时器分配失败：不能静默丢弃——否则挂起等待定时器的任务永远不会
+             * 被唤醒（await 永久挂起）。立即把任务标错并恢复到 READY。 */
+            task->io_result = -ENOMEM;
+            kaula_scheduler_resume_task(task);
+            return;
+        }
     }
 
     uint64_t deadline = kaula_p_now_ns() + delay_ns;
@@ -228,22 +279,42 @@ static uint64_t io_timers_fire(KaulaIoDriver* drv) {
     /*
      * 至少一个到期：整链扫描一次，把到期者全部 fire，
      * 未到期者保留并重建链表，同时重算最小 deadline。
+     *
+     * P2.2：到期任务**批量收集**，扫描结束后一次批量注入 + 一次唤醒。
+     * 原实现逐个 kaula_scheduler_resume_task：外部线程（iodriver）不是
+     * owner，Chase-Lev 约束下每个任务都要逐个注入全局队列 + 逐个
+     * notify（pthread_mutex + cond_signal），conc=10000 时 20000 个
+     * 到期任务 = 20000 次锁竞争与唤醒，是 suspend/mixed 落后 Go 的
+     * 直接原因。此改动与 IO 完成路径（P2.1 done_batch 批量注入）对齐。
      */
     KaulaTimer* keep = NULL;
     KaulaTimer* keep_tail = NULL;
     uint64_t new_min = KAULA_P_WAIT_FOREVER;
+
+    KaulaTask* done_batch[KAULA_IO_BATCH_SIZE * 2];
+    int done_n = 0;
 
     KaulaTimer* cur = drv->timers;
     while (cur != NULL) {
         KaulaTimer* next = cur->next;
         if (cur->deadline_ns <= now) {
             KaulaTask* task = cur->task;
-            free(cur);
+            timer_pool_push(cur);       /* P2.2：归还定时器池，替代 free */
             atomic_fetch_add_explicit(&drv->total_timer_fires, 1,
                                       memory_order_relaxed);
             /* 写回 TLS 供 resume_fn 读取，然后交回调度器 */
             task->io_result = 0;
-            kaula_scheduler_resume_task(task);
+            if (done_n < (int)(sizeof(done_batch) / sizeof(done_batch[0]))) {
+                done_batch[done_n++] = task;
+            } else {
+                /* 批次满：先排空（sched_yield 重试，不丢任务），
+                 * 并立即唤醒 Worker 并行消费——不能等整波扫描完再唤醒，
+                 * 否则 fire 串行处理大波到期任务期间 Worker 全部闲置 */
+                kaula_inject_batch_flush(done_batch, done_n);
+                kaula_scheduler_notify_all();
+                done_n = 0;
+                done_batch[done_n++] = task;
+            }
         } else {
             cur->next = NULL;
             if (keep == NULL) {
@@ -260,6 +331,13 @@ static uint64_t io_timers_fire(KaulaIoDriver* drv) {
 
     drv->timers = keep;
     drv->timers_min_deadline = new_min;
+
+    /* P2.2：批量注入剩余到期任务；有注入就唤醒所有 Worker 并行消化
+     * （替代原逐任务 notify_one；任务量大，多 Worker 同时 pop 注入队列） */
+    if (done_n > 0) {
+        kaula_inject_batch_flush(done_batch, done_n);
+        kaula_scheduler_notify_all();
+    }
 
     if (keep != NULL) {
         uint64_t d = new_min - now;
