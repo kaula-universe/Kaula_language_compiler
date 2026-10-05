@@ -282,6 +282,7 @@ struct KaulaTask {
     /* ---- 链接 ---- */
     struct KaulaTask*   next;         /* 完成队列 / Block Lane 链表 */
     struct KaulaTask*   next_free;    /* per-Worker 复用池链表（P0-2） */
+    struct KaulaTask*   resume_next;  /* 恢复优先链（P-D2）：owner 独占 FIFO */
 
     /* ---- 统计 ---- */
     uint64_t            created_ns;

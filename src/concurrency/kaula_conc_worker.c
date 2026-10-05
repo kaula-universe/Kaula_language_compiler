@@ -234,10 +234,14 @@ static void kaula_worker_check_local_timers(KaulaWorker* w) {
             task->io_result = 0;
             atomic_store_explicit(&task->state, KAULA_TASK_READY,
                                   memory_order_release);
-            if (kaula_ws_deque_push_owner(&w->local_queue, task) == 0 &&
-                !kaula_scheduler_inject_push(task)) {
-                kaula_task_fail(task, KAULA_ERR_WOULD_BLOCK);
+            /* 恢复优先（P-D2）：入 owner 专用 FIFO 链，不被新任务插队 */
+            task->resume_next = NULL;
+            if (w->resume_tail != NULL) {
+                w->resume_tail->resume_next = task;
+            } else {
+                w->resume_head = task;
             }
+            w->resume_tail = task;
         } else {
             cur->next = NULL;
             if (keep == NULL) {
@@ -310,8 +314,17 @@ static void worker_park(KaulaWorker* w) {
 /* ========== 取活 ========== */
 
 KaulaTask* kaula_conc_worker_find_work(KaulaWorker* w) {
+    /* 0. 恢复优先（P-D2）：到期任务先于一切新任务（对标 Go runnext） */
+    KaulaTask* t = w->resume_head;
+    if (t != NULL) {
+        w->resume_head = t->resume_next;
+        if (w->resume_head == NULL) w->resume_tail = NULL;
+        t->resume_next = NULL;
+        return t;
+    }
+
     /* 1. 本地队列（LIFO，缓存友好） */
-    KaulaTask* t = kaula_ws_deque_pop(&w->local_queue);
+    t = kaula_ws_deque_pop(&w->local_queue);
     if (t != NULL) return t;
 
     /* 2. 全局注入队列 */
@@ -573,6 +586,19 @@ void kaula_worker_loop(KaulaWorker* w) {
             /* 注入队列也满：本地找活时已经用尽，只能标记失败 */
             kaula_task_fail(leftover, KAULA_ERR_WOULD_BLOCK);
         }
+    }
+
+    /* P-D2：恢复优先链剩余任务转注入队列（否则随 Worker 消失 → await 死锁） */
+    KaulaTask* rt = w->resume_head;
+    w->resume_head = NULL;
+    w->resume_tail = NULL;
+    while (rt != NULL) {
+        KaulaTask* nx = rt->resume_next;
+        rt->resume_next = NULL;
+        if (!kaula_scheduler_inject_push(rt)) {
+            kaula_task_fail(rt, KAULA_ERR_WOULD_BLOCK);
+        }
+        rt = nx;
     }
 
     /*
