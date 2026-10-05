@@ -265,6 +265,16 @@ func (eg *ExpressionGenerator) concIoCallRewrite(
 		b = append(b, cg.concSaveLiveVars(ord)...)
 		b = append(b, fmt.Sprintf("%s->pc = %d;\n", f, cg.concSegmentPC)...)
 		b = append(b, fmt.Sprintf("%s->sub[%d] = %d;\n", f, cg.concGuardDepth, cg.concGuardSeq)...)
+		/*
+		 * KMM scope 配对：守卫挂起 return 从循环体 KMM 作用域内直接返回，
+		 * 该层 push 不会走到循环体末尾的 SCOPE_END。恢复后重进循环体会
+		 * 无条件重新 push，于是每次请求迭代净 +1 层，KMM_V4_MAX_SCOPE_DEPTH
+		 * （1024）后爆栈。这里按当前生成时已 Enter 未 Exit 的 scope 深度
+		 * 逐个 pop，恢复重进时重新 push，配对。
+		 */
+		for i := 0; i < cg.kmmScopeDepth; i++ {
+			b = append(b, []byte("kmm_v4_scope_pop();\n")...)
+		}
 		b = append(b, fmt.Sprintf(
 			"return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, .io_request = %s, .value = NULL };\n",
 			varName)...)

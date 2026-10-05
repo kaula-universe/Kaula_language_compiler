@@ -1642,6 +1642,20 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	sg.codegen.indent++
 	sg.codegen.EnterScope("while_body")
 
+	/*
+	 * 外层守卫上下文 + 本循环体无挂起点（普通路径）时，本 while 是原子的：
+	 * 恢复路径会整条跳过它，body 内部不需要任何恢复槽位。
+	 * 若不加保护，body 语句会在守卫上下文里被 concGuardSlot 再包一层，
+	 * 槽位号与外层 while 段的槽位号冲突（同号），循环体永不执行、
+	 * 条件永真 → 死循环。普通路径下临时禁用守卫即可。
+	 */
+	guardSuspended := false
+	guardSavedDepth, guardSavedSeq := sg.codegen.concGuardDepth, sg.codegen.concGuardSeq
+	if guardDepth < 0 && sg.codegen.concGuardActive() {
+		sg.codegen.concGuardDepth, sg.codegen.concGuardSeq = -1, 0
+		guardSuspended = true
+	}
+
 	// 缺口6优化：快照 promotedVars，用于判断循环体内是否有 promote
 	whilePromotedSnapshot := sg.codegen.SnapshotPromotedVars()
 
@@ -1737,6 +1751,9 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 		code += sg.codegen.indentString() +
 			fmt.Sprintf("%s->sub[%d] = 0;\n", sg.codegen.concFrameVar, guardDepth)
 		restoreGuard()
+	} else if guardSuspended {
+		/* 普通路径：恢复被临时禁用的外层守卫 */
+		sg.codegen.concGuardDepth, sg.codegen.concGuardSeq = guardSavedDepth, guardSavedSeq
 	}
 
 	code += sg.codegen.indentString() + "}\n"
