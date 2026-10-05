@@ -97,8 +97,13 @@ int kaula_iodriver_backend_wait(KaulaIoShard* sh, uint64_t timeout_ns) {
         }
 
         uint32_t e = 0;
-        if (evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) e |= KAULA_IO_EV_READ;
-        if (evs[i].events & (EPOLLOUT | EPOLLERR))          e |= KAULA_IO_EV_WRITE;
+        /* HUP 对写挂起者也是「可完成」信号（write 会拿 -EPIPE），
+         * 必须映射 WRITE；否则写挂起任务在批量断开时永不匹配
+         * （want=WRITE & events=READ=0）→ fd 滞留 CLOSE-WAIT。
+         * ERROR 位 = EOF 兜底：take_fd 对 EOF 无条件完成。 */
+        if (evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR))    e |= KAULA_IO_EV_READ;
+        if (evs[i].events & (EPOLLOUT | EPOLLHUP | EPOLLERR))   e |= KAULA_IO_EV_WRITE;
+        if (evs[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) e |= KAULA_IO_EV_ERROR;
         sh->ready[sh->ready_count].fd = evs[i].data.fd;
         sh->ready[sh->ready_count].events = e;
         sh->ready_count++;

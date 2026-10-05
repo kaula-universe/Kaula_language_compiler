@@ -95,6 +95,10 @@ class BuildConfig:
             "-Wextra",
             "-Wno-unused-parameter",
             "-DKMM_THREAD_SAFETY_LEVEL=1",
+            # 服务并发场景 survivor 池 16MB 默认偏小：800+ 连接风暴耗尽后
+            # kmm_v4_alloc 返回 NULL，kl 生成代码不检查 → 野写崩溃。
+            # 256MB 为 RESERVE 懒映射（物理按需提交），对裸机/小程序无实质成本。
+            "-DKMM_V4_POOL_SIZE=268435456",
         ]
         if not sys.platform.startswith("win"):
             self.common_flags.append("-fPIC")
