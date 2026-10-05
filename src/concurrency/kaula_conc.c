@@ -152,6 +152,19 @@ int kaula_runtime_init(const KaulaRuntimeConfig* config) {
         }
         g_conc_runtime.steal_batch_max = batch;
     }
+    /* busy-wait 低延迟模式：park前轮询次数。
+     * 环境变量 KAULA_BUSY_WAIT_SPINS 或 config.busy_wait_spins；
+     * 0 = 不忙等（默认park，省CPU）；>0 = 低延迟模式（耗CPU）。 */
+    {
+        uint32_t spins = cfg.busy_wait_spins;
+        const char* env = kaula_p_get_env("KAULA_BUSY_WAIT_SPINS");
+        if (env && *env) {
+            long v = strtol(env, NULL, 10);
+            if (v < 0) v = 0;
+            spins = (uint32_t)v;
+        }
+        g_conc_runtime.busy_wait_spins = spins;
+    }
     atomic_store_explicit(&g_conc_runtime.shutdown, 0, memory_order_relaxed);
     atomic_store_explicit(&g_conc_runtime.active_task_count, 0, memory_order_relaxed);
     atomic_store_explicit(&g_conc_runtime.next_task_id, 1, memory_order_relaxed);

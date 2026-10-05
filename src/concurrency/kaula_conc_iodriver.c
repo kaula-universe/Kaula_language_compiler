@@ -450,6 +450,11 @@ static void iodriver_loop(void* arg) {
         if (timer_delta != KAULA_P_WAIT_FOREVER && timer_delta < wait_ns) {
             wait_ns = timer_delta;
         }
+        /* busy-wait 低延迟模式：epoll_wait 非阻塞（timeout=0），
+         * 无事件时立即返回继续轮询，消除唤醒延迟。代价：iodriver 线程 CPU 100%。 */
+        if (g_conc_runtime.busy_wait_spins > 0 && timer_delta == KAULA_P_WAIT_FOREVER) {
+            wait_ns = 0;
+        }
 
         kaula_iodriver_backend_begin(sh);
 
