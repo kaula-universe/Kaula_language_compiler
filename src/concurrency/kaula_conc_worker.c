@@ -10,6 +10,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ========== TLS 当前 Worker ========== */
 
@@ -398,6 +399,27 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
         task->started_ns = kaula_p_now_ns();
     }
     atomic_store_explicit(&task->state, KAULA_TASK_RUNNING, memory_order_release);
+
+    /*
+     * do_io 下沉（v1.2.1）：就绪式后端事件就绪后 iodriver 不代做 IO，
+     * 由 Worker 在恢复任务前自做非阻塞 read/write——消除 iodriver 单
+     * 线程 do_io 串行税，4 Worker 并行执行 syscall。
+     * 必须在 TLS 复制（下方 404）之前执行，否则 kl 恢复点读到旧 TLS=0
+     * 误判 EOF 关闭连接。EAGAIN（假就绪）经 submit 重挂（其 READ fast
+     * path 会先再读一次，仍 EAGAIN 才真正挂回 epoll）。
+     */
+    if (task->io_do_in_worker) {
+        task->io_do_in_worker = 0;
+        int r = kaula_iodriver_do_io(&task->io_request);
+        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (kaula_iodriver_submit(task) != 0) {
+                kaula_task_fail(task, KAULA_ERR_WOULD_BLOCK);
+            }
+            w->current_task = NULL;
+            return;
+        }
+        task->io_result = r;
+    }
 
     /* 把上次的 IO 结果交给 resume_fn（TLS，非 IO 任务为 0） */
     kaula_conc_tls_io_result = task->io_result;
