@@ -255,6 +255,20 @@ static void worker_park(KaulaWorker* w) {
     atomic_fetch_add_explicit(&w->stats.park_count, 1, memory_order_relaxed);
 
     /*
+     * busy-wait 低延迟阶段：park 前先轮询 N 次。
+     * 有活立即返回（省去 event_wait 的唤醒延迟，~1-10us）。
+     * 代价：空转时 CPU 100%。适合低延迟服务（对标 Redis/DPDK）。
+     */
+    if (g_conc_runtime.busy_wait_spins > 0) {
+        for (uint32_t i = 0; i < g_conc_runtime.busy_wait_spins; i++) {
+            if (!kaula_ws_deque_empty(&w->local_queue)) return;
+            if (w->resume_head != NULL) return;
+            if (!kaula_scheduler_inject_empty()) return;
+            sched_yield();
+        }
+    }
+
+    /*
      * 有限超时：即便漏了一次唤醒，最多 1ms 后自愈。
      * 这是"不空转"与"不丢唤醒"之间的折中 —— 漏唤醒最坏多等 1ms，
      * 而持续空转会烧掉一个核（P2 明确要求）。
