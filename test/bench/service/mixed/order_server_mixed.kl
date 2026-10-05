@@ -15,8 +15,12 @@ extern fn net_send(fd: i32, buf: *u8, len: i32) -> i64
 // 接受 seq 和 salt，返回编码后的结果（低 32 位 checksum，高 32 位 seq*price）
 conc fn compute_task(seq: i32, salt: u32) -> u64 {
     u32 h = 0x811C9DC5
-    for round in range(256) {
-        h = (h ^ salt) * 16777619 + as<u32>(round)
+    // 4x 循环展开：外层 64 次，每次 4 轮 FNV，减少 range 迭代器开销
+    for round in range(64) {
+        h = (h ^ salt) * 16777619 + as<u32>(round * 4)
+        h = (h ^ salt) * 16777619 + as<u32>(round * 4 + 1)
+        h = (h ^ salt) * 16777619 + as<u32>(round * 4 + 2)
+        h = (h ^ salt) * 16777619 + as<u32>(round * 4 + 3)
     }
     i32 price = (seq * 37 + 99) % 10000
     u64 result = (as<u64>(h) & 0xFFFFFFFF) | (as<u64>(price) << 32)
