@@ -9,23 +9,22 @@ extern fn kaula_tls_io_result() -> i32
 extern fn kaula_close(fd: i32) -> i32
 extern fn net_recv(fd: i32, buf: *u8, len: i32) -> i64
 extern fn kaula_svc_send(fd: i32, buf: *u8, len: i32) -> i32
-extern fn kaula_svc_at(buf: *u8, off: i32) -> *u8
 
-fn checksum256(s: *u8, n: i32) -> u32 {
+fn checksum256_at(s: *u8, off: i32, n: i32) -> u32 {
     u32 h = 0x811C9DC5
     for round in range(256) {
         for i in range(n) {
-            h = (h ^ as<u32>(s[i])) * 16777619 + as<u32>(round)
+            h = (h ^ as<u32>(s[off + i])) * 16777619 + as<u32>(round)
         }
     }
     return h
 }
 
-fn parse_seq(line: *u8, n: i32) -> i32 {
+fn parse_seq_at(line: *u8, off: i32, n: i32) -> i32 {
     i32 i = 2
     i32 v = 0
-    while (i < n && line[i] != 44) {
-        v = v * 10 + (line[i] - 48)
+    while (i < n && line[off + i] != 44) {
+        v = v * 10 + (line[off + i] - 48)
         i = i + 1
     }
     return v
@@ -64,9 +63,8 @@ conc fn conn_task(fd: i32) -> i32 {
                 // loadgen 行短、1024 缓冲一次读满，不会跨边界）
                 break
             }
-            u8* ln = kaula_svc_at(buf, off)
-            u32 ck = checksum256(ln, n)
-            i32 seq = parse_seq(ln, n)
+            u32 ck = checksum256_at(buf, off, n)
+            i32 seq = parse_seq_at(buf, off, n)
             std.time.time_sleep_us(200)
             resp[0] = 82
             resp[1] = 44
