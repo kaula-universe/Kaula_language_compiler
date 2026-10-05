@@ -1477,6 +1477,20 @@ static inline int kmm_v4_scope_promote_p_deep(void** ptr, size_t size, kmm_v4_pr
 // 智能选择分配路径（per-thread heap 快速路径 + 全局 CAS 慢路径）
 // 修复 #6：所有分配路径统一不加 header，kmm_v4_free 为 no-op
 
+// 悬空指针 fail-fast 护栏：thread heap/全局池状态被并发破坏导致
+// alloc 返回低地址时立即中止，避免调用方（含 kl 生成代码，不检查
+// 返回值）解引用悬空指针写任意内存。不改变正常分配语义。
+static inline void kaula_kmm_fail_fast(const char* path, uintptr_t base, size_t off, size_t cap) {
+#if defined(KAULA_FREESTANDING) || defined(KMM_V4_STATIC_POOL)
+    (void)path; (void)base; (void)off; (void)cap;
+    __builtin_trap();
+#else
+    fprintf(stderr, "KMM FATAL: corrupted pointer in %s (base=%p off=%zu cap=%zu)\n",
+            path, (void*)base, off, cap);
+    abort();
+#endif
+}
+
 static inline void* kmm_v4_alloc_auto(size_t size) {
     const size_t mask = KMM_V4_ALIGNMENT - 1;
     // 0 字节分配返回有效指针（最小对齐块），与 malloc(0) 语义一致；
@@ -1491,6 +1505,11 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
         uint8_t* ptr = g_kmm_v4_thread_heap.base + g_kmm_v4_thread_heap.offset;
         g_kmm_v4_thread_heap.offset += aligned_size;
 
+        if (KMM_V4_UNLIKELY((uintptr_t)ptr < 0x10000u)) {
+            kaula_kmm_fail_fast("alloc fast-path", (uintptr_t)g_kmm_v4_thread_heap.base,
+                                g_kmm_v4_thread_heap.offset, g_kmm_v4_thread_heap.capacity);
+        }
+
         #ifdef KMM_V4_DEBUG
         KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
         #endif
@@ -1504,6 +1523,11 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
             uint8_t* ptr = g_kmm_v4_thread_heap.base + g_kmm_v4_thread_heap.offset;
             g_kmm_v4_thread_heap.offset += aligned_size;
 
+            if (KMM_V4_UNLIKELY((uintptr_t)ptr < 0x10000u)) {
+                kaula_kmm_fail_fast("alloc refill-path", (uintptr_t)g_kmm_v4_thread_heap.base,
+                                    g_kmm_v4_thread_heap.offset, g_kmm_v4_thread_heap.capacity);
+            }
+
             #ifdef KMM_V4_DEBUG
             KMM_ATOMIC_FETCH_ADD(g_kmm_v4_alloc_count, 1);
             #endif
@@ -1514,7 +1538,13 @@ static inline void* kmm_v4_alloc_auto(size_t size) {
 
     // 慢路径：直接从全局池分配（幸存段，scope_pop 不回卷）
     // 修复 #25：提取为 kmm_v4_alloc_global 复用
-    return kmm_v4_alloc_global(aligned_size);
+    {
+        void* p = kmm_v4_alloc_global(aligned_size);
+        if (KMM_V4_UNLIKELY(p != NULL && (uintptr_t)p < 0x10000u)) {
+            kaula_kmm_fail_fast("alloc global-path", (uintptr_t)p, 0, 0);
+        }
+        return p;
+    }
 }
 
 // ==================== 自动化 SIMD 清零 ====================
