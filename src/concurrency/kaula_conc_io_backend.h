@@ -65,18 +65,18 @@ extern "C" {
  *
  * 返回 1 = 已接手，0 = 拒绝（驱动应立刻把 Task 交回调度器）。
  */
-int  kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t want);
-void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd);
+int  kaula_iodriver_backend_add(KaulaIoShard* sh, KaulaTask* task, uint32_t want);
+void kaula_iodriver_backend_del(KaulaIoShard* sh, int fd);
 
 /*
  * 等待事件。
  * timeout_ns = KAULA_P_WAIT_FOREVER 表示无限等待。
  * 返回就绪事件数，< 0 表示出错（errno 已设置）。
  */
-int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns);
+int kaula_iodriver_backend_wait(KaulaIoShard* sh, uint64_t timeout_ns);
 
 /* 取出一个就绪事件；返回 0 表示批次已空。就绪式后端专用。 */
-int kaula_iodriver_backend_next_event(KaulaIoDriver* drv, int* fd, uint32_t* events);
+int kaula_iodriver_backend_next_event(KaulaIoShard* sh, int* fd, uint32_t* events);
 
 /*
  * 取出一个已完成的结果；返回 0 表示批次已空。完成式后端专用。
@@ -84,11 +84,11 @@ int kaula_iodriver_backend_next_event(KaulaIoDriver* drv, int* fd, uint32_t* eve
  * out_result 是字节数，或负的 -errno。数据已经在 task 的缓冲区里，
  * 调用方直接交回调度器，不要再执行一次 IO。
  */
-int kaula_iodriver_backend_next_completion(KaulaIoDriver* drv,
+int kaula_iodriver_backend_next_completion(KaulaIoShard* sh,
                                            KaulaTask** out_task, int* out_result);
 
 /* 批次开始前清空后端内部状态（完成式后端要在此归还未投递的记录） */
-void kaula_iodriver_backend_begin(KaulaIoDriver* drv);
+void kaula_iodriver_backend_begin(KaulaIoShard* sh);
 
 /*
  * 放弃所有在途操作（关停时调用）。
@@ -97,7 +97,7 @@ void kaula_iodriver_backend_begin(KaulaIoDriver* drv);
  * 已无人收取，记录就泄漏了。就绪式后端是空实现 —— 那边由驱动自己
  * 管挂起表。
  */
-void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv);
+void kaula_iodriver_backend_abort_all(KaulaIoShard* sh);
 
 /*
  * 真正执行一次 IO。

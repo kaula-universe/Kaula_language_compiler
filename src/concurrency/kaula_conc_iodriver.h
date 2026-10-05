@@ -33,6 +33,7 @@ extern "C" {
 
 /* 前向声明：后端头文件需要它 */
 typedef struct KaulaIoDriver KaulaIoDriver;
+typedef struct KaulaIoShard  KaulaIoShard;
 
 /* ========== 挂起表（文档 §6.2） ========== */
 
@@ -58,27 +59,57 @@ typedef struct KaulaTimer {
     struct KaulaTimer*   next;
 } KaulaTimer;
 
-/* ========== IoDriver 主结构 ========== */
+/* ========== IoDriver 主结构（sharded epoll：v1.2） ========== */
 
-struct KaulaIoDriver {
+/*
+ * 就绪事件（后端批次元素，epoll/kqueue 每 shard 一份）。
+ * 原为 io_backend.c 文件级静态 g_ready —— 多 shard 线程共享会互相覆盖，
+ * 移入 shard 内（见 io_backend.c）。
+ */
+typedef struct {
+    int      fd;
+    uint32_t events;
+} IoReadyEvent;
+
+#define KAULA_IO_MAX_SHARDS 64
+
+/*
+ * 一个 shard = 一个 iodriver 线程 + 独立 epoll/kqueue 句柄 + 独立
+ * 提交队列/挂起表/定时器/就绪批次。同 fd 恒归同一 shard（哈希固定），
+ * 每个 shard 的挂起表/epoll_ctl/timers 只被该 shard 线程碰，跨 shard
+ * 无共享可变结构（timer 池为无锁原子栈，跨 shard 共享安全）。
+ */
+struct KaulaIoShard {
     kaula_p_thread_t  thread;
     _Atomic(int)      running;
 
-    /* 后端句柄：epoll fd / kqueue fd / IOCP handle */
+    /* 后端句柄：epoll fd / kqueue fd / IOCP handle（每 shard 一份） */
     kaula_p_io_wait_t wait;
 
-    /* Worker → IoDriver 提交队列 */
+    /* Worker → 该 shard 的提交队列（mpsc） */
     kaula_mpsc_queue_t submit_queue;
 
-    /* fd → Task 挂起表（仅 IoDriver 线程写；计数供 submit 侧读，故为原子） */
+    /* fd → Task 挂起表（仅本 shard 线程写） */
     KaulaIoPending*   pending[KAULA_IO_BUCKETS];
-    _Atomic(uint32_t) pending_count;
 
     /* 定时器链表（无序头插；timers_min_deadline 供 fire 短路） */
     KaulaTimer*       timers;
     uint64_t          timers_min_deadline;
 
-    /* 统计 */
+    /* 就绪批次（epoll/kqueue；IOCP 保持文件级静态，强制 1 shard 安全） */
+    IoReadyEvent      ready[KAULA_IO_BATCH_SIZE];
+    int               ready_count;
+    int               ready_pos;
+};
+
+struct KaulaIoDriver {
+    uint32_t          shard_count;                 /* 1..KAULA_IO_MAX_SHARDS */
+    KaulaIoShard      shards[KAULA_IO_MAX_SHARDS];
+
+    /* 挂起总数（driver 级单一全局原子：各 shard 线程增减；submit 侧读上限） */
+    _Atomic(uint32_t) pending_count;
+
+    /* 统计（metrics.c 读取，保留 driver 级） */
     _Atomic(uint64_t) total_submits;
     _Atomic(uint64_t) total_completions;
     _Atomic(uint64_t) total_timer_fires;

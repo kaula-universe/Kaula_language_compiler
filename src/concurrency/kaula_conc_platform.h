@@ -316,6 +316,9 @@ static void* kaula_p_thread_trampoline(void* p) {
     kaula_p_trampoline* t = (kaula_p_trampoline*)p;
     kaula_p_thread_fn fn = t->fn;
     void* arg = t->arg;
+    /* 与 Windows 版对齐：释放 trampoline 后再调用户函数（原实现泄漏，
+     * ASan 全量暴露：每线程 64B，iodriver shard 化后 4 线程 = 4×64B） */
+    free(t);
     fn(arg);
     return NULL;
 }
