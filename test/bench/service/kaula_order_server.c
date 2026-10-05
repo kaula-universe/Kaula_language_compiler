@@ -34,14 +34,44 @@
 #define WRITE_CAP   512
 #define DB_SLEEP_NS 200000ULL   /* 200us：模拟下游 DB/缓存 IO */
 
-/* ---------- 业务流水线（与 Go 版逐字节同语义） ---------- */
+/*
+ * 复合场景：业务对象分配成分（KMM）。
+ * 每请求分配一个模拟订单记录（16 字段），填充/校验/释放，
+ * 让 KMM slab 分配器参与每请求路径（对比 Go 侧每请求 GC 分配）。
+ */
+typedef struct {
+    uint64_t order_id;
+    uint64_t user_id;
+    uint32_t item_hash;
+    int32_t  qty;
+    int32_t  price;
+    int32_t  total;
+    uint32_t flags;
+    uint64_t ts_ns;
+    uint64_t checksum;
+    uint64_t reserved[6];
+    uint8_t  payload[32];   /* 模拟商品快照 */
+} BizRecord;
 
+/* 二级计算成分：混合哈希 + 整数混合（提高 CPU 占比，模拟业务校验） */
 static uint32_t checksum256(const char* s, size_t n) {
     uint32_t h = 0x811C9DC5u;
     for (int round = 0; round < 256; round++) {
         for (size_t i = 0; i < n; i++) {
             h = (h ^ (uint8_t)s[i]) * 16777619u + (uint32_t)round;
         }
+    }
+    return h;
+}
+
+static uint64_t mixed_verify(BizRecord* r, uint64_t salt) {
+    uint64_t h = salt;
+    for (int i = 0; i < 64; i++) {
+        h ^= (h << 13);
+        h ^= (h >> 7);
+        h ^= (h << 17);
+        h += (uint64_t)r->qty * 2654435761u + (uint64_t)r->price;
+        h *= 0x9E3779B97F4A7C15ull;
     }
     return h;
 }
@@ -121,6 +151,21 @@ static KaulaResumeResult conn_resume(void* fp) {
                 ck = 0xDEADBEEFu; /* 坏行：响应标记 */
             }
             int total = qty * price;
+
+            /* 复合负载：分配业务对象 → 填充 → 二级校验 → 释放（KMM 路径） */
+            BizRecord* r = (BizRecord*)kmm_v4_alloc_global(sizeof(BizRecord));
+            if (r != NULL) {
+                memset(r, 0, sizeof(*r));
+                r->order_id = seq;
+                r->qty = qty;
+                r->price = price;
+                r->total = total;
+                r->item_hash = ck;
+                r->ts_ns = (uint64_t)kaula_p_now_ns();
+                uint64_t v = mixed_verify(r, (uint64_t)ck ^ (uint64_t)seq);
+                ck ^= (uint32_t)(v >> 32) ^ (uint32_t)v; /* 校验结果并入 checksum */
+                kmm_v4_free(r);
+            }
             size_t remain = f->rlen - (line_len + 1);
             if (remain > 0) memmove(f->rbuf, nl + 1, remain);
             f->rlen = remain;

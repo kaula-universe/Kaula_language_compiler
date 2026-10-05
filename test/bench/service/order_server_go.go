@@ -41,6 +41,31 @@ func parseOrder(line string) (uint32, int, int, bool) {
 	return uint32(seq), qty, price, true
 }
 
+// BizRecord 模拟业务对象：与 Kaula 侧同语义（每请求分配/填充/校验/释放）
+type BizRecord struct {
+	OrderID  uint64
+	Qty      int32
+	Price    int32
+	Total    int32
+	ItemHash uint32
+	TsNS     uint64
+	Reserved [6]uint64
+	Payload  [32]byte
+}
+
+// mixedVerify 二级计算成分（与 Kaula 侧同语义的 64 轮混合哈希）
+func mixedVerify(r *BizRecord, salt uint64) uint64 {
+	h := salt
+	for i := 0; i < 64; i++ {
+		h ^= h << 13
+		h ^= h >> 7
+		h ^= h << 17
+		h += uint64(r.Qty)*2654435761 + uint64(r.Price)
+		h *= 0x9E3779B97F4A7C15
+	}
+	return h
+}
+
 func handleConn(c net.Conn) {
 	defer c.Close()
 	r := bufio.NewReaderSize(c, 4096)
@@ -56,6 +81,11 @@ func handleConn(c net.Conn) {
 			ck = 0xDEADBEEF
 		}
 		total := qty * price
+		// 复合负载：分配业务对象 → 填充 → 二级校验 → 丢弃（GC 回收）
+		rec := &BizRecord{OrderID: uint64(seq), Qty: int32(qty), Price: int32(price),
+			Total: int32(total), ItemHash: ck, TsNS: uint64(time.Now().UnixNano())}
+		v := mixedVerify(rec, uint64(ck)^uint64(seq))
+		ck ^= uint32(v>>32) ^ uint32(v)
 		time.Sleep(dbSleep) // 模拟下游 IO
 		resp := fmt.Sprintf("R,%d,%08x,%d\n", seq, ck, total)
 		if _, err := c.Write([]byte(resp)); err != nil {
