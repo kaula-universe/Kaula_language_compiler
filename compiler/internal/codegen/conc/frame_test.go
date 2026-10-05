@@ -321,8 +321,16 @@ func TestGenerateSpawn_SimpleFormNoPC(t *testing.T) {
 	if strings.Contains(code, "__frame->pc") {
 		t.Error("单一形态的 Frame 无 pc 字段，不应写 __frame->pc")
 	}
-	if !strings.Contains(code, "kaula_spawn_simple(K_fetch_simple") {
-		t.Error("单一形态 spawn 应走 simple 入口（void*(void*)）")
+	// P1.1：单一形态 spawn 完全内联——直接调 shim + 包已完成 Handle，
+	// 不再走 Frame 分配与 kaula_spawn_simple。
+	if !strings.Contains(code, "K_fetch_as_fn(") {
+		t.Error("单一形态 spawn 应直接调 shim（P1.1 完全内联）")
+	}
+	if !strings.Contains(code, "kaula_handle_complete") {
+		t.Error("单一形态 spawn 应包已完成 Handle（kaula_handle_complete）")
+	}
+	if strings.Contains(code, "kaula_spawn_simple") {
+		t.Error("单一形态 spawn 不应再走 kaula_spawn_simple（P1.1 已内联）")
 	}
 }
 

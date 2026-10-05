@@ -587,29 +587,40 @@ func (e *Emitter) GenerateSpawn(argExprs []string, flags uint32) string {
 	var b strings.Builder
 
 	/*
-	 * P1.1 完全内联：单形态（无挂起点）+ 无参（常量特化版）→ 跳过 Frame
-	 * 分配与状态机，直接调 shim、包一个已完成 Handle。
+	 * P1.1 完全内联：单形态（无挂起点）→ 跳过 Frame 分配与状态机，
+	 * 直接调 shim（参数原样传入）、包一个已完成 Handle。
 	 *
 	 * 前提：
 	 *   - 无挂起点（IsStateful == false）：函数一次跑完，无需状态机
-	 *   - 无参数（len(Params) == 0）：常量已代入特化版，无需 Frame 传参
+	 *   - flags == 0：无 HINT_BLOCKING 等特殊标志（阻塞任务必须走调度器）
 	 *
-	 * 收益：省一次 Frame 堆分配（~296B）+ 一次 task 初始化。
-	 * 代价：仍从 task 池拿一个 completed task（~50ns），但比 Frame+task 快。
+	 * 有参数时参数直接传给 shim 函数（K_xxx_as_fn(p1, p2, ...)），
+	 * 不再写进 Frame——shim 是普通 C 函数，调用约定天然传参。
+	 *
+	 * 收益：省一次 Frame 堆分配（~296B）+ 一次 task 初始化 + 调度器入队。
+	 * 代价：仍从 task 池拿一个 completed task（~50ns），但比 Frame+task 快数倍。
 	 */
-	if !e.IsStateful() && len(e.Params) == 0 && flags == 0 {
+	if !e.IsStateful() && flags == 0 {
 		b.WriteString("({\n")
+		// 构造实参列表（逗号分隔）
+		argList := ""
+		for i, arg := range argExprs {
+			if i > 0 {
+				argList += ", "
+			}
+			argList += arg
+		}
 		if e.HasResult() {
 			/*
 			 * 直接调 shim 拿返回值，包进 completed handle。
 			 * shim 返回类型是 CReturnType（如 int64_t），转 uint64_t 存 inline_result。
 			 */
-			b.WriteString(fmt.Sprintf("    %s __r = %s();\n",
-				strings.TrimSpace(e.CReturnType), e.ShimFn()))
+			b.WriteString(fmt.Sprintf("    %s __r = %s(%s);\n",
+				strings.TrimSpace(e.CReturnType), e.ShimFn(), argList))
 			b.WriteString("    kaula_handle_complete((uint64_t)__r);\n")
 		} else {
 			/* 无返回值：直接调，包零值 completed handle */
-			b.WriteString(fmt.Sprintf("    %s();\n", e.ShimFn()))
+			b.WriteString(fmt.Sprintf("    %s(%s);\n", e.ShimFn(), argList))
 			b.WriteString("    kaula_handle_complete(0);\n")
 		}
 		b.WriteString("})")
