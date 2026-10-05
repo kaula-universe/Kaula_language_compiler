@@ -102,6 +102,8 @@ KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, si
 /* 唤醒任意一个可能 park 的 Worker（用于唤醒所有 worker 之外的场景） */
 void kaula_scheduler_notify_one(void);
 void kaula_scheduler_notify_all(void);
+/* 唤醒至多 n 个正在运行的 Worker（按 id 顺序；n > worker_count 时等同 all） */
+void kaula_scheduler_notify_n(uint32_t n);
 
 /* 把 Task 投递给它的 owner（IO / 阻塞完成后的回归路径） */
 int kaula_scheduler_resume_task(KaulaTask* task);

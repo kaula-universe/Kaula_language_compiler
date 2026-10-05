@@ -25,20 +25,13 @@
 
 #define IO_READY_BATCH KAULA_IO_BATCH_SIZE
 
-#if KAULA_P_IO_EPOLL || KAULA_P_IO_KQUEUE
 /*
- * 就绪式后端共用的待处理批次。
- * 完成式（IOCP）有自己的一套 —— 那边要交 Task 而不只是 fd。
+ * 就绪式后端（epoll/kqueue）的就绪批次已移入 KaulaIoShard
+ * （sh->ready/ready_count/ready_pos）——多 shard 线程共享文件级静态
+ * 会互相覆盖（v1.2 sharded epoll 的结构性冲突点）。IoReadyEvent 定义
+ * 见 kaula_conc_iodriver.h。完成式（IOCP）仍用文件级静态 g_iocp_*，
+ * 强制 shard_count=1 时单线程假设安全。
  */
-typedef struct {
-    int      fd;
-    uint32_t events;
-} IoReadyEvent;
-
-static IoReadyEvent g_ready[IO_READY_BATCH];
-static int          g_ready_count = 0;
-static int          g_ready_pos = 0;
-#endif
 
 /* ================================================================
  * Linux: epoll（边缘触发）
@@ -54,7 +47,7 @@ static uint32_t to_epoll(uint32_t want) {
     return e;
 }
 
-int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t want) {
+int kaula_iodriver_backend_add(KaulaIoShard* sh, KaulaTask* task, uint32_t want) {
     int fd = task->io_request.fd;
 
     /* 非阻塞是 ET 的前提 */
@@ -65,19 +58,19 @@ int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t wan
     ev.events = to_epoll(want);
     ev.data.fd = fd;      /* 只存 fd —— 修复缺陷 #6 */
 
-    if (epoll_ctl(kaula_p_io_wait_epfd(drv->wait), EPOLL_CTL_ADD, fd, &ev) == 0) return 1;
+    if (epoll_ctl(kaula_p_io_wait_epfd(sh->wait), EPOLL_CTL_ADD, fd, &ev) == 0) return 1;
     if (errno == EEXIST) {
         /* 已注册：合并关注事件，而不是覆盖 Task 指针 */
-        return epoll_ctl(kaula_p_io_wait_epfd(drv->wait), EPOLL_CTL_MOD, fd, &ev) == 0;
+        return epoll_ctl(kaula_p_io_wait_epfd(sh->wait), EPOLL_CTL_MOD, fd, &ev) == 0;
     }
     return 0;
 }
 
-void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd) {
-    epoll_ctl(kaula_p_io_wait_epfd(drv->wait), EPOLL_CTL_DEL, fd, NULL);
+void kaula_iodriver_backend_del(KaulaIoShard* sh, int fd) {
+    epoll_ctl(kaula_p_io_wait_epfd(sh->wait), EPOLL_CTL_DEL, fd, NULL);
 }
 
-int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
+int kaula_iodriver_backend_wait(KaulaIoShard* sh, uint64_t timeout_ns) {
     struct epoll_event evs[IO_READY_BATCH];
 
     /*
@@ -87,38 +80,37 @@ int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
      * 亚毫秒定时只能等到下一个毫秒边界 —— 实测 200us 定时额外开销 1030us。
      * 毫秒取整是 epoll_wait 接口本身的限制，不是参数能调好的。
      */
-    kaula_p_io_arm_timer(drv->wait, timeout_ns);
+    kaula_p_io_arm_timer(sh->wait, timeout_ns);
 
-    int n = epoll_wait(kaula_p_io_wait_epfd(drv->wait), evs, IO_READY_BATCH, -1);
+    int n = epoll_wait(kaula_p_io_wait_epfd(sh->wait), evs, IO_READY_BATCH, -1);
     if (n < 0) return -1;
 
-    g_ready_count = 0;
-    g_ready_pos = 0;
+    sh->ready_count = 0;
+    sh->ready_pos = 0;
     for (int i = 0; i < n; i++) {
         /* 定时器到期不是 IO 就绪：抽干计数后不计入就绪批次。
          * 返回 0 是安全的 —— 驱动循环下一轮会重新 io_timers_fire。 */
         if (evs[i].data.fd == KAULA_P_TIMER_FD) {
             uint64_t ticks;
-            while (read(kaula_p_io_wait_timerfd(drv->wait), &ticks, sizeof(ticks)) > 0) { }
+            while (read(kaula_p_io_wait_timerfd(sh->wait), &ticks, sizeof(ticks)) > 0) { }
             continue;
         }
 
         uint32_t e = 0;
         if (evs[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) e |= KAULA_IO_EV_READ;
         if (evs[i].events & (EPOLLOUT | EPOLLERR))          e |= KAULA_IO_EV_WRITE;
-        g_ready[g_ready_count].fd = evs[i].data.fd;
-        g_ready[g_ready_count].events = e;
-        g_ready_count++;
+        sh->ready[sh->ready_count].fd = evs[i].data.fd;
+        sh->ready[sh->ready_count].events = e;
+        sh->ready_count++;
     }
-    return g_ready_count;
+    return sh->ready_count;
 }
 
-int kaula_iodriver_backend_next_event(KaulaIoDriver* drv, int* fd, uint32_t* events) {
-    (void)drv;
-    if (g_ready_pos >= g_ready_count) return 0;
-    *fd = g_ready[g_ready_pos].fd;
-    *events = g_ready[g_ready_pos].events;
-    g_ready_pos++;
+int kaula_iodriver_backend_next_event(KaulaIoShard* sh, int* fd, uint32_t* events) {
+    if (sh->ready_pos >= sh->ready_count) return 0;
+    *fd = sh->ready[sh->ready_pos].fd;
+    *events = sh->ready[sh->ready_pos].events;
+    sh->ready_pos++;
     return 1;
 }
 
@@ -129,22 +121,21 @@ int kaula_iodriver_backend_next_event(KaulaIoDriver* drv, int* fd, uint32_t* eve
  */
 
 /* 就绪式后端没有「完成结果」：IO 还没做，结果要等 do_io 跑完才知道。 */
-int kaula_iodriver_backend_next_completion(KaulaIoDriver* drv,
+int kaula_iodriver_backend_next_completion(KaulaIoShard* sh,
                                            KaulaTask** out_task, int* out_result) {
-    (void)drv; (void)out_task; (void)out_result;
+    (void)sh; (void)out_task; (void)out_result;
     return 0;
 }
 
 /* 每轮事件循环开始时清空就绪批次。 */
-void kaula_iodriver_backend_begin(KaulaIoDriver* drv) {
-    (void)drv;
-    g_ready_count = 0;
-    g_ready_pos = 0;
+void kaula_iodriver_backend_begin(KaulaIoShard* sh) {
+    sh->ready_count = 0;
+    sh->ready_pos = 0;
 }
 
 /* 就绪式后端的在途操作由驱动的挂起表持有，这里无事可做。 */
-void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv) {
-    (void)drv;
+void kaula_iodriver_backend_abort_all(KaulaIoShard* sh) {
+    (void)sh;
 }
 
 /* ================================================================
@@ -152,7 +143,7 @@ void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv) {
  * ================================================================ */
 #elif KAULA_P_IO_KQUEUE
 
-int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t want) {
+int kaula_iodriver_backend_add(KaulaIoShard* sh, KaulaTask* task, uint32_t want) {
     int fd = task->io_request.fd;
     kaula_p_io_set_nonblocking(fd);
 
@@ -170,17 +161,17 @@ int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t wan
     /* udata 用 fd 编码，保持与 epoll 侧一致的判别语义 */
     for (int i = 0; i < n; i++) changes[i].udata = (void*)(intptr_t)fd;
 
-    return kevent(kaula_p_io_wait_epfd(drv->wait), changes, n, NULL, 0, NULL) >= 0;
+    return kevent(kaula_p_io_wait_epfd(sh->wait), changes, n, NULL, 0, NULL) >= 0;
 }
 
-void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd) {
+void kaula_iodriver_backend_del(KaulaIoShard* sh, int fd) {
     struct kevent changes[2];
     EV_SET(&changes[0], fd, EVFILT_READ,  EV_DELETE, 0, 0, NULL);
     EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    kevent(kaula_p_io_wait_epfd(drv->wait), changes, 2, NULL, 0, NULL);
+    kevent(kaula_p_io_wait_epfd(sh->wait), changes, 2, NULL, 0, NULL);
 }
 
-int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
+int kaula_iodriver_backend_wait(KaulaIoShard* sh, uint64_t timeout_ns) {
     struct kevent evs[IO_READY_BATCH];
     struct timespec ts;
     struct timespec* tsp = NULL;
@@ -191,49 +182,47 @@ int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
         tsp = &ts;
     }
 
-    int n = kevent(kaula_p_io_wait_epfd(drv->wait), NULL, 0, evs, IO_READY_BATCH, tsp);
+    int n = kevent(kaula_p_io_wait_epfd(sh->wait), NULL, 0, evs, IO_READY_BATCH, tsp);
     if (n < 0) return -1;
 
-    g_ready_count = 0;
-    g_ready_pos = 0;
+    sh->ready_count = 0;
+    sh->ready_pos = 0;
     for (int i = 0; i < n; i++) {
         /* 唤醒通道：udata 存哨兵 */
         int fd = (int)(intptr_t)evs[i].udata;
         uint32_t e = 0;
         if (evs[i].filter == EVFILT_READ)  e |= KAULA_IO_EV_READ;
         if (evs[i].filter == EVFILT_WRITE) e |= KAULA_IO_EV_WRITE;
-        g_ready[g_ready_count].fd = fd;
-        g_ready[g_ready_count].events = e;
-        g_ready_count++;
+        sh->ready[sh->ready_count].fd = fd;
+        sh->ready[sh->ready_count].events = e;
+        sh->ready_count++;
     }
-    return g_ready_count;
+    return sh->ready_count;
 }
 
-int kaula_iodriver_backend_next_event(KaulaIoDriver* drv, int* fd, uint32_t* events) {
-    (void)drv;
-    if (g_ready_pos >= g_ready_count) return 0;
-    *fd = g_ready[g_ready_pos].fd;
-    *events = g_ready[g_ready_pos].events;
-    g_ready_pos++;
+int kaula_iodriver_backend_next_event(KaulaIoShard* sh, int* fd, uint32_t* events) {
+    if (sh->ready_pos >= sh->ready_count) return 0;
+    *fd = sh->ready[sh->ready_pos].fd;
+    *events = sh->ready[sh->ready_pos].events;
+    sh->ready_pos++;
     return 1;
 }
 
 /* 就绪式后端没有"完成结果"：IO 还没做，结果要等 do_io 跑完才知道。 */
-int kaula_iodriver_backend_next_completion(KaulaIoDriver* drv,
+int kaula_iodriver_backend_next_completion(KaulaIoShard* sh,
                                            KaulaTask** out_task, int* out_result) {
-    (void)drv; (void)out_task; (void)out_result;
+    (void)sh; (void)out_task; (void)out_result;
     return 0;
 }
 
-void kaula_iodriver_backend_begin(KaulaIoDriver* drv) {
-    (void)drv;
-    g_ready_count = 0;
-    g_ready_pos = 0;
+void kaula_iodriver_backend_begin(KaulaIoShard* sh) {
+    sh->ready_count = 0;
+    sh->ready_pos = 0;
 }
 
 /* 就绪式后端的在途操作由驱动的挂起表持有，这里无事可做。 */
-void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv) {
-    (void)drv;
+void kaula_iodriver_backend_abort_all(KaulaIoShard* sh) {
+    (void)sh;
 }
 
 /* ================================================================
@@ -287,8 +276,8 @@ static IocpDone g_iocp_done[IO_READY_BATCH];
 static int      g_iocp_done_count = 0;
 static int      g_iocp_done_pos = 0;
 
-void kaula_iodriver_backend_begin(KaulaIoDriver* drv) {
-    (void)drv;
+void kaula_iodriver_backend_begin(KaulaIoShard* sh) {
+    (void)sh;
     g_iocp_done_count = 0;
     g_iocp_done_pos = 0;
 }
@@ -316,11 +305,11 @@ static void iocp_untrack(int slot) {
  * 会返回 ERROR_INVALID_PARAMETER —— 那正是"已经关联过"，不是失败。
  * 不忽略它的话，同一个 fd 上的第二个等待者会被误判成注册失败。
  */
-static void iocp_associate(KaulaIoDriver* drv, HANDLE h) {
-    CreateIoCompletionPort(h, drv->wait, 0, 0);
+static void iocp_associate(KaulaIoShard* sh, HANDLE h) {
+    CreateIoCompletionPort(h, sh->wait, 0, 0);
 }
 
-int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t want) {
+int kaula_iodriver_backend_add(KaulaIoShard* sh, KaulaTask* task, uint32_t want) {
     const KaulaIoRequest* req = &task->io_request;
 
     /*
@@ -353,7 +342,7 @@ int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t wan
     op->fd       = req->fd;
     op->is_write = (want & KAULA_IO_EV_WRITE) ? 1 : 0;
 
-    iocp_associate(drv, h);
+    iocp_associate(sh, h);
 
     /*
      * 完成包靠 lpOverlapped 认回记录，不靠 completionKey。
@@ -403,8 +392,8 @@ int kaula_iodriver_backend_add(KaulaIoDriver* drv, KaulaTask* task, uint32_t wan
     return 0;
 }
 
-void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd) {
-    (void)drv;
+void kaula_iodriver_backend_del(KaulaIoShard* sh, int fd) {
+    (void)sh;
     /*
      * 取消该 fd 上所有在途操作。
      *
@@ -436,8 +425,8 @@ void kaula_iodriver_backend_del(KaulaIoDriver* drv, int fd) {
  *
  * 驱动线程已 join，所以这里访问在途表不需要同步。
  */
-void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv) {
-    (void)drv;
+void kaula_iodriver_backend_abort_all(KaulaIoShard* sh) {
+    (void)sh;
     for (int i = 0; i < IOCP_MAX_OPS; i++) {
         IocpOp* op = g_iocp_ops[i];
         if (op == NULL) continue;
@@ -449,7 +438,7 @@ void kaula_iodriver_backend_abort_all(KaulaIoDriver* drv) {
     g_iocp_done_pos = 0;
 }
 
-int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
+int kaula_iodriver_backend_wait(KaulaIoShard* sh, uint64_t timeout_ns) {
     /*
      * 超时换算：向下取整，亚毫秒一律折成 0（= 立即返回重查定时器堆）。
      *
@@ -478,7 +467,7 @@ int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
         ULONG_PTR key = 0;
         OVERLAPPED* pov = NULL;
 
-        BOOL ok = GetQueuedCompletionStatus(drv->wait, &bytes, &key, &pov,
+        BOOL ok = GetQueuedCompletionStatus(sh->wait, &bytes, &key, &pov,
                                             (round == 0) ? ms : 0);
         if (pov == NULL) {
             if (!ok) break;      /* 超时（或端口已关闭） */
@@ -524,18 +513,18 @@ int kaula_iodriver_backend_wait(KaulaIoDriver* drv, uint64_t timeout_ns) {
     return g_iocp_done_count;
 }
 
-int kaula_iodriver_backend_next_event(KaulaIoDriver* drv, int* fd, uint32_t* events) {
+int kaula_iodriver_backend_next_event(KaulaIoShard* sh, int* fd, uint32_t* events) {
     /*
      * 完成式后端不走就绪路径：IO 投递时就做完了，没有"就绪"这回事。
      * 返回 0，驱动循环自然跳过 do_io 分支。
      */
-    (void)drv; (void)fd; (void)events;
+    (void)sh; (void)fd; (void)events;
     return 0;
 }
 
-int kaula_iodriver_backend_next_completion(KaulaIoDriver* drv,
+int kaula_iodriver_backend_next_completion(KaulaIoShard* sh,
                                            KaulaTask** out_task, int* out_result) {
-    (void)drv;
+    (void)sh;
     if (g_iocp_done_pos >= g_iocp_done_count) return 0;
     *out_task = g_iocp_done[g_iocp_done_pos].task;
     *out_result = g_iocp_done[g_iocp_done_pos].result;

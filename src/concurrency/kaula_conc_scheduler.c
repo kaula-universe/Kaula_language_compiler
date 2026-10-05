@@ -457,6 +457,17 @@ void kaula_scheduler_notify_all(void) {
     }
 }
 
+void kaula_scheduler_notify_n(uint32_t n) {
+    uint32_t wc = g_conc_runtime.worker_count;
+    if (n > wc) n = wc;
+    for (uint32_t i = 0; i < wc && n > 0; i++) {
+        if (atomic_load_explicit(&g_conc_workers[i].running, memory_order_acquire)) {
+            kaula_worker_wake(&g_conc_workers[i]);
+            n--;
+        }
+    }
+}
+
 /* ========== Task 回归（IO / 阻塞完成后） ========== */
 
 int kaula_scheduler_resume_task(KaulaTask* task) {

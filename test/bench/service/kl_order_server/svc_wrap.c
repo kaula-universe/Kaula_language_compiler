@@ -23,7 +23,7 @@ int kaula_svc_listen(int port) {
     a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = htons((uint16_t)port);
     if (bind(ls, (struct sockaddr*)&a, sizeof(a)) != 0) { close(ls); return -1; }
-    if (listen(ls, 512) != 0) { close(ls); return -1; }
+    if (listen(ls, 8192) != 0) { close(ls); return -1; }
     return ls;
 }
 
