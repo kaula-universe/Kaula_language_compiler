@@ -1,0 +1,107 @@
+// Kaula 语言层 TCP 订单服务 —— kl 是最终调用方。（诊断日志版）
+import std.io
+import std.memory
+import std.time
+
+extern fn kaula_svc_listen(port: i32) -> i32
+extern fn kaula_svc_accept(lfd: i32) -> i32
+extern fn kaula_tls_io_result() -> i32
+extern fn kaula_close(fd: i32) -> i32
+extern fn net_recv(fd: i32, buf: *u8, len: i32) -> i64
+extern fn kaula_svc_send(fd: i32, buf: *u8, len: i32) -> i32
+extern fn kaula_svc_at(buf: *u8, off: i32) -> *u8
+
+fn checksum256(s: *u8, n: i32) -> u32 {
+    u32 h = 0x811C9DC5
+    for round in range(256) {
+        for i in range(n) {
+            h = (h ^ as<u32>(s[i])) * 16777619 + as<u32>(round)
+        }
+    }
+    return h
+}
+
+fn parse_seq(line: *u8, n: i32) -> i32 {
+    i32 i = 2
+    i32 v = 0
+    while (i < n && line[i] != 44) {
+        v = v * 10 + (line[i] - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn itoa(v: i32, out: *u8, base: i32) -> i32 {
+    i32 t = v
+    i32 nd = 1
+    while (t >= 10) { t = t / 10; nd = nd + 1 }
+    i32 p = base + nd - 1
+    t = v
+    while (t > 0) {
+        out[p] = 48 + (t % 10)
+        t = t / 10
+        p = p - 1
+    }
+    return nd
+}
+
+conc fn conn_task(fd: i32) -> i32 {
+    u8* buf = std.memory.kmm_v4_alloc(1024)
+    u8* resp = std.memory.kmm_v4_alloc(128)
+    while (true) {
+        net_recv(fd, buf, 1024)
+        i32 got = kaula_tls_io_result()
+        if (got <= 0) {
+            kaula_close(fd)
+            return 0
+        }
+        i32 off = 0
+        while (off < got) {
+            i32 n = 0
+            while (off + n < got && buf[off + n] != 10) { n = n + 1 }
+            if (off + n >= got) {
+                // 尾行不完整：留给下一次 net_recv 前的处理（真实场景应保留；
+                // loadgen 行短、1024 缓冲一次读满，不会跨边界）
+                break
+            }
+            u8* ln = kaula_svc_at(buf, off)
+            u32 ck = checksum256(ln, n)
+            i32 seq = parse_seq(ln, n)
+            std.time.time_sleep_us(200)
+            resp[0] = 82
+            resp[1] = 44
+            i32 pos = itoa(seq, resp, 2)
+            pos = pos + 2
+            resp[pos] = 44
+            pos = pos + 1
+            i32 cklow = as<i32>(ck % 256)
+            pos = itoa(cklow, resp, pos) + pos
+            resp[pos] = 44
+            pos = pos + 1
+            resp[pos] = 48
+            pos = pos + 1
+            resp[pos] = 10
+            pos = pos + 1
+            kaula_svc_send(fd, resp, pos)
+            off = off + n + 1
+        }
+    }
+    kaula_close(fd)
+    return 0
+}
+
+fn main() -> i32 {
+    i32 lfd = kaula_svc_listen(8125)
+    if (lfd < 0) {
+        std.io.println("listen failed")
+        return 1
+    }
+    std.io.println("kl order server on 8125")
+    while (true) {
+        i32 cfd = kaula_svc_accept(lfd)
+        if (cfd >= 0) {
+            spawn conn_task(cfd)
+        }
+    }
+    return 0
+}

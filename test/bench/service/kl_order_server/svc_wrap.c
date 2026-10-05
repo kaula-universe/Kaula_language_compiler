@@ -1,0 +1,61 @@
+/*
+ * kl 服务的 socket 侧 C wrapper（语言层不直接碰 syscall）。
+ * 与 std.net 同属"C 互操作"层：kl 是最终调用方，这里只做
+ * listen/accept/nonblock + TLS 结果读取。
+ */
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <stdint.h>
+#include "kaula_conc.h"
+
+int kaula_svc_listen(int port) {
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls < 0) return -1;
+    int one = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    a.sin_port = htons((uint16_t)port);
+    if (bind(ls, (struct sockaddr*)&a, sizeof(a)) != 0) { close(ls); return -1; }
+    if (listen(ls, 512) != 0) { close(ls); return -1; }
+    return ls;
+}
+
+int kaula_svc_accept(int lfd) {
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0) return -1;
+    int fl = fcntl(cfd, F_GETFL, 0);
+    if (fl >= 0) fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
+    return cfd;
+}
+
+int kaula_tls_io_result(void) { return kaula_conc_tls_io_result; }
+
+int kaula_close(int fd) { return close(fd); }
+
+/* 直写响应：ET 下 iodriver WRITE（EPOLLOUT 注册）在小响应/空写缓冲时
+   永不触发（无不可写→可写跃迁），会死锁。服务响应短、客户端总在读，
+   写缓冲几乎总是空 → 直写立即成功；EAGAIN（客户端慢）退避重试。 */
+void* kaula_svc_at(void* buf, int off) { return (char*)buf + off; }
+
+int kaula_svc_send(int fd, const void* buf, int len) {
+    const char* p = (const char*)buf;
+    int left = len;
+    while (left > 0) {
+        ssize_t n = write(fd, p, (size_t)left);
+        if (n > 0) { p += n; left -= (int)n; continue; }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct timespec ts = {0, 100000L}; /* 100us 退避 */
+            nanosleep(&ts, NULL);
+            continue;
+        }
+        return -1;
+    }
+    return len;
+}
