@@ -174,8 +174,10 @@ static void io_take_fd(KaulaIoShard* sh, int fd, uint32_t events,
         KaulaIoPending* p = *link;
         if (p->fd != fd) { link = &p->next; continue; }
 
-        if (p->want & events) {
-            /* 命中：整链摘下 */
+        if ((p->want & events) || (events & KAULA_IO_EV_ERROR)) {
+            /* 命中（EOF 无条件完成：写挂起遇对端断开/半关闭时 HUP/ERR
+             * 映射的 ERROR 位保证节点不被跳过 → 不滞留 CLOSE-WAIT）：
+             * 整链摘下 */
             *link = p->next;
             atomic_fetch_sub_explicit(&g_conc_iodriver.pending_count, 1,
                                       memory_order_relaxed);
