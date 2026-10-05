@@ -117,6 +117,17 @@ typedef struct KaulaWorker {
     KaulaLocalTimer*  local_timer_pool;          /* owner 独占 freelist */
     uint32_t          local_timer_pool_len;
 
+    /*
+     * ---- 恢复优先链（P-D2） ----
+     *
+     * 本地定时器到期任务先入此 FIFO 链（owner 独占），find_work 优先
+     * 取它 —— 对标 Go 的 runnext：恢复的任务绝不被新 spawn 的任务用
+     * LIFO 压住。基准是"完成一个补 spawn 一个"，若无此链，新任务
+     * push head 会把恢复任务一直压住，恢复波次处理被摊慢。
+     */
+    KaulaTask*        resume_head;
+    KaulaTask*        resume_tail;
+
     /* ---- 统计（独占缓存行） ---- */
     KaulaWorkerStats  stats;
     char              _pad_stats[KAULA_CACHE_LINE];

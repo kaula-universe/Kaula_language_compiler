@@ -410,7 +410,19 @@ typedef struct {
 static inline int kaula_p_event_create(kaula_p_event* out) {
     memset(out, 0, sizeof(*out));
     if (pthread_mutex_init(&out->m, NULL) != 0) return -1;
-    if (pthread_cond_init(&out->c, NULL) != 0) {
+    /*
+     * 条件变量必须挂在 CLOCK_MONOTONIC 上：超时计算（worker_park 的
+     * min(1ms, 最近到期剩余) 等）全部以 kaula_p_now_ns()=MONOTONIC
+     * 为基准。默认 REALTIME 会被 host 时钟调整（NTP/手动改时间）
+     * 打断 —— VM 里偶发睡过头，本地定时器到期没人 check，main 的
+     * await 永远等不到 → 偶发挂死（实测 5%~13% 复现率）。
+     */
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    int rc = pthread_cond_init(&out->c, &attr);
+    pthread_condattr_destroy(&attr);
+    if (rc != 0) {
         pthread_mutex_destroy(&out->m);
         return -1;
     }
@@ -443,7 +455,7 @@ static inline void kaula_p_event_reset(kaula_p_event* e) {
 /* 返回 1 = 被唤醒，0 = 超时 */
 static inline int kaula_p_event_wait(kaula_p_event* e, uint64_t timeout_ns) {
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    clock_gettime(CLOCK_MONOTONIC, &ts);  /* 与 condattr 及 kaula_p_now_ns 一致 */
     ts.tv_sec  += (time_t)(timeout_ns / 1000000000ULL);
     ts.tv_nsec += (long)(timeout_ns % 1000000000ULL);
     if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
