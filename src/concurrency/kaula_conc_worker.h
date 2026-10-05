@@ -55,15 +55,10 @@ typedef struct {
  * 这是 suspend 落后 Go 的核心结构性差距。
  *
  * 链表仅 owner 线程访问（add 在 execute 的 SUSPEND 分支；check 在本
- * Worker 调度循环；转移在退出路径），无并发，无需原子。节点走 owner
- * 独占 freelist 池，避免高频 malloc/free。
+ * Worker 调度循环；转移在退出路径），无并发，无需原子。P-D3 起节点
+ * 直接内嵌进 KaulaTask（local_deadline_ns + 复用 resume_next 链接），
+ * 不再分配 KaulaLocalTimer，省一次指针跳与池管理。
  */
-typedef struct KaulaLocalTimer {
-    uint64_t                deadline_ns;
-    KaulaTask*              task;
-    struct KaulaLocalTimer* next;
-} KaulaLocalTimer;
-
 /* 短 sleep 阈值：<= 此值走本地定时器；更长仍提交 IoDriver（低频跨线程可摊薄） */
 #define KAULA_LOCAL_TIMER_MAX_NS 1000000ULL /* 1ms */
 
@@ -111,11 +106,9 @@ typedef struct KaulaWorker {
     /* task_pool 当前长度（owner 独占维护）。归还时据此判定高水位收缩。 */
     uint32_t          task_pool_len;
 
-    /* ---- 本地短定时器（P-D） ---- */
-    KaulaLocalTimer*  local_timers;
+    /* ---- 本地短定时器（P-D3：Task 内嵌，owner 独占无锁） ---- */
+    KaulaTask*        local_timers;              /* 链接复用 task->resume_next */
     uint64_t          local_timers_min_deadline; /* UINT64_MAX = 空 */
-    KaulaLocalTimer*  local_timer_pool;          /* owner 独占 freelist */
-    uint32_t          local_timer_pool_len;
 
     /*
      * ---- 恢复优先链（P-D2） ----

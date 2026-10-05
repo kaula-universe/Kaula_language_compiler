@@ -11,7 +11,7 @@ CONFIGS = [
     ("suspend", 1000), ("suspend", 10000),
     ("mixed", 1000), ("mixed", 10000),
 ]
-PAIRS = 7  # 含首对预热，有效 6 对
+PAIRS = 11  # 含首对预热，有效 6 对
 
 RE = re.compile(r"RESULT curve=(\w+) tps=(\d+) elapsed_ns=(\d+) p50=(\d+) p95=(\d+) p99=(\d+) p999=(\d+) max=(\d+) n=(\d+) win=(\d+) errors=(\d+) checksum=(\d+)")
 

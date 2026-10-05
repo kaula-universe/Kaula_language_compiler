@@ -74,6 +74,8 @@ KaulaTask* kaula_task_alloc(void) {
         memset(&task->io_request, 0, sizeof(task->io_request));
         task->io_result = 0;
         task->next = NULL;
+        task->resume_next = NULL;          /* 链指针一律归零（P-D2/P-D3 防御） */
+        task->local_deadline_ns = 0;       /* P-D3：不在本地定时器链上 */
         task->created_ns = kaula_p_now_ns();
         task->started_ns = 0;
         task->resume_count = 0;
