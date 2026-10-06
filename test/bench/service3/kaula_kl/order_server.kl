@@ -1,0 +1,191 @@
+// Kaula 语言层订单服务（conc）—— 与 Go / Tokio 版逐位等价（见 TRANSACTION.md）。
+//
+// 这是**用户真实写出来的 Kaula**：conn_task 是 conc fn，经 kaulac lowering
+// 成 C 状态机；IO 走 net_recv/net_send 的挂起点，sleep 走 IoDriver 定时器。
+// 与 test/bench/service/kaula_order_server.c 的区别：那个是手写 C 直调内核
+// API（内核下限），**没经过编译器**；本文件是语言层口径。
+//
+// 每请求：net_recv 读行 → checksum256(256轮, u32回绕)
+//   → 手写扫描解析 → kmm_v4_alloc(64) 业务对象 → 64轮 i32 混合校验
+//   → time_sleep_us(200) → 编码 "R,<seq>,<hex8>,<total>\n" → net_send
+import std.io
+import std.memory
+import std.time
+
+extern fn kaula_svc_listen(port: i32) -> i32
+extern fn kaula_svc_accept(lfd: i32) -> i32
+extern fn kaula_tls_io_result() -> i32
+extern fn kaula_close(fd: i32) -> i32
+extern fn net_recv(fd: i32, buf: *u8, len: i32) -> i64
+extern fn kaula_svc_send(fd: i32, buf: *u8, len: i32) -> i32
+// 指针偏移 helper：语言层不直接做 `*u8 + i32`
+extern fn kaula_svc_at(buf: *u8, off: i32) -> *u8
+
+// checksum256：u32 回绕，FNV-1a 变体。与其余两边逐位等价。
+fn checksum256_at(s: *u8, off: i32, n: i32) -> u32 {
+    u32 h = 0x811C9DC5
+    for round in range(256) {
+        for i in range(n) {
+            h = (h ^ as<u32>(s[off + i])) * 16777619 + as<u32>(round)
+        }
+    }
+    return h
+}
+
+// parse_field_at：手写扫描第 k 个逗号分隔字段（0 起始），与其余两边同法。
+fn parse_field_at(line: *u8, off: i32, n: i32, k: i32) -> i32 {
+    i32 i = 0
+    i32 f = 0
+    while (i < n && f < k) {
+        if (line[off + i] == 44) { f = f + 1 }
+        i = i + 1
+    }
+    i32 v = 0
+    while (i < n && line[off + i] != 44) {
+        v = v * 10 + (line[off + i] - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn itoa(v: i32, out: *u8, base: i32) -> i32 {
+    i32 t = v
+    i32 nd = 1
+    while (t >= 10) { t = t / 10; nd = nd + 1 }
+    i32 p = base + nd - 1
+    t = v
+    while (t > 0) {
+        out[p] = 48 + (t % 10)
+        t = t / 10
+        p = p - 1
+    }
+    return nd
+}
+
+// 8 位小写十六进制（对齐 Go 的 %08x 小写；u32→i64 保证余数非负）
+fn itohex8(v: u32, out: *u8, base: i32) -> i32 {
+    i64 t = as<i64>(v)
+    i32 p = base + 7
+    for _k in range(8) {
+        i64 d = t % 16
+        if (d < 10) {
+            out[p] = 48 + as<i32>(d)
+        } else {
+            out[p] = 87 + as<i32>(d)
+        }
+        t = t / 16
+        p = p - 1
+    }
+    return 8
+}
+
+// S4 的 64 轮混合校验 —— **刻意放在普通 fn 里**（非 conc fn）。
+//
+// NOTE 见 ../KBUG_RANGE_GUARD.md：kaulac 对「挂起点之后」的
+// `for k in range(N)` 循环，其守卫链的 `sub[d]` 跨迭代不复位 ——
+// 第 1 轮把 sub[2] 推到链尾后，第 2..N 轮的 `if (sub[2] == ...)`
+// 全部失配，循环体等价于空转，结果只剩第 1 轮。静默算错，不崩。
+//
+// 普通 fn 不生成守卫链，循环语义正确（已用 64 轮递增用例验证
+// 返回 64）。把这段计算下沉到这里，既拿到正确语义，
+// 也避免在 benchmark 里使用「用户按文档直写会踩坑」的形态。
+fn mixed_verify64(seq: i32, qty: i32, price: i32, r: *u8) -> i32 {
+    i32 h = 0
+    i32 k = 0
+    while (k < 64) {
+        i32 x = h ^ as<i32>(r[k])
+        i32 acc = x + seq
+        acc = acc + qty
+        acc = acc + price
+        i32 m = acc * 31
+        h = m + k
+        k = k + 1
+    }
+    return h
+}
+
+conc fn conn_task(fd: i32) -> i32 {
+    u8* buf = std.memory.kmm_v4_alloc(8192)
+    u8* resp = std.memory.kmm_v4_alloc(64)
+    // 跨挂起点存活的缓冲水位必须留在帧外（本轮只处理单行，见下 note）
+    i32 carry = 0
+
+    while (true) {
+        net_recv(fd, kaula_svc_at(buf, carry), 8192 - carry)
+        i32 got = kaula_tls_io_result()
+        if (got <= 0) {
+            kaula_close(fd)
+            return 0
+        }
+        i32 avail = carry + got
+        i32 off = 0
+        while (off < avail) {
+            // 找行尾
+            i32 n = 0
+            while (off + n < avail && buf[off + n] != 10) { n = n + 1 }
+            if (off + n >= avail) { break }   // 尾行不完整，留到下轮
+
+            u32 ck = checksum256_at(buf, off, n)
+            i32 seq = parse_field_at(buf, off, n, 1)
+            i32 qty = parse_field_at(buf, off, n, 3)
+            i32 price = parse_field_at(buf, off, n, 4)
+            i32 total = qty * price
+
+            // S4：KMM 堆分配 + 64 轮 i32 混合校验（计算下沉到普通 fn）
+            u8* r = std.memory.kmm_v4_alloc(64)
+            r[0] = as<u8>(seq)
+            r[1] = as<u8>(qty)
+            r[2] = as<u8>(price)
+            i32 i = 3
+            while (i < 64) { r[i] = 0; i = i + 1 }
+            i32 h = mixed_verify64(seq, qty, price, r)
+            ck = ck ^ as<u32>(h)
+            std.memory.kmm_v4_free(r)
+
+            // S5：模拟下游 IO（挂起点，走 IoDriver 定时器）
+            std.time.time_sleep_us(200)
+
+            // S6：编码 "R,<seq>,<hex8>,<total>\n"
+            resp[0] = 82
+            resp[1] = 44
+            i32 pos = itoa(seq, resp, 2)
+            pos = pos + 2
+            resp[pos] = 44
+            pos = pos + 1
+            pos = itohex8(ck, resp, pos) + pos
+            resp[pos] = 44
+            pos = pos + 1
+            pos = itoa(total, resp, pos) + pos
+            resp[pos] = 10
+            pos = pos + 1
+
+            kaula_svc_send(fd, resp, pos)
+            off = off + n + 1
+        }
+        // 把不完整尾行搬到缓冲头部，水位记入 carry
+        i32 rest = avail - off
+        if (rest > 0 && off > 0) {
+            i32 j = 0
+            while (j < rest) { buf[j] = buf[off + j]; j = j + 1 }
+        }
+        carry = rest
+    }
+    kaula_close(fd)
+    return 0
+}
+
+fn main() -> i32 {
+    i32 lfd = kaula_svc_listen(8123)
+    if (lfd < 0) {
+        std.io.println("listen failed")
+        return 1
+    }
+    std.io.println("kl order server on 8123")
+    while (true) {
+        i32 cfd = kaula_svc_accept(lfd)
+        if (cfd >= 0) {
+            spawn conn_task(cfd)
+        }
+    }
+    return 0
+}
