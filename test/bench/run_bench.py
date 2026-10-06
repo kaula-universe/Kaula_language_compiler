@@ -82,6 +82,17 @@ def render_kaula(curve: str, conc: int, total: int) -> str:
         submit = "in_flight[j] = spawn curve_degrade(%d)" % DEGRADE_SPIN
         expected = "spawn curve_degrade(%d)" % DEGRADE_SPIN
 
+    # inlined：本曲线的事务函数是否被编译器完全内联（不进内核）。
+    #   判定依据是「事务函数体内是否存在挂起点」——
+    #     light   : parse_and_checksum 纯计算，无挂起点 → 内联
+    #     degrade : 忙循环 + parse，无挂起点           → 内联
+    #     suspend : std.time.time_sleep_us 是挂起点    → 不内联
+    #     mixed   : 带挂起的那个分支含挂起点            → 不内联
+    #   内联后 lowering 产出 `{ __r = K_x_as_fn(); kaula_handle_complete(__r); }`，
+    #   内核的 submit/complete 打点不发生，延迟列随之全 0。
+    #   这与 C 边（cbench，恒不内联）构成对照，用于量化编译器的优化幅度。
+    inlined = 1 if curve in ("light", "degrade") else 0
+
     out = (tmpl
            .replace("@@CURVE@@", curve)
            .replace("@@SUBMIT@@", submit)
@@ -92,7 +103,8 @@ def render_kaula(curve: str, conc: int, total: int) -> str:
            .replace("@@MAX_SAMPLES@@", str(MAX_SAMPLES))
            .replace("@@SUSPEND_US@@", str(cfg["suspend_us"]))
            .replace("@@MIXED_SLEEP_PCT@@", str(cfg["mixed_sleep_pct"]))
-           .replace("@@DEGRADE_PCT@@", str(cfg["degrade_pct"])))
+           .replace("@@DEGRADE_PCT@@", str(cfg["degrade_pct"]))
+           .replace("@@INLINED@@", str(inlined)))
     if "@@" in out:
         raise SystemExit(f"模板占位符未替换干净：{re.findall(r'@@[A-Z_]+@@', out)}")
     return out
@@ -116,6 +128,32 @@ def build_kaula(curve: str, conc: int, total: int) -> Path:
                        encoding="utf-8", errors="replace", cwd=str(REPO))
     if not exe.exists():
         raise SystemExit(f"kaulac 失败:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+    return exe
+
+
+def build_c() -> Path:
+    """构建 C 边基准（cbench/）—— 直调内核 API。
+
+    与 kaula 边共用同一份内核静态库 libkaula_runtime.a。
+    C 边参数走命令行（不像 Kaula 要重新渲染+编译），所以整个矩阵只构建一次。
+    这正是 C 边的意义之一：验证内核 API 在「不依赖编译器 lowering」时
+    的开销下限。
+    """
+    src = HERE / "cbench"
+    exe = src / f"bench_c{EXE_SUFFIX}"
+    inc = KAULA_HOME / "include"
+    lib = KAULA_HOME / "lib" / "libkaula_runtime.a"
+    if not lib.exists():
+        raise SystemExit(f"找不到 {lib}，先跑 python toolkit_build.py --target runtime")
+    # -std=gnu11 + _POSIX_C_SOURCE：内核 platform 头用了 clock_gettime /
+    # nanosleep / pthread_condattr_setclock，严格 c11 下这些不声明。
+    cmd = ["clang", "-O2", "-std=gnu11", "-D_POSIX_C_SOURCE=200809L",
+           "-I", str(inc), "-o", str(exe), str(src / "main.c"),
+           str(lib), "-lpthread", "-lm"]
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                       errors="replace", cwd=str(src))
+    if r.returncode != 0 or not exe.exists():
+        raise SystemExit(f"clang 构建 C 基准失败:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
     return exe
 
 
@@ -182,7 +220,7 @@ def run_case(exe: Path, runtime: str, curve: str, conc: int, total: int,
     任何输出，比跑出错误数据更难排查。
     """
     cmd = [str(exe)]
-    if runtime != "kaula":       # Kaula 的参数已编译进源码
+    if runtime != "kaula":       # Kaula 的参数已编译进源码；c/go/tokio 走命令行
         cmd += [curve, str(conc), str(total)]
     full_env = dict(os.environ)
     if env:
@@ -320,7 +358,7 @@ def print_report(records: list[dict]) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runtimes", default="kaula,go")
+    ap.add_argument("--runtimes", default="kaula,c,go")
     ap.add_argument("--curves", default="light,suspend,mixed,degrade")
     ap.add_argument("--conc", default="1000,10000")
     ap.add_argument("--total", type=int, default=20000)
@@ -335,7 +373,7 @@ def main() -> int:
     concs = [int(x) for x in a.conc.split(",") if x]
 
     if a.list:
-        print("runtimes: kaula, go, tokio")
+        print("runtimes: kaula, c, go, tokio")
         print("curves:  ", ", ".join(CURVES))
         print("conc:    ", ", ".join(map(str, concs)))
         return 0
@@ -348,6 +386,9 @@ def main() -> int:
     for rt in runtimes:
         if rt == "kaula":
             built[rt] = None            # 每组参数重新生成编译
+        elif rt == "c":
+            log("构建 C 基准 ...")
+            built[rt] = build_c()
         elif rt == "go":
             log("构建 Go ...")
             built[rt] = build_go()

@@ -692,6 +692,32 @@ def build_kaula(curve: str, conc: int, total: int) -> Path:
     return exe
 
 
+def build_c() -> Path:
+    """构建 C 边基准（cbench/）—— 直调内核 API。
+
+    与 kaula 边共用同一份内核静态库 libkaula_runtime.a。
+    C 边参数走命令行，整个矩阵只构建一次（不像 kaula 每组参数重编译），
+    这也是 C 边的意义之一：验证内核 API 在不依赖编译器 lowering 时的开销下限。
+    """
+    from run_bench import KAULA_HOME         # 与 run_bench 同一份路径约定
+    src = HERE / "cbench"
+    exe = src / f"bench_c{EXE_SUFFIX}"
+    inc = KAULA_HOME / "include"
+    lib = KAULA_HOME / "lib" / "libkaula_runtime.a"
+    if not lib.exists():
+        raise SystemExit(f"找不到 {lib}，先跑 python toolkit_build.py --target runtime")
+    # -std=gnu11 + _POSIX_C_SOURCE：内核 platform 头用了 clock_gettime /
+    # nanosleep / pthread_condattr_setclock，严格 c11 下这些不声明。
+    cmd = ["clang", "-O2", "-std=gnu11", "-D_POSIX_C_SOURCE=200809L",
+           "-I", str(inc), "-o", str(exe), str(src / "main.c"),
+           str(lib), "-lpthread", "-lm"]
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                       errors="replace", cwd=str(src))
+    if r.returncode != 0 or not exe.exists():
+        raise SystemExit(f"clang 构建 C 基准失败:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+    return exe
+
+
 # ==========================================================================
 # 报告
 # ==========================================================================
@@ -823,7 +849,7 @@ CURVES_DEFAULT = "light,suspend,mixed,degrade"
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runtimes", default="kaula,go,tokio")
+    ap.add_argument("--runtimes", default="kaula,c,go")
     ap.add_argument("--curves", default=CURVES_DEFAULT)
     ap.add_argument("--conc", default="100,1000")
     ap.add_argument("--total", type=int, default=2000)
@@ -850,7 +876,7 @@ def main() -> int:
     concs = [int(x) for x in a.conc.split(",") if x]
 
     if a.list:
-        print("runtimes: kaula, go, tokio")
+        print("runtimes: kaula, c, go, tokio")
         print("curves:  ", ", ".join(["light", "suspend", "mixed", "degrade"]))
         print()
         print(f"{'key':<16}{'unit':<8}{'source':<10}desc")
@@ -874,6 +900,9 @@ def main() -> int:
         for rt in runtimes:
             if rt == "kaula":
                 built[rt] = None          # 每组参数重新生成编译
+            elif rt == "c":
+                log("构建 C 基准 ...")
+                built[rt] = build_c()
             elif rt == "go":
                 log("构建 Go ...")
                 built[rt] = build_go()
