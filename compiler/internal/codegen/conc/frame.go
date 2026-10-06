@@ -179,15 +179,60 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 		cType   string
 		name    string
 		comment string
+		/*
+		 * rank 是字段的访问热度分级，值小者靠前。
+		 *
+		 * == 为什么要按热度分区 ==
+		 *
+		 * resume 的每次推进读写的就是那几样：pc、sub[]、branch[]，
+		 * 加上循环的 loop_i/loop_end/loop_step、参数、跨段活的局部变量。
+		 * 这些字段若被冷字段（result 等）挤到第二条缓存行上，
+		 * **每一次状态机推进都要多一次 cache miss**。
+		 *
+		 * 而「热」是二值判据，真实访问频率却差着数量级：
+		 *
+		 *   0 = 状态机管理字段（pc / sub / branch）
+		 *       **每次 resume 与每次挂起都读写**。sub[d] 更是循环体里
+		 *       逐条语句比对的对象。整条热路径的核心。
+		 *
+		 *   1 = 迭代与数据字段（loop_i/end/step、参数、跨段局部变量）
+		 *       每轮循环体碰一次，每个挂起点写回一次。频率高，
+		 *       但比管理字段低一档。
+		 *
+		 *   2 = 冷字段（result 等）
+		 *       只在函数末尾写、await 读。不参与任何推进判断。
+		 *
+		 * 排序是 (rank 升, 对齐降)：先把 rank 0 的 5 字节摆好，
+		 * 再把 rank 1 的 8 字节数组填进去，最后 rank 2。
+		 *
+		 * 效果（K_worker_Frame，实测 sizeof 均为 80）：
+		 *   - 旧布局：pc@72 / sub[1]@74 / branch[1]@76 落在 64B 边界之后，
+		 *     而 loop_i[1]@8 / loop_end[1]@24 在前半 —— 每轮必跨 2 行，
+		 *     且**每次 resume 必读的 pc/sub 恰好在第二行**。
+		 *   - 新布局：pc@0 / sub[1]@2 / branch[1]@4，
+		 *     loop_i[1]@16 / loop_end[1]@32 / loop_step[1]@48
+		 *     全部落在第 0 行；只有 total@64 与 result 在第 1 行。
+		 *     管理字段（每次 resume 都碰）稳定命中第 0 行。
+		 */
+		rank int
 	}
 	var fields []field
 
 	addField := func(cType, name, comment string) {
-		fields = append(fields, field{alignOfCType(cType), cType, name, comment})
+		fields = append(fields, field{alignOfCType(cType), cType, name, comment, 2})
+	}
+	// addHotField 登记一个热字段（rank 0：状态机管理字段）。
+	addHotField := func(cType, name, comment string) {
+		fields = append(fields, field{alignOfCType(cType), cType, name, comment, 0})
+	}
+	// addWarmField 登记一个次热字段（rank 1：迭代/数据字段）。
+	addWarmField := func(cType, name, comment string) {
+		fields = append(fields, field{alignOfCType(cType), cType, name, comment, 1})
 	}
 
 	// pc（P2.3：int8_t 代替 int，挂起点数通常 < 128，省 3B + 对齐填充）
-	addField("int8_t", "pc", "程序计数：0=入口，N=第 N 个 suspend 点之后，-1=已完成")
+	// 热：每次 resume 必读（段入口判 pc）、每次挂起必写。
+	addHotField("int8_t", "pc", "程序计数：0=入口，N=第 N 个 suspend 点之后，-1=已完成")
 
 	// sub/branch 守卫数组（P2.3：int8_t 代替 int，守卫值通常 < 128）
 	if analysis.HasCompound {
@@ -202,8 +247,9 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 		}
 		subType := fmt.Sprintf("int8_t[%d]", depth)
 		brType := fmt.Sprintf("int8_t[%d]", depth)
-		addField(subType, "sub", "复合语句内的恢复槽位")
-		addField(brType, "branch", "if 分支选择")
+		// 热：每轮循环体逐条语句都要比对 sub[d]；branch 在每个 if 入口读写。
+		addHotField(subType, "sub", "复合语句内的恢复槽位")
+		addHotField(brType, "branch", "if 分支选择")
 	}
 
 	// for-in 守卫
@@ -215,28 +261,44 @@ func (e *Emitter) generateStatefulFrame(analysis *BodyAnalysis) string {
 		if depth < 1 {
 			depth = 1
 		}
-		addField(fmt.Sprintf("long long[%d]", depth), "loop_i", "for..in 迭代下标")
-		addField(fmt.Sprintf("long long[%d]", depth), "loop_end", "for..in 上界")
-		addField(fmt.Sprintf("long long[%d]", depth), "loop_step", "for..in 步长")
+		/*
+		 * 热 rank 1：循环每轮都要读写 loop_i/loop_end/loop_step。
+		 */
+		addWarmField(fmt.Sprintf("long long[%d]", depth), "loop_i", "for..in 迭代下标")
+		addWarmField(fmt.Sprintf("long long[%d]", depth), "loop_end", "for..in 上界")
+		addWarmField(fmt.Sprintf("long long[%d]", depth), "loop_step", "for..in 步长")
 	}
 
-	// 参数
+	// 参数（次热：挂起前写回、恢复时读出，每段都碰）
 	for i, p := range e.Params {
-		addField(e.CTypeOfParam(i), p, "参数")
+		addWarmField(e.CTypeOfParam(i), p, "参数")
 	}
 
-	// 跨 suspend 存活的局部变量
+	// 跨 suspend 存活的局部变量（次热：每个挂起点都要写回与恢复）
 	for _, v := range analysis.FrameVars {
-		addField(e.FrameVarCType(v.Name), v.Name, v.Name)
+		addWarmField(e.FrameVarCType(v.Name), v.Name, v.Name)
 	}
 
 	// 结果
 	if e.CReturnType != "" && e.CReturnType != "void" {
+		/*
+		 * 冷：result 只在函数最后写一次、由 await 读一次。
+		 * 它不参与状态机的任何推进判断，放热区只是白占缓存行。
+		 */
 		addField(strings.TrimSpace(e.CReturnType), "result", "结果")
 	}
 
-	// 按对齐降序排序（稳定排序保持同对齐内的声明顺序）
+	/*
+	 * 排序：(rank 升, 对齐降)。
+	 *
+	 * 稳定排序保证同 (rank, align) 内保持声明顺序 —— 这正是
+	 * 「参数按签名序、FrameVars 按声明序」的契约，测试与生成代码
+	 * 都依赖它，不能因为重排而变。
+	 */
 	sort.SliceStable(fields, func(i, j int) bool {
+		if fields[i].rank != fields[j].rank {
+			return fields[i].rank < fields[j].rank
+		}
 		return fields[i].align > fields[j].align
 	})
 
