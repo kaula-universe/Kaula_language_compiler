@@ -31,6 +31,30 @@ extern "C" {
 #define KAULA_INJECT_QUEUE_CAPACITY  131072
 #define KAULA_INJECT_QUEUE_MASK      (KAULA_INJECT_QUEUE_CAPACITY - 1)
 
+/*
+ * 注入队列分片数（必须为 2 的幂）。
+ *
+ * 动机：外部线程（main）的 spawn 全部经**单条**全局注入队列，push 侧
+ * 靠一把 atomic_flag 串行化、pop 侧所有 Worker 竞争同一个 head —— 在
+ * 32 核上这构成一个全局串行点。实测 degrade 曲线随 Worker 数几乎不扩展
+ * （1→32 核只从 61K 涨到 220K TPS，即 3.6x），单任务纯计算 15.3us，
+ * 32 核理论峰值 209 万 TPS，实际只有 10.5%。
+ *
+ * 分片把这条队列拆成 N 条彼此独立的 MPSC 队列：投递方按 task_id 轮转
+ * 选片，消费方优先排空「自己」那一片，空了再去扫别的片（等价于 work
+ * stealing 的注入队列版本）。锁、head/tail 全部按片独立，竞争面缩小
+ * 到 1/N。
+ *
+ * 注意：这不是把任务写进 Worker 的 Chase-Lev 本地队列（那会触发 F1
+ * 的 push_external 丢任务问题），而是另立 N 条 MPSC 队列，结构与原来
+ * 那条完全相同，只是各自独立 —— 正确性论证与原队列一一对应。
+ */
+#define KAULA_INJECT_SHARDS          8
+#define KAULA_INJECT_SHARD_MASK      (KAULA_INJECT_SHARDS - 1)
+/* 单片容量：8 片 × 8192 = 65536 槽（512KB 指针），仍在 I3「一切有界」内 */
+#define KAULA_INJECT_SHARD_CAPACITY  8192
+#define KAULA_INJECT_SHARD_MASK_CAP  (KAULA_INJECT_SHARD_CAPACITY - 1)
+
 /* 完成队列分片数（文档 §8.1，必须为 2 的幂） */
 #define KAULA_COMPLETION_SHARDS      16
 #define KAULA_COMPLETION_CAPACITY    1024
@@ -289,7 +313,10 @@ struct KaulaTask {
 
     /* ---- 链接 ---- */
     struct KaulaTask*   next;         /* 完成队列 / Block Lane 链表 */
-    struct KaulaTask*   next_free;    /* per-Worker 复用池链表（P0-2） */
+    struct KaulaTask*   next_free;    /* per-Worker 复用池链表（P0-2）；
+                                       * 也用作全局复用池（Treiber 栈）的链指针 */
+    _Atomic(struct KaulaTask*) gpool_next;   /* 全局复用池链指针（Treiber 栈用，
+                                              * 与 next_free 分开，避免互相踩） */
     /*
      * 恢复优先链（P-D2）：owner 独占 FIFO。
      * 同时复用为本地短定时器链表（P-D3）的链接：一个任务要么在
@@ -429,11 +456,22 @@ void        kaula_task_recycle(KaulaTask* task);
  * 池长未达高水位 → 入池复用（维护 w->task_pool_len）；
  * 已达高水位   → 彻底回收（destroy done_event + survivor_free），
  *                避免非 Worker 线程持续 spawn 时 Worker 池只增不减导致 OOM。
+ *
  * pool 必须是 &worker->task_pool（owner 独占，单线程访问）。
+ *
+ * 特例：pool == KAULA_TASK_POOL_GLOBAL 表示归还到**全局复用池**
+ * （Treiber 栈，任何线程可 push/pop）。非 Worker 线程（main / 外部线程）
+ * 完成的任务无处可归（没有自己的 Worker 池，也不能跨线程 push 别人的
+ * owner 池），用这个哨兵把它们送进全局池，供后续非 Worker spawn 复用
+ * —— 否则每次都回落 kmm_v4_alloc_global（实测 4.12us/spawn）。
  */
+#define KAULA_TASK_POOL_GLOBAL ((void**)(uintptr_t)1)
 void        kaula_task_pool_return(KaulaTask* task, void** pool);
 
 /* 读取/设置池高水位（init 时从环境变量读一次） */
+/* 排空全局复用池（runtime shutdown 时调用，见实现注释） */
+void        kaula_task_global_pool_reset(void);
+
 uint32_t    kaula_task_pool_high_water(void);
 void        kaula_task_pool_high_water_init(void);
 

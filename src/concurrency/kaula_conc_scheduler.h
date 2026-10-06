@@ -19,17 +19,31 @@
 extern "C" {
 #endif
 
-/* ========== 全局注入队列（MPMC 有界） ========== */
+/* ========== 全局注入队列（MPMC 有界，分片） ========== */
 
 typedef struct {
     _Atomic(uint64_t)   head;
     char                _pad0[KAULA_CACHE_LINE - sizeof(uint64_t)];
     _Atomic(uint64_t)   tail;
     char                _pad1[KAULA_CACHE_LINE - sizeof(uint64_t)];
-    _Atomic(KaulaTask*) buffer[KAULA_INJECT_QUEUE_CAPACITY];
+    _Atomic(KaulaTask*) buffer[KAULA_INJECT_SHARD_CAPACITY];
+} KaulaInjectShard;
+
+typedef struct {
+    /*
+     * 分片后的注入队列。每一片都是独立的 MPSC/MPMC 有界队列，
+     * head/tail 与 push 锁全部按片私有 —— 这是把 32 核上的单一
+     * 全局争用点拆成 8 份的全部手段（见 kaula_conc_task.h 常量处的
+     * 长注释）。lock 与 shard 分开数组存放，避免同一缓存行上
+     * 8 把锁被不同核反复弹跳（false sharing）。
+     */
+    KaulaInjectShard shard[KAULA_INJECT_SHARDS];
+    /* 每片一把 push 串行化锁，彼此独立 */
+    atomic_flag      push_lock[KAULA_INJECT_SHARDS];
 } KaulaInjectQueue;
 
 void kaula_inject_queue_init(void);
+
 int  kaula_inject_queue_push(KaulaTask* task);
 /*
  * P2.1：批量注入。一次拿锁、连续写 n 个 payload、一次 release 推 tail。
@@ -37,13 +51,44 @@ int  kaula_inject_queue_push(KaulaTask* task);
  */
 int  kaula_inject_queue_push_batch(KaulaTask** tasks, int n);
 KaulaTask* kaula_inject_queue_pop(void);
+/*
+ * 批量弹出：一次 CAS 推进 head m 个，把连续的 m 个 Task 写进 out[]。
+ * 返回实际弹出数（≤max）。空则返回 0。
+ *
+ * 为什么需要：外部线程（main）投递全部走全局注入队列，Worker 若每次只
+ * pop 一个 Task，那么每执行一个 Task 就要回来重新竞争 head，且本地队列
+ * 恒空 → 窃取恒失败 → 频繁 park（每次 ~260µs condvar 往返）。批量弹出
+ * 让一次 CAS 换来 m 个 Task，其中 m-1 个回填本地队列，后续取活走无 CAS
+ * 的本地 LIFO 快路径，把全局队列的竞争摊薄到 m 分之一。
+ *
+ * 注意：out[i] 在 head 推进后即可见（CAS 的 acq_rel 语义），
+ * 但因为 head 是单调推进，必须**先**把槽位指针读进 out，**再** CAS
+ * 推进 head；否则 CAS 成功后可能有新 push 覆盖槽位。
+ */
+int  kaula_inject_queue_pop_batch(KaulaTask** out, int max);
 int  kaula_inject_queue_empty(void);
 uint64_t kaula_inject_queue_size(void);
+
+/*
+ * 指定分片的取活/排空（Worker 用）：
+ *   prefer = 优先尝试的片（通常是 worker_id & MASK），
+ *   该片空则轮转扫其余片。
+ * 返回 NULL 表示所有片都空。
+ */
+KaulaTask* kaula_inject_queue_pop_pref(uint32_t prefer);
+/*
+ * 只排空指定片（不做全片扫描）。Worker 先扫自己的片、再扫别人的片，
+ * 使「本片有货」时不必付全扫代价。
+ */
+int kaula_inject_queue_pop_batch_shard(uint32_t shard, KaulaTask** out, int max);
 
 /* 简写（内核内部调用） */
 int       kaula_scheduler_inject_push(KaulaTask* task);
 KaulaTask* kaula_scheduler_inject_pop(void);
+int       kaula_scheduler_inject_pop_batch(KaulaTask** out, int max);
+int       kaula_scheduler_inject_pop_batch_shard(uint32_t shard, KaulaTask** out, int max);
 int       kaula_scheduler_inject_empty(void);
+int       kaula_scheduler_inject_empty_shard(uint32_t shard);
 
 /* ========== spawn（文档 §4.3） ========== */
 
@@ -101,6 +146,16 @@ KaulaHandle kaula_spawn_to(KaulaWorker* owner, KaulaResumeFn fn, void* frame, si
 
 /* 唤醒任意一个可能 park 的 Worker（用于唤醒所有 worker 之外的场景） */
 void kaula_scheduler_notify_one(void);
+/*
+ * 分片感知唤醒：唤醒「偏好 shard 这一片」的 Worker（worker_id & MASK == shard）。
+ * 投递方按 task_id 低位选片，调用本函数让 owner 片对应的 Worker 来取，
+ * 避免统一叫醒 worker[0] 造成的搬运不均与额外 park。
+ */
+void kaula_scheduler_notify_shard(uint32_t shard);
+/*
+ * 任务落在哪一片：与 kaula_inject_queue_push 的选片规则一致（task_id & MASK）。
+ */
+uint32_t kaula_scheduler_shard_of_task(KaulaTask* task);
 void kaula_scheduler_notify_all(void);
 /* 唤醒至多 n 个正在运行的 Worker（按 id 顺序；n > worker_count 时等同 all） */
 void kaula_scheduler_notify_n(uint32_t n);

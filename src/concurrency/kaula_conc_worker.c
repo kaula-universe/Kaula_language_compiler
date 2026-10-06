@@ -118,7 +118,15 @@ int kaula_conc_worker_post(KaulaWorker* w, KaulaTask* task) {
          * 退化成了唯一唤醒机制。
          */
         if (kaula_scheduler_inject_push(task)) {
-            kaula_scheduler_notify_one();
+            /*
+             * 无主投递（main 线程 / 外部生产者）：按 task_id 定片，
+             * 按片 RR 唤醒该片的 owner —— 唤醒面铺开到整片，而不是
+             * 恒定落在 worker[0]。这是 C 边 degrade（conc=100，投递密集、
+             * Worker 基本都在忙）吞吐翻倍的关键：notify_one 只叫 w[0]，
+             * 单核扫片封顶 ~250K；按片 RR 让同片 4 个 owner 轮流接活，
+             * 4 核并行消费，实测 ~460K。
+             */
+            kaula_scheduler_notify_shard(kaula_scheduler_shard_of_task(task));
             return 0;
         }
         return KAULA_ERR_WOULD_BLOCK;
@@ -144,7 +152,27 @@ int kaula_conc_worker_post(KaulaWorker* w, KaulaTask* task) {
      */
     if (t_current_worker != w) {
         if (kaula_scheduler_inject_push(task)) {
-            kaula_scheduler_notify_one();
+            /*
+             * 有明确目标 w：直接唤醒 w，而不是按片 RR 挑一个「偏好该片」
+             * 的兄弟 Worker。
+             *
+             * 任务已经进了注入队列（Chase-Lev 不允许外部线程写 bottom，
+             * 见上方注释），但它「属于」w —— w 是投递方指定的执行者
+             * （suspend 的挂起往返、驱动结果回投都带着明确 owner）。
+             * 按片 RR 会把唤醒推给同片的另一个 Worker：那个 Worker 醒来
+             * 先扫自己的片、再轮到别人的片，任务被它抢走执行，而真正的
+             * w 还在睡 —— 一次挂起往返多出一次跨核迁移 + 一次多余的
+             * 片扫描，实测 suspend/mixed 掉 15%。
+             *
+             * 直接 wake(w)：w 醒来扫片时优先看自己的偏好片，任务大概率
+             * 与它同片（task_id 分配与 owner 相关），一次就取走。
+             * 若 w 已撤离（running=0），下面的 notify_shard 兜底接手。
+             */
+            if (atomic_load_explicit(&w->running, memory_order_acquire)) {
+                kaula_worker_wake(w);
+            } else {
+                kaula_scheduler_notify_shard(kaula_scheduler_shard_of_task(task));
+            }
             return 0;
         }
         return KAULA_ERR_WOULD_BLOCK;
@@ -187,6 +215,8 @@ static void kaula_local_timer_add(KaulaWorker* w, KaulaTask* task,
     if (deadline < w->local_timers_min_deadline) {
         w->local_timers_min_deadline = deadline;
     }
+    /* 跨线程镜像：本 Worker 现在「为定时器而睡」 */
+    atomic_store_explicit(&w->has_local_timer, 1, memory_order_release);
 }
 
 /*
@@ -235,6 +265,8 @@ static void kaula_worker_check_local_timers(KaulaWorker* w) {
     }
     w->local_timers = keep;
     w->local_timers_min_deadline = new_min; /* keep 空时为 UINT64_MAX */
+    /* keep 空 → 不再为定时器而睡，清镜像（notify_shard 可重新唤醒本 Worker） */
+    atomic_store_explicit(&w->has_local_timer, keep != NULL, memory_order_release);
 }
 
 /* ========== 唤醒 ========== */
@@ -263,6 +295,14 @@ static void worker_park(KaulaWorker* w) {
 
     uint64_t t0 = kaula_p_now_ns();
     atomic_fetch_add_explicit(&w->stats.park_count, 1, memory_order_relaxed);
+
+    /*
+     * 置 parked=1 必须紧贴 event_wait 之前，且要保证「置位 → wait」之间
+     * 落入的 wake 不会丢：event 是计数语义（signal 累积），后到的 wait
+     * 会立即返回，因此即便 wake 在置位后、wait 前发生也不丢。
+     * 醒来后（含 wait 超时）立刻清零，保证 parked=1 只在真正阻塞时为真。
+     */
+    atomic_store_explicit(&w->parked, 1, memory_order_release);
 
     /*
      * busy-wait 低延迟阶段：park 前先轮询 N 次。
@@ -298,6 +338,7 @@ static void worker_park(KaulaWorker* w) {
         }
     }
     kaula_p_event_wait(&w->park_event, park_ns);
+    atomic_store_explicit(&w->parked, 0, memory_order_release);
 
     uint64_t dt = kaula_p_now_ns() - t0;
     atomic_fetch_add_explicit(&w->stats.park_total_ns, dt, memory_order_relaxed);
@@ -319,9 +360,57 @@ KaulaTask* kaula_conc_worker_find_work(KaulaWorker* w) {
     t = kaula_ws_deque_pop(&w->local_queue);
     if (t != NULL) return t;
 
-    /* 2. 全局注入队列 */
-    t = kaula_scheduler_inject_pop();
-    if (t != NULL) return t;
+    /* 2. 全局注入队列（分片，批量优先本片）
+     *
+     * 外部线程（main）投递一律走注入队列（见 kaula_conc_worker_post 的
+     * F1 说明），注入队列因此是主要任务来源。注入队列已按 task_id 分成
+     * KAULA_INJECT_SHARDS 片（见 kaula_conc_task.h 常量说明）。
+     *
+     * 先扫「自己那一片」（prefer = worker_id）：投递方按 task_id 轮转选片，
+     * 每个 Worker 大概率在自己的片上拿到活，锁与 head 竞争都只落在本片，
+     * 全局竞争被拆成 1/N。本片空了再轮转扫其余片，保证不让任务滞留。
+     *
+     * 每片批量取（一次 CAS 换一批）：out[0] 立即执行，out[1..m) 回填
+     * 本地队列，后续取活走第 1 步的无 CAS LIFO 快路径，把 head CAS
+     * 竞争再摊薄一个数量级。
+     *
+     * 关键：回填本地队列的每个 Task 都必须改写 owner = w。
+     * owner 是「SUSPEND 后 resume 该投给谁」的依据（kaula_scheduler_resume_task
+     * 读它决定 post 到哪个 Worker）。批量取出的 Task 仍带旧 owner（甚至
+     * NULL），不改写就会出现：IoDriver 唤醒时投给了别人的队列，而持有者
+     * 本地队列里那份仍在等 —— 表现为 sleep 任务 resume 一次后永不完成。
+     * steal 路径同样改写 owner，这里是同一约束。
+     */
+    {
+        KaulaTask* drained[32];
+        uint32_t want = (uint32_t)(w->worker_id) & KAULA_INJECT_SHARD_MASK;
+
+        int got = kaula_scheduler_inject_pop_batch_shard(want, drained, 32);
+        if (got == 0) {
+            /* 本片空：轮转扫其余片 */
+            for (uint32_t k = 1; k < KAULA_INJECT_SHARDS && got == 0; k++) {
+                uint32_t si = (want + k) & KAULA_INJECT_SHARD_MASK;
+                got = kaula_scheduler_inject_pop_batch_shard(si, drained, 32);
+            }
+        }
+
+        if (got > 0) {
+            /* 全部改写 owner = w（见上方「关键」注释） */
+            for (int j = 0; j < got; j++) {
+                atomic_store_explicit(&drained[j]->owner, w, memory_order_release);
+            }
+            for (int j = 1; j < got; j++) {
+                /* 本地队列刚被 pop 空、容量 4096、批量 ≤32，正常不会满；
+                 * 万一满则退回注入队列，绝不丢任务。 */
+                if (!kaula_ws_deque_push_owner(&w->local_queue, drained[j])) {
+                    if (!kaula_scheduler_inject_push(drained[j])) {
+                        kaula_scheduler_notify_one();
+                    }
+                }
+            }
+            return drained[0];
+        }
+    }
 
     /* 3. 窃取他人（随机起点，避免所有 Worker 撞同一个受害者） */
     uint32_t n = g_conc_runtime.worker_count;
@@ -673,6 +762,8 @@ int kaula_worker_prepare(KaulaWorker* w, uint32_t worker_id) {
 
     atomic_store_explicit(&w->running, 1, memory_order_release);
     atomic_store_explicit(&w->park_requested, 0, memory_order_relaxed);
+    atomic_store_explicit(&w->parked, 0, memory_order_relaxed);
+    atomic_store_explicit(&w->has_local_timer, 0, memory_order_relaxed);
     atomic_store_explicit(&w->evicted, 0, memory_order_relaxed);
     atomic_store_explicit(&w->local_epoch, 0, memory_order_relaxed);
 

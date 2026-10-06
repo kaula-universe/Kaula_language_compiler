@@ -27,6 +27,29 @@ extern int kaula_runtime_ensure_init(void);
 
 /* ========== 分配 ========== */
 
+static KaulaTask* global_task_pool_pop(void);
+static void       global_task_pool_push(KaulaTask* task);
+
+/*
+ * 排空全局复用池：runtime shutdown 时调用。
+ *
+ * 必须做，否则池里的 Task 指针在下次 runtime init 后成为悬垂 ——
+ * g_global_task_pool 是 static，跨 init/shutdown 周期存活，而池内
+ * Task 已在 shutdown 时被释放。test_epoch / test_task 这类"多次
+ * init+shutdown"的用例会立刻段错误。
+ */
+void kaula_task_global_pool_reset(void) {
+    KaulaTask* t = global_task_pool_pop();
+    while (t != NULL) {
+        if (kaula_p_event_is_valid(&t->done_event)) {
+            kaula_p_event_destroy(&t->done_event);
+            kaula_p_event_invalidate(&t->done_event);
+        }
+        kmm_v4_survivor_free(t);
+        t = global_task_pool_pop();
+    }
+}
+
 KaulaTask* kaula_task_alloc(void) {
     KaulaWorker* w = kaula_conc_current_worker();
 
@@ -86,10 +109,58 @@ KaulaTask* kaula_task_alloc(void) {
     }
 
     /*
-     * 池空或非 Worker 上下文：从 KMM survivor 段分配（跨 scope 存活）。
-     * 帧也来自同一段，故回收时能成对释放。
+     * 非 Worker 上下文（main / 外部线程）：
+     *
+     * 优先从**全局复用池**取 —— 原实现一律走 kmm_v4_alloc_global，实测
+     * 每次 spawn 4.12us（alloc + event_create + memset），在 20000 spawn
+     * 的基准里就是整个墙钟。全局池命中时只需重置字段 + 重建 event，
+     * 省掉分配器的跨线程记账与 TLS 桶查找。
+     *
+     * 池内 Task 的 done_event 在归还时已被 destroy（见
+     * kaula_task_pool_return / global_task_pool_push 的超水位分支），
+     * 因此这里必须重新 create。
+     *
+     * 池空则回落 KMM survivor 段（跨 scope 存活，帧也来自同一段，
+     * 回收时能成对释放）。
      */
-    KaulaTask* task = (KaulaTask*)kmm_v4_alloc_global(sizeof(KaulaTask));
+    KaulaTask* task = global_task_pool_pop();
+    if (task != NULL) {
+        /* 独占期：普通读写即可（在发布给任何其他线程之前） */
+        task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
+                                                  memory_order_relaxed);
+        task->state = KAULA_TASK_CREATED;
+        task->resume_fn = NULL;
+        task->frame = NULL;
+        task->frame_size = 0;
+        task->inner_frame = NULL;
+        task->owner = NULL;
+        task->submit_ns = 0;
+        task->complete_ns = 0;
+        task->result = NULL;
+        task->error = 0;
+        task->cancelled = 0;
+        task->pin_refs = 0;
+        task->waiters = 0;
+        memset(&task->io_request, 0, sizeof(task->io_request));
+        task->io_result = 0;
+        task->io_do_in_worker = 0;
+        task->next = NULL;
+        task->resume_next = NULL;
+        task->local_deadline_ns = 0;
+        task->created_ns = kaula_p_now_ns();
+        task->started_ns = 0;
+        task->resume_count = 0;
+        task->steal_count = 0;
+        task->flags = 0;
+        if (kaula_p_event_create(&task->done_event) != 0) {
+            /* event 重建失败：还回池/彻底回收，返回 NULL */
+            global_task_pool_push(task);
+            return NULL;
+        }
+        return task;
+    }
+
+    task = (KaulaTask*)kmm_v4_alloc_global(sizeof(KaulaTask));
     if (task == NULL) return NULL;
 
     memset(task, 0, sizeof(*task));
@@ -241,7 +312,10 @@ void kaula_task_complete(KaulaTask* task, void* result) {
      */
     retire_frames(task);
     KaulaWorker* cw = kaula_conc_current_worker();
-    kaula_epoch_retire_to(task, cw ? (void**)&cw->task_pool : NULL);
+    /* 无 Worker 上下文（main/外部线程）：归还全局池而非直接 free —— 下一轮
+     * 同线程的 spawn 就能复用，省掉一次 kmm 分配（degrade 曲线的主要成本）。 */
+    kaula_epoch_retire_to(task,
+        cw ? (void**)&cw->task_pool : KAULA_TASK_POOL_GLOBAL);
 }
 
 void kaula_task_fail(KaulaTask* task, KaulaError err) {
@@ -276,7 +350,8 @@ void kaula_task_fail(KaulaTask* task, KaulaError err) {
 
     retire_frames(task);
     KaulaWorker* cw = kaula_conc_current_worker();
-    kaula_epoch_retire_to(task, cw ? (void**)&cw->task_pool : NULL);
+    kaula_epoch_retire_to(task,
+        cw ? (void**)&cw->task_pool : KAULA_TASK_POOL_GLOBAL);
 }
 
 int kaula_task_cancel(KaulaTask* task) {
@@ -423,6 +498,71 @@ void kaula_task_recycle(KaulaTask* task) {
 
 static uint32_t g_task_pool_high_water = KAULA_TASK_POOL_HIGH_WATER_DEFAULT;
 
+/* ========== 全局 Task 复用池（Treiber 栈，跨线程） ========== */
+
+/*
+ * 为什么需要它：非 Worker 线程（main / 外部线程）spawn 时
+ * kaula_conc_current_worker() == NULL，原实现直接落到 kmm_v4_alloc_global
+ * —— 那是带 slab 桶、跨线程归还、TLS 缓存的一整套分配器，实测
+ * **每次 spawn 4.12us**。base 与 shard 两版都测到同样数值，占满整个
+ * 运行时间（20000 × 4.12us = 82ms ≈ 总墙钟），是 degrade 曲线的真瓶颈。
+ *
+ * 全局池用 Treiber 栈（无锁 push/pop，CAS 循环）：任何线程都能归还，
+ * 任何线程都能取用。语义上它只缓存「已退还的 Task 结构」，字段重置仍
+ * 在 kaula_task_alloc 里按「独占者」前提做（pop 出来的 Task 在发布给
+ * 任何其他线程之前，只有当前线程能访问）。done_event 在归还时必须已
+ * destroy（见 kaula_task_pool_return / reclaim），池内 Task 一律
+ * kaula_p_event_create 重建 —— 因此从全局池取出的 Task 与从
+ * alloc_global 取出的 Task 走同一段初始化。
+ *
+ * 上限：与 per-Worker 池同一高水位，防止无界增长（I3 一切有界）。
+ */
+static _Atomic(KaulaTask*) g_global_task_pool = NULL;
+static _Atomic(uint32_t)    g_global_task_pool_len = 0;
+
+static KaulaTask* global_task_pool_pop(void) {
+    _Atomic(KaulaTask*)* head = &g_global_task_pool;
+    for (int spin = 0; spin < 64; spin++) {
+        KaulaTask* top = atomic_load_explicit(head, memory_order_acquire);
+        if (top == NULL) return NULL;
+        KaulaTask* next = atomic_load_explicit(&top->gpool_next,
+                                               memory_order_acquire);
+        if (atomic_compare_exchange_weak_explicit(
+                head, &top, next,
+                memory_order_acq_rel, memory_order_acquire)) {
+            atomic_fetch_sub_explicit(&g_global_task_pool_len, 1,
+                                      memory_order_relaxed);
+            top->gpool_next = NULL;
+            return top;
+        }
+    }
+    return NULL; /* 竞争太激烈：让调用方回落 alloc_global，不阻塞 */
+}
+
+static void global_task_pool_push(KaulaTask* task) {
+    if (task == NULL) return;
+    if (atomic_load_explicit(&g_global_task_pool_len, memory_order_relaxed)
+            >= g_task_pool_high_water) {
+        /* 超水位：调用方已负责彻底回收（destroy/free），这里不入池 */
+        if (kaula_p_event_is_valid(&task->done_event)) {
+            kaula_p_event_destroy(&task->done_event);
+            kaula_p_event_invalidate(&task->done_event);
+        }
+        kmm_v4_survivor_free(task);
+        return;
+    }
+    _Atomic(KaulaTask*)* head = &g_global_task_pool;
+    KaulaTask* top;
+    do {
+        top = atomic_load_explicit(head, memory_order_relaxed);
+        task->gpool_next = top;
+    } while (!atomic_compare_exchange_weak_explicit(
+                head, &top, task,
+                memory_order_release, memory_order_relaxed));
+    atomic_fetch_add_explicit(&g_global_task_pool_len, 1, memory_order_relaxed);
+}
+
+
 uint32_t kaula_task_pool_high_water(void) {
     return g_task_pool_high_water;
 }
@@ -440,6 +580,16 @@ void kaula_task_pool_high_water_init(void) {
 
 void kaula_task_pool_return(KaulaTask* task, void** pool) {
     if (task == NULL || pool == NULL) return;
+
+    /*
+     * 全局池哨兵：非 Worker 线程（main / 外部线程）完成的任务走这里。
+     * 全局池是 Treiber 栈，push/pop 都是 CAS，任何线程都能用；
+     * 超水位时的彻底回收由 global_task_pool_push 内部处理。
+     */
+    if (pool == KAULA_TASK_POOL_GLOBAL) {
+        global_task_pool_push(task);
+        return;
+    }
 
     /* pool == &worker->task_pool，由偏移反推 worker 以维护长度计数 */
     KaulaWorker* w = (KaulaWorker*)((char*)pool - offsetof(KaulaWorker, task_pool));
