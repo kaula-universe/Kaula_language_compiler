@@ -88,4 +88,12 @@ test/bench/perf/*.json.tmp
 # 标定基准是「本机本时段」的测量结果，换机器即失效，不入库
 test/bench/perf/baselines/
 !test/bench/perf/baselines/.gitkeep
+# service3 三方服务基准：源码/契约/报告入库，二进制与构建缓存不入库
+test/bench/service3/kaula_kl/order_server
+test/bench/service3/kaula_kl/cache/
+test/bench/service3/go/order_server_go
+test/bench/service3/tokio/target/
+test/bench/service3/__pycache__/
+# service3 的原始测量结果同样「本机本时段」，但本轮报告引用它，
+# 因此 results.json 明确入库（不 ignore）；report_tables.md 是生成物，入库便于 diff。
 scratch/
