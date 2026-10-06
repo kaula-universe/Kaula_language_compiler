@@ -1,9 +1,35 @@
-# KBUG：5 个「静默错误」字面量缺陷 —— 已修复
+# KBUG：3 个「静默错误」字面量缺陷 + 1 个迭代缺陷 —— 已修复（附 1 处更正）
 
-> 这一类缺陷的共同特征是：**编译通过、零警告，只安静地给出错答案**。
+> 前 3 个缺陷的共同特征是：**编译通过、零警告，只安静地给出错答案**。
 > 比编译失败危险得多——失败会让人立刻知道，静默错数会一路带到基准报告里。
 >
-> 5 个缺陷的根因都在 parser / AST 层：**声明的字面量形状没被识别，值被丢弃**。
+> 它们的根因都在 parser / codegen 层：**声明的字面量形状没被识别，值被丢弃**。
+> 第 4 个（切片迭代）不属于静默类——它报的是 clang 深处的晦涩类型错误，
+> 本轮改成清晰的编译期诊断。
+
+## ⚠️ 一处更正：`#[derive]` 从未损坏
+
+先前本文件把 `#[derive(Debug)]` 列为「缺陷 4」，**那是误判**，特此更正。
+
+实测证据（真基线 = commit `9a334e2`，独立 worktree 编译）：
+
+```kaula
+#[derive(Debug, Clone, Eq)]
+struct Point { x: i64, y: i64 }
+Point p
+p.x = 10
+p.y = 20
+Point_debug(&p)     // 基线就输出 Point { x: 10, y: 20 } ✅
+```
+
+这是 `docs/tutorials/examples/advanced-attributes.kl` 里的官方写法——**逐字段赋值**，
+它在修复前、修复后都完全正常。
+
+先前之所以观察到 `Point { x: 0, y: 0 }`，是因为用了 `Point { x = 10, y = 20 }`
+这种 **struct 字面量**写法，而那个写法本身有缺陷（见下方缺陷 3）。
+derive 只是第一个把下游坏值暴露出来的消费者，不是缺陷源头。
+
+结论：**derive 无需任何修复**。本轮改动对 derive 生成的代码零改动。
 
 ---
 
@@ -46,6 +72,14 @@ int32_t* arr = ((int64_t[]){ 1, 3, 1990 });   // 元素 8 字节，指针步长 
 
 ## 缺陷 2：定长数组 `{...}` 初始化器被丢弃
 
+> **这条有官方文档背书**，不是我的臆测写法。
+> `docs/tutorials/control-flow.md:76`「迭代数组/切片」一节原样写着：
+> ```kaula
+> int[5] arr = {10, 20, 30, 40, 50}
+> for x in arr { println("x = ", x) }
+> ```
+> （顺带记一笔：文档里的类型名 `int` 是笔误，语言里没有 `int`，应为 `i32`。）
+
 ### 症状
 
 ```kaula
@@ -79,7 +113,15 @@ parser 的 `case lexer.TOKEN_LBRACE`（表达式入口）**无条件**把 `{...}
 
 ---
 
-## 缺陷 3：struct 字面量无点赋值被丢弃
+## 缺陷 3：struct 字面量无点赋值被**静默丢弃**
+
+> **诚实标注**：`TypeName { field = value }` 这种「无点」写法**没有**出现在任何官方文档或
+> 语料库样例里——官方只有 `{ .field = value }` 带点形式（`docs/tutorials/structs-and-enums.md:38`）
+> 和逐字段赋值。所以严格说，这不是「文档承诺的功能坏了」。
+>
+> 但问题在于 parser 遇到它时的行为：**不报错、不警告，直接把整个初始化列表吞掉**，
+> 产出一个全零对象。用户手写漏一个点，损失全部字段值且毫无提示——这才是真缺陷。
+> 修完之后两种写法都合法，不存在「静默丢弃」这条路径。
 
 ### 症状
 
@@ -116,34 +158,7 @@ K_Point p = (K_Point){0};
 
 ---
 
-## 缺陷 4：`#[derive(Debug)]` 读到全零对象
-
-### 症状
-
-```kaula
-#[derive(Debug, Clone, Eq)]
-struct Point { x: i64, y: i64 }
-Point p = Point { x = 10, y = 20 }
-Point_debug(&p)   // 输出 Point { x: 0, y: 0 } ❌
-```
-
-### 根因
-
-derive 生成的 `Point_debug` 本身正确（`printf("%lld", (long long)self->x)`）。
-问题在上游——`p` 是**缺陷 3** 造出的全零对象。derive 只是第一个把它暴露出来的消费者。
-
-### 修复
-
-随缺陷 3 一并解决，derive 侧无需改动。
-
-### 验证
-
-`#[derive(Debug)]` 现在输出 `Point { x: 10, y: 20 }` ✅
-`#[derive(Eq)]` 生成的 `Pair_equals` 对相同字段返回 1、不同返回 0 ✅
-
----
-
-## 缺陷 5：`[]T` 切片迭代生成坏 C
+## 缺陷 4：`[]T` 切片迭代生成坏 C
 
 ### 症状
 
@@ -189,22 +204,31 @@ for v in arr { s = s + v }
 | `TestArrayLiteralElementTypeMatchesDeclaration` | 缺陷 1：`[]i32`/`[]i64`/`[]u8` 复合字面量元素类型 |
 | `TestBraceArrayLiteralParsedAsArray` | 缺陷 2：`{...}` 解析为 ArrayLiteral + 初始化值进 C |
 | `TestStructLiteralDotlessFieldAssign` | 缺陷 3：无点字段赋值 |
-| `TestSliceIterationRejectedClearly` | 缺陷 5：切片迭代给出清晰错误 |
+| `TestSliceIterationRejectedClearly` | 缺陷 4：切片迭代给出清晰错误 |
 
-**已验证守护力**：在未修复的代码上，这 4 个测试**全部 FAIL**；修复后全部 PASS。
+**已验证守护力（真基线 = commit `9a334e2` 的独立 worktree）**：把测试文件拷进基线
+worktree 跑，4 个测试**全部 FAIL**；在修复后的代码上**全部 PASS**。
+
+> 早先一次声称的「修复前全 FAIL」是用错误基线（`git stash` 时改动已入库）得出的，
+> 结论无效；上面的数据已用真基线重做。
 
 ### 端到端语义测试（`test/literal_semantics.kl`）
 
-覆盖全部 5 个缺陷（含缺陷 4 的 derive），退出码 0 即通过。由
-`scripts/run_tests.py` 自动发现，已纳入 106 项测试矩阵。
+覆盖上述 4 个缺陷，退出码 0 即通过。由 `scripts/run_tests.py` 自动发现，
+已纳入测试矩阵。该文件头部注释明确记录了「官方定长数组写法用方括号」以及
+「`#[derive]` 从未损坏」两条更正，避免后来者重踩。
 
 ### 全量结果
 
 | 项 | 结果 |
 |---|---|
-| `go test ./...` | ✅ 全绿（14/14 包） |
-| `scripts/run_tests.py` | **104/106**（余 2 个 `stdlib_async_safety` 为**预存失败**，基线同样 -11） |
-| Kaula 语言层服务端到端 | ✅ 正常返回 `R,7,65055505,5970` |
+| `go test ./...` | ✅ 全绿（14 个含测试包） |
+| `scripts/run_tests.py` | **104/106**（余 2 个 `stdlib_async_safety` 为**预存失败**，真基线同样 -11） |
+| 官方 `docs/tutorials/examples/*.kl` | ✅ 10/10 编译通过 |
+| 回归单测守护力 | 8 个测试在真基线（`9a334e2`）上**全部 FAIL**，修复后全部 PASS |
+| Kaula 语言层服务端到端 | ✅ 4 条请求与基线响应**逐字节一致**（如 `O,7,SKU-0001,105,57` → `R,7,e9da68a0,5985`） |
+
+> 注：早先记录的 `R,7,65055505,5970` 是另一条请求串的结果，本轮改用可复现的对照方式重测。
 
 ---
 
@@ -218,3 +242,9 @@ for v in arr { s = s + v }
 | `compiler/internal/parser/parser.go` | `{` 分派 + `parseBraceArrayLiteral`；两处无点字段赋值 |
 | `compiler/internal/codegen/literal_codegen_regression_test.go` | **新增** 4 个单元测试 |
 | `test/literal_semantics.kl` | **新增** 端到端语义测试 |
+
+> **同批还修了一组泛型 / ADT 缺陷**（`docs/tutorials/generics.md` 里 `Option<T>`、
+> `Result<T,E>`、`class Box<T>` 三个例子原先都编不过），
+> 与本文的字面量缺陷无重叠，单独记录在
+> [`KAULA_FEATURES.md` §3.2](./KAULA_FEATURES.md#32-五个泛型--adt-缺陷)，
+> 回归测试见 `compiler/internal/codegen/generic_codegen_regression_test.go`。

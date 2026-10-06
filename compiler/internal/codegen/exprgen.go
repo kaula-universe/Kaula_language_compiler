@@ -1521,7 +1521,16 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 	if ident, ok := memberAccess.Object.(*ast.Identifier); ok {
 		if sym := eg.codegen.GetSymbol(ident.Name); sym != nil {
 			if eg.codegen.typeGenerator != nil && eg.codegen.typeGenerator.classTypes[sym.Type] {
-				code := sym.Type + "_" + methodName + "(" + eg.GenerateExpression(memberAccess.Object)
+				// 接收者可能是泛型实例（`Box<i32>`）。此时被调用的方法属于单态化后的
+				// `Box_i32`，函数前缀必须用改写后的名字——直接用 sym.Type 会生成
+				// `Box<i32>_get(...)` 这种非法 C 标识符。
+				ownerName := sym.Type
+				if base, targs, ok := splitGenericTypeArgs(sym.Type); ok {
+					if _, err := eg.codegen.InstantiateGenericType(base, targs, memberAccess.Pos.Line); err == nil {
+						ownerName = MangleGenericTypeName(base, targs)
+					}
+				}
+				code := ownerName + "_" + methodName + "(" + eg.GenerateExpression(memberAccess.Object)
 				for _, arg := range args {
 					code += ", " + eg.GenerateExpression(arg)
 				}

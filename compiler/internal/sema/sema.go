@@ -1722,7 +1722,9 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 		if strings.HasPrefix(enumName, "enum ") {
 			enumName = strings.TrimPrefix(enumName, "enum ")
 		}
-		enumStmt := sa.program.FindEnum(enumName)
+		// 泛型 Result（`Res<i32,i32>`）也要能参与错误传播：FindEnum 只认声明时的
+		// 基名，resolveEnumTarget 负责剥离 <...> 并回填类型实参。
+		enumStmt, enumTypeArgs := sa.resolveEnumTarget(inferredType)
 		if enumStmt == nil {
 			sa.errorCollector.AddSemanticError(
 				fmt.Sprintf(":= 右侧表达式类型 '%s' 不是 enum，无法用于错误传播", inferredType),
@@ -1773,6 +1775,16 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 			return
 		}
 		inferredType = okVariant.FieldTypes[0]
+		// 泛型 Result 的 Ok 载荷写的是类型参数名（如 `T`），按 <...> 实参替换成
+		// 具体类型，否则 `v := ...` 得到的变量类型不可用。
+		if len(enumTypeArgs) > 0 {
+			for pi, tp := range enumStmt.TypeParams {
+				if tp != nil && pi < len(enumTypeArgs) && inferredType == tp.Name {
+					inferredType = enumTypeArgs[pi]
+					break
+				}
+			}
+		}
 	}
 
 	stmt.Type = inferredType
@@ -3860,6 +3872,32 @@ func (sa *SemanticAnalyzer) checkStdlibImport(memberAccess *ast.MemberAccessExpr
 	}
 }
 
+// resolveEnumTarget 从 match 目标的类型字符串解析出枚举声明。
+//
+// 目标类型可能是泛型实例化形式（如 `Option<i32>`），而 FindEnum 只认声明时用的
+// 基名（`Option`）。一并回填 `<...>` 里的类型实参，供调用点把变体字段类型里的
+// 类型参数（`T`）替换成具体类型——否则绑定变量落到 `T` 这种既非数值也非指针的
+// 类型上，后续任何算术都会报 type_mismatch。
+func (sa *SemanticAnalyzer) resolveEnumTarget(typeName string) (*ast.EnumStatement, []string) {
+	if sa.program == nil || typeName == "" {
+		return nil, nil
+	}
+	if t := strings.TrimPrefix(typeName, "enum "); t != typeName {
+		typeName = t
+	}
+	base := typeName
+	var args []string
+	if idx := strings.Index(typeName, "<"); idx > 0 && strings.HasSuffix(typeName, ">") {
+		base = strings.TrimSpace(typeName[:idx])
+		for _, p := range splitTopLevelCommasSem(typeName[idx+1 : len(typeName)-1]) {
+			if p = strings.TrimSpace(p); p != "" {
+				args = append(args, p)
+			}
+		}
+	}
+	return sa.program.FindEnum(base), args
+}
+
 // analyzeMatchExpression 分析 match 表达式, 并做枚举穷尽检查(类似 C switch 语义)。
 // 目标为枚举且无通配符/变量绑定臂时, 检查所有变体是否被覆盖。
 func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
@@ -3877,14 +3915,13 @@ func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
 		// 注册模式绑定变量到当前作用域
 		if arm.Pattern != nil && len(arm.Pattern.Bindings) > 0 {
 			// 尝试推断绑定变量的类型（从枚举变体字段类型）
+			// targetType 可能是泛型实例化形式（如 `Option<i32>`），而 FindEnum
+			// 只认声明时用的基名（`Option`）。先拆出基名与类型实参。
 			targetType := ""
 			if expr.Target != nil {
 				targetType = sa.inferExpressionType(expr.Target)
 			}
-			enumStmt := sa.program.FindEnum(targetType)
-			if enumStmt == nil && strings.HasPrefix(targetType, "enum ") {
-				enumStmt = sa.program.FindEnum(strings.TrimPrefix(targetType, "enum "))
-			}
+			enumStmt, enumTypeArgs := sa.resolveEnumTarget(targetType)
 			variantName := arm.Pattern.VariantName
 			if idx := strings.LastIndex(variantName, "."); idx >= 0 {
 				variantName = variantName[idx+1:]
@@ -3898,6 +3935,17 @@ func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
 					for _, v := range enumStmt.Variants {
 						if v != nil && v.Name == variantName && i < len(v.FieldTypes) {
 							bindType = v.FieldTypes[i]
+							break
+						}
+					}
+				}
+				// 泛型枚举的变体字段类型写的是类型参数名（如 `T`）。拿 <..> 里的
+				// 实参做一次替换，绑定变量才是具体类型——否则 `T` 落到一个既非数值
+				// 也非指针的类型上，后面任何算术都会报 type_mismatch。
+				if enumStmt != nil && len(enumTypeArgs) > 0 {
+					for pi, tp := range enumStmt.TypeParams {
+						if tp != nil && pi < len(enumTypeArgs) && bindType == tp.Name {
+							bindType = strings.TrimSpace(enumTypeArgs[pi])
 							break
 						}
 					}
@@ -3930,10 +3978,7 @@ func (sa *SemanticAnalyzer) analyzeMatchExpression(expr *ast.MatchExpression) {
 		}
 	}
 	targetType := sa.inferExpressionType(expr.Target)
-	enumStmt := sa.program.FindEnum(targetType)
-	if enumStmt == nil && strings.HasPrefix(targetType, "enum ") {
-		enumStmt = sa.program.FindEnum(strings.TrimPrefix(targetType, "enum "))
-	}
+	enumStmt, _ := sa.resolveEnumTarget(targetType)
 	if enumStmt == nil || len(enumStmt.Variants) == 0 {
 		// 非枚举目标: 缺少 _ 通配符分支警告 (clang -Wswitch-default 语义)
 		if !hasDefault {
