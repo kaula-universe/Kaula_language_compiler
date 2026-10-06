@@ -156,6 +156,7 @@ static void test_await_races_with_completion(void) {
 static void test_completion_push_take(void) {
     TEST_CASE("完成队列 push / take");
     kaula_completion_init();
+    kaula_completion_consumer_begin();  /* 测试需要 take，开启消费期 */
 
     /* 构造一个"已完成"的任务并入队 */
     KaulaTask* t = kaula_task_alloc();
@@ -174,6 +175,7 @@ static void test_completion_push_take(void) {
 static void test_completion_sharding(void) {
     TEST_CASE("完成队列按 task_id 分片");
     kaula_completion_init();
+    kaula_completion_consumer_begin();  /* 测试需要 take，开启消费期 */
 
     /*
      * 连续 id 若都落到同一片，说明散列失效。
@@ -207,6 +209,7 @@ static void test_completion_sharding(void) {
 static void test_completion_full_no_overwrite(void) {
     TEST_CASE("完成队列满时拒绝而非覆盖（I3）");
     kaula_completion_init();
+    kaula_completion_consumer_begin();  /* 测试需要 take，开启消费期 */
 
     /*
      * 用同一个 task 反复 push：它总是落到同一片，
