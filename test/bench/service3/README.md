@@ -120,7 +120,8 @@ python3 run_service3.py --levels baseline --conns 50 --sec 10 --win 5 --rounds 1
 | `disturb/` | 干扰器（CPU 绑核自旋 / 内存 balloon） |
 | `gen_report.py` | 从 `results.json` 生成 `REPORT.md` 的表格 |
 | `KBUG_*.md` | 过程中发现的编译器缺陷记录 |
-| `results.json` | 原始结果（含每窗口数据） |
+| `results.json` | 原始结果（含每窗口数据，缺陷修复**前**） |
+| `results_after_fix.json` | 修复后重测结果（回归验证用） |
 | `REPORT.md` | **实测报告与结论** |
 
 ## 7. 已知的可比性限制（务必随结论披露）
