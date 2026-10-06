@@ -1870,9 +1870,20 @@ static inline String string_concat_float(String s, double v) {
 		if em.CReturnType == "" {
 			continue
 		}
+		// 空参必须写成 `(void)`。
+		//
+		// C 与 C++ 不同：`f()` 是「参数未指定」，不是「无参数」。
+		// 生成 `int64_t K_x_as_fn();` 时 clang 对 `K_x_as_fn(5)` 不作检查，
+		// 于是**定义**成为唯一判据 —— 一旦定义与调用点的实参个数不一致，
+		// 报错就落到调用行上（too many arguments），而不是声明行，
+		// 排查时很容易被引偏。写成 `(void)` 让声明本身就把约束立起来，
+		// 有参则逐个写出类型，两种情况都不能省。
 		forwardDecls.WriteString(em.CReturnType)
 		forwardDecls.WriteString(em.ShimFn())
 		forwardDecls.WriteString("(")
+		if len(em.Params) == 0 {
+			forwardDecls.WriteString("void")
+		}
 		for i := range em.Params {
 			if i > 0 {
 				forwardDecls.WriteString(", ")

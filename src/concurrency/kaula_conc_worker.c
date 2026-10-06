@@ -5,6 +5,16 @@
 #include "kaula_conc_worker.h"
 #include "kaula_conc_scheduler.h"
 #include "kaula_conc_iodriver.h"
+/*
+ * io_backend.h：给 Worker 自做的 do_io 拿 kaula_iodriver_do_io 声明。
+ *
+ * v1.2.1 把 do_io 下沉到 Worker（消除 iodriver 单线程串行税），
+ * 但声明留在 io_backend.h 里，而这条 include 链没接上 ——
+ * clang 报 implicit function declaration，整个运行时编不出来。
+ * （隐式声明在 C99 起已被移除；就算编过，int 返回值也恰好对，
+ *   属"能跑但不对"的沉默错误，必须显式包含而不是放宽告警。）
+ */
+#include "kaula_conc_io_backend.h"
 #include "kaula_conc_block_lane.h"
 #include "kaula_conc_metrics.h"
 

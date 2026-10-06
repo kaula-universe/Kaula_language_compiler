@@ -37,6 +37,20 @@
 - **编译速度**：`-pipe` + lld 检测；auto-detect CPU 核并行编译。
 
 ### Fixed
+- **构建阻断：Linux/clang 下运行时编不出来（2 处）**：
+  - `kaula_conc_epoch.c`：`g_deferred_lock` 声明成 `_Atomic(uint32_t)` 却用
+    `__atomic_*` 内置访问，clang 判「atomic 操作的地址必须指向整型/指针」直接报错。
+    改普通 `uint32_t`（与所用内置保持一致），语义不变。
+  - `kaula_conc_worker.c`：v1.2.1 把 `do_io` 下沉到 Worker 后漏了
+    `kaula_conc_io_backend.h`，`kaula_iodriver_do_io` 成隐式声明（C99 起非法）。
+- **spawn 常量特化在 Linux 上确定性编译失败**：`specializeSpawnConsts` 把
+  特化版形参列表清空（`clone.Params = nil`），但 spawn 调用点仍按原签名传实参、
+  emitter 也仍从 AST 的 `Params` 构造 —— shim 定义成 `(void)`、
+  Frame 少了参数字段，clang 报 `too many arguments to function call, expected 0, have 1`。
+  只要 `spawn` 的实参全是字面量就必现（`test_for_range_suspend.kl` 的
+  `spawn loop_nested(5)`）。改为保留形参列表、只把常量代入函数体。
+- **coercion shim 前置声明的空参写法**：`f()` 在 C 里是「参数未指定」而非「无参」，
+  声明写 `()` 会让实参个数错误推迟到定义处才报。空参改写成 `(void)`。
 - **链接 / 公开 API**：补齐 `tree_create/destroy/set_root/add_node/get_node`、
   `prefix_system_create/destroy/enter/leave` 的 thin wrapper，转发到既有内部实现；
   修复 tree/prefix 递归释放泄漏、NULL 检查、`strtok` 改 `strtok_r`。
