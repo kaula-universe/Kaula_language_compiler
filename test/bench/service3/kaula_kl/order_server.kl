@@ -79,31 +79,6 @@ fn itohex8(v: u32, out: *u8, base: i32) -> i32 {
     return 8
 }
 
-// S4 的 64 轮混合校验 —— **刻意放在普通 fn 里**（非 conc fn）。
-//
-// NOTE 见 ../KBUG_RANGE_GUARD.md：kaulac 对「挂起点之后」的
-// `for k in range(N)` 循环，其守卫链的 `sub[d]` 跨迭代不复位 ——
-// 第 1 轮把 sub[2] 推到链尾后，第 2..N 轮的 `if (sub[2] == ...)`
-// 全部失配，循环体等价于空转，结果只剩第 1 轮。静默算错，不崩。
-//
-// 普通 fn 不生成守卫链，循环语义正确（已用 64 轮递增用例验证
-// 返回 64）。把这段计算下沉到这里，既拿到正确语义，
-// 也避免在 benchmark 里使用「用户按文档直写会踩坑」的形态。
-fn mixed_verify64(seq: i32, qty: i32, price: i32, r: *u8) -> i32 {
-    i32 h = 0
-    i32 k = 0
-    while (k < 64) {
-        i32 x = h ^ as<i32>(r[k])
-        i32 acc = x + seq
-        acc = acc + qty
-        acc = acc + price
-        i32 m = acc * 31
-        h = m + k
-        k = k + 1
-    }
-    return h
-}
-
 conc fn conn_task(fd: i32) -> i32 {
     u8* buf = std.memory.kmm_v4_alloc(8192)
     u8* resp = std.memory.kmm_v4_alloc(64)
@@ -131,14 +106,24 @@ conc fn conn_task(fd: i32) -> i32 {
             i32 price = parse_field_at(buf, off, n, 4)
             i32 total = qty * price
 
-            // S4：KMM 堆分配 + 64 轮 i32 混合校验（计算下沉到普通 fn）
+            // S4：KMM 堆分配 + 64 轮 i32 混合校验（用户直写 for..in，无需绕行）
             u8* r = std.memory.kmm_v4_alloc(64)
             r[0] = as<u8>(seq)
             r[1] = as<u8>(qty)
             r[2] = as<u8>(price)
             i32 i = 3
             while (i < 64) { r[i] = 0; i = i + 1 }
-            i32 h = mixed_verify64(seq, qty, price, r)
+            i32 h = 0
+
+            for kk in range(64) {
+                i32 x = h ^ as<i32>(r[kk])
+                i32 acc2 = x + seq
+                acc2 = acc2 + qty
+                acc2 = acc2 + price
+                i32 m = acc2 * 31
+                h = m + kk
+            }
+
             ck = ck ^ as<u32>(h)
             std.memory.kmm_v4_free(r)
 

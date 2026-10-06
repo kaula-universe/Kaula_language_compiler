@@ -1,0 +1,98 @@
+// Kaula 并发内核 · 原子嵌套循环的守卫槽复位
+//
+// 回归对象（2026-10 修复）：嵌套在外层守卫复合语句里的**无挂起** for..in，
+// 其循环体被 concGuardSlot 按**外层槽位号**包进 `if (f->sub[d] == k)`，
+// 而该槽位是「一条语句推进一次」语义，在 C 的 for 循环体里跨迭代从不复位。
+// 于是第 1 轮把 sub[d] 从 k 推到 k+1，第 2 轮起整条守卫链失配
+// —— **循环体只执行第 1 轮**，静默算错，不崩不报错。
+//
+// 为何既有用例抓不到：
+//   test_for_range_suspend.kl 覆盖的是「for..in 自身循环体含挂起点」，
+//   那条路径走守卫模式（guardDepth >= 0），每轮末尾显式 `sub[d] = 1`
+//   回到循环头，复位是有的。本用例覆盖的是**另一条路径**：
+//   for..in 自身无挂起（在恢复路径上原子），但被外层守卫包着 ——
+//   该路径原先完全没有复位，也没有原子保护。
+//
+// 判据：外层循环体每轮把内层 for..in 的贡献累加一次，且内层首项非零，
+// 所以「只跑第 1 轮」与「跑满 N 轮」的结果**可区分**（首项为 0 时二者
+// 恰好同值，那样的用例抓不到这个 bug —— 这也是它长期潜伏的原因）。
+
+import std.io
+import std.time
+
+// 外层 while（守卫复合语句，体内含挂起点）
+// 内层 for..in（自身无挂起 → 恢复路径上原子）
+//
+// 内层贡献：range(1, 5) = 1+2+3+4 = 10；首项为 1，非零 → 可区分
+// 每轮末尾 acc += 1000，跑 1 轮
+// 期望 acc = 10 + 1000 = 1010（修复前为 1+1000 = 1001，只跑了第 1 轮）
+conc fn nested_atomic_forin() -> i64 {
+    i64 acc = 0
+    while (acc >= 0) {
+        std.time.time_sleep(1)          // 挂起点：本层进入守卫模式
+        for k in range(1, 5) {          // 原子 for..in，嵌在守卫里
+            acc = acc + k
+        }
+        acc = acc + 1000
+        break
+    }
+    return acc
+}
+
+// 同形态但内层跑多轮、外层也跑多轮（放大「只跑第 1 轮」的偏差）
+//
+// 外层 3 轮（用 i 控制），内层 range(1, 4) = 1+2+3 = 6
+// 期望 acc = (6 + 10) * 3 = 48
+// 修复前每轮内层只贡献 1 → (1 + 10) * 3 = 33
+conc fn nested_atomic_forin_multi() -> i64 {
+    i64 acc = 0
+    for i in range(3) {
+        std.time.time_sleep(1)
+        for k in range(1, 4) {
+            acc = acc + k
+        }
+        acc = acc + 10
+    }
+    return acc
+}
+
+// 反向步长的原子 for..in（步进方向也走同一段生成代码）
+// range(5, 0, -1) = 5+4+3+2+1 = 15；首项 5 非零
+// 期望 acc = 15 + 1000 = 1015
+conc fn nested_atomic_forin_down() -> i64 {
+    i64 acc = 0
+    while (acc >= 0) {
+        std.time.time_sleep(1)
+        for k in range(5, 0, -1) {
+            acc = acc + k
+        }
+        acc = acc + 1000
+        break
+    }
+    return acc
+}
+
+fn main() -> i32 {
+    i64 err = 0
+
+    // 1) 基本形态：外层 while + 内层原子 for..in
+    i64 r0 = nested_atomic_forin()
+    if r0 != 1010 { err += 1; std.io.println("ERR nested_atomic_forin got=", r0) }
+
+    Handle h0 = spawn nested_atomic_forin()
+    i64 r1 = h0.await
+    if r1 != 1010 { err += 1; std.io.println("ERR spawn nested_atomic_forin got=", r1) }
+
+    // 2) 多层形态：外层 for..in 也含挂起，内层原子
+    Handle h1 = spawn nested_atomic_forin_multi()
+    i64 r2 = h1.await
+    if r2 != 48 { err += 1; std.io.println("ERR nested_atomic_forin_multi got=", r2) }
+
+    // 3) 反向步长
+    Handle h2 = spawn nested_atomic_forin_down()
+    i64 r3 = h2.await
+    if r3 != 1015 { err += 1; std.io.println("ERR nested_atomic_forin_down got=", r3) }
+
+    std.io.println("forin_atomic_reset ok err=", err)
+    return 0
+}

@@ -2536,6 +2536,28 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 		code = "for (" + idxType + " _i_ = (" + startExpr + "); " + cond + "; _i_ += (" + stepExpr + ")) {\n"
 	}
 
+	/*
+	 * 原子循环体保护（与 generateWhileStatement 同源）。
+	 *
+	 * 走到这里且 guardDepth < 0，说明本 for..in 的**自身循环体不含挂起点**
+	 * —— 它在恢复路径上是原子的（整条跳过即可），循环体不该带任何恢复槽位。
+	 *
+	 * 但它可能**嵌在外层守卫复合语句里**（例如 while 体内套一个无挂起的
+	 * for..in）。此时 concGuardActive() 仍为真，循环体语句会被
+	 * concGuardSlot 按**外层**的槽位号包进 `if (f->sub[d] == k)`。而
+	 * 外层那个槽位是「一条语句只推进一次」的语义，在 C 的 for 循环体里
+	 * 跨迭代**从不复位** —— 于是第 1 轮把它从 k 推到 k+1，第 2 轮起
+	 * 整条守卫链失配，循环体只执行第 1 轮（静默算错）。
+	 *
+	 * 修法与 while 完全一致：生成循环体期间临时禁用守卫，让语句直接平铺。
+	 */
+	guardSuspended := false
+	guardSavedDepth, guardSavedSeq := sg.codegen.concGuardDepth, sg.codegen.concGuardSeq
+	if guardDepth < 0 && sg.codegen.concGuardActive() {
+		sg.codegen.concGuardDepth, sg.codegen.concGuardSeq = -1, 0
+		guardSuspended = true
+	}
+
 	sg.codegen.indent++
 	sg.codegen.EnterScope("forrange_body")
 	if guardDepth >= 0 {
@@ -2628,6 +2650,9 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 		code += sg.codegen.indentString() +
 			fmt.Sprintf("%s->sub[%d] = 1;\n", sg.codegen.concFrameVar, guardDepth)
 		restoreGuard()
+	} else if guardSuspended {
+		/* 普通路径：恢复被临时禁用的外层守卫（见上面的原子循环体保护） */
+		sg.codegen.concGuardDepth, sg.codegen.concGuardSeq = guardSavedDepth, guardSavedSeq
 	}
 
 	sg.codegen.indent--

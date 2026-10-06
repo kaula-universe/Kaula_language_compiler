@@ -479,3 +479,116 @@ fn main() -> i32 { return 0 }
 		t.Errorf("取回结果与 return 必须同段且顺序在前：\n%s", c)
 	}
 }
+
+// ---------- 原子嵌套循环：循环体内不得有守卫槽 ----------
+
+/*
+ * 回归（2026-10）：嵌在外层守卫复合语句里的**无挂起** for..in，
+ * 其循环体曾被 concGuardSlot 按外层槽位号包进 `if (f->sub[d] == k)`。
+ * 该槽位在 C 的 for 循环体里跨迭代从不复位 —— 第 1 轮把它从 k 推到 k+1，
+ * 第 2 轮起整条守卫链失配，**循环体只执行第 1 轮**（静默算错）。
+ *
+ * 症状形状（修复前，外层是 while、内层是 range(1,5)）：
+ *
+ *	if (f->sub[1] == 2) { f->sub[1] = 3;
+ *	    for (long long _i_ = (1); _i_ < (5); _i_ += (1)) {
+ *	        long long k = _i_;
+ *	        if (f->sub[1] == 3) { f->sub[1] = 4; acc = acc + k; }   ← 只有第 1 轮命中
+ *	    }
+ *	}
+ *
+ * 判据：内层 for 循环体的**整段文本区间**内不得出现 `f->sub[`。
+ */
+func TestConcGuard_AtomicNestedLoopBodyHasNoSlots(t *testing.T) {
+	src := `
+import std.time
+
+conc fn nested() -> i64 {
+    i64 acc = 0
+    while acc >= 0 {
+        std.time.time_sleep(1)
+        for k in range(1, 5) {
+            acc = acc + k
+        }
+        acc = acc + 1000
+        break
+    }
+    return acc
+}
+
+fn main() -> i32 { return 0 }
+`
+	c, errs := genConc(t, src)
+	for _, e := range errs {
+		t.Errorf("不应报错，实际：%s", e)
+	}
+
+	// 定位内层 for 的循环头（range(1,5) 展开成 _i_ = (1); _i_ < (5)）
+	head := strings.Index(c, "for (long long _i_ = (1); _i_ < (5); _i_ += (1)) {")
+	if head < 0 {
+		t.Fatalf("未找到内层 for..in 的 C 循环头，生成的代码形态已变：\n%s", c)
+	}
+	// 从循环头起找与之匹配的右花括号（按花括号配平）
+	bodyStart := strings.Index(c[head:], "{") + head
+	depth, bodyEnd := 0, -1
+	for i := bodyStart; i < len(c); i++ {
+		switch c[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				bodyEnd = i
+			}
+		}
+		if bodyEnd >= 0 {
+			break
+		}
+	}
+	if bodyEnd < 0 {
+		t.Fatalf("未能配平内层 for 的花括号：\n%s", c)
+	}
+	body := c[bodyStart : bodyEnd+1]
+
+	if strings.Contains(body, "f->sub[") {
+		t.Errorf("原子嵌套 for..in 的循环体内不得出现守卫槽（会导致只执行第 1 轮）：\n%s", body)
+	}
+	// 累加语句必须平铺在循环体里（而不是被包在某个 if 里）
+	if !strings.Contains(body, "acc = kaula_add_i64((int64_t)(acc), (int64_t)(k));") {
+		t.Errorf("循环体内的累加语句应直接生成、不被守卫包裹：\n%s", body)
+	}
+}
+
+/*
+ * 对照组：for..in **自身循环体含挂起点**时走守卫模式，循环体内**必须**
+ * 有守卫槽，且每轮末尾必须复位回循环头槽（`f->sub[d] = 1;`）——
+ * 那条路径的复位是本来就有的，不能被上面的收紧误伤。
+ */
+func TestConcGuard_SuspendingLoopStillHasSlots(t *testing.T) {
+	src := `
+import std.time
+
+conc fn looping(n: i64) -> i64 {
+    i64 acc = 0
+    for k in range(n) {
+        std.time.time_sleep(1)
+        acc = acc + k
+    }
+    return acc
+}
+
+fn main() -> i32 { return 0 }
+`
+	c, errs := genConc(t, src)
+	for _, e := range errs {
+		t.Errorf("不应报错，实际：%s", e)
+	}
+	// 守卫模式：frame 的迭代状态提升进 Frame
+	if !strings.Contains(c, "loop_i[") {
+		t.Errorf("含挂起的 for..in 应把迭代下标提升到 Frame：\n%s", c)
+	}
+	// 每轮末尾必须回到循环头槽（复位）
+	if !strings.Contains(c, "= 1;") {
+		t.Errorf("含挂起的 for..in 每轮末尾应把守卫槽复位回循环头：\n%s", c)
+	}
+}

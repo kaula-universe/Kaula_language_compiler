@@ -129,8 +129,9 @@ python3 run_service3.py --levels baseline --conns 50 --sec 10 --win 5 --rounds 1
    粒度硬编码 1ms，短睡眠实际超额远大于 Go。这是**运行时属性**，
    但会让 S5 的绝对值被拉偏 —— **看相对形态，不要把绝对值归因于调度质量**。
 2. **`for..in(range)` 循环体守卫槽缺陷**（见 `KBUG_RANGE_GUARD.md`）：
-   Kaula 侧 S4 的计算**下沉到普通 `fn`** 规避。不影响三方公平性
-   （同一算法/常量/轮数），但用户按文档直写 `for..in(range)` 会踩坑。
+   **已修复**。Kaula 侧原先为绕开该缺陷把 S4 计算下沉到普通 `fn`，
+   修复后已改回**用户直写形态**（`for kk in range(64)`），
+   端到端 `loadgen` 验证 `mismatch=0 errors=0`。本报告数据为修复后重测。
 3. 沙箱为共享实例，绝对 TPS 会随机器状态漂移，**比值比绝对值稳健**。
 4. **CPU 干扰档是乐观口径**：干扰线程从高编号核占起（`base = NCPU - n`），
    与服务 worker 尽量错开；真实环境服务被直接抢核时退化会更重。
