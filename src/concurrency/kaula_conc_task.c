@@ -211,6 +211,24 @@ void kaula_task_complete(KaulaTask* task, void* result) {
                               memory_order_acq_rel);
     kaula_conc_metrics_inc_completed();
 
+    /*
+     * 完成队列：仅在有消费者时承接 payload（见 kaula_conc_completion.h）。
+     *
+     * metrics 打开 = 需要完整可观测，此时开启消费期，保持与旧实现
+     * 完全一致的行为（入队 + 可 take + total_drops 计数）。
+     *
+     * metrics 关闭（基准/生产默认）时热路径 await 不读该队列，于是
+     * 完全跳过环形缓冲写入与片满判定 —— 省掉每任务一次索引计算 +
+     * head 读 + slot 写 + tail release 写，以及稳态下必然发生的
+     * total_drops 原子加（片早已灌满且无消费者）。
+     *
+     * g_completion_consumer_active 是同一个进程内的 bool；在 spawn 之前
+     * 就已由 runtime_init 依 enable_metrics 设定，运行期不变，
+     * 因此这里读它是无竞争的（与 metrics_enabled 同类的运行期常量）。
+     */
+    if (atomic_load_explicit(&kaula_conc_metrics_enabled, memory_order_relaxed)) {
+        kaula_completion_consumer_begin();
+    }
     kaula_completion_push(task);
 
     /* 唤醒放最后：此刻任务的状态与统计都已就绪 */

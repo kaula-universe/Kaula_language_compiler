@@ -45,12 +45,29 @@ void     kaula_completion_shutdown(void);
 
 /*
  * 推入一个已完成的 Task。
- * 返回 1 = 已入队，0 = 该片已满（调用方仍须唤醒等待者，只是不进队列）。
+ * 返回 1 = 已入队（或无消费者时的计数路径），0 = 该片已满。
+ *
+ * 无消费者时（见 kaula_completion_consumer_begin 说明）：只递增
+ * total_completions，不写环形缓冲，恒返回 1，total_drops 保持 0。
  */
 int kaula_completion_push(KaulaTask* task);
 
 /* 取出一个（按 task_id 查最近的完成项）；找不到返回 NULL */
 KaulaTask* kaula_completion_take(uint64_t task_id);
+
+/*
+ * 消费期开关。
+ *
+ * 完成队列的唯一消费者是 kaula_completion_take()；热路径 await
+ * （kaula_task_await）不读此队列。因此仅在"确定会调 take"的场景
+ * （单元测试、按 id 查完成状态的诊断）开启消费期，稳态热路径保持
+ * 关闭以省掉全部环形缓冲写入。
+ *
+ * kaula_task_complete 在 enable_metrics != 0 时会自动开启/维持消费期
+ * （metrics 打开意味着完成队列需要完整可观测）。
+ */
+void kaula_completion_consumer_begin(void);
+void kaula_completion_consumer_end(void);
 
 /* 队列统计 */
 uint64_t kaula_completion_count(void);
