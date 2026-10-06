@@ -232,19 +232,50 @@ func (cg *CodeGenerator) specializeSpawnConsts(program *ast.Program) {
 		clone.Name = fmt.Sprintf("%s_spc_%d", fn.Name, seq)
 		seq++
 
-		// 形参 → 常量代入
+		// 形参 → 常量代入（只改**函数体**，形参列表原样保留）
 		for i, p := range clone.Params {
 			if i < len(sp.Args) {
 				replaceIdentInStmts(clone.Body, p, sp.Args[i])
 			}
 		}
-		// 参数已全部代入常量：清空 Params 及配套类型表。
-		// 否则 emitter 仍按形参名生成 Frame 字段写入（__frame->p = ...），
-		// 而重分析后的特化版 Frame 已无该字段 —— C 编译错；
-		// forwardDecls 也会按 ParamTypes 读 Params[i] —— 越界 panic。
-		clone.Params = nil
-		clone.ParamTypes = nil
-		clone.ParamNullables = nil
+		/*
+		 * 形参列表**必须原样保留** —— 曾经在这里 `clone.Params = nil`，
+		 * 理由是「参数已全部代入常量，Frame 不该再有参数字段」。
+		 *
+		 * 那个理由站不住：spawn 的调用点仍然按原签名传实参
+		 * （GenerateSpawn 走非内联路径时写 `__frame->rounds = 5`，
+		 *  走内联路径时写 `K_x_spc_N_as_fn(5)`），
+		 * 而 emitter 是**从 AST 的 Params 建的**（generateConcurrentFunction）。
+		 * 清空 Params 于是产生两处错位：
+		 *
+		 *   1. Frame 里没有 rounds 字段，但 GenerateSpawn 照写不误
+		 *      → C 报 no member named 'rounds'
+		 *   2. shim 定义按 Params 空生成 `(void)`，而调用点传 1 个实参
+		 *      → C 报 too many arguments to function call,
+		 *        expected 0, have 1
+		 *
+		 * 实测 test_for_range_suspend.kl 的 `spawn loop_nested(5)` 必现
+		 * （loop_nested 的所有实参都是字面量 → 命中特化路径）。
+		 *
+		 * 保留 Params 的代价是 Frame 多几个常量字段、spawn 多写几个常量 ——
+		 * 几字节，换来的是生成代码自洽。真正省下的收益（体内引用已被
+		 * 常量折叠掉、不再读形参）一分不少。
+		 *
+		 * 注意 ParamCTypes/ParamNullables 与 Params 必须同长：
+		 * generateConcurrentFunction 会按 Params 逐个建 C 类型，
+		 * 三张表错位就是又一次静默的签名错乱。
+		 */
+		if len(clone.ParamTypes) < len(clone.Params) {
+			// 防御：ParamTypes 短于 Params 时补齐，避免下游按下标越界
+			for len(clone.ParamTypes) < len(clone.Params) {
+				clone.ParamTypes = append(clone.ParamTypes, "")
+			}
+		}
+		if len(clone.ParamNullables) < len(clone.Params) {
+			for len(clone.ParamNullables) < len(clone.Params) {
+				clone.ParamNullables = append(clone.ParamNullables, false)
+			}
+		}
 
 		// 插入头部：先生成 → 先注册 emitter → 后到的 spawn 引用可查到
 		program.Statements = append([]ast.Statement{clone}, program.Statements...)

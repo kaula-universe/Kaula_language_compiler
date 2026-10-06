@@ -72,7 +72,22 @@ typedef struct {
 } KaulaDeferredEntry;
 static KaulaDeferredEntry g_deferred[KAULA_EPOCH_DEFERRED_CAP];
 static _Atomic(uint32_t) g_deferred_count = 0;
-static _Atomic(uint32_t) g_deferred_lock = 0;
+
+/*
+ * 自旋锁不能声明成 _Atomic(uint32_t)。
+ *
+ * GCC/Clang 的 __atomic_* 内置函数只在「普通对象」上合法；
+ * 形参是 _Atomic 限定时，clang 直接判错：
+ *   error: address argument to atomic operation must be a pointer to
+ *          integer or pointer ('_Atomic(uint32_t) *' invalid)
+ * 于是 kaula_conc_epoch.c 整文件编不过（实测 clang 18 / Linux）。
+ *
+ * 两种正确写法二选一：
+ *   a) 普通 uint32_t + __atomic_* 内置（本处采用）
+ *   b) _Atomic(uint32_t) + 标准 atomic_* 宏
+ * 混用是错的 —— 所以这里必须与下面用的 __atomic_* 保持一致。
+ */
+static uint32_t g_deferred_lock = 0;
 
 static void deferred_lock(void) {
     while (__atomic_exchange_n(&g_deferred_lock, 1, __ATOMIC_ACQUIRE) != 0) {
