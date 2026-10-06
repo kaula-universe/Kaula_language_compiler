@@ -1,10 +1,13 @@
-# kaulac：`for..in(range)` 循环体守卫槽跨迭代不复位（CONFIRMED）
+# kaulac：`for..in(range)` 循环体守卫槽跨迭代不复位（**已修复**）
 
-> **已定案**。最小复现 ~20 行，非并发可触发。
+> **已定案并修复**（提交见本文件末尾）。最小复现 ~20 行，非并发可触发。
 > 这是**编译器 lowering 的正确性缺陷**，静默算错，不崩不报错。
 >
 > **严重度**：高。任何「挂起点之后跟着 `for k in range(N)` 且循环体跨迭代
 > 累积状态」的代码都会只执行第一轮 —— 循环体其余 N−1 轮被整体跳过。
+>
+> ⚠️ **本文件保留原始调查记录**（§1–§8），修复说明见 §9。
+> 缺陷已修，基准侧的「下沉到普通 fn」规避**已移除**（见 §10）。
 
 ## 1. 症状
 
@@ -146,3 +149,102 @@ conc fn conn_task(fd: i32) -> i32 {
 
 > 全部证据均可复现：`kaulac` + `cache/f99e616…c`（源 `order_server.kl`
 > 的未规避版本）+ 探针 `trace_s4.kl`。
+
+## 9. 修复（2026-10）
+
+### 9.1 精确根因（修正 §2 的描述）
+
+§2 说「循环体内的守卫槽不复位」——方向对，但**位置说错了一层**。
+真实成因是「**原子循环体被外层守卫污染**」：
+
+`generateForRangeStatement` 分两条路（`stmtgen.go`）：
+
+| 路径 | 触发条件 | 循环体 |
+|---|---|---|
+| **守卫模式** | 本 for..in 的**自身循环体**含挂起点 | 走 `for(;;)`，每轮末尾 `sub[d] = 1` 复位 ✓ |
+| **原子模式** | 自身循环体**不含**挂起点 | 走普通 C `for` —— **设计上不该带任何恢复槽位** |
+
+问题是原子模式下，若该 for..in **嵌在外层守卫复合语句里**
+（`concGuardActive()` 仍为真），循环体语句仍会被 `concGuardSlot`
+按**外层**的槽位号包进 `if (f->sub[d] == k)`。而外层槽位是
+「一条语句推进一次」语义，在 C 的 `for` 循环体里**跨迭代从不复位**：
+
+```c
+if (f->sub[1] == 2) { f->sub[1] = 3;
+    for (long long _i_ = (1); _i_ < (5); _i_ += (1)) {
+        long long k = _i_;
+        if (f->sub[1] == 3) { f->sub[1] = 4; acc = acc + k; }  /* 只有第 1 轮命中 */
+    }                                                          /* 2..N 轮整条失配 */
+}
+```
+
+第 1 轮把 `sub[1]` 从 3 推到 4，第 2 轮起 `== 3` 不成立 → 循环体空转。
+
+> **这解释了为什么 §2 的最小复现「看起来」是另一回事**：
+> `order_server.kl` 里的 `for k in range(64)` 位于 `while (true)`
+> **连接处理循环之内**，那层 while 是守卫复合语句 ——
+> 内层 for..in 自身无挂起，于是走了原子模式并被外层槽位污染。
+
+### 9.2 修复
+
+`generateWhileStatement` 早就处理了同一问题（`guardSuspended`：
+生成循环体期间临时把 `concGuardDepth` 置 −1，让语句平铺）。
+`generateForRangeStatement` 漏了这一步。修复即**移植同一保护**：
+
+```go
+guardSuspended := false
+guardSavedDepth, guardSavedSeq := sg.codegen.concGuardDepth, sg.codegen.concGuardSeq
+if guardDepth < 0 && sg.codegen.concGuardActive() {
+    sg.codegen.concGuardDepth, sg.codegen.concGuardSeq = -1, 0
+    guardSuspended = true
+}
+// …生成循环体…
+} else if guardSuspended {
+    sg.codegen.concGuardDepth, sg.codegen.concGuardSeq = guardSavedDepth, guardSavedSeq
+}
+```
+
+改动 25 行，**不动**守卫模式下已有的复位逻辑（那是正确的）。
+
+### 9.3 验证
+
+| 层次 | 用例 | 修复前 | 修复后 |
+|---|---|---|---|
+| 语义 | `test/concurrency/test_forin_atomic_reset.kl`（新增） | — | `err=0` |
+| codegen | `TestConcGuard_AtomicNestedLoopBodyHasNoSlots`（新增） | **FAIL**（循环体内有 `f->sub[`） | PASS |
+| codegen | `TestConcGuard_SuspendingLoopStillHasSlots`（对照，新增） | PASS | PASS |
+| 回归 | `python3 test/concurrency/run_tests.py` | — | **30/30 全通过** |
+| 单元 | `go test ./...`（compiler） | — | 14/14 包通过 |
+| 端到端 | `loadgen` 对**用户直写 for..in** 的服务（§10） | `mismatch=223744` | **`mismatch=0 errors=0`** |
+
+§2 的最小复现（`repro6.kl`：外层 while + 内层 `range(1,5)`）实测
+由 `1001` 变为正确的 `1010`；`repro5.kl` 由 `1000` 变为 `1006`。
+
+### 9.4 未被本次修复覆盖的边界
+
+- `while` 在「挂起点之后、自身无挂起、嵌在外层守卫里」时**早已**有保护
+  （`guardSuspended`），本轮未改动、但也未新增针对性用例
+  —— 既有 `test_guard_*.kl` 间接覆盖。
+- `if` 的原子分支体走 `concIsResumableCompound` 分支，不是循环、无「下一轮」，
+  本身不受本缺陷影响（§5 已述）。
+- 数组/string 迭代的 for..in 含挂起时仍在 `concCheckSupported` 报诊断（不变）。
+
+## 10. 基准侧规避已移除
+
+`test/bench/service3/kaula_kl/order_server.kl` 原先把 64 轮折叠**下沉到
+普通 `fn mixed_verify64`** 以绕开本缺陷。修复后**已改回用户直写形态**：
+
+```kaula
+i32 h = 0
+for kk in range(64) {
+    i32 x = h ^ as<i32>(r[kk])
+    i32 acc2 = x + seq
+    acc2 = acc2 + qty
+    acc2 = acc2 + price
+    i32 m = acc2 * 31
+    h = m + kk
+}
+```
+
+`mixed_verify64` 函数已删除。端到端 `loadgen` 验证 `mismatch=0 errors=0`。
+
