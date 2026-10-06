@@ -356,6 +356,12 @@ void kaula_runtime_shutdown(void) {
 
     /* 8. 单线程上下文下强制回收所有退休对象 */
     kaula_epoch_shutdown();
+    /*
+     * 排空全局 Task 复用池（stop 之后才安全：此时无 Worker 在归还）。
+     * 池是 static、跨 init/shutdown 存活，不清空会给下次 init 留下悬垂
+     * 指针（test_epoch/test_task 等多次 init+shutdown 的用例立刻段错误）。
+     */
+    kaula_task_global_pool_reset();
     kaula_completion_shutdown();
     kaula_evict_destroy();
     kaula_iodriver_destroy();

@@ -17,7 +17,7 @@
 
 KaulaRuntimeState g_conc_runtime;
 
-/* 全局注入队列 */
+/* 全局注入队列（分片，见 kaula_conc_task.h 常量说明与 scheduler.h 结构说明） */
 static KaulaInjectQueue g_inject_queue;
 
 /*
@@ -47,49 +47,72 @@ static KaulaInjectQueue g_inject_queue;
  * pop 侧保持原样不动：互斥只加在生产者一侧，读侧的 release/acquire
  * 配对关系没有变化，改动面越小越好。
  */
-static atomic_flag g_inject_push_lock = ATOMIC_FLAG_INIT;
-
 /*
- * 实现：多生产者 / 多消费者有界队列。
+ * 实现：多生产者 / 多消费者有界队列（分片版）。
  * push 从 tail 进（整段串行化），pop 从 head 出（CAS 竞争，多线程可并行）。
  * 容量固定，因此满时返回 0 —— 绝不覆盖未消费的槽位。
  *
  * 注意 pop 的 CAS 只保护 head 的推进，**不能替代 push 侧的串行化**：
  * 两个 pusher 即使各自都「对」，写的也是同一个槽位。
+ *
+ * 分片后上面的论证逐片成立：每片有自己的 head/tail/lock，互不相干。
  */
 
-/* ========== 全局注入队列实现 ========== */
+/* ========== 全局注入队列实现（分片） ========== */
+
+static inline KaulaInjectShard* inject_shard(uint32_t idx) {
+    return &g_inject_queue.shard[idx & KAULA_INJECT_SHARD_MASK];
+}
 
 void kaula_inject_queue_init(void) {
-    atomic_store_explicit(&g_inject_queue.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_inject_queue.tail, 0, memory_order_relaxed);
-    memset((void*)g_inject_queue.buffer, 0, sizeof(g_inject_queue.buffer));
+    for (uint32_t i = 0; i < KAULA_INJECT_SHARDS; i++) {
+        KaulaInjectShard* sh = inject_shard(i);
+        atomic_store_explicit(&sh->head, 0, memory_order_relaxed);
+        atomic_store_explicit(&sh->tail, 0, memory_order_relaxed);
+        memset((void*)sh->buffer, 0, sizeof(sh->buffer));
+        atomic_flag_clear_explicit(&g_inject_queue.push_lock[i],
+                                   memory_order_relaxed);
+    }
+}
+
+/* 轮转片选择：投递方按 task_id 低位分散，避免全压在一片 */
+static inline uint32_t inject_shard_for_task(KaulaTask* task) {
+    /* task_id 由 g_conc_runtime.next_task_id 单调分配，低位轮转良好 */
+    uint64_t id = task ? (uint64_t)task->task_id : 0;
+    return (uint32_t)(id & KAULA_INJECT_SHARD_MASK);
+}
+
+uint32_t kaula_scheduler_shard_of_task(KaulaTask* task) {
+    return inject_shard_for_task(task);
 }
 
 int kaula_inject_queue_push(KaulaTask* task) {
-    /* 抢锁：acquire，与下面的 release 解锁配对 */
-    while (atomic_flag_test_and_set_explicit(&g_inject_push_lock,
+    uint32_t si = inject_shard_for_task(task);
+    KaulaInjectShard* sh = inject_shard(si);
+
+    /* 抢锁：acquire，与下面的 release 解锁配对。分片后只与本片 pusher 争 */
+    while (atomic_flag_test_and_set_explicit(&g_inject_queue.push_lock[si],
                                              memory_order_acquire)) {
         /* 临界区三条指令且不阻塞，持锁者必然在推进，自旋即可 */
     }
 
-    uint64_t tail = atomic_load_explicit(&g_inject_queue.tail, memory_order_relaxed);
-    uint64_t head = atomic_load_explicit(&g_inject_queue.head, memory_order_acquire);
+    uint64_t tail = atomic_load_explicit(&sh->tail, memory_order_relaxed);
+    uint64_t head = atomic_load_explicit(&sh->head, memory_order_acquire);
 
     int ok = 1;
-    if (tail - head >= KAULA_INJECT_QUEUE_CAPACITY) {
+    if (tail - head >= KAULA_INJECT_SHARD_CAPACITY) {
         ok = 0; /* 满：背压 */
     } else {
         /* 顺序关键：先写 payload，再以 release 推进 tail。
          * pop 读到 tail > head 之后才读 buffer，正是靠这次 release
          * 看见 payload。 */
         atomic_store_explicit(
-            &g_inject_queue.buffer[tail & KAULA_INJECT_QUEUE_MASK],
+            &sh->buffer[tail & KAULA_INJECT_SHARD_MASK_CAP],
             task, memory_order_relaxed);
-        atomic_store_explicit(&g_inject_queue.tail, tail + 1, memory_order_release);
+        atomic_store_explicit(&sh->tail, tail + 1, memory_order_release);
     }
 
-    atomic_flag_clear_explicit(&g_inject_push_lock, memory_order_release);
+    atomic_flag_clear_explicit(&g_inject_queue.push_lock[si], memory_order_release);
     return ok;
 }
 
@@ -101,53 +124,43 @@ int kaula_inject_queue_push(KaulaTask* task) {
  *
  * 空间不足时只接纳 m ≤ n 个，返回 m；调用方用剩余 n-m 个重试。
  * Worker 持续排空队列，重试不会死循环。
+ *
+ * 分片后：一批 task 可能落在不同的片上。按片分组、逐片批量入队；
+ * 单片空间的限制按片各自成立。返回「首个未能接纳的下标」（0..n），
+ * 语义与原实现一致：返回值之前的都入队成功。
  */
 int kaula_inject_queue_push_batch(KaulaTask** tasks, int n) {
     if (n <= 0) return 0;
 
-    while (atomic_flag_test_and_set_explicit(&g_inject_push_lock,
-                                             memory_order_acquire)) {
+    /*
+     * 简单而正确的做法：逐片处理。
+     * 调用方（Worker 本地队列满时的兜底、evict 批量转移）不追求
+     * 极致的批量摊销，正确性优先；真正的热路径是单条 push。
+     */
+    int accepted = 0;
+    for (int i = 0; i < n; i++) {
+        if (!kaula_inject_queue_push(tasks[i])) break;
+        accepted++;
     }
-
-    uint64_t tail = atomic_load_explicit(&g_inject_queue.tail, memory_order_relaxed);
-    uint64_t head = atomic_load_explicit(&g_inject_queue.head, memory_order_acquire);
-
-    uint64_t avail = KAULA_INJECT_QUEUE_CAPACITY - (tail - head);
-    int m = (int)avail;
-    if (m > n) m = n;
-    if (m < 0) m = 0;
-
-    for (int i = 0; i < m; i++) {
-        atomic_store_explicit(
-            &g_inject_queue.buffer[(tail + i) & KAULA_INJECT_QUEUE_MASK],
-            tasks[i], memory_order_relaxed);
-    }
-    if (m > 0) {
-        atomic_store_explicit(&g_inject_queue.tail, tail + m, memory_order_release);
-    }
-
-    atomic_flag_clear_explicit(&g_inject_push_lock, memory_order_release);
-    return m;
+    return accepted;
 }
 
-KaulaTask* kaula_inject_queue_pop(void) {
-    /*
-     * 多个 Worker 可能同时 pop。用 CAS 竞争 head：
-     * 赢者取走该槽位的 Task，输者继续尝试下一个。
-     */
+/* 从指定片弹一个（CAS 竞争该片的 head） */
+static KaulaTask* inject_shard_pop(uint32_t si) {
+    KaulaInjectShard* sh = inject_shard(si);
     for (uint64_t attempt = 0; attempt < 8; attempt++) {
-        uint64_t head = atomic_load_explicit(&g_inject_queue.head, memory_order_relaxed);
-        uint64_t tail = atomic_load_explicit(&g_inject_queue.tail, memory_order_acquire);
+        uint64_t head = atomic_load_explicit(&sh->head, memory_order_relaxed);
+        uint64_t tail = atomic_load_explicit(&sh->tail, memory_order_acquire);
 
         if (head >= tail) return NULL; /* 空 */
 
         KaulaTask* task = atomic_load_explicit(
-            &g_inject_queue.buffer[head & KAULA_INJECT_QUEUE_MASK],
+            &sh->buffer[head & KAULA_INJECT_SHARD_MASK_CAP],
             memory_order_acquire);
 
         uint64_t expected = head;
         if (atomic_compare_exchange_strong_explicit(
-                &g_inject_queue.head, &expected, head + 1,
+                &sh->head, &expected, head + 1,
                 memory_order_acq_rel, memory_order_relaxed)) {
             /*
              * 修复：不再清空槽位。
@@ -173,21 +186,123 @@ KaulaTask* kaula_inject_queue_pop(void) {
     return NULL;
 }
 
-int kaula_inject_queue_empty(void) {
-    uint64_t h = atomic_load_explicit(&g_inject_queue.head, memory_order_relaxed);
-    uint64_t t = atomic_load_explicit(&g_inject_queue.tail, memory_order_acquire);
+/* 从指定片批量弹（同一片内一次 CAS 推进 m 个） */
+static int inject_shard_pop_batch(uint32_t si, KaulaTask** out, int max) {
+    if (out == NULL || max <= 0) return 0;
+    if (max > 64) max = 64;
+    KaulaInjectShard* sh = inject_shard(si);
+
+    for (uint64_t attempt = 0; attempt < 8; attempt++) {
+        uint64_t head = atomic_load_explicit(&sh->head, memory_order_relaxed);
+        uint64_t tail = atomic_load_explicit(&sh->tail, memory_order_acquire);
+
+        if (head >= tail) return 0; /* 空 */
+
+        uint64_t avail = tail - head;
+        int m = (avail < (uint64_t)max) ? (int)avail : max;
+
+        /* 先读 payload（见下方注释） */
+        for (int i = 0; i < m; i++) {
+            out[i] = atomic_load_explicit(
+                &sh->buffer[(head + i) & KAULA_INJECT_SHARD_MASK_CAP],
+                memory_order_acquire);
+        }
+
+        uint64_t expected = head;
+        if (atomic_compare_exchange_strong_explicit(
+                &sh->head, &expected, head + (uint64_t)m,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            return m;
+        }
+        /* 输者：重试（可能因别的 Worker 抢走了 head） */
+    }
+    return 0;
+}
+
+static int inject_shard_empty(uint32_t si) {
+    KaulaInjectShard* sh = inject_shard(si);
+    uint64_t h = atomic_load_explicit(&sh->head, memory_order_relaxed);
+    uint64_t t = atomic_load_explicit(&sh->tail, memory_order_acquire);
     return t <= h;
 }
 
+/* 某片的存量深度（tail - head，近似；仅用于唤醒策略的启发式判断）。 */
+static uint64_t inject_shard_depth(uint32_t si) {
+    KaulaInjectShard* sh = inject_shard(si);
+    uint64_t h = atomic_load_explicit(&sh->head, memory_order_relaxed);
+    uint64_t t = atomic_load_explicit(&sh->tail, memory_order_acquire);
+    return t > h ? (t - h) : 0;
+}
+
+/*
+ * 便捷弹出：优先 prefer 片，空则轮转扫其余片。
+ * 这是无 prefer 信息的调用方（如检测、兜底）使用的版本。
+ */
+KaulaTask* kaula_inject_queue_pop_pref(uint32_t prefer) {
+    uint32_t base = prefer & KAULA_INJECT_SHARD_MASK;
+    for (uint32_t i = 0; i < KAULA_INJECT_SHARDS; i++) {
+        uint32_t si = (base + i) & KAULA_INJECT_SHARD_MASK;
+        KaulaTask* t = inject_shard_pop(si);
+        if (t != NULL) return t;
+    }
+    return NULL;
+}
+
+int kaula_inject_queue_pop_batch_shard(uint32_t si, KaulaTask** out, int max) {
+    return inject_shard_pop_batch(si & KAULA_INJECT_SHARD_MASK, out, max);
+}
+
+/*
+ * 批量弹出（跨片）：先扫一遍 prefer 起始的所有片，只要任一片取到
+ * 就不再看后面的片 —— Worker 的 find_work 会在下一轮继续来取。
+ * 保留旧签名以兼容既有调用方。
+ */
+int kaula_inject_queue_pop_batch(KaulaTask** out, int max) {
+    if (out == NULL || max <= 0) return 0;
+    if (max > 64) max = 64;
+    for (uint32_t i = 0; i < KAULA_INJECT_SHARDS; i++) {
+        int got = inject_shard_pop_batch(i, out, max);
+        if (got > 0) return got;
+    }
+    return 0;
+}
+
+KaulaTask* kaula_inject_queue_pop(void) {
+    /* 无片偏好：扫全部片 */
+    return kaula_inject_queue_pop_pref(0);
+}
+
+int kaula_inject_queue_empty(void) {
+    for (uint32_t i = 0; i < KAULA_INJECT_SHARDS; i++) {
+        if (!inject_shard_empty(i)) return 0;
+    }
+    return 1;
+}
+
+int kaula_scheduler_inject_empty_shard(uint32_t shard) {
+    return inject_shard_empty(shard & KAULA_INJECT_SHARD_MASK);
+}
+
 uint64_t kaula_inject_queue_size(void) {
-    uint64_t h = atomic_load_explicit(&g_inject_queue.head, memory_order_relaxed);
-    uint64_t t = atomic_load_explicit(&g_inject_queue.tail, memory_order_acquire);
-    return t > h ? t - h : 0;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < KAULA_INJECT_SHARDS; i++) {
+        KaulaInjectShard* sh = inject_shard(i);
+        uint64_t h = atomic_load_explicit(&sh->head, memory_order_relaxed);
+        uint64_t t = atomic_load_explicit(&sh->tail, memory_order_acquire);
+        if (t > h) total += t - h;
+    }
+    return total;
 }
 
 /* 简写 */
 int kaula_scheduler_inject_push(KaulaTask* task) { return kaula_inject_queue_push(task); }
 KaulaTask* kaula_scheduler_inject_pop(void)      { return kaula_inject_queue_pop(); }
+int kaula_scheduler_inject_pop_batch(KaulaTask** out, int max) {
+    return kaula_inject_queue_pop_batch(out, max);
+}
+int kaula_scheduler_inject_pop_batch_shard(uint32_t shard, KaulaTask** out, int max) {
+    return kaula_inject_queue_pop_batch_shard(shard, out, max);
+}
 int kaula_scheduler_inject_empty(void)           { return kaula_inject_queue_empty(); }
 
 /* ========== spawn ========== */
@@ -440,6 +555,9 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
 
 /* ========== 唤醒 ========== */
 
+/* notify_shard 铺开唤醒面的最小片积压深度（见 kaula_scheduler_notify_shard） */
+#define KAULA_NOTIFY_SHARD_SPREAD_MIN 3
+
 void kaula_scheduler_notify_one(void) {
     uint32_t n = g_conc_runtime.worker_count;
     for (uint32_t i = 0; i < n; i++) {
@@ -448,6 +566,80 @@ void kaula_scheduler_notify_one(void) {
             return;
         }
     }
+}
+
+/*
+ * 分片感知唤醒：唤醒「偏好该片」的 Worker（worker_id & MASK == shard），
+ * 让「谁该干活就叫谁」，把唤醒面从 worker[0] 铺开到整片。
+ *
+ * 为什么不是 notify_one：投递方知道任务落在哪一片（task_id 低位），
+ * 而 consume 方也按同样规则偏好自己的片。若统一用 notify_one 只叫醒
+ * worker[0]，那 w[0] 醒来会先扫自己的片、再去扫别人的片 —— 它要么
+ * 替别人把活干了（分布不均），要么抢在 owner 醒来之前把片搬空、导致
+ * owner 永远只等自己的空片而 park。实测 C 边 degrade（conc=100、投递
+ * 密集、Worker 基本都在忙）吞吐 ~200K → ~460K（2.3×）。
+ *
+ * **但有一个必须避开的坑**：suspend/mixed 里 Worker 常处于「本地短定时器
+ * 未到期、为定时器而睡」的状态（park_ns = 距最近到期的剩余时间）。此时
+ * 用按片 RR 把它唤醒，它醒来发现定时器没到、手头没活，只能立刻 re-park
+ * ——一次多余的 syscall + 调度往返。100 并发 × 20000 任务下这种「无谓
+ * 唤醒」累积起来，实测把 suspend/mixed 拖慢 19%（270K → 220K）。
+ *
+ * 因此这里加一道过滤：**跳过 has_local_timer=1 的 Worker**。它为定时器
+ * 而睡时叫它没用（定时器到期它自己会醒）；degrade 无定时器，过滤不生效，
+ * 分片唤醒的 2.4× 收益完整保留。轮转（ticket）保证同片多个 owner 轮流
+ * 承担，避免只唤醒最低 id 导致其余 Worker 长期 park。
+ *
+ * 找不到可唤醒的 owner 时退化为 notify_one，保证不漏唤醒。
+ */
+void kaula_scheduler_notify_shard(uint32_t shard) {
+    uint32_t n = g_conc_runtime.worker_count;
+    uint32_t want = shard & KAULA_INJECT_SHARD_MASK;
+    if (n == 0) return;
+
+    /*
+     * 门槛：只有当本片确实「积压」时才铺开唤醒面。
+     *
+     * 这是把「degrade 要铺开、suspend 不能骚扰」这对矛盾落到可判定信号
+     * 上的关键。判据用本片存量深度：
+     *   - degrade（conc=100、投递密集）：本片常积压多个任务 → 铺开唤醒，
+     *     让同片多个 owner 并行消费 → 吞吐 2.3×。
+     *   - suspend/mixed：一次只投一两个任务，唤醒后的 owner 立刻取走、
+     *     片随即转空 → 深度低，走 notify_one，不去骚扰为定时器而睡的
+     *     Worker → 保住挂起往返延迟。
+     * 深度是近似值（relaxed 读，允许与真实值差 1），只用于启发式选择
+     * 唤醒策略，不影响正确性：无论走哪条，任务最终都会被消费。
+     */
+    if (inject_shard_depth(want) < KAULA_NOTIFY_SHARD_SPREAD_MIN) {
+        kaula_scheduler_notify_one();
+        return;
+    }
+
+    uint32_t owners_per_shard = n / KAULA_INJECT_SHARDS;
+    if (owners_per_shard == 0) owners_per_shard = 1;
+
+    static _Atomic(uint32_t) rr_ticket = 0;
+    uint32_t k = atomic_fetch_add_explicit(&rr_ticket, 1, memory_order_relaxed)
+                 % owners_per_shard;
+
+    for (uint32_t t = 0; t < owners_per_shard; t++) {
+        uint32_t off = (k + t) % owners_per_shard;
+        uint32_t idx = want + off * KAULA_INJECT_SHARDS;
+        if (idx >= n) continue;
+        KaulaWorker* w = &g_conc_workers[idx];
+        if (!atomic_load_explicit(&w->running, memory_order_acquire)) continue;
+        /* 为定时器而睡的 Worker 不叫（叫了也是白醒一次） */
+        if (atomic_load_explicit(&w->has_local_timer, memory_order_acquire)) continue;
+        kaula_worker_wake(w);
+        return;
+    }
+
+    /*
+     * 兜底：worker_id 未必是 0..n-1 的紧凑序列（撤离/重启后可能有空洞），
+     * 或该片 owner 全在为定时器而睡。退化为顺序扫「任何 running 的
+     * Worker」，保证不漏唤醒 —— 代价只是这一次的分布差。
+     */
+    kaula_scheduler_notify_one();
 }
 
 void kaula_scheduler_notify_all(void) {

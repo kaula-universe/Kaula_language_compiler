@@ -342,9 +342,11 @@ void kaula_epoch_reclaim_all(void) {
 
     for (uint32_t i = 0; i < list->count; i++) {
         if (list->items[i].pool != NULL) {
-            KaulaTask* t = (KaulaTask*)list->items[i].ptr;
-            t->next_free = *(KaulaTask**)list->items[i].pool;
-            *(KaulaTask**)list->items[i].pool = t;
+            /* pool 可能是 &worker->task_pool，也可能是全局池哨兵
+             * KAULA_TASK_POOL_GLOBAL —— 一律交给 kaula_task_pool_return
+             * 分派，绝不在此直接解引用 pool（哨兵 1 会立刻段错误）。 */
+            kaula_task_pool_return((KaulaTask*)list->items[i].ptr,
+                                   list->items[i].pool);
         } else {
             kmm_v4_survivor_free(list->items[i].ptr);
         }
@@ -366,9 +368,9 @@ void kaula_epoch_shutdown(void) {
         KaulaRetireList* l = &g_conc_workers[i].retired;
         for (uint32_t j = 0; j < l->count; j++) {
             if (l->items[j].pool != NULL) {
-                KaulaTask* t = (KaulaTask*)l->items[j].ptr;
-                t->next_free = *(KaulaTask**)l->items[j].pool;
-                *(KaulaTask**)l->items[j].pool = t;
+                /* 同 reclaim_all：pool 可能是全局池哨兵，统一走分派 */
+                kaula_task_pool_return((KaulaTask*)l->items[j].ptr,
+                                       l->items[j].pool);
             } else {
                 kmm_v4_survivor_free(l->items[j].ptr);
             }

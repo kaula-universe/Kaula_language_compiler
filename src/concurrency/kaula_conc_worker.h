@@ -81,6 +81,7 @@ typedef struct KaulaWorker {
     /* ---- park / 唤醒 ---- */
     kaula_p_event     park_event;   /* Worker 睡在这里 */
     _Atomic(int)      park_requested;
+    _Atomic(int)      parked;
 
     /* ---- 生命周期 ---- */
     _Atomic(int)      running;
@@ -109,6 +110,7 @@ typedef struct KaulaWorker {
     /* ---- 本地短定时器（P-D3：Task 内嵌，owner 独占无锁） ---- */
     KaulaTask*        local_timers;              /* 链接复用 task->resume_next */
     uint64_t          local_timers_min_deadline; /* UINT64_MAX = 空 */
+    _Atomic(int)      has_local_timer;
 
     /*
      * ---- 恢复优先链（P-D2） ----
