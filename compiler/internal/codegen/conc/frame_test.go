@@ -424,7 +424,8 @@ func TestEndToEnd_SuspendPath(t *testing.T) {
 	}
 	analysis := AnalyzeBody(body)
 	e := newEmitter("url")
-	res := e.Generate(analysis, []string{"    /* generated body */\n"}, "", body)
+	// 顶层挂起点 → 非守卫模式，2 段（pc=0 入口 + pc=1 恢复）
+	res := e.Generate(analysis, []string{"    /* seg0 */\n", "    /* seg1 */\n"}, "", body)
 
 	if !strings.Contains(res, "switch (f->pc)") {
 		t.Error("有挂起的函数应走双形态")
