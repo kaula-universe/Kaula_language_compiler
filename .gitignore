@@ -79,4 +79,13 @@ test/bench/kaula/bench_gen.*
 test/bench/results_*.json
 test/bench/kaula/ab_*.kl
 test/bench/kaula/bench_gen
+# C 边基准的编译产物（无扩展名，上面的 *.exe 规则覆盖不到）
+test/bench/cbench/bench_c
+test/bench/cbench/*.o
+# 性能工具的临时产物
+test/bench/perf/__pycache__/
+test/bench/perf/*.json.tmp
+# 标定基准是「本机本时段」的测量结果，换机器即失效，不入库
+test/bench/perf/baselines/
+!test/bench/perf/baselines/.gitkeep
 scratch/
