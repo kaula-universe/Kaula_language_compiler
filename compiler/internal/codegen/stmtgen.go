@@ -459,8 +459,24 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			}
 			prevCtx := sg.codegen.pendingEnumCtxType
 			sg.codegen.pendingEnumCtxType = stmt.Type
+
+			/*
+			 * `[]i32 arr = [1,3,1990]` 的类型是**指针** int32_t*，走本分支。
+			 * 数组字面量的复合字面量元素类型必须与元素一致：不设置时恒生成
+			 * `(int64_t[]){...}` → 绑到 int32_t* 造成指针步长错位，
+			 * arr[1]/arr[2] 读到错误槽位，静默给错答案（1994 → 4）。
+			 */
+			prevElem := sg.codegen.pendingArrayElemType
+			if kauraElem := inferElementType(stmt.Type); kauraElem != "" {
+				sg.codegen.pendingArrayElemType = kauraElem
+			} else {
+				sg.codegen.pendingArrayElemType = strings.TrimSpace(baseType)
+			}
+
 			initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+
 			sg.codegen.pendingEnumCtxType = prevCtx
+			sg.codegen.pendingArrayElemType = prevElem
 		}
 		if initValue != "" {
 			// 有初始值：直接用初始值初始化，不调用 alloc_auto
@@ -637,8 +653,29 @@ func (sg *StatementGenerator) generateRuntimeSizedArrayAlloc(stmt *ast.VariableD
 	if stmt.Value != nil {
 		prevCtx := cg.pendingEnumCtxType
 		cg.pendingEnumCtxType = stmt.Type
+
+		/*
+		 * 数组字面量的复合字面量元素类型必须与 elem 一致。
+		 *
+		 * `[]i32 arr = [1,3,1990]`：元素是 i32，不设置上下文时字面量恒生成
+		 * `(int64_t[]){...}` → 绑到 int32_t* 造成步长错位、静默错答案。
+		 * 这里把**元素**Kaula 类型名传下去。
+		 *
+		 * 注：stmt.Type 是 Kaula 类型名。既有 `[]i32`（元素在前）也有
+		 * `[3]i32`（元素在后）两种写法，两者都归约到元素类型。
+		 */
+		prevElem := cg.pendingArrayElemType
+		if kauraElem := inferElementType(stmt.Type); kauraElem != "" {
+			cg.pendingArrayElemType = kauraElem
+		} else {
+			// 兜底：用已解析出的 C 元素类型
+			cg.pendingArrayElemType = elem
+		}
+
 		initValue := cg.expressionGenerator.GenerateExpression(stmt.Value)
+
 		cg.pendingEnumCtxType = prevCtx
+		cg.pendingArrayElemType = prevElem
 		if initValue != "" {
 			return promotePrefix + decl +
 				fmt.Sprintf("%s = %s;\n", stmt.Name, initValue)
@@ -2368,6 +2405,7 @@ func (sg *StatementGenerator) generateForInStatement(stmt *ast.ForInStatement) s
 
 	var elemCType string
 	var isFixedArray bool
+	var isSliceArray bool // []T 形态：C 侧是裸指针，运行期无长度
 	var isStringIter bool
 	var arraySize string
 
@@ -2380,13 +2418,36 @@ func (sg *StatementGenerator) generateForInStatement(stmt *ast.ForInStatement) s
 				elemCType = sg.codegen.typeGenerator.convertType(elemKaula, false)
 			}
 			if len(kt) > 0 && kt[0] == '[' {
-				isFixedArray = true
 				closeBracket := strings.Index(kt, "]")
 				if closeBracket > 0 {
 					arraySize = kt[1:closeBracket]
 				}
+				/*
+				 * 区分定长数组与切片（指针语义）：
+				 *   `[5]i32` → arraySize="5"  → 定长数组，长度编译期已知
+				 *   `[]i32`  → arraySize=""   → 指针，C 侧是 int32_t*，
+				 *                               没有 .len / .ptr 字段
+				 *
+				 * 此前两者都置 isFixedArray=true，切片在长度表达式处走到
+				 * `(arr).len` → 对裸指针取成员，clang 报
+				 * "member reference base type 'int64_t *' is not a structure"。
+				 * 切片的长度在运行期不可得，这里直接给编译期错误——比生成
+				 * 坏 C 再让 clang 报栈底信息清晰得多。
+				 */
+				if arraySize == "" {
+					isSliceArray = true
+				} else {
+					isFixedArray = true
+				}
 			}
 		}
+	}
+
+	if isSliceArray {
+		sg.codegen.error(fmt.Sprintf(
+			"无法迭代切片 `[]T`（行 %d）：其 C 侧是裸指针，运行期不带长度。"+
+				"请改用定长数组 `[N]T`，或用下标循环 `for i in range(n) { arr[i] }`。",
+			stmt.Pos.Line))
 	}
 
 	code := "for (size_t _i_ = 0; _i_ < "
