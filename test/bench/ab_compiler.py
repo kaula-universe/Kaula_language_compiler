@@ -248,10 +248,23 @@ def main() -> int:
     print("-" * 132)
     for (curve, conc, ta, tb, tr, ts_a, ts_b,
          pa, pb, pr, ps_a, ps_b) in rows:
-        print(f"{curve + '/' + str(conc):<16}{ta:>10,.0f}{tb:>10,.0f}"
-              f"{(tr - 1) * 100:>+8.0f}%{ts_a:>7.0f}%{ts_b:>7.0f}%"
-              f"{pa / 1000:>8.1f}u{pb / 1000:>8.1f}u"
-              f"{(pr - 1) * 100:>+8.0f}%{ps_a:>7.0f}%{ps_b:>7.0f}%")
+        # p99 可能为 None：light/degrade 曲线不产生挂起，内核打点恒为 0，
+        # 逐轮配对比值被 `if ra["p99"]` 全部过滤掉 → med([]) 返回 None。
+        # 此时该列显示 n/a，不能让格式化炸掉整份报告（之前是 TypeError）。
+        ta_s = f"{ta:>10,.0f}" if ta is not None else f"{'n/a':>10}"
+        tb_s = f"{tb:>10,.0f}" if tb is not None else f"{'n/a':>10}"
+        tr_s = f"{(tr - 1) * 100:>+8.0f}%" if tr is not None else f"{'n/a':>9}"
+        ts_a_s = f"{ts_a:>7.0f}%" if ts_a is not None else f"{'n/a':>8}"
+        ts_b_s = f"{ts_b:>7.0f}%" if ts_b is not None else f"{'n/a':>8}"
+        pa_s = f"{pa / 1000:>8.1f}u" if pa is not None else f"{'n/a':>9}"
+        pb_s = f"{pb / 1000:>8.1f}u" if pb is not None else f"{'n/a':>9}"
+        pr_s = f"{(pr - 1) * 100:>+8.0f}%" if pr is not None else f"{'n/a':>9}"
+        ps_a_s = f"{ps_a:>7.0f}%" if ps_a is not None else f"{'n/a':>8}"
+        ps_b_s = f"{ps_b:>7.0f}%" if ps_b is not None else f"{'n/a':>8}"
+        print(f"{curve + '/' + str(conc):<16}{ta_s}{tb_s}"
+              f"{tr_s}{ts_a_s}{ts_b_s}"
+              f"{pa_s}{pb_s}"
+              f"{pr_s}{ps_a_s}{ps_b_s}")
     print("=" * 132)
     print("tps / p99 取各变体 reps 轮的中位数；tps B/A、p99 B/A 是**逐轮配对比值的中位数**。")
     print("σ% = 该变体 reps 轮内极差（max/min - 1），即「自己跟自己比」的噪声量级。")
