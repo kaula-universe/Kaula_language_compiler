@@ -29,7 +29,7 @@ usage: python toolkit_build.py [-h] [--release] [--clean]
 | `std` | 标准库（kaula_std） |
 | `freestanding` | freestanding 无依赖标准库（kaula_freestanding） |
 | `runtime` | 运行时（kaula_runtime） |
-| `compiler` | Go 编译器 `kaulac` 与格式化工具 `kaulafmt` |
+| `compiler` | Go 编译器 `kaulac`（含 `fmt` 子命令） |
 | `headers` | 头文件 |
 
 ## 示例
@@ -59,7 +59,6 @@ python toolkit_build.py --clean                # 清理所有构建产物
 build/
 ├── bin/
 │   ├── kaulac.exe          # 编译器
-│   ├── kaulafmt.exe        # 格式化工具
 │   └── stdlib.json         # 标准库配置（随编译器输出）
 ├── include/                # 头文件（headers 目标）
 └── lib/                    # 标准库/运行时静态库

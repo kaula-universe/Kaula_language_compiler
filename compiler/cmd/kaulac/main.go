@@ -412,6 +412,21 @@ func hasTestFunctions(program *ast.Program) bool {
 	return found
 }
 
+// isFmtSubcommand 判断一个 token 是否为 kaulac fmt 的子命令关键字。
+//
+// fmt 的参数预扫描靠它划边界：`fmt` 之后一路收到下一个子命令之前，
+// 这样排在文件名之后的旗标（--write / -w）不会被漏掉。
+// 若按「是否 - 开头」判断，`kaulac fmt file x.kl --write` 会只收集到 x.kl，
+// --write 被静默丢弃，命令退化成只打印不落盘。
+func isFmtSubcommand(tok string) bool {
+	switch tok {
+	case "file", "stdin", "check":
+		return true
+	default:
+		return false
+	}
+}
+
 func main() {
  // Test subcommands own their flags and must bypass compiler flag pre-scanning.
  if len(os.Args) > 1 && os.Args[1] == "test" {
@@ -541,8 +556,11 @@ func main() {
 			if i+1 < len(args) {
 				fmtCmd = args[i+1]
 				i++
-				// 收集 fmt 子命令的其余参数
-				for i+1 < len(args) && len(args[i+1]) > 0 && args[i+1][0] != '-' {
+				// 收集 fmt 子命令的其余参数。
+				// 边界必须按「是否下一个 fmt 子命令」来切，不能按「是否 - 开头」——
+				// 后者会让排在文件名之后的旗标（`fmt file x.kl --write`）
+				// 被整段漏掉，使 --write 静默失效、只打印不落盘。
+				for i+1 < len(args) && !isFmtSubcommand(args[i+1]) {
 					fmtArgs = append(fmtArgs, args[i+1])
 					i++
 				}
@@ -884,6 +902,8 @@ func main() {
 					os.Exit(1)
 				}
 				if writeBack {
+					// FormatFileInPlace 自带护栏：解析失败或遇到未覆盖节点时
+					// 拒绝落盘，避免把损坏源码写回。
 					if err := formatter.FormatFileInPlace(file); err != nil {
 						fmt.Printf("Error formatting %s: %v\n", file, err)
 						os.Exit(1)
@@ -893,6 +913,23 @@ func main() {
 					formatted, err := formatter.FormatFile(file)
 					if err != nil {
 						fmt.Printf("Error formatting %s: %v\n", file, err)
+						os.Exit(1)
+					}
+					// stdout 模式同样要拦住不可信输出：
+					// 解析失败时 parser 的错误恢复会产出畸形 AST，
+					// 直接打印等于给出破坏源码的建议。
+					if formatter.HasParseError() {
+						fmt.Fprintf(os.Stderr, "Error: %s 解析失败，未输出格式化结果：\n", file)
+						for _, msg := range formatter.ParseErrorMessages() {
+							fmt.Fprintf(os.Stderr, "  %s\n", msg)
+						}
+						os.Exit(1)
+					}
+					if formatter.HasUnknown() {
+						fmt.Fprintf(os.Stderr,
+							"Error: %s 含有格式化器尚未覆盖的语法（%s），未输出结果。\n",
+							file, strings.Join(formatter.UnknownNodes(), ", "))
+						fmt.Fprintln(os.Stderr, "  请提交 Issue 反馈该语法，格式化器不会输出可能丢语义的代码。")
 						os.Exit(1)
 					}
 					fmt.Println(formatted)
@@ -924,6 +961,21 @@ func main() {
 			}
 			formatter := formatter.New()
 			formatted := formatter.FormatSource(string(buf))
+			// stdin 模式同样 fail-fast：宁可报错，也不输出丢语义的代码。
+			if formatter.HasParseError() {
+				fmt.Fprintf(os.Stderr, "Error: 输入解析失败，未输出格式化结果：\n")
+				for _, msg := range formatter.ParseErrorMessages() {
+					fmt.Fprintf(os.Stderr, "  %s\n", msg)
+				}
+				os.Exit(1)
+			}
+			if formatter.HasUnknown() {
+				fmt.Fprintf(os.Stderr,
+					"Error: 输入含有格式化器尚未覆盖的语法（%s），未输出结果。\n",
+					strings.Join(formatter.UnknownNodes(), ", "))
+				fmt.Fprintln(os.Stderr, "  请提交 Issue 反馈该语法，格式化器不会输出可能丢语义的代码。")
+				os.Exit(1)
+			}
 			fmt.Println(formatted)
 			return
 		case "check":
@@ -947,7 +999,24 @@ func main() {
 				}
 				formatter.Reset()
 				formatted := formatter.FormatSource(string(data))
-				if string(data) != formatted {
+				// 解析失败 / 未覆盖语法时无法判断是否已格式化，
+				// 应当报错退出，而不是谎报 "is not formatted"。
+				if formatter.HasParseError() {
+					fmt.Fprintf(os.Stderr, "Error: %s 解析失败，无法检查格式：\n", file)
+					for _, msg := range formatter.ParseErrorMessages() {
+						fmt.Fprintf(os.Stderr, "  %s\n", msg)
+					}
+					os.Exit(1)
+				}
+				if formatter.HasUnknown() {
+					fmt.Fprintf(os.Stderr,
+						"Error: %s 含有格式化器尚未覆盖的语法（%s），无法检查格式。\n",
+						file, strings.Join(formatter.UnknownNodes(), ", "))
+					os.Exit(1)
+				}
+				// --write 落盘时末尾追加换行(见 formatter.FormatFileInPlace),
+				// 此处须用同一规范形比对,否则经 --write 处理过的文件会被误判为未格式化。
+				if string(data) != formatted+"\n" {
 					fmt.Printf("%s is not formatted\n", file)
 					os.Exit(1)
 				}

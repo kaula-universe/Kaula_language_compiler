@@ -80,8 +80,83 @@
 - **POSIX/Linux 首次实编实跑**：`_GNU_SOURCE` 暴露 `MAP_ANONYMOUS`、栈尺寸链接标志平台自适应等。
 - **KMM 内存安全**：paged free 小块不入池避免 Treiber 节点越界写；别名感知 liveness 提前释放，
   修 use-after-free 与 double-free。
+- **`kaulac fmt` 静默破坏源文件（6 类，共12 处修复）**：
+  - **未覆盖 AST 节点被替换成注释占位**：`formatExpression` 的 default 分支对
+    `SpawnExpression`/`AwaitExpression`/数组字面量/条件表达式/括号表达式等一律输出
+    `/* unknown expression: %T */`。首次格式化把 `Handle h = spawn f()` 变成注释、
+    抹掉并发语义；二次格式化再把注释当 token 重解析，散成乱码，源码彻底不可用。
+    已补齐7 个表达式分支，并把 `await` 按仓库真实语法输出为**后缀**形式
+    `handle.await`（`parseAwaitExpressionIterative` 只在前缀位置构造节点，
+    但现存代码全部写作后缀，输出前缀会在 `hs[i].await` 这类下标句柄上丢语句）。
+    全仓 `/* unknown expression` 占位数 **119 → 0**。
+  - **lexer 遇到无法识别的字节死循环**：`Next()` 的 default 分支报错后 `continue`
+    却不推进 `l.pos`，于是在同一字节上无限吐空 token。孤立高位字节（`\x97`）即可触发，
+    1 行输入产出 20000 行空白。已改为报错后推进位置。
+  - **UTF-8 多字节标识符被拦腰截断**：`scanIdentifier`用
+    `unicode.IsLetter(rune(byte))` 逐字节判断，而 `rune(0xE5)` 是字母 'å'、
+    `rune(0x9D)` 是控制字符，于是中文标识符在多字节序列中间被切断。
+    改为 `utf8.DecodeRuneInString` 按码点解码；`Next()` 中恒真条件
+    `char >= 0x80 && (... || char >= 0x80)`（永真，导致任意高位字节都被当标识符首字符）
+    一并修正。
+  - **块注释 `/* */` 完全不被识别**：`skipComment()` 只认 `//` 与 `#`，
+    块注释被拆成「除号 + 星号 + 内容」重新解析，含中文时连锁失败并触发上面的死循环。
+    已支持块注释（跨行、含中文、未闭合时报错定位到开启行）。
+  - **一元运算符丢括号（语义静默改变）**：`formatUnaryExpression` 无条件输出
+    `op + 操作数`，`!(5 < 3)` 被写成 `!5 < 3`，重新解析变成 `(!5) < 3`——
+    语义从「5 不小于 3」(false) 变成「-5 小于 3」(true)，**条件恒真**，
+    `test/stress_numeric.kl` 的断言全部失效但测试框架报绿。
+    已按「操作数是否原子表达式」补括号，`-(a+b)`→`-(a + b)`、`!ready()` 保持原样。
+  - **泛型类型参数被写成方括号**：`fn identity<T>` 被格式化成 `fn identity[T]`，
+    `[T]` 会被重新解析成「表达式下标」，泛型语义丢失、编译报 4 个 Semantic Error。
+    已统一用 `<T>`（`writeTypeParams`）。
+- **`kaulac fmt` 护栏补全（fail-fast，不做静默降级）**：
+  - **`--write` 静默不落盘**：fmt 参数预扫描按「下一个 token 是否 `-` 开头」划边界，
+    排在文件名之后的旗标被整段漏掉——`kaulac fmt file x.kl --write` 与
+    `kaulac fmt file --write x.kl` **两种写法都只打印不落盘**，且无任何提示。
+    改为按 fmt 子命令关键字（`file`/`stdin`/`check`）划边界。
+  - **解析错误仍被格式化**：`kaulafmt` 迁移到 `kaulac fmt` 时漏抄了
+    `if p.HasErrors() { exit(1) }`，语法错误文件仍走完格式化并输出——
+    而 parser 的错误恢复会产出畸形 AST。已补回该护栏，
+    `fmt file`/`fmt stdin`/`fmt check` 三条路径全部覆盖。
+  - **import 可解析性检查被误当语法检查**：该检查依赖**运行环境**
+    （工作目录、stdlib 清单、`kaula.json`），与源码语法无关。
+    formatter 硬编码 `SetFile("<fmt>")` 导致 `filepath.Dir` = `.`，
+    换个目录执行 fmt 就会把合法import 判成「导入的模块不存在」并拒绝格式化。
+    parser 新增 `SetSkipImportCheck`，formatter 侧显式跳过。
+  - **词法错误收集器与语法错误收集器分离**：lexer 与 parser 各持一个独立收集器，
+    「未闭合块注释」「无法识别的字节」只进 lexer 侧。已一并采集。
+  - **`fmt check` 永久误报**：`--write` 落盘时写 `formatted+"\n"`，
+    而 check拿 `formatted` 比对，于是经`--write` 处理过的文件永远报「未格式化」。
+    比对改为同一规范形。
+- **格式化器丢失语言修饰符与错误传播语义（3 处）**：
+  - `conc fn` 的 `conc`、`pub fn` 的 `pub` 全部丢失，并发函数与导出可见性被静默改写；
+  - `export fn` 被输出成 `pub export fn`（parser 对 `export fn` 同时置
+    `IsExported` 与 `IsPublic`，两者都输出就得到 parser 不接受的组合，
+    二次解析失败并把函数体降级成垃圾）；
+  - 泛型函数被误加 `export`（`stmt.Generic` 的含义是「是否泛型函数」，
+    早期实现错用它当导出标志）；
+  - `x := f()` 的错误传播赋值被写成 `auto x = ...`（parser 对 `:=` 同时置
+    `IsAuto` 与 `IsTryAssign`），`:=` 语义与类型推断来源一并丢失。
+- **新增回归测试（4 个文件、40+ 用例）**：`lexer/comment_test.go`（注释三形态、
+  UTF-8 截断、死循环）、`formatter/new_syntax_test.go`（spawn/await/修饰符/
+  `:=`/一元括号/幂等）、`formatter/guard_test.go`（解析错误、unknown 护栏、
+  输出爆炸上限）、`kaulac/fmtargs_test.go`（`--write` 参数边界）。
+- **验证结论**：全仓 114 个 `.kl` 文件格式化 114/114 成功、unknown 占位 0、
+  解析错误 0；与基线逐文件A/B 对照中 **19 个此前被破坏的文件（15 个concurrency +
+  `stress_concurrent_spawn` / `stress_numeric` / `try_assign`）由 BREAK 转OK，
+  零反向回归**；`run_tests.py --quick` 基线与修复版均为 76/90 且失败集合逐项一致
+  （`error_handling`/`probe_err`/`probe_panic`/`stdlib_async_safety`/
+  `stdlib_parallel_safety`/`stress_option`/`stress_panic`，均为既存失败）。
 
 ### Changed
+- **格式化入口统一为 `kaulac fmt`，移除独立 `kaulafmt` 二进制（BREAKING）**：
+  `compiler/cmd/kaulafmt/` 与 `kaulac fmt` 是同一份格式化逻辑的两份拷贝
+  （除构造函数名与少数 API 包装外逐行一致），长期存在改动不同步的漂移风险。
+  现删除重复实现，`kaulac fmt` 成为唯一入口。
+  迁移：`kaulafmt -w f.kl` → `kaulac fmt file f.kl --write`；
+  `kaulafmt f.kl` → `kaulac fmt file f.kl`；
+  新增 `kaulac fmt check f.kl`（校验）与 `kaulac fmt stdin`（stdin 管道）。
+  已在仓库全部 99 个可解析 `.kl` 文件上验证：新旧入口输出**逐字节一致**，零行为变更。
 - **CONC 术语正式定义与统一**：CONC = Continuation-Oriented Native Co-runtime。
 - **文档重构**：`concurrency-kernel.md` 改名 `core-runtime.md`，重写为"并发内核与 KMM V4"。
 - `for` 语句统一为 `for x in range(...)`，移除 C 风格三段式 for。

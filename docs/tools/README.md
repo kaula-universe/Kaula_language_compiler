@@ -15,7 +15,7 @@
 
 | 工具 | 文档 | 说明 |
 |------|------|------|
-| `kaulafmt` | [kaulafmt.md](kaulafmt.md) | 代码格式化工具（`.kl` 源文件） |
+| `kaulac fmt` | [formatter.md](formatter.md) | 代码格式化（`kaulac` 内置子命令） |
 
 ### 诊断与开发
 
@@ -28,7 +28,7 @@
 
 - 日常编译程序 → [kaulac.md](kaulac.md)
 - 一键构建整个工具链 → [toolkit-build.md](toolkit-build.md)
-- 统一代码风格 → [kaulafmt.md](kaulafmt.md)
+- 统一代码风格 → [formatter.md](formatter.md)
 - 调试解析器/AST → [dumpast.md](dumpast.md)
 - 验证语义分析 → [loadtest.md](loadtest.md)
 
@@ -38,8 +38,7 @@
 
 ```
 build/bin/
-├── kaulac.exe      # 编译器
-├── kaulafmt.exe    # 格式化工具
+├── kaulac.exe      # 编译器（含 fmt 子命令）
 └── stdlib.json     # 标准库配置（编译器运行依赖，随构建输出）
 ```
 

@@ -1,6 +1,6 @@
 # Kaula 代码规范 (Code Style)
 
-本文档定义 Kaula 语言 (`.kl`) 代码的风格规范。格式化以 `kaulafmt` 输出为准,
+本文档定义 Kaula 语言 (`.kl`) 代码的风格规范。格式化以 `kaulac fmt` 输出为准,
 手工书写时遵循以下规则。
 
 ## 1. 基础格式
@@ -79,7 +79,7 @@ fn handle_request(req: HttpRequest*, res: HttpResponse*) {
 
 ## 6. import
 
-- import 置于文件顶部,std 库优先按字母序,其他 import 空行分隔(kaulafmt 自动处理)。
+- import 置于文件顶部,std 库优先按字母序,其他 import 空行分隔(kaulac fmt 自动处理)。
 - 本地模块 import 名 = 文件名:
   - `import helper` → 文件 `helper.kl`
   - `import my.util` → 文件 `my/util.kl`(点号转目录),或兼容 `my.util.kl`
@@ -97,12 +97,12 @@ fn handle_request(req: HttpRequest*, res: HttpResponse*) {
 ## 8. 提交前检查
 
 ```bash
-kaulafmt -w <file>.kl
+kaulac fmt file <file>.kl --write
 ```
 
 - 格式化输出不得包含 `/* unknown statement */` 或 `/* unknown expression */` 注释
-  (表示 kaulafmt 未覆盖的节点,需要修复)。
-- 二次运行 kaulafmt 结果应与首次一致(round-trip 稳定)。
+  (表示 kaulac fmt 未覆盖的节点,需要修复)。
+- 二次运行 kaulac fmt 结果应与首次一致(round-trip 稳定)。
 
 ## 9. 更多资源
 
