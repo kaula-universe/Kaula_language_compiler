@@ -92,6 +92,19 @@ type CodeGenerator struct {
 	pendingEnumCtxType string
 
 	/*
+	 * pendingArrayElemType：正在生成初始化表达式的数组字面量元素类型（Kaula 类型名）。
+	 *
+	 * 数组字面量 `[]i32 arr = [1,3,1990]` 的复合字面量元素类型必须与声明
+	 * 的元素类型一致。此前 generateArrayLiteral 硬编码 `(int64_t[]){...}`，
+	 * 于是 `int32_t* arr = ((int64_t[]){...})` —— 指针步长错位，
+	 * arr[1] 读到的其实是第 0 个 8 字节槽的高 4 字节，静默给出错误结果。
+	 *
+	 * 声明处（generateRuntimeSizedArrayAlloc / 定长数组路径）按元素类型设置，
+	 * 表达式生成后清除。空串表示无上下文，此时回退到 int64_t（保持旧行为）。
+	 */
+	pendingArrayElemType string
+
+	/*
 	 * inConcResume 表示正在生成 conc fn 的 resume 函数体。
 	 *
 	 * 此时 `return X` 不能生成裸的 C return —— resume 的返回类型是

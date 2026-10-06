@@ -3180,7 +3180,24 @@ func (eg *ExpressionGenerator) generateArrayLiteral(e *ast.ArrayLiteral) string 
 	for i, elem := range e.Elements {
 		elems[i] = eg.GenerateExpression(elem)
 	}
-	return "((int64_t[]){ " + strings.Join(elems, ", ") + " })"
+
+	/*
+	 * 复合字面量的元素类型必须与声明目标一致。
+	 *
+	 * 此前恒用 `(int64_t[]){...}`，使 `[]i32 arr = [1,3,1990]` 生成
+	 * `int32_t* arr = ((int64_t[]){...})` —— 指针步长 8 字节、元素宽 4 字节，
+	 * arr[1]/arr[2] 读到错误的槽位，静默给出错误结果（1994 → 4）。
+	 *
+	 * 现在从声明上下文（pendingArrayElemType）取元素类型；无上下文时
+	 * 回退 int64_t，保持旧行为不变。
+	 */
+	elemCType := "int64_t"
+	if t := strings.TrimSpace(eg.codegen.pendingArrayElemType); t != "" {
+		if mapped := eg.codegen.typeGenerator.MapKaulaTypeToC(t); mapped != "" {
+			elemCType = mapped
+		}
+	}
+	return "((" + elemCType + "[]){ " + strings.Join(elems, ", ") + " })"
 }
 
 func (eg *ExpressionGenerator) generateComptimeExpression(e *ast.ComptimeExpression) string {

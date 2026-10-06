@@ -4083,6 +4083,21 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		// 否则忽略（函数声明不是表达式）
 		return nil
 	case lexer.TOKEN_LBRACE:
+		/*
+		 * `{ ... }` 有两种可能：
+		 *   1) 结构体字面量   { .field = value, ... }  —— 首 token 是 '.'
+		 *   2) 数组初始化器   { 10, 20, 30 }           —— 定长数组声明用
+		 *
+		 * 此前无条件走 struct literal，于是 `{10,20,30}` 里的裸值被
+		 * parseStructLiteralExpression 静默丢弃（它只认 `.field=value`），
+		 * 生成空 Fields → codegen 回落成 `= {0}`，数组元素全为 0。
+		 * 定长数组 `i32 arr[5] = {10,20,30,40,50}` 因此静默得到全 0 数组。
+		 *
+		 * 现在按首 token 区分：'.' 走结构体字面量，否则按数组字面量解析。
+		 */
+		if p.peekTok.Type != lexer.TOKEN_DOT {
+			return p.parseBraceArrayLiteral()
+		}
 		return p.parseStructLiteralExpression()
 	case lexer.TOKEN_AS:
 		// as<T>(e) 类型转换表达式（唯一允许的强转形式，禁止裸 (T)e）
@@ -4123,6 +4138,20 @@ func (p *Parser) parseStructLiteralWithType(typeName string, pos ast.Position) a
 			p.nextToken() // skip COLON
 			field.Value = p.parseExpressionIterative()
 			stmt.Fields = append(stmt.Fields, field)
+		} else if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
+			/*
+			 * 支持文档与实测都在用的无点写法 `TypeName { field = value, ... }`。
+			 *
+			 * 此前只认 `.field = value` 和 `field: value`，无点的 `field = value`
+			 * 落到最后的 else 分支被静默丢弃 → Fields 为空 → codegen 生成
+			 * `(K_T){0}`，字段全为 0。文档的 `Point p = Point { x = 10, y = 20 }`
+			 * 因此得到一个全零对象，无任何报错。
+			 */
+			field := ast.StructLiteralField{Name: p.curTok.Value}
+			p.nextToken() // skip IDENT
+			p.nextToken() // skip ASSIGN
+			field.Value = p.parseExpressionIterative()
+			stmt.Fields = append(stmt.Fields, field)
 		} else if p.curTok.Type == lexer.TOKEN_COMMA {
 			p.nextToken()
 		} else {
@@ -4133,6 +4162,39 @@ func (p *Parser) parseStructLiteralWithType(typeName string, pos ast.Position) a
 		p.nextToken()
 	}
 	return stmt
+}
+
+// parseBraceArrayLiteral 解析花括号数组初始化器 { expr1, expr2, ... }。
+//
+// 用于定长数组声明的初始化：`i32 arr[5] = {10, 20, 30, 40, 50}`。
+// 与 parseArrayLiteralIterative 的唯一区别是括号为 `{}` 而非 `[]`；
+// 产出同样是 *ast.ArrayLiteral，供 codegen 的固定数组 brace 分支消费。
+func (p *Parser) parseBraceArrayLiteral() ast.Expression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken() // 跳过 '{'
+	lit := &ast.ArrayLiteral{
+		Elements: []ast.Expression{},
+		Pos:      pos,
+	}
+	for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+		elem := p.parseExpressionIterative()
+		if elem != nil {
+			lit.Elements = append(lit.Elements, elem)
+		}
+		if p.curTok.Type == lexer.TOKEN_COMMA {
+			p.nextToken()
+		} else if p.curTok.Type != lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+	if p.curTok.Type == lexer.TOKEN_RBRACE {
+		p.nextToken()
+	}
+	return lit
 }
 
 // parseStructLiteralExpression 解析结构体字面量 { .field = value, ... }
@@ -4159,6 +4221,13 @@ func (p *Parser) parseStructLiteralExpression() ast.Expression {
 				}
 				stmt.Fields = append(stmt.Fields, field)
 			}
+		} else if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
+			// 无点写法 `{ field = value, ... }`（与 TypeName{...} 分支保持一致）
+			field := ast.StructLiteralField{Name: p.curTok.Value}
+			p.nextToken() // skip IDENT
+			p.nextToken() // skip ASSIGN
+			field.Value = p.parseExpressionIterative()
+			stmt.Fields = append(stmt.Fields, field)
 		} else if p.curTok.Type == lexer.TOKEN_COMMA {
 			p.nextToken()
 		} else {
