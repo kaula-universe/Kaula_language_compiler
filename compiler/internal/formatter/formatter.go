@@ -1,21 +1,33 @@
-﻿package formatter
+package formatter
 
 import (
 	"bytes"
-	"kaula/internal/ast"
-	"kaula/internal/lexer"
-	"kaula/internal/parser"
 	"fmt"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+
+	"kaula/internal/ast"
+	"kaula/internal/errors"
+	"kaula/internal/lexer"
+	"kaula/internal/parser"
 )
 
 type Formatter struct {
 	indent    int
 	buf       bytes.Buffer
 	indentStr string
+
+	// unknown 记录本次格式化中遇到的、formatter **尚未覆盖**的 AST 节点类型。
+	// 它是 fail-fast 护栏的依据：与其输出一份丢语义的源码，不如明确失败。
+	unknown []string
+
+	// parseErrors / parseErrorMsgs 记录本次解析的**语法**错误。
+	// 格式化器必须区分「语法错误」（源码本身有问题，拒绝格式化）与
+	//「未覆盖的 AST 节点」（formatter 的能力缺口），二者都不是可降级情形。
+	parseErrors    int
+	parseErrorMsgs []string
 }
 
 func New() *Formatter {
@@ -24,14 +36,96 @@ func New() *Formatter {
 	}
 }
 
+// FormatSource 格式化一段源码（无文件上下文）。
 func (f *Formatter) FormatSource(source string) string {
-	f.reset()
+	return f.formatSource(source, "")
+}
+
+// formatSource 是真正干活的格式化入口。
+// filePath 仅用于给 parser 提供正确的文件名，使依赖文件位置的检查行为一致；
+// 传入空串时回退到占位名。
+func (f *Formatter) formatSource(source, filePath string) string {
+	if filePath == "" {
+		filePath = "<fmt>"
+	}
+
 	lex := lexer.NewLexer(source)
 	p := parser.NewParser(lex)
-	p.SetFile("<fmt>")
+	p.SetFile(filePath)
 	p.SetSkipMainCheck(true)
+	// import 目标的「可解析性」检查依赖运行环境（工作目录 / stdlib / kaula.json），
+	// 与源码语法是否正确无关。格式化时必须跳过，否则换个目录执行 fmt
+	// 就会把合法的 import 判成错误并拒绝格式化。
+	p.SetSkipImportCheck(true)
+
 	program := p.Parse()
-	return f.FormatProgram(program)
+
+	// 注意：必须在 FormatProgram **之后**采集解析错误。
+	// FormatProgram 自身会调reset() 清空状态（它是公开 API，需要能独立复用），
+	// 若在之前采集，错误计数会被 reset 抹掉。
+	out := f.FormatProgram(program)
+	f.captureParseErrors(p)
+
+	return out
+}
+
+// captureParseErrors 从 parser 与 lexer 的错误收集器中提取**语法**错误。
+// 只统计 ErrorSyntax：语义/类型错误与「源码能否被正确格式化」无关，
+// 而格式化阶段本来也还没做类型检查。
+//
+// 必须同时看 lexer：parser 与 lexer 默认各持一个独立收集器，
+// 「未闭合块注释」「无法识别的字节」这类词法错误只会进lexer 的收集器。
+func (f *Formatter) captureParseErrors(p *parser.Parser) {
+	collect := func(ec *errors.ErrorCollector) {
+		if ec == nil {
+			return
+		}
+		for _, e := range ec.Errors() {
+			if e == nil || e.Type != errors.ErrorSyntax {
+				continue
+			}
+			f.parseErrors++
+			f.parseErrorMsgs = append(f.parseErrorMsgs,
+				fmt.Sprintf("第 %d 行第 %d 列：%s", e.Line, e.Column, e.Message))
+		}
+	}
+	collect(p.ErrorCollector())
+	collect(p.LexerErrorCollector())
+}
+
+// HasParseError 报告本次解析是否存在语法错误。
+func (f *Formatter) HasParseError() bool {
+	return f.parseErrors > 0
+}
+
+// ParseErrorCount 返回语法错误数量。
+func (f *Formatter) ParseErrorCount() int {
+	return f.parseErrors
+}
+
+// ParseErrorMessages 返回逐条语法错误信息。
+func (f *Formatter) ParseErrorMessages() []string {
+	return f.parseErrorMsgs
+}
+
+// HasUnknown 报告本次格式化是否遇到过未覆盖的 AST 节点。
+func (f *Formatter) HasUnknown() bool {
+	return len(f.unknown) > 0
+}
+
+// UnknownNodes 返回去重后的未覆盖 AST 节点类型列表。
+func (f *Formatter) UnknownNodes() []string {
+	return f.unknown
+}
+
+// noteUnknown 记录一个未覆盖的 AST 节点类型（去重）。
+func (f *Formatter) noteUnknown(what string) {
+	for _, u := range f.unknown {
+		if u == what {
+			return
+		}
+	}
+	f.unknown = append(f.unknown, what)
 }
 
 func (f *Formatter) FormatFile(path string) (string, error) {
@@ -39,20 +133,39 @@ func (f *Formatter) FormatFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return f.FormatSource(string(data)), nil
+	return f.formatSource(string(data), path), nil
 }
 
+// WriteFileInPlace 直接把格式化结果写入磁盘（不追加换行，由调用方决定）。
+func (f *Formatter) WriteFileInPlace(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// FormatFileInPlace 就地格式化文件。
+// 遇到语法错误或未覆盖的 AST 节点时**拒绝落盘**——
+// 此时返回的 string 已是不可信的产物，写回会造成不可逆的源码损坏。
 func (f *Formatter) FormatFileInPlace(path string) error {
 	formatted, err := f.FormatFile(path)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(formatted+"\n"), 0644)
+	if f.HasParseError() {
+		return fmt.Errorf("%s: 解析失败，已跳过写入（%d 个语法错误）：%s",
+			path, f.parseErrors, strings.Join(f.parseErrorMsgs, "; "))
+	}
+	if f.HasUnknown() {
+		return fmt.Errorf("%s: 存在未覆盖的 AST 节点，已跳过写入：%s",
+			path, strings.Join(f.unknown, ", "))
+	}
+	return f.WriteFileInPlace(path, formatted+"\n")
 }
 
 func (f *Formatter) reset() {
 	f.indent = 0
 	f.buf.Reset()
+	f.unknown = nil
+	f.parseErrors = 0
+	f.parseErrorMsgs = nil
 }
 
 func (f *Formatter) Reset() {
@@ -242,7 +355,10 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 		f.buf.WriteString(e.Member)
 	case *ast.UnaryExpression:
 		f.buf.WriteString(e.Operator)
-		f.formatExpression(e.Right)
+		// 前缀一元运算符的操作数若本身是复合表达式，必须补括号。
+		// 否则 `!(5 < 3)` 会被写成 `!5 < 3`——解析成 `(!5) < 3`，
+		// 语义从「5不小于3」变成「-5 小于 3」，恒为真。
+		f.formatUnaryOperand(e.Right)
 	case *ast.PrefixCallExpression:
 		f.formatPrefixCallExpression(e)
 	case *ast.TypeCastExpression:
@@ -284,9 +400,135 @@ func (f *Formatter) formatExpression(expr ast.Expression) {
 		f.formatMatchExpression(e)
 	case *ast.AttributeExpression:
 		f.formatAttributeExpression(e)
+	case *ast.SpawnExpression:
+		f.formatSpawnExpression(e)
+	case *ast.AwaitExpression:
+		f.formatAwaitExpression(e)
+	case *ast.ArrayLiteral:
+		f.formatArrayLiteral(e)
+	case *ast.ConditionalExpression:
+		f.formatConditionalExpression(e)
+	case *ast.ParenExpression:
+		f.buf.WriteString("(")
+		f.formatExpression(e.Inner)
+		f.buf.WriteString(")")
+	case *ast.MemberExpression:
+		f.formatExpression(e.Object)
+		f.buf.WriteString(".")
+		f.buf.WriteString(e.Member)
+	case *ast.LiteralExpression:
+		f.formatLiteralExpressionValue(e)
 	default:
+		// 未覆盖的节点类型：记录下来并输出占位。
+		// 上层护栏会据此 fail-fast，避免把损坏的源码写回磁盘。
+		f.noteUnknown(fmt.Sprintf("%T", expr))
 		f.buf.WriteString(fmt.Sprintf("/* unknown expression: %T */", expr))
 	}
+}
+
+// formatSpawnExpression 格式化并发提交表达式。
+// 语法：spawn func(args...)；parser 要求目标是裸函数名，实参可选。
+func (f *Formatter) formatSpawnExpression(e *ast.SpawnExpression) {
+	if e == nil {
+		return
+	}
+	f.buf.WriteString("spawn ")
+	f.formatExpression(e.Function)
+	f.buf.WriteString("(")
+	for i, arg := range e.Args {
+		if i > 0 {
+			f.buf.WriteString(", ")
+		}
+		f.formatExpression(arg)
+	}
+	f.buf.WriteString(")")
+}
+
+// formatAwaitExpression 格式化 await 表达式。
+//
+// 采用**后缀**形式 `handle.await`：这是 parser 构造 AwaitExpression 的唯一路径
+// （后缀链，见 parseIterativeExpression 中的 TOKEN_AWAIT 分支），
+// 也是仓库中现存代码的实际写法（如 `i64 r = hs[i].await`）。
+// 若输出前缀 `await h`，在 `hs[i]` 这类下标句柄上会丢语句。
+func (f *Formatter) formatAwaitExpression(e *ast.AwaitExpression) {
+	if e == nil {
+		return
+	}
+	f.formatExpression(e.Handle)
+	f.buf.WriteString(".await")
+}
+
+// formatArrayLiteral 格式化数组字面量 [a, b, c]
+func (f *Formatter) formatArrayLiteral(e *ast.ArrayLiteral) {
+	if e == nil {
+		return
+	}
+	f.buf.WriteString("[")
+	for i, el := range e.Elements {
+		if i > 0 {
+			f.buf.WriteString(", ")
+		}
+		f.formatExpression(el)
+	}
+	f.buf.WriteString("]")
+}
+
+// formatConditionalExpression 格式化条件表达式 cond ? a : b
+func (f *Formatter) formatConditionalExpression(e *ast.ConditionalExpression) {
+	if e == nil {
+		return
+	}
+	f.formatExpression(e.Condition)
+	f.buf.WriteString(" ? ")
+	f.formatExpression(e.TrueExpr)
+	f.buf.WriteString(" : ")
+	f.formatExpression(e.FalseExpr)
+}
+
+// formatLiteralExpressionValue 按 Kind 分派字面量的具体写法。
+func (f *Formatter) formatLiteralExpressionValue(e *ast.LiteralExpression) {
+	if e == nil {
+		return
+	}
+	switch strings.ToLower(e.Kind) {
+	case "int", "i64", "integer":
+		f.buf.WriteString(formatIntegerLiteral(e.Value))
+	case "float", "f64", "double":
+		f.buf.WriteString(formatFloatLiteral(e.Value))
+	case "string", "str":
+		f.buf.WriteString(formatStringLiteral(e.Value))
+	case "bool", "boolean":
+		f.buf.WriteString(formatBoolLiteral(e.Value))
+	case "char":
+		f.buf.WriteString(formatCharLiteral(e.Value))
+	default:
+		f.buf.WriteString(formatFallbackLiteral(e.Value))
+	}
+}
+
+// writeTypeParams 输出泛型类型参数列表。
+//
+// 必须用尖括号 <T>：这是 Kaula 真实的泛型语法（fn<T>(...)）。
+// 方括号 [T] 会被 parser 解析成「表达式下标」，导致泛型语义丢失、
+// 格式化后的源码编译报错。
+func (f *Formatter) writeTypeParams(tps []*ast.TypeParameter) {
+	if len(tps) == 0 {
+		return
+	}
+	f.buf.WriteString("<")
+	for i, tp := range tps {
+		if i > 0 {
+			f.buf.WriteString(", ")
+		}
+		if tp == nil {
+			continue
+		}
+		f.buf.WriteString(tp.Name)
+		if tp.Constraint != "" {
+			f.buf.WriteString(": " + tp.Constraint)
+		}
+	}
+	f.buf.WriteString(">")
 }
 
 func (f *Formatter) formatFunctionStatement(stmt *ast.FunctionStatement) {
@@ -326,28 +568,28 @@ func (f *Formatter) formatFunctionStatement(stmt *ast.FunctionStatement) {
 		}
 	}
 
-	if stmt.Generic || stmt.IsExported {
+	// 修饰符输出顺序：conc → export / pub
+	//
+	// 1. conc 必须在最前（conc fn 是并发函数标记）
+	// 2. export 与 pub 互斥：parser 对 `export fn` 会**同时**置 IsExported 与
+	//    IsPublic（export 语义包含 pub），因此这里必须用 else if，
+	//    否则会输出 parser 不接受的 `pub export fn`
+	// 3. 绝不能用 stmt.Generic 参与导出判定：它的含义是「是否泛型函数」。
+	//    早期实现写成 `stmt.Generic || stmt.IsExported`，
+	//    结果给每一个泛型函数都加上 export 并改变其可见性
+	if stmt.IsConcurrent {
+		f.buf.WriteString("conc ")
+	}
+	if stmt.IsExported {
 		f.buf.WriteString("export ")
+	} else if stmt.IsPublic {
+		f.buf.WriteString("pub ")
 	}
 
 	f.buf.WriteString("fn ")
 	f.buf.WriteString(stmt.Name)
 
-	if len(stmt.TypeParams) > 0 {
-		f.buf.WriteString("[")
-		for i, tp := range stmt.TypeParams {
-			if i > 0 {
-				f.buf.WriteString(", ")
-			}
-			if tp != nil {
-				f.buf.WriteString(tp.Name)
-				if tp.Constraint != "" {
-					f.buf.WriteString(": " + tp.Constraint)
-				}
-			}
-		}
-		f.buf.WriteString("]")
-	}
+	f.writeTypeParams(stmt.TypeParams)
 
 	f.buf.WriteString("(")
 	for i, param := range stmt.Params {
@@ -498,7 +740,8 @@ func (f *Formatter) formatVariableDeclaration(stmt *ast.VariableDeclaration) {
 	baseType := declTypeString(stmt)
 	if baseType != "" {
 		f.buf.WriteString(baseType + " ")
-	} else if stmt.IsAuto {
+	} else if stmt.IsAuto && !stmt.IsTryAssign {
+		// := 赋值的类型由右侧 Ok 变体推断，书写形式里没有 auto 前缀
 		f.buf.WriteString("auto ")
 	}
 	f.buf.WriteString(stmt.Name)
@@ -506,7 +749,14 @@ func (f *Formatter) formatVariableDeclaration(stmt *ast.VariableDeclaration) {
 	if stmt.Nullable {
 		f.buf.WriteString("?")
 	}
-	if stmt.Value != nil {
+	// := 错误传播赋值。
+	// parser 对 `x := f()` 同时置 IsAuto 与 IsTryAssign，
+	// 若按 IsAuto 输出 `auto x = ...` 就丢掉了 := 语义
+	//（类型推断来源不同，且右侧 Result enum 的错误传播行为会消失）。
+	if stmt.IsTryAssign {
+		f.buf.WriteString(" := ")
+		f.formatExpression(stmt.Value)
+	} else if stmt.Value != nil {
 		f.buf.WriteString(" = ")
 		f.formatExpression(stmt.Value)
 	}
@@ -671,18 +921,7 @@ func (f *Formatter) formatClassStatement(stmt *ast.ClassStatement) {
 	f.buf.WriteString("class ")
 	f.buf.WriteString(stmt.Name)
 
-	if len(stmt.TypeParams) > 0 {
-		f.buf.WriteString("[")
-		for i, tp := range stmt.TypeParams {
-			if i > 0 {
-				f.buf.WriteString(", ")
-			}
-			if tp != nil {
-				f.buf.WriteString(tp.Name)
-			}
-		}
-		f.buf.WriteString("]")
-	}
+	f.writeTypeParams(stmt.TypeParams)
 
 	if len(stmt.Implements) > 0 {
 		f.buf.WriteString(" implements ")
@@ -788,18 +1027,7 @@ func (f *Formatter) formatTypeAliasStatement(stmt *ast.TypeAliasStatement) {
 		f.buf.WriteString("export ")
 	}
 	f.buf.WriteString(stmt.Name)
-	if len(stmt.TypeParams) > 0 {
-		f.buf.WriteString("[")
-		for i, tp := range stmt.TypeParams {
-			if i > 0 {
-				f.buf.WriteString(", ")
-			}
-			if tp != nil {
-				f.buf.WriteString(tp.Name)
-			}
-		}
-		f.buf.WriteString("]")
-	}
+	f.writeTypeParams(stmt.TypeParams)
 	if stmt.UnderlyingType != "" {
 		f.buf.WriteString(" = " + stmt.UnderlyingType)
 	}
@@ -972,21 +1200,7 @@ func (f *Formatter) formatExternStatement(stmt *ast.ExternStatement) {
 func (f *Formatter) formatEnumStatement(stmt *ast.EnumStatement) {
 	f.buf.WriteString("enum ")
 	f.buf.WriteString(stmt.Name)
-	if len(stmt.TypeParams) > 0 {
-		f.buf.WriteString("[")
-		for i, tp := range stmt.TypeParams {
-			if i > 0 {
-				f.buf.WriteString(", ")
-			}
-			if tp != nil {
-				f.buf.WriteString(tp.Name)
-				if tp.Constraint != "" {
-					f.buf.WriteString(": " + tp.Constraint)
-				}
-			}
-		}
-		f.buf.WriteString("]")
-	}
+	f.writeTypeParams(stmt.TypeParams)
 	f.buf.WriteString(" {")
 	if len(stmt.Variants) > 0 {
 		f.buf.WriteString("\n")
@@ -1241,5 +1455,138 @@ func (f *Formatter) formatCallExpression(expr *ast.CallExpression) {
 func (f *Formatter) writeIndent() {
 	for i := 0; i < f.indent; i++ {
 		f.buf.WriteString(f.indentStr)
+	}
+}
+
+// formatIntegerLiteral 把任意整数型 interface{} 渲染成源码文本。
+func formatIntegerLiteral(v interface{}) string {
+	switch n := v.(type) {
+	case int:
+		return strconv.Itoa(n)
+	case int8:
+		return strconv.FormatInt(int64(n), 10)
+	case int16:
+		return strconv.FormatInt(int64(n), 10)
+	case int32:
+		return strconv.FormatInt(int64(n), 10)
+	case int64:
+		return strconv.FormatInt(n, 10)
+	case uint:
+		return strconv.FormatUint(uint64(n), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(n), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(n), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(n), 10)
+	case uint64:
+		return strconv.FormatUint(n, 10)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// formatFloatLiteral 渲染浮点字面量。整数值补 ".0"，避免被当成整数类型。
+func formatFloatLiteral(v interface{}) string {
+	var s string
+	switch n := v.(type) {
+	case float32:
+		s = strconv.FormatFloat(float64(n), 'g', -1, 32)
+	case float64:
+		s = strconv.FormatFloat(n, 'g', -1, 64)
+	default:
+		s = fmt.Sprintf("%v", v)
+	}
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
+}
+
+// formatStringLiteral 渲染字符串字面量。
+func formatStringLiteral(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return `"` + s + `"`
+	}
+	return `"` + fmt.Sprintf("%v", v) + `"`
+}
+
+// formatBoolLiteral 渲染布尔字面量。
+func formatBoolLiteral(v interface{}) string {
+	if b, ok := v.(bool); ok {
+		if b {
+			return "true"
+		}
+		return "false"
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// formatCharLiteral 渲染字符字面量。
+func formatCharLiteral(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return "'" + s + "'"
+	}
+	return "'" + fmt.Sprintf("%v", v) + "'"
+}
+
+// formatFallbackLiteral 是所有已知 Kind 都不匹配时的兜底渲染。
+func formatFallbackLiteral(v interface{}) string {
+	if v == nil {
+		return "nil"
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// formatUnaryOperand 输出一元前缀运算符的操作数。
+//
+// 一元运算符（! - ~）的优先级高于所有二元运算符，
+// 因此操作数只要是「复合表达式」就必须加括号：
+//
+//	!(5 < 3)   -> (!5) < 3   语义从 true 变成 false
+//	-(a + b)   -> -a + b     语义完全改变
+//
+// 「复合」指二元、一元、条件、await/spawn 等一切非原子表达式。
+func (f *Formatter) formatUnaryOperand(expr ast.Expression) {
+	if isAtomicExpr(expr) {
+		f.formatExpression(expr)
+		return
+	}
+	f.buf.WriteString("(")
+	f.formatExpression(expr)
+	f.buf.WriteString(")")
+}
+
+// isAtomicExpr 判断表达式是否是「不需要括号即可安全嵌入更大表达式」的原子形式。
+func isAtomicExpr(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case nil:
+		return true
+	case *ast.Identifier,
+		*ast.IntegerLiteral,
+		*ast.FloatLiteral,
+		*ast.StringLiteral,
+		*ast.BooleanLiteral,
+		*ast.CharLiteral,
+		*ast.LiteralExpression:
+		return true
+	case *ast.CallExpression:
+		// 函数调用的调用者部分已经自带括号，成员访问链也是原子的
+		return isAtomicExpr(e.Function)
+	case *ast.MemberExpression:
+		return isAtomicExpr(e.Object)
+	case *ast.MemberAccessExpression:
+		return isAtomicExpr(e.Object)
+	case *ast.IndexExpression:
+		return isAtomicExpr(e.Object)
+	case *ast.ParenExpression:
+		// 源文件里已经带括号，原样保留即可
+		return true
+	default:
+		_ = e
+		return false
 	}
 }

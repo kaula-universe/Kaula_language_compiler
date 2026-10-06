@@ -11,7 +11,7 @@ description: "Use when contributing to the Kaula project. Covers build, test, co
 kaula/
 ├── compiler/                  # Go 编译器（模块名: kaula）
 │   ├── cmd/kaulac/           # 主编译器入口
-│   ├── cmd/kaulafmt/         # 格式化工具入口
+│   ├── internal/formatter/   # 代码格式化（kaulac fmt 子命令）
 │   ├── internal/             # 内部包
 │   │   ├── lexer/            # 词法分析
 │   │   ├── parser/           # 语法分析
@@ -65,7 +65,7 @@ cd compiler && go test ./...
 cd compiler && go test ./internal/parser/ -run TestParseFunction
 
 # 格式化检查
-kaulafmt -c <file>.kl
+kaulac fmt check <file>.kl
 ```
 
 ## 4. Git 规范
@@ -169,5 +169,5 @@ kaulac --preprocess main.kl
 kaulac --version
 
 # 格式化
-kaulafmt -w main.kl
+kaulac fmt file main.kl --write
 ```

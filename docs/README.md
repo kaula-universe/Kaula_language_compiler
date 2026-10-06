@@ -51,7 +51,7 @@
 - [构建与部署指南](deployment.md) - 工具链构建、安装布局、程序分发、交叉编译与裸机部署
 - [编译器 kaulac](tools/kaulac.md) - 全参数编译、缓存管理、pkglib 管理、裸机模式
 - [构建脚本 toolkit_build.py](tools/toolkit-build.md) - 一键全量/分目标构建
-- [代码格式化工具 (kaulafmt)](tools/kaulafmt.md) - 格式化规则、使用方法
+- [代码格式化 (kaulac fmt)](tools/formatter.md) - 格式化规则、使用方法
 - [AST 转储 (dumpast)](tools/dumpast.md) - 调试解析器的 AST 树输出
 - [语义负载测试 (loadtest)](tools/loadtest.md) - 语义分析验证
 

@@ -1,4 +1,4 @@
-﻿package parser
+package parser
 
 import (
 	"fmt"
@@ -60,8 +60,12 @@ type Parser struct {
 	file           string
 	taskStack      []ParseTask
 	skipMainCheck  bool // 跳过 main 函数检查（用于导入目标文件）
+	// skipImportCheck 跳过 import 目标的可解析性检查。
+	// 该检查依赖**运行环境**（工作目录、stdlib 清单、kaula.json），
+	// 与源码语法是否正确无关；格式化器需要关闭它。
+	skipImportCheck   bool
 	pendingAttributes []*ast.Attribute // 已解析但尚未应用的属性（#[attr] pub 场景）
-	memberParseFailed bool // 标记当前类/结构体是否有成员解析失败（用于错误恢复）
+	memberParseFailed bool             // 标记当前类/结构体是否有成员解析失败（用于错误恢复）
 }
 
 // NewParser 创建一个新的语法分析器
@@ -86,6 +90,13 @@ func (p *Parser) EnableLogging(enabled bool) {
 // SetSkipMainCheck 设置是否跳过 main 函数检查（用于导入的库文件）
 func (p *Parser) SetSkipMainCheck(skip bool) {
 	p.skipMainCheck = skip
+}
+
+// SetSkipImportCheck 设置是否跳过 import 目标的可解析性检查。
+// 格式化器只关心语法，应设为 true —— 否则「同目录下找不到被导入模块」
+// 这类**环境相关**失败会被当成语法错误，导致合法源码被拒绝格式化。
+func (p *Parser) SetSkipImportCheck(skip bool) {
+	p.skipImportCheck = skip
 }
 
 // log 记录日志
@@ -404,8 +415,9 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 // parseTryAssignStatementIterative 解析 := 错误传播赋值
 // 语法：name := expr
 // 语义：右侧 expr 必须返回 Result enum（含 Ok/Err 变体）
-//       若为 Err，自动 return 当前函数（携带 Err 值）
-//       若为 Ok，将 Ok 中的值解包赋值给 name
+//
+//	若为 Err，自动 return 当前函数（携带 Err 值）
+//	若为 Ok，将 Ok 中的值解包赋值给 name
 func (p *Parser) parseTryAssignStatementIterative() *ast.VariableDeclaration {
 	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
 	name := p.curTok.Value
@@ -419,8 +431,8 @@ func (p *Parser) parseTryAssignStatementIterative() *ast.VariableDeclaration {
 	return &ast.VariableDeclaration{
 		Name:        name,
 		Value:       value,
-		IsAuto:      true,  // 类型由右侧 Ok 变体推断
-		IsTryAssign: true,  // 标记为错误传播赋值
+		IsAuto:      true, // 类型由右侧 Ok 变体推断
+		IsTryAssign: true, // 标记为错误传播赋值
 		Pos:         pos,
 	}
 }
@@ -720,8 +732,9 @@ func applyToAllDeclarators(stmt *ast.VariableDeclaration, apply func(*ast.Variab
 // 变量语法: extern name: type
 // 函数语法: extern fn name(params) -> return_type
 // 示例:
-//   extern bss_start: u8
-//   extern fn boot_main() -> void
+//
+//	extern bss_start: u8
+//	extern fn boot_main() -> void
 func (p *Parser) parseExternStatementIterative() *ast.ExternStatement {
 	stmt := &ast.ExternStatement{
 		Pos: ast.Position{Line: p.curTok.Line, Column: p.curTok.Column},
@@ -1081,14 +1094,15 @@ func (p *Parser) parseCallStatementIterative() *ast.CallStatement {
 
 // parseSpendCallStatementIterative 迭代解析 spend/call 语句
 // 新语法：
-// spend(obj1){
-//     call(1){
-//         return 1
-//     }
-//     call(2){
-//         return 2
-//     }
-// }
+//
+//	spend(obj1){
+//	    call(1){
+//	        return 1
+//	    }
+//	    call(2){
+//	        return 2
+//	    }
+//	}
 func (p *Parser) parseSpendCallStatementIterative() *ast.SpendStatement {
 	p.log("开始解析 spend 语句")
 	stmt := &ast.SpendStatement{
@@ -1966,8 +1980,8 @@ func (p *Parser) parseContinueStatementIterative() *ast.ContinueStatement {
 
 // parseImportStatementIterative 迭代解析 import 语句
 // 支持两种形式：
-//   1. import std.io           模块名导入
-//   2. import "lib" / "file"   路径导入（相对路径以当前文件目录为基准，Python 风格）
+//  1. import std.io           模块名导入
+//  2. import "lib" / "file"   路径导入（相对路径以当前文件目录为基准，Python 风格）
 func (p *Parser) parseImportStatementIterative() *ast.ImportStatement {
 	pos := ast.Position{
 		Line:   p.curTok.Line,
@@ -2063,8 +2077,8 @@ func (p *Parser) parsePubStatementIterative() ast.Statement {
 
 // parseExportStatementIterative 迭代解析 export 语句
 // 支持三种形式：
-//   1. export fn/var/const/class/struct/object <声明>  修饰符形式（含 pub 语义 + C 级导出）
-//   2. export <name>                                 裸名形式：标记既有符号为导出（可转发导入的符号）
+//  1. export fn/var/const/class/struct/object <声明>  修饰符形式（含 pub 语义 + C 级导出）
+//  2. export <name>                                 裸名形式：标记既有符号为导出（可转发导入的符号）
 func (p *Parser) parseExportStatementIterative() ast.Statement {
 	pos := ast.Position{
 		Line:   p.curTok.Line,
@@ -3769,7 +3783,7 @@ func (p *Parser) parseBinaryExpressionIterative(precedence int) ast.Expression {
 		// 构建新的二元表达式
 		// 优先用 token 自身的 Value(源码字面,如 "==","+","<=")
 		// Kaula 0.1.0-alpha 历史上用 TokenTypeToString 拿类型名("EQ","PLUS"),导致
-		// kaulafmt 输出 "path EQ \"/\"" 这种怪东西
+		// 格式化工具输出 "path EQ \"/\"" 这种怪东西
 		operator := opTok.Value
 		if operator == "" {
 			operator = lexer.TokenTypeToString(op)
@@ -3803,23 +3817,23 @@ var precedences = map[lexer.TokenType]int{
 	lexer.TOKEN_LSHIFT_ASSIGN:   1,
 	lexer.TOKEN_RSHIFT_ASSIGN:   1,
 	lexer.TOKEN_OR:              2,
-	lexer.TOKEN_AND:       3,
-	lexer.TOKEN_EQ:        4,
-	lexer.TOKEN_NE:        4,
-	lexer.TOKEN_LT:        5,
-	lexer.TOKEN_GT:        5,
-	lexer.TOKEN_LE:        5,
-	lexer.TOKEN_GE:        5,
-	lexer.TOKEN_LSHIFT:    5,
-	lexer.TOKEN_RSHIFT:    5,
-	lexer.TOKEN_XOR:       4,
-	lexer.TOKEN_PIPE:      4,
-	lexer.TOKEN_AMPERSAND: 5,
-	lexer.TOKEN_PLUS:      6,
-	lexer.TOKEN_MINUS:     6,
-	lexer.TOKEN_MULTIPLY:  7,
-	lexer.TOKEN_DIVIDE:    7,
-	lexer.TOKEN_MOD:       7,
+	lexer.TOKEN_AND:             3,
+	lexer.TOKEN_EQ:              4,
+	lexer.TOKEN_NE:              4,
+	lexer.TOKEN_LT:              5,
+	lexer.TOKEN_GT:              5,
+	lexer.TOKEN_LE:              5,
+	lexer.TOKEN_GE:              5,
+	lexer.TOKEN_LSHIFT:          5,
+	lexer.TOKEN_RSHIFT:          5,
+	lexer.TOKEN_XOR:             4,
+	lexer.TOKEN_PIPE:            4,
+	lexer.TOKEN_AMPERSAND:       5,
+	lexer.TOKEN_PLUS:            6,
+	lexer.TOKEN_MINUS:           6,
+	lexer.TOKEN_MULTIPLY:        7,
+	lexer.TOKEN_DIVIDE:          7,
+	lexer.TOKEN_MOD:             7,
 }
 
 // precedence 获取运算符优先级
@@ -4550,9 +4564,9 @@ func (p *Parser) parseGroupedExpressionIterative() ast.Expression {
 // 这是 Kaula 特殊操作的统一语法：asm/volatile/atomic/fence 等都通过此机制实现
 // 示例:
 //
-//   let cr3 = #[asm("mov %cr3, %rax")]
-//   let val = #[volatile_load(ptr)]
-//   #[fence()]
+//	let cr3 = #[asm("mov %cr3, %rax")]
+//	let val = #[volatile_load(ptr)]
+//	#[fence()]
 func (p *Parser) parseAttributeExpressionIterative() ast.Expression {
 	if p.curTok.Type != lexer.TOKEN_ATTRIBUTE {
 		return nil
@@ -5058,7 +5072,7 @@ func (p *Parser) errorAt(line, column int, message string) {
 
 // synchronize 通用错误恢复：跳过 token 直到到达语句边界。
 // 同步点包括：分号、当前块的右大括号、以及语句级关键字
-//（fn/class/struct/enum/import/const/return/if/while/for/else 等）。
+// （fn/class/struct/enum/import/const/return/if/while/for/else 等）。
 // 用于函数体等场景快速恢复解析，避免级联错误。
 func (p *Parser) synchronize() {
 	depth := 0
@@ -5129,9 +5143,25 @@ func (p *Parser) GetErrorCollector() *errors.ErrorCollector {
 	return p.errorCollector
 }
 
+// LexerErrorCollector 暴露词法分析器自己的错误收集器。
+//
+// lexer 与 parser 默认各持有一个独立收集器，词法错误（未闭合块注释、
+// 无法识别的字节等）不会出现在 parser 的收集器里。
+// 格式化器需要同时看到两侧错误才能正确 fail-fast。
+func (p *Parser) LexerErrorCollector() *errors.ErrorCollector {
+	return p.lexer.GetErrorCollector()
+}
+
 // HasErrors 检查是否有错误
 func (p *Parser) HasErrors() bool {
 	return p.errorCollector.HasErrors() || p.lexer.HasErrors()
+}
+
+// ErrorCollector 暴露内部错误收集器。
+// 格式化器需要据此判断「源码是否存在语法错误」，
+// 从而在写出损坏源码之前 fail-fast。
+func (p *Parser) ErrorCollector() *errors.ErrorCollector {
+	return p.errorCollector
 }
 
 // ReportErrors 报告错误
@@ -5221,6 +5251,24 @@ func (p *Parser) Validate(program *ast.Program) {
 		}
 	}
 
+	if !p.skipImportCheck {
+		p.validateImports(program)
+	}
+
+	if p.HasErrors() {
+		p.log("验证完成，发现验证错误")
+	} else {
+		p.log("验证完成，未发现错误")
+	}
+}
+
+// validateImports 校验 import 语句的目标是否可解析。
+//
+// 该检查依赖**运行环境**（当前工作目录、stdlib 清单、kaula.json），
+// 与源码语法是否正确无关。格式化器等只需要语法信息的调用方
+// 应通过 SetSkipImportCheck(true) 跳过，否则会把「找不到模块」
+// 误判成语法错误并拒绝格式化本来合法的源码。
+func (p *Parser) validateImports(program *ast.Program) {
 	validModules := map[string]bool{
 		// 基础模块
 		"std":      true,
@@ -5244,7 +5292,7 @@ func (p *Parser) Validate(program *ast.Program) {
 		"std.net":        true,
 		"std.logging":    true,
 		"std.testing":    true,
-		"std.encoding":    true,
+		"std.encoding":   true,
 		"std.random":     true,
 		"std.algebra":    true,
 		"std.cmath":      true,
@@ -5340,12 +5388,6 @@ func (p *Parser) Validate(program *ast.Program) {
 				}
 			}
 		}
-	}
-
-	if p.HasErrors() {
-		p.log("验证完成，发现验证错误")
-	} else {
-		p.log("验证完成，未发现错误")
 	}
 }
 

@@ -24,7 +24,7 @@
 | 依赖 | 版本 | 用途 |
 |------|------|------|
 | Python | 3.8+ | 运行构建脚本 |
-| Go | 1.21+ | 编译 kaulac / kaulafmt |
+| Go | 1.21+ | 编译 kaulac |
 | C 工具链 | LLVM-mingw 或 MSVC（Windows）；Clang/GCC（Linux/macOS） | 编译 C 运行时/标准库 |
 | 归档工具 | Windows: `llvm-lib` 或 MSVC `lib.exe`；其他: `llvm-ar` / `gcc-ar` / `ar` | 打包静态库 |
 
@@ -60,7 +60,7 @@ python toolkit_build.py --clean         # 清理所有构建产物
 | `std` | `lib/kaula_std.lib`（Windows）/ `lib/libkaula_std.a`（其他） |
 | `freestanding` | `lib/kaula_freestanding.lib` / `lib/libkaula_freestanding.a` |
 | `runtime` | `lib/kaula_runtime.lib` / `lib/libkaula_runtime.a`（src/ + compiler/runtime/） |
-| `compiler` | `bin/kaulac(.exe)`、`bin/kaulafmt(.exe)`、`bin/stdlib.json` |
+| `compiler` | `bin/kaulac(.exe)`、`bin/stdlib.json` |
 | `headers` | `include/{kaula,runtime,std,freestanding}`（仅复制头文件，跳过 `.c`） |
 
 ### 增量构建机制
@@ -76,8 +76,7 @@ python toolkit_build.py --clean         # 清理所有构建产物
 ```
 build/
 ├── bin/
-│   ├── kaulac.exe          # 编译器 CLI
-│   ├── kaulafmt.exe        # 格式化工具
+│   ├── kaulac.exe          # 编译器 CLI（含 fmt 子命令）
 │   └── stdlib.json         # 标准库模块注册表（编译器运行依赖）
 ├── include/
 │   ├── kaula/              # 运行时头（kaula.h 等）

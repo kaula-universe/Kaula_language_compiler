@@ -3,6 +3,7 @@
 import (
 	"fmt"
 	"unicode"
+	"unicode/utf8"
 
 	"kaula/internal/errors"
 )
@@ -224,6 +225,26 @@ func isASCIIAlnum(c byte) bool {
 	return isASCIILetter(c) || isASCIIDigit(c)
 }
 
+// isUnicodeIdentStart 判断从 s 起始的字节是否为合法的多字节标识符首字符。
+// 必须按 UTF-8 码点解码：逐字节判断会把 UTF-8 序列的后续字节（>=0x80）
+// 误当成独立字符，从而在多字节字符内部截断标识符。
+func isUnicodeIdentStart(s string) bool {
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && size <= 1 {
+		return false
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+}
+
+// isUnicodeIdentContinue 判断从 s 起始的字节是否为合法的多字节标识符后续字符。
+func isUnicodeIdentContinue(s string) bool {
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && size <= 1 {
+		return false
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+}
+
 // Next 返回下一个token
 func (l *Lexer) Next() Token {
 	for l.pos < l.inputLen {
@@ -266,9 +287,13 @@ func (l *Lexer) Next() Token {
 		case char == '/' && l.peek() == '/':
 			l.skipComment()
 			continue
+		case char == '/' && l.peek() == '*':
+			// 块注释 /* ... */：内容整体惰性跳过，不参与词法分析
+			l.skipComment()
+			continue
 		case char < 0x80 && (isASCIILetter(char) || char == '_'):
 			return l.scanIdentifier()
-		case char >= 0x80 && (unicode.IsLetter(rune(char)) || char == '_' || char >= 0x80):
+		case char >= 0x80 && isUnicodeIdentStart(l.input[l.pos:]):
 			return l.scanIdentifier()
 		case char < 0x80 && isASCIIDigit(char):
 			return l.scanNumber()
@@ -468,7 +493,11 @@ func (l *Lexer) Next() Token {
 			l.next()
 			return Token{Type: TOKEN_TILDE, Value: "~", Line: l.line, Column: l.column}
 		default:
+			// 兜底：无法识别的字节。这里**必须**推进位置，
+			// 否则 continue 会在同一个字节上无限循环，产出海量空 token。
 			l.error(fmt.Sprintf("unexpected character: %c", char))
+			l.pos++
+			l.column++
 			continue
 		}
 	}
@@ -501,9 +530,34 @@ func (l *Lexer) skipWhitespace() {
 	}
 }
 
-// skipComment 跳过注释
+// skipComment 跳过注释。支持三种形式：// 行注释、# 行注释、/* ... */ 块注释。
 func (l *Lexer) skipComment() {
-	// 跳过注释标记
+	// 块注释 /* ... */：逐字节扫描到配对的 */，支持跨行、允许嵌套内容为任意字节
+	if l.pos+1 < l.inputLen && l.input[l.pos] == '/' && l.input[l.pos+1] == '*' {
+		startLine := l.line
+		l.pos += 2
+		closed := false
+		for l.pos < l.inputLen {
+			if l.input[l.pos] == '*' && l.pos+1 < l.inputLen && l.input[l.pos+1] == '/' {
+				l.pos += 2
+				closed = true
+				break
+			}
+			if l.input[l.pos] == '\n' {
+				l.line++
+				l.column = 1
+			} else {
+				l.column++
+			}
+			l.pos++
+		}
+		if !closed {
+			l.error(fmt.Sprintf("unterminated block comment (opened at line %d)", startLine))
+		}
+		return
+	}
+
+	// 行注释：跳过注释标记
 	if l.pos+1 < l.inputLen && l.input[l.pos] == '/' && l.input[l.pos+1] == '/' {
 		l.pos += 2
 	} else if l.input[l.pos] == '#' {
@@ -517,18 +571,29 @@ func (l *Lexer) skipComment() {
 	l.column += l.pos - start
 }
 
-// scanIdentifier 扫描标识符
+// scanIdentifier 扫描标识符。
+// ASCII 走字节快速路径；>=0x80 的部分必须按 UTF-8 码点解码，
+// 逐字节判断会把多字节序列拦腰截断（例如 rune(0xE5) 是字母 'å'，会被当成合法首字符）。
 func (l *Lexer) scanIdentifier() Token {
 	start := l.pos
 	for l.pos < l.inputLen {
 		c := l.input[l.pos]
-		if c < 0x80 && (isASCIILetter(c) || isASCIIDigit(c) || c == '_') {
-			l.pos++
-		} else if c >= 0x80 && (unicode.IsLetter(rune(c)) || unicode.IsDigit(rune(c)) || c == '_') {
-			l.pos++
-		} else {
+		if c < 0x80 {
+			if isASCIILetter(c) || isASCIIDigit(c) || c == '_' {
+				l.pos++
+				continue
+			}
 			break
 		}
+		if !isUnicodeIdentContinue(l.input[l.pos:]) {
+			break
+		}
+		_, size := utf8.DecodeRuneInString(l.input[l.pos:])
+		if size <= 0 {
+			break
+		}
+		l.pos += size
+		l.column++
 	}
 	value := l.input[start:l.pos]
 	tokenType := TOKEN_IDENT

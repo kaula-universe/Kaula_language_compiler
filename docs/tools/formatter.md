@@ -175,18 +175,18 @@ let p = Point{ .x = 1.0, .y = 2.0 }
 let obj = object{ name: "test", version: 1 }
 ```
 
-## 独立工具
+## 一次处理多个文件
 
-旧版独立格式化工具 `kaulafmt` 仍然可用，但推荐使用 `kaulac fmt`：
+`kaulac fmt file` 支持一次传入多个文件：
 
 ```bash
-# 旧版
-kaulafmt main.kl          # 输出到 stdout
-kaulafmt -w main.kl       # 写回文件
+kaulac fmt file main.kl utils.kl --write
+```
 
-# 新版（推荐）
-kaulac fmt file main.kl
-kaulac fmt file main.kl --write
+也可配合 shell 循环处理目录下全部 `.kl`：
+
+```bash
+for f in src/*.kl; do kaulac fmt file "$f" --write; done
 ```
 
 ## 注意事项
@@ -195,3 +195,50 @@ kaulac fmt file main.kl --write
 2. **不改变语义**：格式化仅调整空白和括号，不改变代码含义
 3. **解析错误**：如果文件有语法错误，格式化会失败
 4. **import 排序**：只对文件开头连续的 import 块进行排序
+
+## 限制
+
+- 不支持自定义缩进风格（固定 4 空格）
+- **注释在格式化过程中丢失**（AST 不保留注释）。`//`、`#`、`/* */` 三种形式
+  都可被词法器正确跳过，但不会出现在格式化输出里
+- 手动换行不保留
+- 注解的自定义格式不支持
+
+### 失败即退出，不做静默降级
+
+格式化器遵循「宁可报错，也不输出可能丢语义的代码」：
+
+| 情形 | 行为 |
+|---|---|
+| 源码存在语法错误（含词法错误） | 报错退出，`file` / `stdin` / `check` 三条路径一致；**不输出、不落盘** |
+| AST 含formatter 尚未覆盖的节点类型 | 报错退出并列出类型名，提示提交 Issue；**不输出、不落盘** |
+| import 目标在本机找不到 | **不视为错误**。该检查依赖运行环境，与语法无关，格式化时跳过 |
+
+因此 `/* unknown expression: %T */` 这类占位**不会出现在输出里**——
+一旦出现就说明护栏失效，属于缺陷。当前全仓 114 个 `.kl` 文件格式化
+114/114 成功，未覆盖节点数为 0。
+
+>注意：格式化会丢弃注释，但**解析错误不会被"修好"**——
+> 括号不闭合、非法字符这类输入会被直接拒绝，而不是给出一份猜测性的修补结果。
+
+## 构建
+
+格式化功能已内置于 `kaulac`：
+
+```bash
+python toolkit_build.py                    # 随工具链整体构建
+cd compiler && go build -o kaulac ./cmd/kaulac   # 单独构建
+```
+
+## 实现位置
+
+| 组件 | 路径 |
+|------|------|
+| CLI 子命令分发 | `compiler/cmd/kaulac/main.go`（`fmt` 子命令：`file` / `stdin` / `check`） |
+| 格式化器 | `compiler/internal/formatter/formatter.go` |
+
+## 相关文档
+
+- 工具索引：[README.md](README.md)
+- 编译器命令参考：[kaulac.md](kaulac.md)
+- 代码规范：[../../codeStyle.md](../../codeStyle.md)

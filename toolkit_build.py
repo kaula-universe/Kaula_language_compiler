@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Kaula Toolkit 一键编译脚本
-编译所有组件：标准库 (std.lib)、运行时、编译器 (kaulac)、格式化工具 (kaulafmt)
+编译所有组件：标准库 (std.lib)、运行时、编译器 (kaulac)
+
+代码格式化已并入 `kaulac fmt` 子命令（见 docs/tools/formatter.md），
+不再单独构建 kaulafmt 二进制。
 
 默认使用 clang 作为 C 编译器（跨平台一致），可通过 --cc 覆盖。
 
@@ -685,8 +688,8 @@ class GoBuilder:
         """计算 Go 二进制的增量 hash。
 
         覆盖: cmd/<name>/*.go + internal/**/*.go + go.mod/go.sum + release 标志。
-        任何一个 .go 源码变化都会触发该二进制重建;只改 kaulafmt 的
-        cmd 源码不会让 kaulac 重编(各自独立 digest)。
+        任何一个 .go 源码变化都会触发该二进制重建;各 cmd 目标之间
+        互不影响(各自独立 digest)。
         """
         files = []
         cmd_path = self.config.compiler_dir / "cmd" / cmd_dir
@@ -780,9 +783,6 @@ class GoBuilder:
     def build_kaulac(self):
         return self._build_go_binary("kaulac", "kaulac")
 
-    def build_kaulafmt(self):
-        return self._build_go_binary("kaulafmt", "kaulafmt")
-
     def install_stdlib_json(self):
         """复制 stdlib.json 到输出目录"""
         src = self.config.compiler_dir / "stdlib.json"
@@ -824,11 +824,9 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
     if go_cmd:
         go_builder = GoBuilder(config, go_cmd, release)
         results["kaulac"] = go_builder.build_kaulac()
-        results["kaulafmt"] = go_builder.build_kaulafmt()
         results["stdlib_json"] = go_builder.install_stdlib_json()
     else:
         results["kaulac"] = None
-        results["kaulafmt"] = None
         results["stdlib_json"] = None
 
     print("\n" + "=" * 60)
@@ -986,9 +984,8 @@ def main():
     elif args.target == "compiler":
         if go_builder:
             ok1 = go_builder.build_kaulac()
-            ok2 = go_builder.build_kaulafmt()
-            ok3 = go_builder.install_stdlib_json()
-            success = ok1 and ok2 and ok3
+            ok2 = go_builder.install_stdlib_json()
+            success = ok1 and ok2
         else:
             print("[-] 错误: 构建 compiler 需要 Go 编译器")
             success = False
@@ -1004,9 +1001,8 @@ def main():
         # 先构建编译器
         if go_builder:
             ok1 = go_builder.build_kaulac()
-            ok2 = go_builder.build_kaulafmt()
-            ok3 = go_builder.install_stdlib_json()
-            if not (ok1 and ok2 and ok3):
+            ok2 = go_builder.install_stdlib_json()
+            if not (ok1 and ok2):
                 print("[-] 错误: 编译器构建失败")
                 success = False
             else:
