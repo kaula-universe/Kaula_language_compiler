@@ -119,8 +119,6 @@ fn main() -> i32 {
     // 编译器 256KB 栈预算（static assert 拒绝）；堆分配与 Go 的
     // slice（堆）对等，且不改变窗口语义。KMM scope 退出自动回收。
     Handle* in_flight = as<Handle*>(std.memory.kmm_v4_alloc(@@MAX_CONC@@ * 48))
-    [@@MAX_CONC@@]i64 submit_ts;
-    [@@MAX_CONC@@]i64 submitted;
 
     std.io.println("PHASE load_start");
     i64 t0 = std.time.time_now_ns();
@@ -133,8 +131,7 @@ fn main() -> i32 {
     // 为什么不按大批量提交后统一等：那样批边界会形成同步点，
     // 测出来的是「批」的吞吐而不是调度的吞吐。
     //
-    // 每个任务的延迟都是单独测的（提交时刻 -> 拿到结果），
-    // 所以 P99 反映的是真实单事务延迟，而不是批耗时。
+    // 延迟由内核打点（submit -> complete），与取回顺序无关。
     while done < total {
         // 1) 填窗口
         i64 j = 0;
@@ -143,10 +140,7 @@ fn main() -> i32 {
             if issued >= total {
                 break;
             }
-            i64 ts = std.time.time_now_ns();
             @@SUBMIT@@;
-            submit_ts[j] = ts;
-            submitted[j] = 1;
             issued = issued + 1;
             j = j + 1;
         }
@@ -221,6 +215,16 @@ fn main() -> i32 {
 
     // 输出固定格式的一行，run_bench.py 按 key=value 解析。
     // 写成单行：多行调用与自动补分号的脚本会互相干扰。
-    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed, " elapsed_ns=", elapsed, " p50=", p50, " p95=", p95, " p99=", p99, " p999=", p999, " max=", mx, " n=", n, " win=", win, " errors=", errors, " checksum=", checksum);
+    //
+    // inlined：本曲线的事务函数是否被编译器完全内联。
+    //   不含挂起点的 conc fn（light/degrade）会被 lowering 成
+    //   `{ i64 __r = K_xxx_as_fn(); kaula_handle_complete(__r); }` ——
+    //   既不分配 Frame 也不进内核，所以内核的 submit/complete 打点
+    //   根本不会发生，上面的 p50..max 全为 0。
+    //   这不是「测不到」，是「编译器把这个任务优化没了」——
+    //   用户拿到的是零调度开销，代价是内核看不到它的服务时间。
+    //   inlined=1 时延迟列请对照 C 边（cbench，恒 inlined=0）读，
+    //   不要当成「延迟为 0」。
+    std.io.println("RESULT curve=@@CURVE@@ tps=", (total * 1000000000) / elapsed, " elapsed_ns=", elapsed, " p50=", p50, " p95=", p95, " p99=", p99, " p999=", p999, " max=", mx, " n=", n, " win=", win, " errors=", errors, " checksum=", checksum, " inlined=@@INLINED@@");
     return 0;
 }
