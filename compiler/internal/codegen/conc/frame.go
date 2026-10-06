@@ -398,10 +398,16 @@ func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, segments []stri
 	b.WriteString(" * 每次 resume 只跑到下一个挂起点就返回，把 Worker 让出去。 */\n")
 	b.WriteString("KaulaResumeResult " + e.ResumeFn() + "(void* frame_ptr) {\n")
 	b.WriteString("    " + e.FrameType() + "* f = (" + e.FrameType() + "*)frame_ptr;\n")
-	b.WriteString("    switch (f->pc) {\n")
+
+	singleSegment := len(segments) == 1
+	if !singleSegment {
+		b.WriteString("    switch (f->pc) {\n")
+	}
 
 	for pc, seg := range segments {
-		b.WriteString(fmt.Sprintf("    case %d: {\n", pc))
+		if !singleSegment {
+			b.WriteString(fmt.Sprintf("    case %d: {\n", pc))
+		}
 		if pc == 0 {
 			b.WriteString("        /* 入口：参数由 spawn 时写入 Frame */\n")
 		} else {
@@ -409,8 +415,6 @@ func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, segments []stri
 			if pc-1 < len(analysis.SuspendSites) {
 				kind = analysis.SuspendSites[pc-1].Kind
 			}
-			// 行号只是注释：解析器不填表达式位置，它通常是 0。
-			// 真正决定恢复哪一批变量的是序号，不是这里打印的行号。
 			b.WriteString(fmt.Sprintf("        /* 从第 %d 个挂起点恢复（%s） */\n", pc, kind))
 		}
 		/*
@@ -440,13 +444,17 @@ func (e *Emitter) generateStatefulResume(analysis *BodyAnalysis, segments []stri
 		} else {
 			b.WriteString("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
 		}
-		b.WriteString("    }\n")
+		if !singleSegment {
+			b.WriteString("    }\n")
+		}
 	}
 
-	b.WriteString("    default:\n")
-	b.WriteString("        /* 已完成（pc = -1）：不应再次进入 */\n")
-	b.WriteString("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
-	b.WriteString("    }\n")
+	if !singleSegment {
+		b.WriteString("    default:\n")
+		b.WriteString("        /* 已完成（pc = -1）：不应再次进入 */\n")
+		b.WriteString("        return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
+		b.WriteString("    }\n")
+	}
 	b.WriteString("}\n\n")
 	return b.String()
 }
