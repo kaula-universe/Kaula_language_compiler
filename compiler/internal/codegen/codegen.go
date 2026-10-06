@@ -2736,8 +2736,10 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 	var fields []*ast.FieldDeclaration
 	needSynthCtor := false
 	var generate func(instName string) string
+	isClassInst := false
 
 	if classStmt := cg.program.FindClass(typeName); classStmt != nil && classStmt.Generic {
+		isClassInst = true
 		typeParams = classStmt.TypeParams
 		fields = classStmt.Fields
 		// 无显式构造器的泛型类：同样需要合成位置构造器
@@ -2783,18 +2785,29 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 		}
 	}
 
-	// 实例化后的类型名：Box_int → C tag K_Box_int
 	instName := MangleGenericTypeName(typeName, typeArgs)
 	cName := kaulaStructTag(instName)
+
+	// 递归环保护：必须在生成**之前**登记缓存。
+	// 单态化过程中处理字段/方法/构造器时，可能再次遇到同一实例的请求
+	// （例如方法签名里残留的类型参数被解析回 `Box<T>`）。若在生成结束后才写缓存，
+	// 嵌套请求会查不到命中而再次展开同一实例——表现为同一个
+	// `typedef struct K_Box_i32` 被重复输出几十次，clang 报 redefinition。
+	cg.genericTypeCache[cacheKey] = cName
 
 	// 设置活跃类型映射，使字段/方法/构造函数中的类型参数引用被替换为具体类型。
 	// 生成后恢复，避免污染其他类型。同时递增实例化深度，防止无限递归实例化。
 	// 状态隔离同 InstantiateGeneric：实例化可能在外层函数/类型的生成中途触发，
 	// 需归零 per-function 状态（kmmScopeDepth 等）防止孤立 scope_pop 注入。
+	// currentFunctionReturnType 同样必须隔离：实例化过程中会生成构造器/方法体，
+	// 它们各自设置并在结束时复位为 ""。若不保存，外层函数（触发实例化的那个）
+	// 在实例化之后遇到的 `return <expr>` 会因返回类型丢失退化成裸 `return;`，
+	// 生成物里表现为 clang 报 non-void function 缺返回值。
 	savedScopeDepth := cg.kmmScopeDepth
 	savedEmitsPromote := cg.funcEmitsPromote
 	savedHasCheckpoint := cg.funcHasKMMCheckpoint
 	savedIndent := cg.indent
+	savedReturnType := cg.currentFunctionReturnType
 	cg.kmmScopeDepth = 0
 	cg.funcEmitsPromote = false
 	cg.funcHasKMMCheckpoint = false
@@ -2802,6 +2815,14 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 
 	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
 	cg.typeGenerator.structTypes[instName] = true
+	if isClassInst {
+		// class 是引用语义：变量声明要靠 classTypes 命中才退化为指针（`K_Box_i32*`）。
+		// instName（“Box_i32”）由 GenerateClassStatement 自行登记；这里额外登记
+		// 用户在源码里书写的形态（“Box<i32>”）——变量声明节点的 Type 未经改写，
+		// 只认这一种拼写。
+		cg.typeGenerator.classTypes[instName] = true
+		cg.typeGenerator.classTypes[typeName+"<"+strings.Join(typeArgs, ",")+">"] = true
+	}
 	cg.genericTypeInstDepth++
 
 	code := generate(instName)
@@ -2845,6 +2866,7 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 	cg.funcEmitsPromote = savedEmitsPromote
 	cg.funcHasKMMCheckpoint = savedHasCheckpoint
 	cg.indent = savedIndent
+	cg.currentFunctionReturnType = savedReturnType
 
 	// 写入泛型类型实例化代码缓冲区，稍后前置注入到 typeCode 之前
 	if code != "" {
@@ -2860,7 +2882,6 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 		}
 	}
 
-	cg.genericTypeCache[cacheKey] = cName
 	return cName, nil
 }
 

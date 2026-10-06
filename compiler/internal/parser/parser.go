@@ -4084,18 +4084,21 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		return nil
 	case lexer.TOKEN_LBRACE:
 		/*
-		 * `{ ... }` 有两种可能：
+		 * `{ ... }` 有三种可能：
 		 *   1) 结构体字面量   { .field = value, ... }  —— 首 token 是 '.'
 		 *   2) 数组初始化器   { 10, 20, 30 }           —— 定长数组声明用
+		 *   3) 空结构体字面量 { }                      —— 零初始化
 		 *
 		 * 此前无条件走 struct literal，于是 `{10,20,30}` 里的裸值被
 		 * parseStructLiteralExpression 静默丢弃（它只认 `.field=value`），
 		 * 生成空 Fields → codegen 回落成 `= {0}`，数组元素全为 0。
-		 * 定长数组 `i32 arr[5] = {10,20,30,40,50}` 因此静默得到全 0 数组。
 		 *
-		 * 现在按首 token 区分：'.' 走结构体字面量，否则按数组字面量解析。
+		 * 现在按首 token 区分。空 `{}` 必须继续走结构体字面量：
+		 * 若按数组解析会生成 `(int64_t[]){ }`，赋给结构体变量时 clang 报
+		 * "initializing 'K_E' with an expression of incompatible type
+		 * 'int64_t[0]'" —— 那是把原本能编译的写法改坏。
 		 */
-		if p.peekTok.Type != lexer.TOKEN_DOT {
+		if p.peekTok.Type != lexer.TOKEN_DOT && p.peekTok.Type != lexer.TOKEN_RBRACE {
 			return p.parseBraceArrayLiteral()
 		}
 		return p.parseStructLiteralExpression()
