@@ -35,6 +35,13 @@
 - **调度/定时延迟**：抬系统时钟分辨率、注入后唤醒 Worker、epoll 后端改 timerfd、
   混合场景 timer O(1) + submit 扩容 + epoch 回收限流。
 - **编译速度**：`-pipe` + lld 检测；auto-detect CPU 核并行编译。
+- **Frame 热/冷字段分区（缓存行对齐）**：stateful Frame 的字段按访问热度三级排序 ——
+  rank 0 状态机管理字段（`pc`/`sub[]`/`branch[]`，每次 resume 与每次挂起都读写）、
+  rank 1 迭代与数据字段（`loop_i/end/step`、参数、跨 suspend 局部变量）、
+  rank 2 冷字段（`result`）。同 rank 内仍按对齐降序消除填充，`sizeof` 不变。
+  实测 `K_worker_Frame`：旧布局 `pc@72 / sub[1]@74 / branch[1]@76` 落在 64B 边界之后，
+  每轮循环必跨两条缓存行且**每次 resume 必读的 pc/sub 恰在第二行**；
+  新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
 - **构建阻断：Linux/clang 下运行时编不出来（2 处）**：
