@@ -12,10 +12,11 @@ import (
 type LockSource string
 
 const (
-	LockSourceLock   LockSource = "lock"   // 从 kaula.lock 复用（离线）
-	LockSourceFetch  LockSource = "fetch"  // 联网拉取
-	LockSourceLocal  LockSource = "local"  // 本地路径覆盖（patches）
-	LockSourceUpdate LockSource = "update" // 联网更新到新版本
+	LockSourceLock       LockSource = "lock"       // 从 kaula.lock 复用（离线）
+	LockSourceFetch      LockSource = "fetch"      // 联网拉取
+	LockSourceLocal      LockSource = "local"      // 本地路径覆盖（patches）
+	LockSourceUpdate     LockSource = "update"     // 联网更新到新版本
+	LockSourceTransitive LockSource = "transitive" // 传递依赖（由直接依赖的 depends_on 引入）
 )
 
 // PackageLockEntry 单个依赖的锁条目

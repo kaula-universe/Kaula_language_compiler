@@ -1,6 +1,7 @@
 package pkgmgr
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -259,4 +260,120 @@ func UpdateDependencies(registry string, deps map[string]config.Dependency, proj
 		})
 	}
 	return results, lock, nil
+}
+
+// readDependsOn 从包的 pkglib 配置 (<name>.json) 中提取 depends_on 列表。
+// 也尝试读取 kaula.json 的 dependencies 字段（用于纯 Kaula 包）。
+func readDependsOn(dir, name string) []string {
+	var deps []string
+
+	// 1. 读 <name>.json 的 depends_on 字段
+	cfgFile := filepath.Join(dir, name+".json")
+	if data, err := os.ReadFile(cfgFile); err == nil {
+		var raw struct {
+			DependsOn []string `json:"depends_on"`
+		}
+		if err := json.Unmarshal(data, &raw); err == nil && len(raw.DependsOn) > 0 {
+			deps = append(deps, raw.DependsOn...)
+		}
+	}
+
+	// 2. 读 kaula.json 的 dependencies（纯 Kaula 包）
+	kaulaFile := filepath.Join(dir, "kaula.json")
+	if data, err := os.ReadFile(kaulaFile); err == nil {
+		var raw struct {
+			Dependencies map[string]interface{} `json:"dependencies"`
+		}
+		if err := json.Unmarshal(data, &raw); err == nil && len(raw.Dependencies) > 0 {
+			for depName := range raw.Dependencies {
+				// 避免重复添加（已在 depends_on 中）
+				found := false
+				for _, d := range deps {
+					if d == depName {
+						found = true
+						break
+					}
+				}
+				if !found {
+					deps = append(deps, depName)
+				}
+			}
+		}
+	}
+
+	return deps
+}
+
+// ResolveTransitiveClosure 对已解析的直接依赖做传递闭包遍历。
+// 读取每个包的 depends_on 声明，自动拉取传递依赖到缓存，
+// 并递归处理新引入的包。
+//
+// 返回新增的解析结果（不含原有的 direct 结果）。
+// registry: 注册源 URL（同 ResolveDependencies）。
+// direct: 已有的直接依赖解析结果。
+func ResolveTransitiveClosure(registry string, direct []ResolveResult) ([]ResolveResult, error) {
+	// 已解析集合（按名称去重）
+	resolved := make(map[string]bool)
+	queue := make([]ResolveResult, 0)
+	var allNew []ResolveResult
+
+	// 初始化队列
+	for _, r := range direct {
+		if !resolved[r.Name] {
+			resolved[r.Name] = true
+			queue = append(queue, r)
+		}
+	}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		subs := readDependsOn(current.Dir, current.Name)
+		for _, depName := range subs {
+			if resolved[depName] {
+				continue
+			}
+			resolved[depName] = true
+
+			// 先检查缓存是否已有
+			root, rootErr := CacheRoot()
+			if rootErr != nil {
+				return nil, rootErr
+			}
+			dst := pkgDir(root, depName)
+			if locked, lErr := LoadResolved(root, depName); lErr == nil && locked != nil {
+				if _, statErr := os.Stat(filepath.Join(dst, ".git")); statErr == nil {
+					allNew = append(allNew, ResolveResult{
+						Name:    depName,
+						Version: locked.Version,
+						Dir:     dst,
+						Source:  LockSourceLock,
+					})
+					queue = append(queue, ResolveResult{
+						Name: depName, Dir: dst, Version: locked.Version,
+					})
+					continue
+				}
+			}
+
+			// 联网拉取（"*" 表示接受任意版本）
+			fmt.Printf("[pkg] transitive: %s <- %s\n", depName, current.Name)
+			fr, fErr := Fetch(registry, depName, "*")
+			if fErr != nil {
+				return nil, fmt.Errorf("transitive dependency %s (required by %s): %w", depName, current.Name, fErr)
+			}
+
+			newResult := ResolveResult{
+				Name:    fr.Name,
+				Version: fr.Version,
+				Dir:     fr.Dir,
+				Source:  LockSourceFetch,
+			}
+			allNew = append(allNew, newResult)
+			queue = append(queue, newResult)
+		}
+	}
+
+	return allNew, nil
 }
