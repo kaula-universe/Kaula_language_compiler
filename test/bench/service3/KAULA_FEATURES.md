@@ -14,6 +14,10 @@
 >
 > 结论：**修正后的可用面比第一版报告的要宽**。真正损坏的东西更少，但也确实
 > 新发现了一组泛型/ADT 层面的实质缺陷（已修复，见 §3.2）。
+>
+> ⚠️ **第三轮追加**：新增 **§3.5 adopt 套用类型**实测。它同样暴露了一个真实缺陷——
+> 官方 stdlib 里就存在的 `adopt int` 写法，在用户代码里会被拼写规范化误拦，
+> 且"照提示改"反而会得到 ABI 错误的代码。已修复并补回归测试。
 
 ---
 
@@ -25,7 +29,9 @@
   `:=` 错误传播在**修复前的基线上就已经能用**。第一版把这些判为"不可用"是错的。
 - **真正损坏的部分**（已在本轮修复）：
   - 3 个**静默错误**的字面量缺陷（编译通过、零警告，只给错答案）——§3.1；
-  - 5 个**泛型 / ADT 层面**的缺陷，让 `docs/tutorials/generics.md` 里的官方写法编不过——§3.2。
+  - 5 个**泛型 / ADT 层面**的缺陷，让 `docs/tutorials/generics.md` 里的官方写法编不过——§3.2；
+  - 1 个 **adopt 套用类型**缺陷：`adopt int` 被拼写规范化误拦，逼用户写出 ABI 错误的
+    `adopt i32`——§3.5。
 - **真正不支持、不要依赖**：三元 `?:`、C 风格 `switch`（二者文档均未承诺）、
   可空类型 `T?` 赋非空字面量、`int`/`float` 类型名（文档笔误，应用 `i32`/`f64`）。
 - 就"减少服务代码"而言，**最大的一块收益已确认可行**：用 `std.net` + `std.string` +
@@ -50,6 +56,7 @@
 | 泛型结构体 | `Box<i32> b = { .value = 42 }` → `42` | ✅（**基线即可用**，见 §3.3） |
 | 泛型函数 | `fn identity<T>(T x) T` + `identity<i32>(11)` → `11` | ✅ |
 | 泛型 ADT 构造与解构 | `Option<i32> o = Option.Some(42)` + `match o { Some(v) => ... }` → `42` | ✅（基线即可用） |
+| adopt 套用类型（零成本 C ABI 桥） | `#[transparent] type Size = adopt size_t` + `adopt(x)` / `unwrap(x)` | ✅ 往返与域内比较基线即可用；`adopt int` 拼写误拦已修（§3.5） |
 
 > 注：结构化「方法」在 Kaula 里**不是** `impl`/`self` 语法，而是 `class` 的成员方法
 > （§2 有官方写法）。struct **不支持**方法、构造器、`implements`——这是设计，不是缺陷。
@@ -202,6 +209,69 @@ OOP class/interface、`match`、可空类型声明、`#[derive]`。
 | `println("%d", x)` | ⚠️ `%d` 不被替换，原样打印；用 `std.io.print().int(x)` |
 | 数组类型声明 | `i32 name[5]` 或 `[5]i32 name`，**不是** `int[5] name` |
 | 定长数组初始化 | 官方样例用方括号 `i32 arr[10] = [0, 1, 2, ...]`；花括号形式现已支持 |
+
+### 3.5 adopt 套用类型（本轮新测）—— 1 个真实缺陷，已修复
+
+**这是什么**：`type X = adopt <C 类型>` 是 Kaula 的**零成本 C ABI 桥**，官方称「套用类型」，
+见 `docs/tutorials/extern-and-ffi.md` §套用类型（adopt）。官方声明集中在 `std/ctypes.kl`：
+
+```kaula
+#[transparent] type Size  = adopt size_t
+type CInt = adopt int
+type CStr = adopt const char*
+type StringBuilder = adopt StringBuilder*
+```
+
+设计要点（读源码 + 文档确认）：
+- adopt 的底层是**原始 C 类型**，刻意**不经过** Kaula 类型映射——这正是它的全部意义。
+- 跨边界必须**显式**：`adopt(x)` 构造、`unwrap(x)` 取出；隐式跨越被拒（`adopt_implicit`）。
+- `#[transparent]` 才允许算术 / 比较，且**只允许标量底层**（`isScalarAdoptUnderlying` /
+  `isCScalarType`）；不透明句柄（`const char*`、`StringBuilder*`）做算术被拒（`adopt_not_transparent`），
+  非标量加 `#[transparent]` 被拒（`adopt_transparent_non_scalar`）。
+- 代码生成就是一条 `typedef`（`GenerateTypeAliasStatement` → `typedef %s %s;`），零运行时开销。
+
+**实测（两份编译器对照）**：
+
+| 用例 | 真基线 `9a334e2` | 修复后 | 判定 |
+|---|---|---|---|
+| **a1 官方样例**：`Size` / `CInt` / `CStr` 三件套 + 算术 | ❌ `numeric type int must be written as i32` | ✅ 通过 | **真实缺陷**，已修复 |
+| a2 不透明 `CStr` 句柄做算术 | `adopt_not_transparent` | 同 | ✅ 正确拒绝（设计如此） |
+| a3 `#[transparent] type Bad = adopt FILE*` | `adopt_transparent_non_scalar` | 同 | ✅ 正确拒绝 |
+| a4 `Size a = 3`（隐式跨界） | `adopt_implicit` | 同 | ✅ 正确拒绝 |
+| a5 `adopt` / `unwrap` 往返 | ✅ 输出 3 | ✅ | 基线就可用 |
+| a6 `a > adopt(5)` | `type_mismatch` | 同 | ⚠️ 已知限制（见下） |
+| b1 `Size a > Size b` | ✅ `gt` / `15` | ✅ | 基线就可用 |
+| b2 `unwrap(a) > 5` | `type_mismatch`（`size_t` vs `u8`） | 同 | ⚠️ 已知限制 |
+
+**缺陷根因**：`compiler/internal/sema/numeric_names.go` 的 `validateNumericSpellings` 用反射
+遍历 AST 做「`int` 必须写成 `i32`」这类拼写规范化，却把 adopt 的**底层**也扫了进去。
+而 `std/ctypes.kl` 里 `type CInt = adopt int` 正是**官方写法**——stdlib 走元数据路径不进该
+walker，所以这个坑一直没暴露；用户代码里一写 `adopt int` 就被拦。
+更要命的是把 `adopt int` 改成 `adopt i32` 会变成 `int32_t`，**ABI 就不再是 C 的 `int` 了**，
+等于逼用户写出错误的代码。
+
+**修复**：`IsAdopt == true` 的 `TypeAliasStatement` 跳过拼写规范化（`skipNumericSpell`）。
+同时**确认没有放宽其它地方**——`type Bad = int`、`fn f(a: int)`、以及二者混写的用例，
+在两份编译器上都仍被正确拒绝。
+
+**回归测试**：`compiler/internal/sema/numeric_names_test.go` 新增
+`TestNumericSpellingSkipsAdoptUnderlying`（覆盖 `int/uint/float/double/byte/size_t/long/char`），
+在真基线上以 4 条 `numeric type ... must be written as ...` 失败，修复后全绿。
+
+**已知限制（不是本轮修的，给绕行方案）**：`unwrap(a)` 拿出来的原始 C 值参与比较时，
+字面量侧会被推成 `u8`，导致 `type_mismatch`。两份编译器上均已验证可行的绕行：
+
+两种写法都在**两份编译器**上实机跑通（`gt` / `15`）：
+
+```kaula
+// 写法 A：把取出的值显式提升
+if as<i64>(unwrap(a)) > 5 { ... }
+
+// 写法 B：全程留在 adopt 类型域内比较（推荐，零转换）
+Size k = adopt(5)
+if a > k { ... }              // → gt
+unwrap(a) + unwrap(k)         // → 15
+```
 
 ---
 
