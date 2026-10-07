@@ -3,9 +3,9 @@
 Kaula Release Packager / Kaula 发布包打包工具
 
 为当前平台创建发布包：
-- Windows: kaula-windows-x64.zip
-- Linux: kaula-linux-x64.tar.gz
-- macOS: kaula-macos-x64.tar.gz
+- Windows: kaula-windows-x64.exe (NSIS installer)
+- Linux: kaula-linux-x64.deb / kaula-linux-x64.rpm
+- macOS: kaula-macos-x64.dmg
 
 Usage / 用法:
     python scripts/package_release.py                  # 打包当前平台
@@ -72,9 +72,9 @@ class ReleasePackager:
             arch = machine
 
         if system == "windows":
-            return "windows", arch, ".zip"
+            return "windows", arch, ".exe"
         elif system == "darwin":
-            return "macos", arch, ".tar.gz"
+            return "macos", arch, ".dmg"
         else:
             return "linux", arch, ".tar.gz"
 
@@ -157,22 +157,110 @@ class ReleasePackager:
         archive_name = f"{pkg_dir.name}-{sys_name}-{arch}{ext}"
         archive_path = self.release_dir / archive_name
 
-        if ext == ".zip":
+        if ext == ".exe":
+            # Windows: 创建 zip 作为备选
+            archive_name = f"{pkg_dir.name}-{sys_name}-{arch}.zip"
+            archive_path = self.release_dir / archive_name
             with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for root, dirs, files in os.walk(pkg_dir):
                     for file in files:
                         file_path = Path(root) / file
                         arcname = file_path.relative_to(self.release_dir)
                         zf.write(file_path, arcname)
+        elif ext == ".dmg":
+            # macOS: 创建 tar.gz 作为备选
+            archive_name = f"{pkg_dir.name}-{sys_name}-{arch}.tar.gz"
+            archive_path = self.release_dir / archive_name
+            with tarfile.open(archive_path, 'w:gz') as tf:
+                tf.add(pkg_dir, arcname=pkg_dir.name)
         else:
             with tarfile.open(archive_path, 'w:gz') as tf:
                 tf.add(pkg_dir, arcname=pkg_dir.name)
 
         return archive_path
 
+    def build_installer(self, pkg_dir: Path) -> list:
+        """构建平台安装包"""
+        print("[4/4] Building installer...")
+
+        sys_name, arch, ext = self.get_platform_info()
+        installers = []
+
+        if sys_name == "windows":
+            # Windows: NSIS installer
+            nsi_script = self.project_root / "scripts" / "installers" / "kaula.nsi"
+            if nsi_script.exists():
+                # 设置版本环境变量
+                version_no_v = self.version.lstrip("v")
+                parts = version_no_v.split(".")
+                env = os.environ.copy()
+                env["KAULA_VERSION"] = version_no_v
+                env["KAULA_VERSION_MAJOR"] = parts[0] if len(parts) > 0 else "1"
+                env["KAULA_VERSION_MINOR"] = parts[1] if len(parts) > 1 else "0"
+                env["KAULA_VERSION_PATCH"] = parts[2] if len(parts) > 2 else "0"
+
+                result = subprocess.run(
+                    ["makensis", str(nsi_script)],
+                    cwd=str(self.project_root),
+                    env=env,
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    # 找到生成的 exe
+                    exe_files = list(self.release_dir.glob("*.exe"))
+                    if exe_files:
+                        installers.extend(exe_files)
+                        print(f"  [OK] NSIS installer: {exe_files[0].name}")
+                else:
+                    print(f"  [WARN] NSIS failed: {result.stderr}")
+
+        elif sys_name == "linux":
+            # Linux: .deb and .rpm
+            deb_script = self.project_root / "scripts" / "installers" / "build_deb.py"
+            if deb_script.exists():
+                result = subprocess.run(
+                    [sys.executable, str(deb_script)],
+                    cwd=str(self.project_root),
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    deb_files = list((self.release_dir / "deb").glob("*.deb"))
+                    if deb_files:
+                        installers.extend(deb_files)
+                        print(f"  [OK] DEB package: {deb_files[0].name}")
+
+            rpm_script = self.project_root / "scripts" / "installers" / "build_rpm.py"
+            if rpm_script.exists():
+                result = subprocess.run(
+                    [sys.executable, str(rpm_script)],
+                    cwd=str(self.project_root),
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    rpm_files = list((self.release_dir / "rpm").glob("*.rpm"))
+                    if rpm_files:
+                        installers.extend(rpm_files)
+                        print(f"  [OK] RPM package: {rpm_files[0].name}")
+
+        elif sys_name == "macos":
+            # macOS: .dmg
+            dmg_script = self.project_root / "scripts" / "installers" / "build_dmg.py"
+            if dmg_script.exists():
+                result = subprocess.run(
+                    [sys.executable, str(dmg_script)],
+                    cwd=str(self.project_root),
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    dmg_files = list((self.release_dir / "dmg").glob("*.dmg"))
+                    if dmg_files:
+                        installers.extend(dmg_files)
+                        print(f"  [OK] DMG: {dmg_files[0].name}")
+
+        return installers
+
     def cleanup(self, pkg_dir: Path):
         """清理临时目录"""
-        print("[4/4] Cleaning up...")
         if pkg_dir.exists():
             shutil.rmtree(pkg_dir)
 
@@ -183,7 +271,6 @@ class ReleasePackager:
         print(f"  Version:  {self.version}")
         print(f"  Snapshot: {self.get_snapshot()}")
         print(f"  Platform: {sys_name}-{arch}")
-        print(f"  Output:   {sys_name}-{arch}{ext}")
         print()
 
         if not self.build_compiler():
@@ -192,12 +279,19 @@ class ReleasePackager:
 
         pkg_dir = self.prepare_package_dir()
         archive_path = self.create_archive(pkg_dir)
+        installers = self.build_installer(pkg_dir)
         self.cleanup(pkg_dir)
 
         print()
         print(f"Release package created:")
         print(f"  {archive_path}")
         print(f"  Size: {archive_path.stat().st_size / 1024 / 1024:.1f} MB")
+
+        if installers:
+            print(f"\nInstallers:")
+            for inst in installers:
+                print(f"  {inst}")
+                print(f"    Size: {inst.stat().st_size / 1024 / 1024:.1f} MB")
 
         return archive_path
 

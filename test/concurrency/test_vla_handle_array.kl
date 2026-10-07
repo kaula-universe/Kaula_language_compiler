@@ -31,9 +31,34 @@ fn v_forin_decl(i64 n) -> i64 {
         hs[i] = spawn noop(i)
     }
     i64 acc = 0
+    i64 bad = 0
+    i64 bad_zero = 0
+    i64 bad_neg = 0
+    i64 bad_other = 0
+    i64 bad_i = -1
+    i64 bad_r = -1
     for i in range(n) {
         i64 r = hs[i].await
+        if r != i {
+            bad = bad + 1
+            if bad_i == -1 {
+                bad_i = i
+                bad_r = r
+            }
+            if r == 0 {
+                bad_zero = bad_zero + 1
+            } else if r < 0 {
+                bad_neg = bad_neg + 1
+            } else {
+                bad_other = bad_other + 1
+            }
+        }
         acc = acc + r
+    }
+    if bad > 0 {
+        std.io.println("DBG forin_decl bad=", bad, " zero=", bad_zero,
+                       " neg=", bad_neg, " other=", bad_other,
+                       " first_i=", bad_i, " first_r=", bad_r)
     }
     return acc
 }

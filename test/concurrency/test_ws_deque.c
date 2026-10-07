@@ -45,6 +45,66 @@ static void test_steal_is_fifo(void) {
     ASSERT_NULL(kaula_ws_deque_steal(&q), "空队列 steal 返回 NULL");
 }
 
+/* ========== 批量 steal（P0） ========== */
+
+static void test_steal_batch_half(void) {
+    TEST_CASE("批量 steal 拿最老一半，剩余归 owner");
+    KaulaWSDeque q;
+    kaula_ws_deque_init(&q);
+
+    dummy_task a = {1}, b = {2}, c = {3}, d = {4}, e = {5}, f = {6};
+    kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&a);
+    kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&b);
+    kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&c);
+    kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&d);
+    kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&e);
+    kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&f);
+
+    struct KaulaTask* batch[KAULA_STEAL_BATCH_MAX];
+    int nb = kaula_ws_deque_steal_batch(&q, batch, KAULA_STEAL_BATCH_MAX);
+    ASSERT_EQ(nb, 3, "6 个偷一半 = 3");
+    ASSERT_TRUE(batch[0] == (struct KaulaTask*)&a &&
+                batch[1] == (struct KaulaTask*)&b &&
+                batch[2] == (struct KaulaTask*)&c, "FIFO 拿最老 a b c");
+
+    /* 剩余 [mid, bottom) 归 owner：pop 仍是 LIFO（f e d） */
+    ASSERT_TRUE(kaula_ws_deque_pop(&q) == (struct KaulaTask*)&f, "owner 剩 f（LIFO）");
+    ASSERT_TRUE(kaula_ws_deque_pop(&q) == (struct KaulaTask*)&e, "再弹 e");
+    ASSERT_TRUE(kaula_ws_deque_pop(&q) == (struct KaulaTask*)&d, "再弹 d");
+    ASSERT_NULL(kaula_ws_deque_pop(&q), "空队列 pop 返回 NULL");
+}
+
+static void test_steal_batch_single_fallback(void) {
+    TEST_CASE("只剩 1 个时批量退化为单偷");
+    KaulaWSDeque q;
+    kaula_ws_deque_init(&q);
+
+    dummy_task a = {1};
+    kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&a);
+
+    struct KaulaTask* batch[KAULA_STEAL_BATCH_MAX];
+    int nb = kaula_ws_deque_steal_batch(&q, batch, KAULA_STEAL_BATCH_MAX);
+    ASSERT_EQ(nb, 1, "n==1 时偷 1 个");
+    ASSERT_TRUE(batch[0] == (struct KaulaTask*)&a, "拿到 a");
+    ASSERT_EQ(kaula_ws_deque_steal_batch(&q, batch, KAULA_STEAL_BATCH_MAX), 0,
+              "空队列返回 0");
+}
+
+static void test_steal_batch_cap(void) {
+    TEST_CASE("批量上限截断 max_out");
+    KaulaWSDeque q;
+    kaula_ws_deque_init(&q);
+
+    dummy_task t = {0};
+    for (int i = 0; i < 10; i++) {
+        kaula_ws_deque_push_owner(&q, (struct KaulaTask*)&t);
+    }
+    struct KaulaTask* batch[2];
+    int nb = kaula_ws_deque_steal_batch(&q, batch, 2);
+    ASSERT_EQ(nb, 2, "max_out=2 截断批量");
+    ASSERT_EQ(kaula_ws_deque_size(&q), 8, "剩余 8 个");
+}
+
 /* ========== 满队列背压（I3） ========== */
 
 static void test_push_returns_false_when_full(void) {
@@ -149,6 +209,22 @@ static void race_thief(void* arg) {
     }
 }
 
+/* 批量 steal 的 thief：一次拿一半，stolen 按任务数累加 */
+static void race_batch_thief(void* arg) {
+    race_ctx* c = (race_ctx*)arg;
+    while (!atomic_load(&c->start)) { }
+    for (;;) {
+        struct KaulaTask* batch[KAULA_STEAL_BATCH_MAX];
+        int nb = kaula_ws_deque_steal_batch(&c->q, batch, KAULA_STEAL_BATCH_MAX);
+        if (nb > 0) {
+            atomic_fetch_add(&c->stolen, nb);
+            continue;
+        }
+        if (atomic_load(&c->owner_done)) break;
+        kaula_p_yield();
+    }
+}
+
 static void test_owner_pop_vs_thief_race(void) {
     TEST_CASE("owner pop 与 thief steal 竞争不重复不丢失");
     race_ctx c;
@@ -166,6 +242,32 @@ static void test_owner_pop_vs_thief_race(void) {
     atomic_store(&c.start, 1);
     kaula_p_thread_join(owner);
     kaula_p_thread_join(thief);
+
+    int got = atomic_load(&c.popped) + atomic_load(&c.stolen);
+    ASSERT_EQ(got, c.total, "popped + stolen 应等于总数（无重复无丢失）");
+    ASSERT_EQ(kaula_ws_deque_size(&c.q), 0, "结束后队列应为空");
+}
+
+static void test_owner_pop_vs_batch_thief_race(void) {
+    TEST_CASE("owner pop 与批量 steal 竞争不重复不丢失");
+    race_ctx c;
+    kaula_ws_deque_init(&c.q);
+    c.total = 20000;
+    atomic_store(&c.popped, 0);
+    atomic_store(&c.stolen, 0);
+    atomic_store(&c.start, 0);
+    atomic_store(&c.owner_done, 0);
+
+    /* 两个批量 thief：与 owner 同时抢，验证双读 bottom 的边界防护 */
+    kaula_p_thread_t thief1, thief2, owner;
+    kaula_p_thread_create(&owner, race_owner, &c);
+    kaula_p_thread_create(&thief1, race_batch_thief, &c);
+    kaula_p_thread_create(&thief2, race_batch_thief, &c);
+
+    atomic_store(&c.start, 1);
+    kaula_p_thread_join(owner);
+    kaula_p_thread_join(thief1);
+    kaula_p_thread_join(thief2);
 
     int got = atomic_load(&c.popped) + atomic_load(&c.stolen);
     ASSERT_EQ(got, c.total, "popped + stolen 应等于总数（无重复无丢失）");
@@ -241,11 +343,15 @@ int main(void) {
     TEST_SECTION("WSDeque 单线程语义");
     test_push_pop_lifo();
     test_steal_is_fifo();
+    test_steal_batch_half();
+    test_steal_batch_single_fallback();
+    test_steal_batch_cap();
     TEST_SECTION("WSDeque 背压");
     test_push_returns_false_when_full();
     test_slot_reusable_after_pop();
     TEST_SECTION("WSDeque 并发");
     test_owner_pop_vs_thief_race();
+    test_owner_pop_vs_batch_thief_race();
     test_concurrent_external_push();
     return test_report("ws_deque");
 }

@@ -355,6 +355,19 @@ KaulaHandle kaula_spawn_to_flags(KaulaWorker* owner, KaulaResumeFn fn,
     task->flags |= flags;
     atomic_store_explicit(&task->owner, owner, memory_order_relaxed);
 
+    /*
+     * 任务出生即受 epoch pin 保护 —— 必须在 READY（任务对 Worker 可见）
+     * 之前拿。原实现把 pin 放在 handle_from_task（post 之后）：窗口内
+     * Worker 可能已完成该任务并触发回收扫描，此时 g_ext_pins 还是 0
+     * （本任务的 pin 尚未发生），min_active 判定"无人读、可回收"，
+     * Task 被 survivor_free；main 随后 pin 的是已释放内存 → await 读
+     * UAF。实测 kl 20000 并发下 682~1348 个早期任务 result 恒 0
+     * （await 失败路径 memset），C 探针直接崩在 await。
+     * 预 pin 后任何回收扫描都必能看到本任务的 pin，窗口关闭。
+     */
+    atomic_fetch_add_explicit(&task->pin_refs, 1, memory_order_acq_rel);
+    kaula_epoch_pin();
+
     atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1, memory_order_relaxed);
     kaula_conc_metrics_inc_spawned();
 
@@ -532,6 +545,10 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
     task->inner_frame = frame;
     task->flags |= KAULA_TASK_FLAG_FRAME_ON_HEAP;
     atomic_store_explicit(&task->owner, NULL, memory_order_relaxed);
+
+    /* 预 pin：见 kaula_spawn_to_flags —— 必须在 READY（对 Worker 可见）之前 */
+    atomic_fetch_add_explicit(&task->pin_refs, 1, memory_order_acq_rel);
+    kaula_epoch_pin();
 
     atomic_fetch_add_explicit(&g_conc_runtime.active_task_count, 1, memory_order_relaxed);
 
