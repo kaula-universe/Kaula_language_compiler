@@ -54,6 +54,19 @@ func (sa *SemanticAnalyzer) validateNumericSpellings(program *ast.Program) {
 			if strings.HasPrefix(v.Type().Name(), "Extern") {
 				return
 			}
+			// 套用类型 `type X = adopt <C 类型>` 的底层是**原始 C 类型**：
+			// adopt 的全部意义就是不经过 Kaula 类型映射、保留 C 原生语义。
+			// 因此它的底层不做「int 必须写成 i32」这类拼写规范化——
+			// `adopt int` 表达的是 C 的 int（32 位），改成 `adopt i32` 反而
+			// 会变成 int32_t，ABI 就不再是 C 的 int 了。
+			// （std/ctypes.kl 里的 `type CInt = adopt int` 正是官方写法；
+			//  stdlib 走元数据路径不进本 walker，所以此前没暴露出来。）
+			skipNumericSpell := false
+			if v.Type() == reflect.TypeOf(ast.TypeAliasStatement{}) {
+				if f := v.FieldByName("IsAdopt"); f.IsValid() && f.Kind() == reflect.Bool && f.Bool() {
+					skipNumericSpell = true
+				}
+			}
 			for i := 0; i < v.NumField(); i++ {
 				f := v.Type().Field(i)
 				if f.PkgPath != "" {
@@ -62,7 +75,7 @@ func (sa *SemanticAnalyzer) validateNumericSpellings(program *ast.Program) {
 				value := v.Field(i)
 				switch f.Name {
 				case "Type", "ReturnType", "TargetType", "UnderlyingType", "FuncReturnType":
-					if value.Kind() == reflect.String {
+					if value.Kind() == reflect.String && !skipNumericSpell {
 						check(value.String(), pos)
 					}
 				case "ParamTypes", "FieldTypes", "FuncParamTypes":
