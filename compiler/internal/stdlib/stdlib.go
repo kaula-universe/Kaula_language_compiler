@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"kaula/internal/config"
 )
 
 type Function struct {
@@ -40,10 +42,12 @@ type ThirdPartyLibrary struct {
 	// 直接内联进生成 C 代码的源文件列表（codegen 的第三方库内联路径使用）
 	SourceDir string   `json:"source_dir,omitempty"`
 	Sources   []string `json:"sources,omitempty"`
-	// DependsOn 声明此库依赖的其他 pkglib 包名列表。
+	// DependsOn 声明此库依赖的其他 pkglib 包。
 	// 编译器解析时会自动从注册源拉取传递依赖并构建、链接。
-	// 例如 kaulaweb 的 kaulaweb.json 中声明 "depends_on": ["webview"]。
-	DependsOn []string `json:"depends_on,omitempty"`
+	// 支持两种格式：
+	//   - 纯包名:      "depends_on": ["webview"]
+	//   - 带自定义URL:  "depends_on": [{"name": "webview", "git": "https://custom.com/webview.git"}]
+	DependsOn []config.DependsOnEntry `json:"depends_on,omitempty"`
 }
 
 type StdlibConfig struct {
