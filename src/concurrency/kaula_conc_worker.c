@@ -314,7 +314,7 @@ static void worker_park(KaulaWorker* w) {
             if (!kaula_ws_deque_empty(&w->local_queue)) return;
             if (w->resume_head != NULL) return;
             if (!kaula_scheduler_inject_empty()) return;
-            sched_yield();
+            kaula_p_yield();
         }
     }
 
@@ -463,21 +463,11 @@ KaulaTask* kaula_conc_worker_find_work(KaulaWorker* w) {
              * I2：改写 owner。
              * 任务状态在帧里，迁移只是改一个指针，不拷贝任何执行状态，
              * 因此不存在"搬栈导致悬垂指针"的问题。
-             *
-             * 批量：batch[0] 本轮执行，batch[1..nb) 压回本地队列。
-             * find_work 走到这里时本地队列必空（第一步 pop 已返 NULL），
-             * 4096 容量 >> 32 批量上限，push_owner 不可能满 ——
-             * 返回值无需检查，任务不会丢。
              */
-            for (int j = 0; j < nb; j++) {
-                batch[j]->steal_count++;
-                atomic_store_explicit(&batch[j]->owner, w, memory_order_release);
-                if (j > 0) {
-                    kaula_ws_deque_push_owner(&w->local_queue, batch[j]);
-                }
-            }
-            atomic_fetch_add_explicit(&w->stats.steal_count, nb, memory_order_relaxed);
-            return batch[0];
+            victim->steal_count++;
+            atomic_store_explicit(&victim->owner, w, memory_order_release);
+            atomic_fetch_add_explicit(&w->stats.steal_count, 1, memory_order_relaxed);
+            return victim;
         }
     }
     return NULL;

@@ -291,7 +291,7 @@ static void kaula_inject_batch_flush(KaulaTask** tasks, int n) {
     while (off < n) {
         int accepted = kaula_inject_queue_push_batch(tasks + off, n - off);
         if (accepted <= 0) {
-            sched_yield();
+            kaula_p_yield();
             continue;
         }
         off += accepted;

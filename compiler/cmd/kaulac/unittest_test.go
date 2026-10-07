@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,46 @@ func TestDiscoverTestFilesAcceptsSingleFile(t *testing.T) {
 func TestDiscoverTestFilesMissingPath(t *testing.T) {
 	if _, err := discoverTestFiles(filepath.Join(t.TempDir(), "nope")); err == nil {
 		t.Error("want error for missing path")
+	}
+}
+
+// 回归：旗标必须先从位置参数里剥离。此前 `unittest x.kl --verbose` 参数数 != 1，
+// 被当成批量模式；子进程收到同样参数又进批量模式，无限自我调用。
+// `--stdlib <path>` 的值也曾被当成目标目录。
+func TestSplitUnittestArgs(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		positional []string
+		flags      []string
+	}{
+		{"file only", []string{"a.kl"}, []string{"a.kl"}, nil},
+		{"bool flag after file", []string{"a.kl", "--verbose"}, []string{"a.kl"}, []string{"--verbose"}},
+		{"bool flag before file", []string{"--no-cache", "a.kl"}, []string{"a.kl"}, []string{"--no-cache"}},
+		{"value flag", []string{"--stdlib", "x/stdlib.json", "a.kl"}, []string{"a.kl"}, []string{"--stdlib", "x/stdlib.json"}},
+		{"value flag with =", []string{"--stdlib=x.json", "dir"}, []string{"dir"}, []string{"--stdlib=x.json"}},
+		{"value flag at end without value", []string{"a.kl", "-o"}, []string{"a.kl"}, []string{"-o"}},
+		{"no args", nil, nil, nil},
+	}
+	for _, tc := range cases {
+		pos, flags := splitUnittestArgs(tc.args)
+		if strings.Join(pos, "|") != strings.Join(tc.positional, "|") {
+			t.Errorf("%s: positional = %v, want %v", tc.name, pos, tc.positional)
+		}
+		if strings.Join(flags, "|") != strings.Join(tc.flags, "|") {
+			t.Errorf("%s: flags = %v, want %v", tc.name, flags, tc.flags)
+		}
+	}
+}
+
+// 批量模式给子进程的参数（unittest <flags...> <file>）拆分后必须判定为单文件，
+// 否则子进程会再次进入批量模式。
+func TestBatchChildArgsResolveToSingleFile(t *testing.T) {
+	kl := filepath.Join(t.TempDir(), "one.kl")
+	writeFile(t, kl, "#[test]\nfn t() {}\n")
+	pos, _ := splitUnittestArgs([]string{"--verbose", "--stdlib", "s.json", kl})
+	if !isSingleFileTarget(pos) {
+		t.Errorf("child args must resolve to a single file target, positional=%v", pos)
 	}
 }
 

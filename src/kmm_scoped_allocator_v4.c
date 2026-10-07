@@ -717,6 +717,41 @@ static uint8_t* pool_offset_to_addr(size_t offset) {
     return NULL;  // 不会发生：offset 推进前已校验额度
 }
 
+// kaula 自有内存判定（kmm_v4_scope_promote_p 系列的护栏，声明见头文件）。
+// 覆盖主池（静态/动态）与全部扩展段——TLAB 快路径、全局慢路径切块都来自
+// 这里，因此池内指针必为 kaula 分配。返回 0 表示指针来自外部分配器
+// （C++ new / malloc / FILE* 等 FFI 句柄，或 std_malloc 显式分配）：
+// 这类内存不在作用域回收范围内，任何拷贝提升都会把目标改写成残缺副本
+// （void* 场景 codegen 发射 sizeof(*v)=sizeof(void)=1，仅复制首字节，
+// 后续解引用即访问违例），必须原样透传。已提升到 survivor 的指针同样
+// 返回 0：对象本就是全局存活语义，跳过冗余拷贝只会更安全。
+int kmm_v4_pool_owned(const void* ptr) {
+    if (ptr == NULL) return 0;
+    const uint8_t* p = (const uint8_t*)ptr;
+    int dbg = getenv("KMM_DBG_OWNED") != NULL;
+#ifndef KMM_V4_STATIC_POOL
+    if (g_kmm_v4_pool != NULL &&
+        p >= g_kmm_v4_pool && p < g_kmm_v4_pool + g_kmm_v4_pool_capacity) {
+        if (dbg) fprintf(stderr, "[kmm_owned] %p in primary pool\n", ptr);
+        return 1;
+    }
+#else
+    if (p >= g_kmm_v4_pool && p < g_kmm_v4_pool + g_kmm_v4_pool_capacity) {
+        if (dbg) fprintf(stderr, "[kmm_owned] %p in static pool\n", ptr);
+        return 1;
+    }
+#endif
+    for (kmm_v4_extra_seg_t* s = g_extra_head; s != NULL; s = s->next) {
+        if (p >= s->base && p < s->base + s->capacity) {
+            if (dbg) fprintf(stderr, "[kmm_owned] %p in extra seg\n", ptr);
+            return 1;
+        }
+    }
+    if (dbg) fprintf(stderr, "[kmm_owned] %p NOT owned (pool=%p cap=%zu)\n",
+                     ptr, (void*)g_kmm_v4_pool, g_kmm_v4_pool_capacity);
+    return 0;
+}
+
 // 将统一 offset 调整为使 [offset, offset+size) 完整落在单一段内的最小
 // 合法起点（跳过段尾部碎片——被跳过的碎片与首段尾部一样不回收，与
 // “offset 单调递增”语义一致）。返回调整后的 offset；已安装额度不足

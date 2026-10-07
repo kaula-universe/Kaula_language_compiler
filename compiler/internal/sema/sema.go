@@ -492,8 +492,14 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 			sa.analyzePrefixCallExpression(prefixCall)
 			return
 		}
+		// 裸 $param 是 prefix 参数声明（不是待求值表达式），
+		// 仍做分析以保留上下文校验，但不产生 unused-value 警告
+		isBarePrefixParam := false
+		if id, ok := s.Expression.(*ast.Identifier); ok && id.IsPrefixVar {
+			isBarePrefixParam = true
+		}
 		// 纯值表达式语句(无副作用): 结果未使用警告 (clang -Wunused-value)
-		if isPureValueExpression(s.Expression) {
+		if !isBarePrefixParam && isPureValueExpression(s.Expression) {
 			sa.errorCollector.AddSemanticWarning(
 				"表达式结果未使用",
 				s.Pos.Line, s.Pos.Column, "unused_value",
@@ -926,14 +932,24 @@ func (sa *SemanticAnalyzer) checkSpendBodyExit(clauseIdx, totalClauses int, call
 }
 
 // analyzePrefixStatement 分析 prefix 语句
+// 注册体内全部 $参数 符号（类型留空：参数在调用点才绑定具体值），
+// 并在定义体分析期间把 currentPrefixTable 指向本前缀符号表，
+// 使定义体内的 $msg 引用可解析（而不是报"只能在 @前缀块 中使用"）。
 func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
 	oldSymbolTable := sa.symbolTable
 	sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "prefix_"+stmt.Name)
 	sa.scope++
 
+	for _, ref := range ast.CollectPrefixParamRefs(stmt.Body) {
+		sa.symbolTable.AddSymbol(ref.Name, "", false, "prefix_"+stmt.Name, ref.Pos.Line, ref.Pos.Column)
+	}
+
+	oldPrefixTable := sa.currentPrefixTable
+	sa.currentPrefixTable = sa.symbolTable
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.currentPrefixTable = oldPrefixTable
 
 	// 保存前缀的符号表，以便 @前缀块 中引用 $变量
 	sa.prefixSymbolTables[stmt.Name] = sa.symbolTable
@@ -942,61 +958,157 @@ func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
 	sa.scope--
 }
 
-// analyzePrefixCallExpression 分析前缀调用表达式
-// 分析调用体内的语句并检测变量遮蔽等潜在问题
+// analyzePrefixCallExpression 分析前缀调用表达式：
+//  1. 查找前缀定义并收集已声明参数（含模板体内隐式引用的 $参数）；
+//  2. 把调用体中的 `name = value` 参数赋值收编进 Params（幂等）；
+//  3. 在调用方作用域分析实参，校验未知/缺失参数；
+//  4. 切换到前缀符号表后分析剩余调用体（$var 解析到前缀参数）。
 func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpression) {
-	// 获取前缀函数定义
+	// 查找前缀定义（与 codegen 一致：前缀函数优先，其次 prefix 语句）
 	funcDecl := sa.findFunctionDeclaration(expr.Name)
+	if funcDecl != nil {
+		annotation := funcDecl.GetAnnotation()
+		if annotation != ast.TreeAnnotationPrefix &&
+			annotation != ast.TreeAnnotationPrefixTree {
+			funcDecl = nil
+		}
+	}
+	var prefixStmt *ast.PrefixStatement
 	if funcDecl == nil {
-		// 尝试查找前缀定义（prefix 语句）
-		if prefixTable, ok := sa.prefixSymbolTables[expr.Name]; ok {
-			oldPrefixTable := sa.currentPrefixTable
-			sa.currentPrefixTable = prefixTable
-			for _, bodyStmt := range expr.Body {
-				sa.analyzeStatement(bodyStmt)
+		prefixStmt = sa.findPrefixStatement(expr.Name)
+	}
+	foundDef := funcDecl != nil || prefixStmt != nil
+
+	// 已声明参数：前缀函数形参 + 模板体内全部 $参数（声明与引用）
+	declared := make(map[string]bool)
+	if funcDecl != nil {
+		for _, param := range funcDecl.Params {
+			declared[param] = true
+		}
+		for name := range ast.DeclaredPrefixParams(funcDecl.Body) {
+			declared[name] = true
+		}
+	} else if prefixStmt != nil {
+		for name := range ast.DeclaredPrefixParams(prefixStmt.Body) {
+			declared[name] = true
+		}
+	}
+
+	// 调用体中的 `name = value` 收编为参数绑定（codegen 侧复用同一辅助，幂等）
+	if foundDef {
+		expr.CollectBodyParams(declared)
+	}
+
+	// 实参在调用方作用域中分析（可能引用外层前缀的 $变量）
+	for _, paramValue := range expr.Params {
+		if paramValue != nil {
+			sa.analyzeExpression(paramValue)
+		}
+	}
+
+	if foundDef {
+		// 未知参数校验
+		unknown := make([]string, 0, len(expr.Params))
+		for name := range expr.Params {
+			if !declared[name] {
+				unknown = append(unknown, name)
 			}
-			sa.currentPrefixTable = oldPrefixTable
-			return
 		}
-		// 如果找不到前缀定义，仍然需要分析调用体内的语句
-		for _, bodyStmt := range expr.Body {
-			sa.analyzeStatement(bodyStmt)
+		sort.Strings(unknown)
+		for _, name := range unknown {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("前缀 '%s' 未声明参数: '%s'", expr.Name, name),
+				expr.Pos.Line,
+				expr.Pos.Column,
+				"undefined_prefix_param",
+				"参数名必须与前缀定义体内的 $参数 一致",
+			)
 		}
-		return
-	}
 
-	// 检查是否是前缀函数
-	annotation := funcDecl.GetAnnotation()
-	if annotation != ast.TreeAnnotationPrefix &&
-		annotation != ast.TreeAnnotationPrefixTree {
-		// 不是前缀函数，但仍然需要分析调用体内的语句
-		// 尝试查找前缀定义（prefix 语句）
-		if prefixTable, ok := sa.prefixSymbolTables[expr.Name]; ok {
-			oldPrefixTable := sa.currentPrefixTable
-			sa.currentPrefixTable = prefixTable
-			for _, bodyStmt := range expr.Body {
-				sa.analyzeStatement(bodyStmt)
+		// 缺失参数校验（容错：只校验表达式中引用且无默认值的参数，
+		// 遍历不到的引用按漏报处理，不会误报）
+		if prefixStmt != nil {
+			provided := make(map[string]bool, len(expr.Params))
+			for name := range expr.Params {
+				provided[name] = true
 			}
-			sa.currentPrefixTable = oldPrefixTable
-			return
+			for _, name := range ast.RequiredPrefixParams(prefixStmt.Body) {
+				if !provided[name] {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("前缀 '%s' 缺少参数: '%s'", expr.Name, name),
+						expr.Pos.Line,
+						expr.Pos.Column,
+						"missing_prefix_param",
+						fmt.Sprintf("调用时通过 %s = ... 绑定 $%s", name, name),
+					)
+				}
+			}
 		}
-		for _, bodyStmt := range expr.Body {
-			sa.analyzeStatement(bodyStmt)
-		}
-		return
 	}
 
-	// 收集前缀函数的参数列表
-	prefixParams := make(map[string]bool)
-	for _, param := range funcDecl.Params {
-		prefixParams[param] = true
+	// 前缀符号表：使调用体内的 $var 解析到前缀参数
+	prefixTable := sa.prefixSymbolTables[expr.Name]
+	if prefixTable == nil {
+		if prefixStmt != nil {
+			// 前缀定义尚未分析（例如定义出现在调用之后的顶层），补一次分析
+			sa.analyzePrefixStatement(prefixStmt)
+			prefixTable = sa.prefixSymbolTables[expr.Name]
+		} else if funcDecl != nil {
+			// 前缀函数：按声明参数构造符号表
+			prefixTable = symbol.NewSymbolTable(nil, "prefix_"+expr.Name)
+			for name := range declared {
+				prefixTable.AddSymbol(name, "", false, "prefix_"+expr.Name, expr.Pos.Line, expr.Pos.Column)
+			}
+		}
 	}
 
-	// 分析调用体内的语句，检测变量遮蔽
+	oldPrefixTable := sa.currentPrefixTable
+	if prefixTable != nil {
+		sa.currentPrefixTable = prefixTable
+	}
 	for _, bodyStmt := range expr.Body {
 		sa.analyzeStatement(bodyStmt)
-		sa.checkPrefixVariableShadowing(bodyStmt, prefixParams)
+		if funcDecl != nil {
+			sa.checkPrefixVariableShadowing(bodyStmt, declared)
+		}
 	}
+	sa.currentPrefixTable = oldPrefixTable
+}
+
+// findPrefixStatement 递归查找 prefix 语句（与 codegen 的查找方式一致，
+// 覆盖定义在函数体等嵌套位置的情况）
+func (sa *SemanticAnalyzer) findPrefixStatement(name string) *ast.PrefixStatement {
+	if sa.program == nil {
+		return nil
+	}
+	return findPrefixInStmts(sa.program.Statements, name)
+}
+
+func findPrefixInStmts(stmts []ast.Statement, name string) *ast.PrefixStatement {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.PrefixStatement:
+			if s.Name == name {
+				return s
+			}
+		case *ast.FunctionStatement:
+			if r := findPrefixInStmts(s.Body, name); r != nil {
+				return r
+			}
+		case *ast.IfStatement:
+			if r := findPrefixInStmts(s.Body, name); r != nil {
+				return r
+			}
+			if r := findPrefixInStmts(s.Else, name); r != nil {
+				return r
+			}
+		case *ast.WhileStatement:
+			if r := findPrefixInStmts(s.Body, name); r != nil {
+				return r
+			}
+		}
+	}
+	return nil
 }
 
 // checkPrefixVariableShadowing 检查前缀调用体内的变量遮蔽

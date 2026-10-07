@@ -29,37 +29,37 @@ func newAliasTypeGenerator(structs, classes, enums []string) *TypeGenerator {
 }
 
 // TestTypeAliasToStruct 验证 type P = Point（别名指向已定义 struct）
-// 生成 typedef K_Point P;，而不是向 C 吐出不存在的裸名 Point。
+// 生成 typedef Point P;，而不是向 C 吐出不存在的裸名 Point。
 func TestTypeAliasToStruct(t *testing.T) {
 	tg := newAliasTypeGenerator([]string{"Point"}, nil, nil)
 	stmt := &ast.TypeAliasStatement{Name: "P", UnderlyingType: "Point"}
 	got := tg.GenerateTypeAliasStatement(stmt)
 	t.Logf("生成:\n%s", got)
-	if !strings.Contains(got, "typedef K_Point P;") {
-		t.Errorf("struct 别名应生成 typedef K_Point P;，实际:\n%s", got)
+	if !strings.Contains(got, "typedef Point P;") {
+		t.Errorf("struct 别名应生成 typedef Point P;，实际:\n%s", got)
 	}
 }
 
-// TestTypeAliasToStructPointer 验证 type PNode = *Node 生成 K_Node* 指针别名。
+// TestTypeAliasToStructPointer 验证 type PNode = *Node 生成 Node* 指针别名。
 func TestTypeAliasToStructPointer(t *testing.T) {
 	tg := newAliasTypeGenerator([]string{"Node"}, nil, nil)
 	stmt := &ast.TypeAliasStatement{Name: "PNode", UnderlyingType: "*Node"}
 	got := tg.GenerateTypeAliasStatement(stmt)
 	t.Logf("生成:\n%s", got)
-	if !strings.Contains(got, "typedef K_Node* PNode;") {
-		t.Errorf("struct 指针别名应生成 typedef K_Node* PNode;，实际:\n%s", got)
+	if !strings.Contains(got, "typedef Node* PNode;") {
+		t.Errorf("struct 指针别名应生成 typedef Node* PNode;，实际:\n%s", got)
 	}
 }
 
-// TestTypeAliasToEnum 验证 type C = Color（枚举值语义）生成 K_Color。
+// TestTypeAliasToEnum 验证 type C = Color（枚举值语义）生成 Color。
 func TestTypeAliasToEnum(t *testing.T) {
 	tg := newAliasTypeGenerator(nil, nil, []string{"Color"})
 	// 枚举在 codegen 也登记进 structTypes（tagged union 形态），这里模拟登记
 	tg.structTypes["Color"] = true
 	stmt := &ast.TypeAliasStatement{Name: "C", UnderlyingType: "Color"}
 	got := tg.GenerateTypeAliasStatement(stmt)
-	if !strings.Contains(got, "typedef K_Color C;") {
-		t.Errorf("enum 别名应生成 typedef K_Color C;，实际:\n%s", got)
+	if !strings.Contains(got, "typedef Color C;") {
+		t.Errorf("enum 别名应生成 typedef Color C;，实际:\n%s", got)
 	}
 }
 

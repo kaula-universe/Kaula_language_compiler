@@ -4894,9 +4894,11 @@ func (p *Parser) parseArrayLiteralIterative() ast.Expression {
 
 // parsePrefixCallStatementIterative 迭代解析前缀调用语句
 // 语法: @PrefixName(param1=value1, param2=value2) { body }
+// 无花括号时调用体为空（仅展开模板本身）。
 func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 	var prefixName string
 	params := make(map[string]ast.Expression)
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
 
 	// 检查是否是 @ 前缀调用
 	if p.curTok.Type == lexer.TOKEN_AT {
@@ -4912,14 +4914,26 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 		if p.curTok.Type == lexer.TOKEN_LPAREN {
 			p.nextToken()
 			for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+				prevTok := p.curTok
 				if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
 					paramName := p.curTok.Value
 					p.nextToken() // skip IDENT
 					p.nextToken() // skip ASSIGN
-					paramValue := p.parseExpressionIterative()
-					params[paramName] = paramValue
+					if paramValue := p.parseExpressionIterative(); paramValue != nil {
+						params[paramName] = paramValue
+					}
 				}
 				if p.curTok.Type == lexer.TOKEN_COMMA {
+					p.nextToken()
+				}
+				/*
+				 * 一轮下来 token 没有前进就手动前进，避免死循环：
+				 * 形如 `@Name(a)`（参数缺少 =值）这类语法错误会让 IDENT
+				 * 分支与逗号分支都不触发，不前进就永远转下去。
+				 */
+				if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+					p.log("跳过无法解析的前缀参数 token: %s=%q",
+						lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value)
 					p.nextToken()
 				}
 			}
@@ -4970,13 +4984,27 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 			Name:   prefixName,
 			Params: params,
 			Body:   blockBody,
+			Pos:    pos,
 		}
 		return &ast.ExpressionStatement{
 			Expression: prefixCall,
+			Pos:        pos,
 		}
 	}
 
-	return nil
+	// 没有花括号的前缀调用：@Name(params) 后无 { } —— 调用体为空，
+	// 展开时只生成模板体（此前这里返回 nil，导致整个语句解析失败）。
+	if prefixName == "" {
+		return nil
+	}
+	return &ast.ExpressionStatement{
+		Expression: &ast.PrefixCallExpression{
+			Name:   prefixName,
+			Params: params,
+			Pos:    pos,
+		},
+		Pos: pos,
+	}
 }
 
 // parseYieldStatementIterative 解析 yield 语句

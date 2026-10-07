@@ -9,6 +9,23 @@
 ## [Unreleased]
 
 ### Added
+- **`std.regex` 正则引擎重写**：自带引擎（递归下降解析 + 迭代式回溯匹配），
+  不再依赖 libc `<regex.h>`，三平台与 freestanding 行为一致。
+  - 语法：贪婪/惰性量词、`{n}` `{n,}` `{n,m}`、非捕获组、具名组
+    `(?<name>)` / `(?'name')` / `(?P<name>)`、POSIX 字符类 `[:alpha:]`、
+    `\b \B \A \z`、`\xHH`、内联开关 `(?i)` / `(?i:...)`
+  - 标志：`REGEX_FLAG_IGNORECASE` / `MULTILINE` / `DOTALL` / `EXTENDED`
+  - 捕获组：`regex_captures` 返回各组文本与 `matched` 标记；
+    `regex_group_count` / `group_name` / `group_index` 查元数据
+  - 替换：`$0..$9` / `$&` / `${name}` / `${n}` / `$$`；
+    另有 `regex_replace_first`
+  - 新增 `regex_search`（非锚定）、`regex_find_first`（带 from 偏移）、
+    `regex_split` 支持 `max_parts`、`regex_quote`（元字符转义）
+  - 步数预算 `regex_set_step_limit` / `regex_aborted`：灾难性回溯
+    （如 `(a+)+b`）从「挂死」降级为「有限步放弃」，`aborted` 可区分
+    「无匹配」与「超预算」
+  - 匹配器用显式回溯栈而非 C 递归：`a*b` 匹配 10 万字符不再爆栈
+  - 模式串在 `regex_create` 时拷贝，调用方可立即释放原串
 - **CONC 并发内核端到端落地**：work-stealing 调度器 + 预算机制、IoDriver + suspend/resume、
   阻塞车道 + Worker 撤离、`conc fn` + `spawn` 语法、内核重写与 lowering、IoDriver lowering 端到端。
 - **并发语言接缝**：`for..in(range)` 循环体内挂起、`#[hint(blocking)]` 阻塞车道入口。
@@ -44,6 +61,19 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **`std.regex` 引擎此前不可用（4 处）**：
+  - **量词死循环**：`parse_quantifier` 把 `*` 的 `SPLIT` 发射在 body **之后**，
+    body 消费失败后跳过分支根本走不到，`a+b` / `a*b` / `[a-c]+` 及
+    `regex_replace` 全部挂死。
+  - **锚点失效**：`^` / `$` 编译成 `out` 为 NULL 的 `NFA_SPLIT`，等于什么都没匹配；
+    `^ab` 对 `"xab"` 会误报命中。
+  - **`types` 未登记**：`stdlib.json` 里 `std.regex` 没有 `types` 段，
+    `Regex*` / `RegexMatch*` 是未知类型，Kaula 侧连变量都声明不出来。
+    同问题也存在于 `std.string`——其 `split` 返回 `String*`，但 `String`
+    未登记，那个 API 同样调不通。两处均已补 `types`。
+  - **`match` 撞保留字**：`std.regex.match(...)` 被解析成 match 表达式而非函数调用，
+    生成的 C 是 `check(std.regex, switch (re) {}, ...)`。Kaula 侧改用
+    `std.regex.full_match(...)`。
 - **构建阻断：Linux/clang 下运行时编不出来（2 处）**：
   - `kaula_conc_epoch.c`：`g_deferred_lock` 声明成 `_Atomic(uint32_t)` 却用
     `__atomic_*` 内置访问，clang 判「atomic 操作的地址必须指向整型/指针」直接报错。

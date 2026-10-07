@@ -657,17 +657,53 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	return builder.String()
 }
 
+// annotatedFuncSignature 生成 prefix/tree/root-tree 注解函数的 C 签名。
+// 这三类函数此前硬编码 "int64_t f(int64_t arg)"，与 forwardDecls 按 Kaula 声明
+// 生成的原型冲突：无返回值函数的原型是 "void K_f(void)"、带参原型的参数类型也按
+// 声明转换，定义却一律 int64_t → clang 报 conflicting types，程序根本编不过。
+// 这里复用普通函数的签名规则（mapReturnType + convertType），保证定义与前向声明一致。
+func (fg *FunctionGenerator) annotatedFuncSignature(stmt *ast.FunctionStatement) string {
+	var b strings.Builder
+	b.WriteString(fg.mapReturnType(stmt.ReturnType))
+	b.WriteString(fg.codegen.UserFuncCName(stmt.Name))
+	b.WriteByte('(')
+	for i, param := range stmt.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		paramType := "int64_t"
+		isNullable := false
+		if i < len(stmt.ParamTypes) && stmt.ParamTypes[i] != "" {
+			if i < len(stmt.ParamNullables) {
+				isNullable = stmt.ParamNullables[i]
+			}
+			if ctype := fg.codegen.typeGenerator.convertType(stmt.ParamTypes[i], isNullable); ctype != "" {
+				paramType = ctype
+			}
+		}
+		// 函数指针类型参数：R (*)(args) name → R (*name)(args)
+		// 数组类型参数：T[N] name → T name[N]（C 要求声明符在后）
+		b.WriteString(formatCVarDecl(paramType, param))
+		fg.codegen.AddSymbol(param, stmt.ParamTypes[i], isNullable, "parameter", stmt.Pos.Line, stmt.Pos.Column)
+	}
+	if len(stmt.Params) == 0 {
+		b.WriteString("void")
+	}
+	b.WriteByte(')')
+	return b.String()
+}
+
 func (fg *FunctionGenerator) generatePrefixFunction(stmt *ast.FunctionStatement) string {
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Prefix function: AST generation for cross-file reuse\n")
-	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
+	code.WriteString(fg.annotatedFuncSignature(stmt))
+	code.WriteString(" {\n")
 
-	if len(stmt.Params) > 0 {
-		code.WriteString("(int64_t arg) {\n")
-	} else {
-		code.WriteString("(void) {\n")
-	}
+	// return 语句按当前函数返回类型生成，注解函数同样需要设置并在结束时恢复
+	prevReturnType := fg.codegen.currentFunctionReturnType
+	fg.codegen.currentFunctionReturnType = stmt.ReturnType
+	defer func() { fg.codegen.currentFunctionReturnType = prevReturnType }()
 
 	fg.codegen.indent++
 
@@ -700,13 +736,13 @@ func (fg *FunctionGenerator) generateTreeFunction(stmt *ast.FunctionStatement) s
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Tree function: AST generation with root validation\n")
-	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
+	// 签名必须与 forwardDecls 生成的原型一致（此前硬编码 int64_t，与 void 原型冲突）
+	code.WriteString(fg.annotatedFuncSignature(stmt))
+	code.WriteString(" {\n")
 
-	if len(stmt.Params) > 0 {
-		code.WriteString("(int64_t arg) {\n")
-	} else {
-		code.WriteString("(void) {\n")
-	}
+	prevReturnType := fg.codegen.currentFunctionReturnType
+	fg.codegen.currentFunctionReturnType = stmt.ReturnType
+	defer func() { fg.codegen.currentFunctionReturnType = prevReturnType }()
 
 	fg.codegen.indent++
 
@@ -735,13 +771,13 @@ func (fg *FunctionGenerator) generateRootTreeFunction(stmt *ast.FunctionStatemen
 	var code strings.Builder
 	code.Grow(1024)
 	code.WriteString("// Root tree function: defines global tree structure\n")
-	fmt.Fprintf(&code, "int64_t %s", fg.codegen.UserFuncCName(stmt.Name))
+	// 签名必须与 forwardDecls 生成的原型一致（此前硬编码 int64_t，与 void 原型冲突）
+	code.WriteString(fg.annotatedFuncSignature(stmt))
+	code.WriteString(" {\n")
 
-	if len(stmt.Params) > 0 {
-		code.WriteString("(int64_t arg) {\n")
-	} else {
-		code.WriteString("(void) {\n")
-	}
+	prevReturnType := fg.codegen.currentFunctionReturnType
+	fg.codegen.currentFunctionReturnType = stmt.ReturnType
+	defer func() { fg.codegen.currentFunctionReturnType = prevReturnType }()
 
 	fg.codegen.indent++
 
@@ -895,10 +931,8 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		// 裸机入口符号名必须与 freestanding.c.tmpl / user.c.tmpl 里的前向声明一致。
 		// 两种写法都要落到同一个 C 符号上：
 		//   fn main()       → 直接重命名为裸机入口（不能叫 main，裸机无 CRT 启动代码）
-		//   fn kaula_main() → UserFuncCName 规则给出 K_ 前缀，本身就是 K_kaula_main
-		// 此前这里用无前缀的 "kaula_main"，而用户写 fn kaula_main() 时实际符号是
-		// K_kaula_main，模板按 K_kaula_main 声明 → 链接期 undefined symbol。
-		funcName = "K_kaula_main"
+		//   fn kaula_main() → UserFuncCName 给出原名 kaula_main，与模板声明一致
+		funcName = "kaula_main"
 	}
 	code.WriteString("int " + funcName + "() {\n")
 	fg.codegen.indent++

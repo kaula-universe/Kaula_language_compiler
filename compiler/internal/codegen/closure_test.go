@@ -81,7 +81,7 @@ func TestMatchPayloadAssignmentAndScope(t *testing.T) {
 	}
 	cg.genericTypeCode.Reset()
 	cg.lambdaDefinitions = nil
-	runClosureC(t, cg, "typedef struct { int kind; union { int64_t Ok_val; int64_t Err_val; } data; } K_Result;\nenum {Result_Kind_Ok,Result_Kind_Err};\nint main(void){ K_Result r={Result_Kind_Ok,{.Ok_val=42}}; int64_t v=0; "+code+" return v!=42; }")
+	runClosureC(t, cg, "typedef struct { int kind; union { int64_t Ok_val; int64_t Err_val; } data; } Result;\nenum {Result_Kind_Ok,Result_Kind_Err};\nint main(void){ Result r={Result_Kind_Ok,{.Ok_val=42}}; int64_t v=0; "+code+" return v!=42; }")
 }
 func TestMatchStringsNULAndSingleEvaluation(t *testing.T) {
 	cg := NewCodeGenerator(config.DefaultConfig())

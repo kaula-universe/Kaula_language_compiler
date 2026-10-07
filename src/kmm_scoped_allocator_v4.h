@@ -1445,14 +1445,22 @@ static inline void* kmm_v4_promote_deep(void* ptr, size_t size, kmm_v4_promote_c
     return dst;
 }
 
+// kmm_v4_pool_owned：指针是否为 kaula 池自有内存（主池+扩展段）。
+// 实现在 kmm_scoped_allocator_v4.c。返回 0 = 外部分配器指针
+// （FFI 句柄 / C++ new / malloc / std_malloc），不属于作用域回收范围。
+extern int kmm_v4_pool_owned(const void* ptr);
+
 // kmm_v4_scope_promote_p: 原地提升（编译器友好版，配合 sizeof(*var) 使用）。
 // 将 *ptr 指向的内容拷贝到幸存段，并把 *ptr 替换为新指针。
 //
 // ⚠ 限制（Bug 2）：同 kmm_v4_promote，浅拷贝，对含指针字段的聚合对象不安全。
 // 编译器 codegen 当前调用此函数做 SOR yield/return 边界提升——仅对扁平对象
 // 或内部指针已单独提升的对象安全。聚合对象需由前端生成逐字段提升代码。
+// ⚠ 护栏：extern/FFI 返回的外部指针（webview_t、FILE* 等）必须原样透传——
+// 拷贝提升会把目标改写成残缺副本（void* 场景 size=1），解引用即访问违例。
 static inline void kmm_v4_scope_promote_p(void** ptr, size_t size) {
     if (KMM_V4_UNLIKELY(ptr == NULL || *ptr == NULL)) return;
+    if (KMM_V4_UNLIKELY(!kmm_v4_pool_owned(*ptr))) return;  // 外部指针：不拷贝、不改写
     void* dst = kmm_v4_alloc_global(size);
     if (KMM_V4_UNLIKELY(dst == NULL)) return;  // D1 修复：分配失败时保留原指针
     if (size > 0) memcpy(dst, *ptr, size);
@@ -1463,6 +1471,7 @@ static inline void kmm_v4_scope_promote_p(void** ptr, size_t size) {
 // 改写对象内部的指针字段。失败时 *ptr 保持原值（不替换为半成品）。
 static inline int kmm_v4_scope_promote_p_deep(void** ptr, size_t size, kmm_v4_promote_cb_t cb) {
     if (KMM_V4_UNLIKELY(ptr == NULL || *ptr == NULL)) return 0;
+    if (KMM_V4_UNLIKELY(!kmm_v4_pool_owned(*ptr))) return 0;  // 外部指针护栏：同 scope_promote_p，不改写
     void* dst = kmm_v4_alloc_global(size);
     if (KMM_V4_UNLIKELY(dst == NULL)) return -1;
     if (size > 0) memcpy(dst, *ptr, size);

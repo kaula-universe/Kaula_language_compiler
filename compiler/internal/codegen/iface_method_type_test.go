@@ -36,7 +36,11 @@ func TestIfaceMethodReturnTypeDrivesFloatArithmetic(t *testing.T) {
 		t.Errorf("interface call should dispatch through the vtable; got:\n%s", cCode)
 	}
 	// 返回表达式必须是浮点加法，不能被整数溢出检查包装
-	body := norm[strings.Index(norm, "double K_sum(K_Shape a"):]
+	idx := strings.Index(norm, "double sum(Shape a")
+	if idx < 0 {
+		t.Fatalf("sum definition not found; got:\n%s", cCode)
+	}
+	body := norm[idx:]
 	if i := strings.Index(body, "return "); i >= 0 {
 		ret := body[i:]
 		if j := strings.Index(ret, ";"); j >= 0 {

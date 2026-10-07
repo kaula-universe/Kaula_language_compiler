@@ -2,12 +2,29 @@ package codegen
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"kaula/internal/ast"
 )
 
-// AttributeFeatures 处理 #[test]、#[derive]、#[command] 等高级属性
+// mainShellRegex 匹配模板里包�?{{main_code}} �?main 壳，对空�?换行不敏�?
+// （CRLF、缩进差异、int main(void) 都能命中）�?
+var mainShellRegex = regexp.MustCompile(`int\s+main\s*\(\s*(?:void)?\s*\)\s*\{\s*\{\{main_code\}\}\s*return\s+0\s*;\s*\}`)
+
+// replaceMainShellWithRunner 用测�?runner（自�?int main）整体替换模板的 main 壳�?
+// 不能退化为只替�?{{main_code}}：那会把 runner �?#include、全局变量和函�?
+// 定义嵌进模板�?int main() 函数体内，C 编译�?"function definition is not
+// allowed here"。返�?false 表示模板里没有可识别�?main 壳�?
+func replaceMainShellWithRunner(result, runner string) (string, bool) {
+	loc := mainShellRegex.FindStringIndex(result)
+	if loc == nil {
+		return result, false
+	}
+	return result[:loc[0]] + runner + result[loc[1]:], true
+}
+
+// AttributeFeatures 处理 #[test]�?[derive]�?[command] 等高级属�?
 type AttributeFeatures struct {
 	cg *CodeGenerator
 }
@@ -34,7 +51,7 @@ func (af *AttributeFeatures) CollectTestFunctions(program *ast.Program) []TestFu
 				info := TestFunctionInfo{
 					Name: fn.Name,
 				}
-				// 提取 #[test("description")] 的描述
+				// 提取 #[test("description")] 的描�?
 				for _, attr := range fn.Attributes {
 					if attr != nil && attr.Name == "test" && len(attr.Args) > 0 {
 						info.Description = strings.Trim(attr.Args[0], "\"'")
@@ -49,7 +66,7 @@ func (af *AttributeFeatures) CollectTestFunctions(program *ast.Program) []TestFu
 	return tests
 }
 
-// GenerateTestRunner 生成测试运行器 main 函数
+// GenerateTestRunner 生成测试运行�?main 函数
 func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string {
 	var sb strings.Builder
 
@@ -90,8 +107,8 @@ func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string
 	sb.WriteString("}\n\n")
 
 	// 单个测试运行函数
-	// should_panic：语义为「断言失败即通过」。该测试若没有触发断言失败，
-	// 说明它本应失败却通过了，此时计为 FAILED。
+	// should_panic：语义为「断言失败即通过」。该测试若没有触发断言失败�?
+	// 说明它本应失败却通过了，此时计为 FAILED�?
 	sb.WriteString("static void __kaula_run_test(const char* name, const char* desc, void (*test_fn)(void), int ignored, int should_panic) {\n")
 	sb.WriteString("    __kaula_test_count++;\n")
 	sb.WriteString("    if (ignored) {\n")
@@ -131,7 +148,7 @@ func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string
 		if test.Ignored {
 			sb.WriteString(fmt.Sprintf("    __kaula_run_test(\"%s\", %s, NULL, 1, %d);\n", test.Name, desc, boolToCInt(test.ShouldPanic)))
 		} else {
-			sb.WriteString(fmt.Sprintf("    __kaula_run_test(\"%s\", %s, K_%s, 0, %d);\n", test.Name, desc, test.Name, boolToCInt(test.ShouldPanic)))
+			sb.WriteString(fmt.Sprintf("    __kaula_run_test(\"%s\", %s, %s, 0, %d);\n", test.Name, desc, af.cg.UserFuncCName(test.Name), boolToCInt(test.ShouldPanic)))
 		}
 	}
 
@@ -155,9 +172,9 @@ func (af *AttributeFeatures) GenerateTestRunner(tests []TestFunctionInfo) string
 	return sb.String()
 }
 
-// cStringLiteral 把任意字符串编码为安全的 C 字符串字面量。
-// #[test("描述")] 的描述会直接拼进生成的 C 源码，必须转义引号/反斜杠/换行，
-// 否则描述里的一个 " 就能破坏生成代码。
+// cStringLiteral 把任意字符串编码为安全的 C 字符串字面量�?
+// #[test("描述")] 的描述会直接拼进生成�?C 源码，必须转义引�?反斜�?换行�?
+// 否则描述里的一�?" 就能破坏生成代码�?
 func cStringLiteral(s string) string {
 	if s == "" {
 		return "NULL"
@@ -178,7 +195,7 @@ func cStringLiteral(s string) string {
 		case '\t':
 			sb.WriteString(`\t`)
 		default:
-			// 过滤不可打印控制字符，避免生成非法 C 源码
+			// 过滤不可打印控制字符，避免生成非�?C 源码
 			if c < 0x20 || c == 0x7f {
 				fmt.Fprintf(&sb, `\x%02x`, c)
 			} else {
@@ -190,7 +207,7 @@ func cStringLiteral(s string) string {
 	return sb.String()
 }
 
-// boolToCInt 把 Go bool 转为 C 整数字面量
+// boolToCInt �?Go bool 转为 C 整数字面�?
 func boolToCInt(b bool) int {
 	if b {
 		return 1
@@ -198,7 +215,7 @@ func boolToCInt(b bool) int {
 	return 0
 }
 
-// DeriveInfo 派生宏信息
+// DeriveInfo 派生宏信�?
 type DeriveInfo struct {
 	TypeName string
 	Traits   []string
@@ -234,7 +251,7 @@ func (af *AttributeFeatures) CollectDeriveTypes(program *ast.Program) []DeriveIn
 	return derives
 }
 
-// GenerateDeriveImpls 为 #[derive] 类型生成方法实现
+// GenerateDeriveImpls �?#[derive] 类型生成方法实现
 func (af *AttributeFeatures) GenerateDeriveImpls(derives []DeriveInfo, program *ast.Program) string {
 	var sb strings.Builder
 
@@ -263,7 +280,7 @@ func (af *AttributeFeatures) generateDebugImpl(typeName string, program *ast.Pro
 	}
 
 	var sb strings.Builder
-	cName := "K_" + typeName
+	cName := typeName
 	fnName := typeName + "_debug"
 
 	sb.WriteString(fmt.Sprintf("\n/* #[derive(Debug)] for %s */\n", typeName))
@@ -303,7 +320,7 @@ func (af *AttributeFeatures) generateCloneImpl(typeName string, program *ast.Pro
 	}
 
 	var sb strings.Builder
-	cName := "K_" + typeName
+	cName := typeName
 	fnName := typeName + "_clone"
 
 	sb.WriteString(fmt.Sprintf("\n/* #[derive(Clone)] for %s */\n", typeName))
@@ -325,7 +342,7 @@ func (af *AttributeFeatures) generateEqImpl(typeName string, program *ast.Progra
 	}
 
 	var sb strings.Builder
-	cName := "K_" + typeName
+	cName := typeName
 	fnName := typeName + "_equals"
 
 	sb.WriteString(fmt.Sprintf("\n/* #[derive(Eq)] for %s */\n", typeName))
@@ -354,7 +371,7 @@ type FieldInfo struct {
 	Type string
 }
 
-// getTypeFields 获取类型的字段列表
+// getTypeFields 获取类型的字段列�?
 func (af *AttributeFeatures) getTypeFields(typeName string, program *ast.Program) []FieldInfo {
 	var fields []FieldInfo
 	program.Traverse(func(n ast.Node) {
@@ -372,7 +389,7 @@ func (af *AttributeFeatures) getTypeFields(typeName string, program *ast.Program
 	return fields
 }
 
-// isIntegerType 判断是否为整数类型
+// isIntegerType 判断是否为整数类�?
 func (af *AttributeFeatures) isIntegerType(t string) bool {
 	switch t {
 	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "int", "int8", "int16", "int32", "int64",
@@ -382,7 +399,7 @@ func (af *AttributeFeatures) isIntegerType(t string) bool {
 	return false
 }
 
-// isFloatType 判断是否为浮点类型
+// isFloatType 判断是否为浮点类�?
 func (af *AttributeFeatures) isFloatType(t string) bool {
 	switch t {
 	case "f32", "f64", "float", "double", "float32", "float64":
@@ -391,13 +408,13 @@ func (af *AttributeFeatures) isFloatType(t string) bool {
 	return false
 }
 
-// CommandInfo 命令行参数信息
+// CommandInfo 命令行参数信�?
 type CommandInfo struct {
 	StructName string
 	Fields     []CommandField
 }
 
-// CommandField 命令行参数字段
+// CommandField 命令行参数字�?
 type CommandField struct {
 	Name    string
 	Type    string
@@ -407,7 +424,7 @@ type CommandField struct {
 	Help    string
 }
 
-// CollectCommands 收集所有带 #[command] 属性的结构体
+// CollectCommands 收集所有带 #[command] 属性的结构�?
 func (af *AttributeFeatures) CollectCommands(program *ast.Program) []CommandInfo {
 	var commands []CommandInfo
 	program.Traverse(func(n ast.Node) {
@@ -444,12 +461,12 @@ func (af *AttributeFeatures) CollectCommands(program *ast.Program) []CommandInfo
 	return commands
 }
 
-// GenerateCommandParser 生成命令行参数解析代码
+// GenerateCommandParser 生成命令行参数解析代�?
 func (af *AttributeFeatures) GenerateCommandParser(commands []CommandInfo) string {
 	var sb strings.Builder
 
 	for _, cmd := range commands {
-		cName := "K_" + cmd.StructName
+		cName := cmd.StructName
 		parseFn := cmd.StructName + "_parse"
 
 		sb.WriteString(fmt.Sprintf("\n/* #[command] parser for %s */\n", cmd.StructName))
@@ -457,7 +474,7 @@ func (af *AttributeFeatures) GenerateCommandParser(commands []CommandInfo) strin
 		sb.WriteString(fmt.Sprintf("    %s* args = (%s*)calloc(1, sizeof(%s));\n", cName, cName, cName))
 		sb.WriteString("    if (!args) return NULL;\n\n")
 
-		// 设置默认值
+		// 设置默认�?
 		for _, field := range cmd.Fields {
 			if field.Default != "" {
 				if af.isIntegerType(field.Type) {

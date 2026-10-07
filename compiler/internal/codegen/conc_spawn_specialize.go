@@ -244,7 +244,7 @@ func (cg *CodeGenerator) specializeSpawnConsts(program *ast.Program) {
 		 *
 		 * 那个理由站不住：spawn 的调用点仍然按原签名传实参
 		 * （GenerateSpawn 走非内联路径时写 `__frame->rounds = 5`，
-		 *  走内联路径时写 `K_x_spc_N_as_fn(5)`），
+		 *  走内联路径时写 `x_spc_N_as_fn(5)`），
 		 * 而 emitter 是**从 AST 的 Params 建的**（generateConcurrentFunction）。
 		 * 清空 Params 于是产生两处错位：
 		 *
@@ -288,7 +288,7 @@ func (cg *CodeGenerator) specializeSpawnConsts(program *ast.Program) {
 //
 // 生成顺序问题：fn A 顺序调用 conc fn B（B 定义在 A 之后）时，A 生成时
 // B 尚未经 EmitResume 注册 → LookupConcFunc 查不到 → 顺序调用按普通 C
-// 函数生成（K_compute(7)），而 conc fn 没有同名普通 C 定义 → 链接失败。
+// 函数生成（compute(7)），而 conc fn 没有同名普通 C 定义 → 链接失败。
 // spawn 常量特化把特化版插到头部，使该问题从「可能」变成「必现」。
 //
 // 预注册做完整形态判定（AnalyzeBody + SetStateful/SetGuardLayout），
@@ -300,14 +300,9 @@ func (cg *CodeGenerator) preRegisterConcFns(program *ast.Program) {
 			continue
 		}
 		// 注意：预注册跑在 isUserKaulaFunc 等表填充之前，UserFuncCName
-		// 此时对用户函数返回的是原名（compute 而非 K_compute），与生成时
-		// （EmitCall Lookup 用 K_compute）不一致 → 查不到。这里按与
-		// funcgen 构造 emitter 相同的规则手动定名：用户 conc fn 非 export
-		// 一律 K_ 前缀；export 保持原名（FFI 边界）。
+		// 此时对用户函数返回的也是原名，与生成时一致（不再有 K_ 前缀），
+		// 这里直接用函数原名作为 C 符号名。
 		cName := fn.Name
-		if !fn.IsExported {
-			cName = "K_" + fn.Name
-		}
 		if cg.LookupConcFunc(cName) != nil {
 			continue
 		}

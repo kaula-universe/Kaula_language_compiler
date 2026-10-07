@@ -347,7 +347,27 @@ func extractStatement(s ast.Statement, stmts *[]Stmt, caller *string, externFns 
 		if stmt == nil {
 			return
 		}
+		// 模板体里的 $参数 是占位符，不是作用域里已存在的变量：
+		// 先按首次出现顺序声明（否则后续 release/yield/读写会报"变量未找到"），
+		// 再提取体内语句；裸 `$param` 与 `$param = 默认值` 本身是参数声明，
+		// 不产生读/写访问。
+		seenParams := make(map[string]bool)
+		for _, ref := range ast.CollectPrefixParamRefs(stmt.Body) {
+			if seenParams[ref.Name] {
+				continue
+			}
+			seenParams[ref.Name] = true
+			letStmt := LetStmt(ref.Pos.Line, "$"+ref.Name, ref.Name, "", false)
+			letStmt.CallerName = *caller
+			*stmts = append(*stmts, letStmt)
+		}
 		for _, bodyStmt := range stmt.Body {
+			if _, _, ok := ast.PrefixParamDefaultDecl(bodyStmt); ok {
+				continue
+			}
+			if _, ok := ast.BarePrefixParamName(bodyStmt); ok {
+				continue
+			}
 			extractStatement(bodyStmt, stmts, caller, externFns, adoptTypes)
 		}
 

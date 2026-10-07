@@ -1,4 +1,5 @@
 #include "kaula.h"
+#include "path_tokenizer.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -199,17 +200,17 @@ TreeNode* find_tree_node(TreeNode* root, const char* path) {
     char* path_copy = kmm_v4_strdup(path);
     if (!path_copy) return NULL;
 
-    char* saveptr = NULL;
-    char* token = strtok_r(path_copy, ".", &saveptr);
+    char* next = NULL;
+    char* segment = kaula_path_next_segment(path_copy, &next);
     TreeNode* current = root;
 
-    while (token) {
-        current = find_tree_child(current, token);
+    while (segment) {
+        current = find_tree_child(current, segment);
         if (!current) {
             kmm_v4_free(path_copy);
             return NULL;
         }
-        token = strtok_r(NULL, ".", &saveptr);
+        segment = kaula_path_next_segment(NULL, &next);
     }
 
     kmm_v4_free(path_copy);

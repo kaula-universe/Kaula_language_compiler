@@ -17,7 +17,7 @@ import (
  * 这些字段若被冷字段（result）挤过 64B 缓存行边界，
  * **每次状态机推进都要多碰一条缓存行**。
  *
- * == 实测（K_worker_Frame）==
+ * == 实测（worker_Frame）==
  *
  * 旧布局（仅按对齐降序）：sizeof=80
  *   loop_i[2]@0 / loop_end[2]@16 / loop_step[2]@32 / n@48 / total@56
@@ -57,7 +57,7 @@ fn main() -> i32 {
 		t.Errorf("不应报错，实际：%s", e)
 	}
 
-	body := extractFrameStruct(t, c, "K_worker_Frame")
+	body := extractFrameStruct(t, c, "worker_Frame")
 
 	pcIdx := strings.Index(body, "pc;")
 	subIdx := strings.Index(body, "sub[")
@@ -101,7 +101,7 @@ conc fn worker(i64 n) -> i64 {
 fn main() -> i32 { return 0 }
 `
 	c, _ := genConc(t, src)
-	body := extractFrameStruct(t, c, "K_worker_Frame")
+	body := extractFrameStruct(t, c, "worker_Frame")
 
 	// 逐条解析字段占用（保守估算：按类型宽度求和 + 对齐取整）。
 	// 这里只断言不会离谱地膨胀 —— 精确尺寸由 C 编译器决定，

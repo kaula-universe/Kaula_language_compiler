@@ -22,7 +22,7 @@ import (
  * 而调用点的实参是按**原签名**生成的。清空 Params 于是让两侧错位：
  *
  *   - Frame 少了参数字段，spawn 仍照写 __frame->rounds
- *   - shim 定义成了 K_x_spc_N_as_fn(void)，调用点却传实参
+ *   - shim 定义成了 x_spc_N_as_fn(void)，调用点却传实参
  *
  * clang 报 "too many arguments to function call, expected 0, have 1"，
  * 整个 TU 编不过 —— 而触发条件只是"spawn 的实参全是字面量"。
@@ -86,10 +86,10 @@ func TestSpawnSpecialize_ShimArityMatchesCallSite(t *testing.T) {
 	}
 
 	/*
-	 * shim 定义：`int64_t  K_loop_nested_spc_0_as_fn(<参数>) {`
+	 * shim 定义：`int64_t  loop_nested_spc_0_as_fn(<参数>) {`
 	 * 抓参数列表，数逗号分隔的形参个数。
 	 */
-	defRe := regexp.MustCompile(`(?m)^\S+\s+K_loop_nested_spc_0_as_fn\(([^)]*)\)\s*\{`)
+	defRe := regexp.MustCompile(`(?m)^\S+\s+loop_nested_spc_0_as_fn\(([^)]*)\)\s*\{`)
 	def := defRe.FindStringSubmatch(c)
 	if def == nil {
 		t.Fatalf("找不到特化版 shim 的定义：\n%s", c)
@@ -97,10 +97,10 @@ func TestSpawnSpecialize_ShimArityMatchesCallSite(t *testing.T) {
 	defParams := countCParams(def[1])
 
 	/*
-	 * 调用点：spawn 内联路径生成 `K_loop_nested_spc_0_as_fn(5)`。
+	 * 调用点：spawn 内联路径生成 `loop_nested_spc_0_as_fn(5)`。
 	 * 匹配**非定义**的那一处（定义后面紧跟 ` {`，调用点后面跟 `;`）。
 	 */
-	callRe := regexp.MustCompile(`K_loop_nested_spc_0_as_fn\(([^)]*)\);`)
+	callRe := regexp.MustCompile(`loop_nested_spc_0_as_fn\(([^)]*)\);`)
 	call := callRe.FindStringSubmatch(c)
 	if call == nil {
 		// 也可能走非内联路径（帧分配 + kaula_spawn_*）。
@@ -136,7 +136,7 @@ func TestSpawnSpecialize_FrameKeepsParamFields(t *testing.T) {
 
 	// 从特化版 Frame 定义里取字段块
 	re := regexp.MustCompile(
-		`(?s)Frame for conc fn loop_nested_spc_0.*?typedef struct \{(.*?)\} K_loop_nested_spc_0_Frame;`)
+		`(?s)Frame for conc fn loop_nested_spc_0.*?typedef struct \{(.*?)\} loop_nested_spc_0_Frame;`)
 	m := re.FindStringSubmatch(c)
 	if m == nil {
 		t.Fatalf("找不到特化版 Frame 定义：\n%s", c)

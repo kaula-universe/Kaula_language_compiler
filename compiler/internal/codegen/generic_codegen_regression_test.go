@@ -92,7 +92,7 @@ func TestGenericEnumPayloadBindingGetsConcreteType(t *testing.T) {
 // TestGenericClassMonomorphizedOnce 守护缺陷 B。
 //
 // 单态化缓存原先在生成**之后**才写回。处理字段/方法时若再次请求同一实例，
-// 查不到缓存就会重新展开——同一个 `typedef struct K_Box_i32` 被输出几十次，
+// 查不到缓存就会重新展开——同一个 `typedef struct Box_i32` 被输出几十次，
 // clang 报 redefinition。
 func TestGenericClassMonomorphizedOnce(t *testing.T) {
 	src := "class Box<T> {\n" +
@@ -105,8 +105,8 @@ func TestGenericClassMonomorphizedOnce(t *testing.T) {
 		"}\n"
 	cCode := generateForTest(t, src)
 
-	if n := strings.Count(cCode, "typedef struct K_Box_i32 {"); n != 1 {
-		t.Errorf("K_Box_i32 的 typedef 应恰好出现 1 次，实际 %d 次", n)
+	if n := strings.Count(cCode, "typedef struct Box_i32 {"); n != 1 {
+		t.Errorf("Box_i32 的 typedef 应恰好出现 1 次，实际 %d 次", n)
 	}
 	if n := strings.Count(cCode, "static inline int32_t Box_i32_get("); n > 2 {
 		// 允许「前向声明 + 定义」两份，超过说明单态化重复了
@@ -131,7 +131,7 @@ func TestGenericClassReferenceSemanticsAndMethodMangling(t *testing.T) {
 		"}\n"
 	cCode := generateForTest(t, src)
 
-	if !strings.Contains(cCode, "K_Box_i32* b = ") {
+	if !strings.Contains(cCode, "Box_i32* b = ") {
 		t.Errorf("泛型 class 变量应按引用语义声明为指针，生成:\n%s", cCode)
 	}
 	if !strings.Contains(cCode, "Box_i32_get(b)") {

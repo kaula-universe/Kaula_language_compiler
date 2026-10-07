@@ -55,22 +55,22 @@ fn main() -> i32 {
 
 	// 先编译「定义 conc fn 的那个文件」：它的签名必须留在自己的表里
 	defCode, cgDef := genWithNewCG(t, defineConc)
-	if !strings.Contains(defCode, "K_worker_Frame") {
-		t.Fatalf("第一个 TU 应当生成 K_worker 的 Frame 定义，实际：\n%s", defCode)
+	if !strings.Contains(defCode, "worker_Frame") {
+		t.Fatalf("第一个 TU 应当生成 worker 的 Frame 定义，实际：\n%s", defCode)
 	}
-	if cgDef.LookupConcFunc("K_worker") == nil {
+	if cgDef.LookupConcFunc("worker") == nil {
 		t.Fatalf("定义 conc fn 的 TU 必须能查到自己登记的签名")
 	}
 
 	// 再编译「另一个文件」：它没有定义 conc fn，不该看见上一个的签名
 	callerCode, cgCaller := genWithNewCG(t, caller)
-	if cgCaller.LookupConcFunc("K_worker") != nil {
-		t.Errorf("conc fn 签名表泄漏到了另一个 CodeGenerator：%v", cgCaller.LookupConcFunc("K_worker"))
+	if cgCaller.LookupConcFunc("worker") != nil {
+		t.Errorf("conc fn 签名表泄漏到了另一个 CodeGenerator：%v", cgCaller.LookupConcFunc("worker"))
 	}
 	if !strings.Contains(callerCode, "不是 conc fn") {
 		t.Errorf("查不到签名时必须生成明确的错误 handle，不能猜。实际生成：\n%s", callerCode)
 	}
-	if strings.Contains(callerCode, "K_worker_Frame") {
+	if strings.Contains(callerCode, "worker_Frame") {
 		t.Errorf("不得引用别的编译单元的 Frame，实际生成：\n%s", callerCode)
 	}
 }
@@ -97,7 +97,7 @@ fn main() -> i32 {
 	if cg.HasErrors() {
 		t.Fatalf("codegen errors: %v", cg.Errors())
 	}
-	if !strings.Contains(c, "K_worker_Frame") {
+	if !strings.Contains(c, "worker_Frame") {
 		t.Errorf("同单元内的 spawn 必须能查到 conc fn 签名，实际生成：\n%s", c)
 	}
 }

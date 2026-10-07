@@ -6,7 +6,6 @@ import (
 	"os"
 	"kaula/internal/ast"
 	"kaula/internal/core"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,10 +111,16 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		// 安全地进行类型断言
 		callExpr, isCall := interface{}(s.Expression).(*ast.CallExpression)
 		if isCall && callExpr != nil && callExpr.Function != nil {
-			if _, isMemberAccess := callExpr.Function.(*ast.MemberAccessExpression); isMemberAccess {
+			if memberAccess, isMemberAccess := callExpr.Function.(*ast.MemberAccessExpression); isMemberAccess {
 				// 跨线程逃逸：thread_create/thread_pool_add_task 的实参对象被
 				// 另一线程异步使用，必须提升到幸存段并抑制提前回收（防 UAF）。
 				if prefix, ok := sg.handleThreadSpawnEscape(callExpr); ok {
+					return prefix + sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
+				}
+				// 模块限定调用（std.container.vector_push_back 等）：被调函数名
+				// 在最内层 Member 上，同样要按"可能被长期持有"做实参提升——否则
+				// 元素/对象存进全局容器后，调用方 scope_pop 一回卷就悬垂。
+				if prefix := sg.emitCallArgPromotePrefix(memberAccess.Member, callExpr.Args); prefix != "" {
 					return prefix + sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 				}
 				// 这是模块函数调用，直接生成函数调用代码
@@ -125,35 +130,12 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 			if callee, ok := callExpr.Function.(*ast.Identifier); ok && callee.Name != "" {
 				// SOR 模式传参 promote（精确，依赖 SOR 决策）
 				promotes := sg.sorCallArgPromotes(callee.Name, callExpr.Args)
-				// 基础层传参逃逸 promote（缺口3：extern 函数调用的指针实参，保守 promote）
+				// 基础层传参逃逸 promote（缺口3：extern/stdlib FFI 调用的指针实参，保守 promote）
 				if len(promotes) == 0 {
 					promotes = sg.structuralCallArgPromotes(callee.Name, callExpr.Args)
 				}
-				if len(promotes) > 0 {
-					var pb strings.Builder
-					emitted := 0
-					for _, argName := range promotes {
-						sizeExpr := ""
-						if size, ok := sg.sorPromoteSize(argName, argName); ok {
-							sizeExpr = size
-						} else {
-							// 兜底：指针 deref 大小（String 不需要 size，会在 emitPromoteForType 内绕过）
-							sizeExpr = "sizeof(*" + argName + ")"
-						}
-						// emitPromoteForType 在拷贝大小不可信时返回 ""（跳过 promote）：
-						// 此时不能标记 funcEmitsPromote，否则函数出口会白白放弃
-						// survivor_rewind，把本该回收的对象留在幸存段。
-						if line := sg.emitPromoteForType(argName, sizeExpr, "promote arg into callee", argName); line != "" {
-							pb.WriteString(line)
-							emitted++
-						}
-					}
-					if emitted > 0 {
-						sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote，出口跳过 survivor_rewind
-					}
-					pb.WriteString(sg.codegen.expressionGenerator.GenerateExpression(s.Expression))
-					pb.WriteString(";\n")
-					return pb.String()
+				if prefix := sg.emitPromotePrefixFor(promotes, "promote arg into callee"); prefix != "" {
+					return prefix + sg.codegen.expressionGenerator.GenerateExpression(s.Expression) + ";\n"
 				}
 			}
 		}
@@ -1247,89 +1229,114 @@ func (sg *StatementGenerator) generatePrefixStatement(stmt *ast.PrefixStatement)
 	return code
 }
 
-// generatePrefixCallBody 生成前缀调用体的代码 - AST 直接插入
+// generatePrefixCallBody 生成前缀调用的展开代码（编译期模板展开）。
+//
+// 展开规则（语义见 docs/tutorials/prefix-system.md）：
+//   - 裸 `$param` 声明与 `$param = 默认值` 声明不生成代码；
+//   - `$param` 经前缀绑定栈替换为实参（含默认值）生成的 C 表达式；
+//   - 调用体在首个未绑定的裸 `$param` 处拼接（$body 占位），否则追加在模板体之后；
+//   - 整体包裹块作用域，避免多次展开时变量重定义。
 func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression) string {
 	code := ""
 
-	// 查找前缀函数的声明
+	// 查找模板：与语义阶段的查找顺序一致 —— 前缀函数优先，其次 prefix 语句
 	funcDecl := sg.findFunctionDeclaration(e.Name)
-	if funcDecl == nil {
-		// 尝试查找 prefix 语句（非函数前缀）
-		prefixStmt := sg.codegen.findPrefixStatement(e.Name)
-		if prefixStmt != nil {
-			// 用块作用域包裹，避免多次调用时变量重定义
-			code += "{\n"
+	var tplBody []ast.Statement
+	foundTemplate := false
+	if funcDecl != nil {
+		annotation := funcDecl.GetAnnotation()
+		if annotation == ast.TreeAnnotationPrefix ||
+			annotation == ast.TreeAnnotationPrefixTree ||
+			annotation == ast.TreeAnnotationTree {
+			tplBody = funcDecl.Body
+			foundTemplate = true
+		} else {
+			// 不是前缀函数，只处理调用体内的语句
 			sg.codegen.indent++
-			for _, bodyStmt := range prefixStmt.Body {
-				code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
-			}
 			for _, bodyStmt := range e.Body {
 				code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
 			}
 			sg.codegen.indent--
-			code += sg.codegen.indentString() + "}\n"
 			return code
 		}
+	} else if prefixStmt := sg.codegen.findPrefixStatement(e.Name); prefixStmt != nil {
+		tplBody = prefixStmt.Body
+		foundTemplate = true
+	}
+	if !foundTemplate {
 		// 如果找不到前缀定义，跳过
 		return ""
 	}
 
-	// 检查是否是前缀函数
-	annotation := funcDecl.GetAnnotation()
-	if annotation != ast.TreeAnnotationPrefix &&
-		annotation != ast.TreeAnnotationPrefixTree &&
-		annotation != ast.TreeAnnotationTree {
-		// 不是前缀函数，只处理调用体内的语句
-		sg.codegen.indent++
-		for _, bodyStmt := range e.Body {
-			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+	// 已声明参数与调用体参数分区（sema 已做过一次，此处幂等，兜底 codegen 单独使用的场景）
+	declared := ast.DeclaredPrefixParams(tplBody)
+	if funcDecl != nil {
+		for _, param := range funcDecl.Params {
+			declared[param] = true
 		}
-		sg.codegen.indent--
-		return code
 	}
+	e.CollectBodyParams(declared)
 
-	// 参数替换：将前缀函数体中的参数引用替换为实际值
-	// 使用正则表达式进行精确匹配，避免意外替换子字符串
-	paramRegex := make(map[string]*regexp.Regexp)
-	for paramName := range e.Params {
-		// 匹配 $paramName 后面不是字母数字或下划线的情况
-		paramRegex[paramName] = regexp.MustCompile(`\$` + regexp.QuoteMeta(paramName) + `([^a-zA-Z0-9_]|$)`)
+	// 实参绑定：实参表达式在当前（外层）绑定上下文中生成，类型提示随实参推导
+	paramNames := make([]string, 0, len(e.Params))
+	for name := range e.Params {
+		paramNames = append(paramNames, name)
 	}
-
-	paramMap := make(map[string]string)
-	for paramName, paramValue := range e.Params {
-		valueCode := sg.codegen.expressionGenerator.GenerateExpression(paramValue)
-		paramMap[paramName] = valueCode
-	}
-
-	// 辅助函数：执行参数替换
-	replaceParams := func(code string) string {
-		for paramName, paramValue := range paramMap {
-			regex := paramRegex[paramName]
-			// 使用 ReplaceAllStringFunc 保留匹配的分隔符
-			code = regex.ReplaceAllString(code, paramValue+"$1")
+	sort.Strings(paramNames) // 确定性生成顺序
+	bindings := make(map[string]PrefixParamBinding, len(paramNames))
+	for _, name := range paramNames {
+		valueExpr := e.Params[name]
+		if valueExpr == nil {
+			continue
 		}
-		return code
+		bindings[name] = PrefixParamBinding{
+			Code: sg.codegen.expressionGenerator.GenerateExpression(valueExpr),
+			Kind: sg.codegen.expressionGenerator.inferType(valueExpr),
+		}
 	}
 
-	// 直接展开前缀函数的函数体
-	sg.codegen.indent++
-	for _, bodyStmt := range funcDecl.Body {
-		generated := sg.codegen.generateStatement(bodyStmt)
-		// 参数替换：$device -> 实际值
-		generated = replaceParams(generated)
-		code += sg.codegen.indentString() + generated
-	}
-	sg.codegen.indent--
-
-	// 追加调用体内的语句
-	for _, bodyStmt := range e.Body {
-		generated := sg.codegen.generateStatement(bodyStmt)
-		// 参数替换
-		generated = replaceParams(generated)
-		code += sg.codegen.indentString() + generated
+	// 推入绑定栈；默认值在绑定上下文中生成（可引用已绑定的其他参数）
+	sg.codegen.pushPrefixBindings(bindings)
+	for _, decl := range ast.DefaultPrefixParams(tplBody) {
+		if _, ok := bindings[decl.Name]; !ok && decl.Value != nil {
+			bindings[decl.Name] = PrefixParamBinding{
+				Code: sg.codegen.expressionGenerator.GenerateExpression(decl.Value),
+				Kind: sg.codegen.expressionGenerator.inferType(decl.Value),
+			}
+		}
 	}
 
+	// 构造展开后的语句序列：跳过参数声明，在占位符处拼接调用体
+	var expanded []ast.Statement
+	bodySpliced := false
+	for _, bodyStmt := range tplBody {
+		// 裸 $param 声明：已绑定则跳过；未绑定则是调用体拼接点（$body 占位）
+		if name, ok := ast.BarePrefixParamName(bodyStmt); ok {
+			if _, bound := bindings[name]; bound {
+				continue
+			}
+			if !bodySpliced && len(e.Body) > 0 {
+				expanded = append(expanded, e.Body...)
+				bodySpliced = true
+			}
+			continue
+		}
+		// $param = 默认值 声明：绑定已就绪，不生成赋值语句
+		if _, _, ok := ast.PrefixParamDefaultDecl(bodyStmt); ok {
+			continue
+		}
+		expanded = append(expanded, bodyStmt)
+	}
+	// 调用体未在占位符处拼接 → 追加在展开之后
+	if !bodySpliced {
+		expanded = append(expanded, e.Body...)
+	}
+
+	// 按普通块生成：作用域登记、liveness 与 survivor 回收都在块内完成
+	// （手写 "{ }" 文本会让块内变量登记到外层作用域，回收代码落到块外）
+	code = sg.generateBlockStatement(&ast.BlockStatement{Statements: expanded, Pos: e.Pos})
+
+	sg.codegen.popPrefixBindings()
 	return code
 }
 
@@ -1427,14 +1434,14 @@ func (sg *StatementGenerator) generateTreeImplementation(stmt *ast.TreeStatement
 func (sg *StatementGenerator) generateObjectStatement(stmt *ast.ObjectStatement) string {
 	code := fmt.Sprintf("// Object: %s of type %s\n", stmt.Name, stmt.Type)
 	sg.codegen.typeGenerator.structTypes[stmt.Name] = true
-	code += fmt.Sprintf("typedef struct K_%s {\n", stmt.Name)
+	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
 	for i := range stmt.Fields {
 		code += fmt.Sprintf("    void* field%d;\n", i+1)
 	}
-	code += fmt.Sprintf("} K_%s;\n", stmt.Name)
+	code += fmt.Sprintf("} %s;\n", stmt.Name)
 	// 声明全局变量
 	varName := stmt.Name + "_obj"
-	code += fmt.Sprintf("K_%s* %s;\n", stmt.Name, varName)
+	code += fmt.Sprintf("%s* %s;\n", stmt.Name, varName)
 	return code
 }
 
@@ -2841,8 +2848,12 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 	// 修复 #25：return 前跨作用域提升返回值（必须在本函数作用域 pop 之前拷贝，
 	// 否则返回值指针在 kmm_v4_scope_pop 回卷后悬垂）
 	retPromoteLine := ""
-	promoteVarName := "" // 记录被提升的变量名，per-object free 时需要排除
+	returnVarName := "" // 返回的对象及其别名不得在 return 路径被释放
 	if !isVoid && stmt.Value != nil {
+		if id, ok := stmt.Value.(*ast.Identifier); ok &&
+			(sg.isPointerTyped(id.Name) || sg.isStringTyped(id.Name)) {
+			returnVarName = id.Name
+		}
 		if id, ok := stmt.Value.(*ast.Identifier); ok && sg.needsReturnPromote(id.Name) {
 			sizeExpr := ""
 			if sg.isStringTyped(id.Name) {
@@ -2853,21 +2864,48 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 			} else {
 				sizeExpr = "sizeof(*" + id.Name + ")"
 			}
-			// promote 被跳过（拷贝大小不可信）时：返回值仍指向原内存，
-			// 不能排除它的 per-object free，也不能标记 funcEmitsPromote。
 			if line := sg.emitPromoteForType(id.Name, sizeExpr, "promote on return", id.Name); line != "" {
 				retPromoteLine = sg.codegen.indentString() + line
-				promoteVarName = id.Name
 				sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+			} else {
+				// 未知长度的缓冲区不能只拷贝一个元素；也不能在作用域
+				// 回卷后把未提升的局部指针交给调用方。
+				sg.codegen.error("[return escape] 无法安全提升返回指针 '" + id.Name +
+					"'：分配大小未知；请使用 kmm_v4_global_alloc 或显式管理生命周期")
 			}
 		}
 	}
 
-	// 方案 A：per-object survivor 回收——在 promote 之前发射，遍历整条作用域链。
-	// 排除被提升的返回值变量（promote 会把数据拷到幸存段，free 会造成 use-after-free）。
-	// 必须在 promote 之前执行：此时返回值变量仍指向原始位置，排除它即可；
-	// 其余 SOR 对象在此刻释放，避免 return 跳过外层作用域末尾 free 导致泄漏。
-	freeCode, freedNames := sg.generateSurvivorFreeForReturn(promoteVarName)
+	// 先回收其他对象，再提升返回值；始终排除返回指针及其别名，
+	// 即使它已提升、来自形参或因未知大小而无法提升，也不能在返回前释放。
+	freeCode, freedNames := sg.generateSurvivorFreeForReturn(returnVarName)
+
+	// 直接返回分配表达式没有局部变量可供 promote。把作用域分配改为
+	// survivor 分配（参数只求值一次，也支持运行期长度），避免 scope_pop 回卷产物。
+	directReturnAlloc := ""
+	if !isVoid && stmt.Value != nil {
+		value := stmt.Value
+		if cast, ok := value.(*ast.TypeCastExpression); ok {
+			value = cast.Expression
+		}
+		if call, ok := value.(*ast.CallExpression); ok {
+			switch calledFuncName(call.Function) {
+			case "kmm_v4_alloc":
+				directReturnAlloc = "kmm_v4_alloc("
+			case "kmm_v4_alloc_auto":
+				directReturnAlloc = "kmm_v4_alloc_auto("
+			case "kmm_v4_bump":
+				directReturnAlloc = "kmm_v4_bump("
+			case "std_malloc":
+				if sg.codegen.IsFreestanding() {
+					directReturnAlloc = "kmm_v4_alloc_auto("
+				}
+			}
+		}
+	}
+	if directReturnAlloc != "" {
+		sg.codegen.funcEmitsPromote = true
+	}
 
 	// 方案 C：若函数不向外 promote，return 前回卷 survivor 段
 	// （若 return 自身 promote 了返回值，funcEmitsPromote 已为 true，跳过）
@@ -2885,6 +2923,9 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 	if !isVoid && tcoCall == nil {
 		if stmt.Value != nil {
 			exprCode = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+			if directReturnAlloc != "" {
+				exprCode = strings.Replace(exprCode, directReturnAlloc, "kmm_v4_alloc_global(", 1)
+			}
 			// 返回类型是 interface 而返回值是具体类对象 → 装箱成接口句柄
 			// （fn grow() Shape { return Circle(...) }）
 			exprCode = sg.codegen.expressionGenerator.liftInterfaceValue(retType, exprCode, stmt.Value)
@@ -2893,7 +2934,10 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 		}
 	}
 	hoistTemp := ""
-	if !isVoid && tcoCall == nil && stmt.Value != nil && (len(freedNames) > 0 || rewindOnReturn) {
+	// promote 会改写原变量；若先保存旧指针到临时变量，返回临时值仍会悬垂。
+	// 标识符表达式无副作用，提升后直接返回改写后的变量即可。
+	if !isVoid && tcoCall == nil && stmt.Value != nil && retPromoteLine == "" &&
+		(len(freedNames) > 0 || rewindOnReturn) {
 		sg.codegen.retHoistSeq++
 		hoistTemp = fmt.Sprintf("__kaula_ret%d", sg.codegen.retHoistSeq)
 		b.WriteString(sg.codegen.indentString())
@@ -3089,7 +3133,10 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 
 	code := "KMM_V4_SCOPE_START {\n"
 	sg.codegen.indent++
+	// 与实际发射的 scope_push 配对：块内 return 必须显式 pop 这一帧。
+	sg.codegen.EnterKMMScope()
 	code += sg.generateStmtsWithLiveness(stmt.Statements, nil)
+	sg.codegen.ExitKMMScope()
 
 	code += sg.codegen.indentString() + "// Free allocated memory\n"
 	for name, symbol := range sg.codegen.currentScope.GetAllSymbols() {
@@ -4304,6 +4351,13 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 	indent := sg.codegen.indentString()
 	seen := make(map[string]bool) // 去重：同名变量只在最内层作用域释放一次
 	freed := make([]string, 0, 4)
+	returnedAliases := make(map[string]bool)
+	if excludeName != "" {
+		returnedAliases[excludeName] = true
+		for _, alias := range sg.codegen.GetVarAliasGroup(excludeName) {
+			returnedAliases[alias] = true
+		}
+	}
 
 	adapter := sg.codegen.GetSORAdapter()
 	sorActive := adapter != nil && adapter.IsActive
@@ -4333,7 +4387,7 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 				continue
 			}
 			seen[name] = true
-			if name == excludeName {
+			if returnedAliases[name] {
 				continue
 			}
 			// F8 修复：函数参数是借用指针，所有权属于调用方，不应在 return 时释放
@@ -4393,6 +4447,14 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 				b.WriteString("/* structural: skip survivor_free on return for ")
 				b.WriteString(name)
 				b.WriteString(" (assign-escaped, ownership moved out) */\n")
+				continue
+			}
+			// 已提升到幸存段的变量：所有权已移交给被调方/全局，出口不得回收
+			if sg.codegen.IsPromoted(name) {
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip survivor_free on return for ")
+				b.WriteString(name)
+				b.WriteString(" (promoted, ownership moved to survivor) */\n")
 				continue
 			}
 			// SOR 优化层：ShouldSkipSurvivorFree 网关
@@ -4808,16 +4870,24 @@ func (sg *StatementGenerator) sorNeedsReturnPromote(name string) bool {
 }
 
 // structuralNeedsReturnPromote 结构化所有权基础层的 return promote 判断（不依赖 SOR）。
-// 规则：返回值是当前词法作用域声明的指针类型（或 String）变量，且未通过赋值逃逸、未被 promote 过。
-// 这样的变量在函数返回后其所在作用域会被回卷，必须 promote 到 survivor 段才能安全返回。
+// 规则：返回值是当前函数内任一词法作用域声明的指针类型（或 String）变量，
+// 且未通过赋值逃逸、未被 promote 过。内层块返回外层局部变量同样要提升。
 // extern 来源的变量会加编译警告（promote 语义可能不正确，但基础层保守 promote）。
 // SOR 优化层（启用时）可用 sorNeedsReturnPromote 做更精确的判断（如已提升的不重复拷贝）。
 func (sg *StatementGenerator) structuralNeedsReturnPromote(name string) bool {
 	if name == "" {
 		return false
 	}
-	// 必须在当前词法作用域声明（参数和全局变量不需要 promote）
-	if !sg.codegen.IsVarDeclaredInCurrentScope(name) {
+	// 只查当前块会漏掉 if/循环内返回函数外层局部变量的情况。
+	// 停在当前函数边界，不能提升形参、全局或嵌套函数捕获的外层变量。
+	local := false
+	for scope := sg.codegen.GetCurrentScope(); scope != nil && scope != sg.codegen.survivorStopScope; scope = scope.GetParent() {
+		if sym := scope.GetLocalSymbol(name); sym != nil {
+			local = sym.Scope != "parameter" && sym.Scope != "global"
+			break
+		}
+	}
+	if !local {
 		return false
 	}
 	// 已通过赋值逃逸的变量不需要 promote（所有权已移到外层）
@@ -4857,21 +4927,32 @@ func (sg *StatementGenerator) needsReturnPromote(name string) bool {
 
 // structuralCallArgPromotes 基础层传参逃逸分析（不依赖 SOR）。
 // 缺口3：悬垂指针/use-after-free。
-// 对于 extern 函数调用中的指针/String 实参，如果实参是当前作用域声明的局部变量，
-// 保守认为 extern 函数可能存储指针（长期持有），调用方作用域 pop 后会悬垂。
-// 在调用前自动 promote 到 survivor 段，保证被调方长期持有的安全。
-// 对于当前文件定义的函数，可通过函数体分析判断是否存储指针（暂不实现，保守不 promote）。
+// 两类被调方按"可能长期持有指针"处理：
+//   - extern 函数：所有权不透明，指针/String 实参一律保守 promote；
+//   - stdlib FFI 函数：vector_push_back(G_POOL, as<void()>(e)) 之类会把元素
+//     指针存进容器（容器通常是全局的），仅对本作用域新建的类实例 promote。
+// 当前文件定义的 KL 函数暂不做跨函数所有权分析（保守不 promote）。
 func (sg *StatementGenerator) structuralCallArgPromotes(funcName string, args []ast.Expression) []string {
 	if funcName == "" {
 		return nil
 	}
-	// 仅对 extern 函数做保守 promote（当前文件定义的函数可分析，暂不处理）
-	if !sg.codegen.IsExternFunc(funcName) {
+	isExtern := sg.codegen.IsExternFunc(funcName)
+	isFFI := !isExtern && sg.isStdlibFFIFunc(funcName)
+	if !isExtern && !isFFI {
 		return nil
 	}
 	var promotes []string
 	for _, arg := range args {
 		id, ok := arg.(*ast.Identifier)
+		if !ok {
+			// 显式转换实参（as<void()>(e) / as<Elem>(p)）与裸标识符实参等价：
+			// 同样是把局部对象的指针交给被调方。此前只认裸标识符，导致
+			// "存入全局容器"的常见写法漏提升，调用方 scope_pop 后对象内存
+			// 被复用 → 悬垂（典型症状：元素池里的对象字段变成垃圾）。
+			if cast, isCast := arg.(*ast.TypeCastExpression); isCast {
+				id, ok = cast.Expression.(*ast.Identifier)
+			}
+		}
 		if !ok {
 			continue
 		}
@@ -4883,12 +4964,79 @@ func (sg *StatementGenerator) structuralCallArgPromotes(funcName string, args []
 		if sg.codegen.IsAssignEscaped(id.Name) || sg.codegen.IsPromoted(id.Name) {
 			continue
 		}
-		// 指针类型或 String 类型需要 promote
+		// 本作用域新建的类实例（`Elem e = Elem()`）：交给上面两类被调方时
+		// 按"被调方会长期持有"处理——不提升则调用方 scope_pop 后对象内存
+		// 被复用，容器里留下悬垂指针（渲染时表现为元素字段变成垃圾）。
+		// 借用指针（elem_at()/vector_get()/file_open() 的返回值）不在此列：
+		// 拷贝它们会让容器本体与副本失联。
+		if sg.codegen.IsOwnedObj(id.Name) {
+			promotes = append(promotes, id.Name)
+			continue
+		}
+		if !isExtern {
+			continue
+		}
+		// extern 调用的指针/String 实参：所有权不透明，保守 promote
 		if sg.isPointerTyped(id.Name) || sg.isStringTyped(id.Name) {
 			promotes = append(promotes, id.Name)
 		}
 	}
 	return promotes
+}
+
+// isStdlibFFIFunc 判断函数名是否为 stdlib.json 登记的 FFI（C 实现）函数。
+func (sg *StatementGenerator) isStdlibFFIFunc(name string) bool {
+	if name == "" || sg.codegen == nil || sg.codegen.stdlibConfig == nil {
+		return false
+	}
+	return sg.codegen.stdlibConfig.GetAnyFunctionSignature(name) != nil
+}
+
+// emitCallArgPromotePrefix 针对"按名字调用"（含 std.xxx.yyy 模块限定调用）
+// 收集需要提升的实参并生成提升代码前缀；无需提升时返回 ""。
+func (sg *StatementGenerator) emitCallArgPromotePrefix(funcName string, args []ast.Expression) string {
+	if funcName == "" {
+		return ""
+	}
+	// SOR 模式优先（更精确）；否则退回基础层的保守判定
+	promotes := sg.sorCallArgPromotes(funcName, args)
+	if len(promotes) == 0 {
+		promotes = sg.structuralCallArgPromotes(funcName, args)
+	}
+	return sg.emitPromotePrefixFor(promotes, "promote arg into callee")
+}
+
+// emitPromotePrefixFor 把实参名列表渲染成 promote 语句前缀（空列表返回 ""）。
+func (sg *StatementGenerator) emitPromotePrefixFor(promotes []string, commentTag string) string {
+	if len(promotes) == 0 {
+		return ""
+	}
+	var pb strings.Builder
+	emitted := 0
+	for _, argName := range promotes {
+		sizeExpr := ""
+		if size, ok := sg.sorPromoteSize(argName, argName); ok {
+			sizeExpr = size
+		} else {
+			// 兜底：指针 deref 大小（String 不需要 size，会在 emitPromoteForType 内绕过）
+			sizeExpr = "sizeof(*" + argName + ")"
+		}
+		// emitPromoteForType 在拷贝大小不可信时返回 ""（跳过 promote）：
+		// 此时不能标记 funcEmitsPromote，否则函数出口会白白放弃
+		// survivor_rewind，把本该回收的对象留在幸存段。
+		if line := sg.emitPromoteForType(argName, sizeExpr, commentTag, argName); line != "" {
+			pb.WriteString(line)
+			// reaching definition：标记已提升，出口回收必须跳过该变量——
+			// 否则会把刚提升到幸存段（所有权已移交被调方）的对象释放掉，
+			// 被调方容器里留下悬垂指针。
+			sg.codegen.MarkPromoted(argName)
+			emitted++
+		}
+	}
+	if emitted > 0 {
+		sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote，出口跳过 survivor_rewind
+	}
+	return pb.String()
 }
 
 // sorCallArgPromotes 收集调用前需要提升的实参（修复 #25）
