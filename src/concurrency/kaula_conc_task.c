@@ -648,8 +648,11 @@ KaulaHandle kaula_handle_from_task(KaulaTask* task) {
     KaulaHandle h;
     h.task_id = task->task_id;
     h.task = task;
-    atomic_fetch_add_explicit(&task->pin_refs, 1, memory_order_acq_rel);
-    kaula_epoch_pin();
+    /*
+     * pin 不在句柄产生时拿：它在 spawn 提交（READY 置位）之前已经预拿
+     * （kaula_spawn_to_flags / kaula_spawn_simple 的预 pin），
+     * 由 kaula_handle_release 归还。见 handle_from_task 调用点的注释。
+     */
     return h;
 }
 
@@ -794,6 +797,11 @@ void kaula_handle_await_into(KaulaHandle h, void* dst, size_t dst_size) {
     kaula_handle_await_into_timed(h, dst, dst_size, NULL);
 }
 
+/* 诊断插桩（临时）：await_into 三路径计数，shutdown 打印 */
+_Atomic(uint64_t) g_dbg_ai_null = 0;
+_Atomic(uint64_t) g_dbg_ai_awaitfail = 0;
+_Atomic(uint64_t) g_dbg_ai_ok = 0;
+
 /*
  * await_into_timed：await 的同时给出「内核测得的服务时间」。
  *
@@ -814,13 +822,42 @@ void kaula_handle_await_into_timed(KaulaHandle h, void* dst, size_t dst_size,
     if (out_latency_ns != NULL) *out_latency_ns = 0;
 
     if (h.task == NULL) {
+        atomic_fetch_add_explicit(&g_dbg_ai_null, 1, memory_order_relaxed);
         if (dst != NULL && dst_size > 0) memset(dst, 0, dst_size);
         return;
     }
 
     if (!await_copy_out(h, dst, dst_size, KAULA_P_WAIT_FOREVER)) {
+        atomic_fetch_add_explicit(&g_dbg_ai_awaitfail, 1, memory_order_relaxed);
+        /* 诊断插桩（临时）：失败时打印 Task 现场 */
+        if ((atomic_load_explicit(&g_dbg_ai_awaitfail, memory_order_relaxed) & 0x3F) == 0) {
+            fprintf(stdout, "DBG awaitfail task=%p state=%d result=%p pin=%d waiters=%d id=%llu\n",
+                    (void*)h.task,
+                    atomic_load_explicit(&h.task->state, memory_order_acquire),
+                    atomic_load_explicit(&h.task->result, memory_order_acquire),
+                    atomic_load_explicit(&h.task->pin_refs, memory_order_acquire),
+                    atomic_load_explicit(&h.task->waiters, memory_order_acquire),
+                    (unsigned long long)h.task->task_id);
+            fflush(stdout);
+        }
         memset(dst, 0, dst_size);
         return;
+    }
+    atomic_fetch_add_explicit(&g_dbg_ai_ok, 1, memory_order_relaxed);
+    /* 诊断插桩（临时）：ok 路径但 result 值为 0（r=0 根源），打印现场 */
+    {
+        const int64_t* rp = (const int64_t*)atomic_load_explicit(&h.task->result, memory_order_acquire);
+        if (rp != NULL && *rp == 0) {
+            static _Atomic(uint64_t) g_dbg_zero_print = 0;
+            uint64_t z = atomic_fetch_add_explicit(&g_dbg_zero_print, 1, memory_order_relaxed);
+            if (z < 12) {
+                fprintf(stdout, "DBG zero result task=%p res=%p frame=%p id=%llu state=%d\n",
+                        (void*)h.task, (const void*)rp, (void*)h.task->frame,
+                        (unsigned long long)h.task->task_id,
+                        atomic_load_explicit(&h.task->state, memory_order_acquire));
+                fflush(stdout);
+            }
+        }
     }
 
     if (out_latency_ns != NULL) {

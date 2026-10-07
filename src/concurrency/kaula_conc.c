@@ -278,6 +278,11 @@ int kaula_runtime_is_initialized(void) {
     return g_conc_initialized;
 }
 
+/* 诊断插桩（临时）：await_into 路径计数（定义在 kaula_conc_task.c） */
+extern _Atomic(uint64_t) g_dbg_ai_null;
+extern _Atomic(uint64_t) g_dbg_ai_awaitfail;
+extern _Atomic(uint64_t) g_dbg_ai_ok;
+
 /* ========== 关闭 ========== */
 
 void kaula_runtime_shutdown(void) {
@@ -372,6 +377,13 @@ void kaula_runtime_shutdown(void) {
     g_conc_runtime.worker_count = 0;
     g_conc_initialized = 0;
     atomic_store(&g_conc_initing, 0);
+
+    /* 诊断插桩（临时）：await_into 三路径计数 */
+    fprintf(stdout, "DBG await_into: null=%llu awaitfail=%llu ok=%llu\n",
+            (unsigned long long)atomic_load_explicit(&g_dbg_ai_null, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_dbg_ai_awaitfail, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_dbg_ai_ok, memory_order_relaxed));
+    fflush(stdout);
 
     (void)drained;
 }

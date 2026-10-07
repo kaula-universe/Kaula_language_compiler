@@ -63,6 +63,11 @@ extern "C" {
 #endif
 #define KAULA_WS_DEQUE_MASK (KAULA_WS_DEQUE_CAPACITY - 1)
 
+/* 批量窃取上限（Go runqsteal / Tokio max_batch_size 同量级） */
+#ifndef KAULA_STEAL_BATCH_MAX
+    #define KAULA_STEAL_BATCH_MAX 32
+#endif
+
 #if (KAULA_WS_DEQUE_CAPACITY & (KAULA_WS_DEQUE_CAPACITY - 1)) != 0
     #error "KAULA_WS_DEQUE_CAPACITY 必须是 2 的幂"
 #endif

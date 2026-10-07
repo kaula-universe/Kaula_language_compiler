@@ -28,6 +28,36 @@ Kaula 是一门**静态类型的系统级编程语言**，编译到 C，由 Clan
 
 ### 安装
 
+#### Windows
+
+下载并运行安装程序：`kaula-{version}-windows-x64.exe`
+
+安装程序会自动将 Kaula 添加到系统 PATH。
+
+#### Linux
+
+**Debian/Ubuntu:**
+```bash
+sudo dpkg -i kaula_{version}_amd64.deb
+sudo apt-get install -f  # 如有依赖问题
+```
+
+**Fedora/RHEL:**
+```bash
+sudo rpm -i kaula-{version}-1.x86_64.rpm
+```
+
+#### macOS
+
+下载并打开 `kaula-{version}-macos-x64.dmg`，将 Kaula 拖入 Applications。
+
+然后将以下内容添加到你的 `~/.zshrc` 或 `~/.bash_profile`：
+```bash
+export PATH="/Applications/Kaula.app/Contents/MacOS/bin:$PATH"
+```
+
+#### 从源码构建
+
 ```bash
 # 构建编译器
 python toolkit_build.py

@@ -30,6 +30,9 @@ jobs:
       - name: Install Clang
         run: choco install llvm -y
 
+      - name: Install NSIS
+        run: choco install nsis -y
+
       - name: Update version
         run: python scripts/version.py --update
         env:
@@ -50,17 +53,23 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
-      # Release gate: nothing gets packaged unless the whole language test
-      # corpus passes. Both allocator modes (default and --sor) are covered.
-      # Runs the full set including the slow multithreaded allocator stress
-      # tests, because a release is exactly when those must hold.
       - name: Test
         run: python scripts/run_tests.py
         env:
           PYTHONIOENCODING: utf-8
 
-      - name: Package
-        run: python scripts/package_release.py
+      - name: Build NSIS installer
+        run: |
+          $version = python scripts/version.py --release
+          $versionNoV = $version -replace "^v", ""
+          $major = ($versionNoV -split "\.")[0]
+          $minor = ($versionNoV -split "\.")[1]
+          $patch = ($versionNoV -split "\.")[2]
+          $env:KAULA_VERSION = $versionNoV
+          $env:KAULA_VERSION_MAJOR = $major
+          $env:KAULA_VERSION_MINOR = $minor
+          $env:KAULA_VERSION_PATCH = $patch
+          makensis /DPRODUCT_VERSION=$versionNoV scripts/installers/kaula.nsi
         env:
           PYTHONIOENCODING: utf-8
 
@@ -68,7 +77,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kaula-windows-x64
-          path: release/*.zip
+          path: release/*.exe
 
   build-linux:
     runs-on: ubuntu-latest
@@ -90,7 +99,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang dpkg-dev rpm
 
       - name: Update version
         run: python scripts/version.py --update
@@ -110,8 +119,13 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
-      - name: Package
-        run: python scripts/package_release.py
+      - name: Build .deb package
+        run: python scripts/installers/build_deb.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build .rpm package
+        run: python scripts/installers/build_rpm.py
         env:
           PYTHONIOENCODING: utf-8
 
@@ -119,7 +133,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kaula-linux-x64
-          path: release/*.tar.gz
+          path: |
+            release/deb/*.deb
+            release/rpm/*.rpm
 
   build-macos:
     runs-on: macos-latest
@@ -138,6 +154,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install dependencies
+        run: brew install create-dmg
+
       - name: Update version
         run: python scripts/version.py --update
         env:
@@ -156,8 +175,8 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
-      - name: Package
-        run: python scripts/package_release.py
+      - name: Build .dmg
+        run: python scripts/installers/build_dmg.py
         env:
           PYTHONIOENCODING: utf-8
 
@@ -165,7 +184,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kaula-macos-x64
-          path: release/*.tar.gz
+          path: release/dmg/*.dmg
 
   release:
     needs: [build-windows, build-linux, build-macos]
@@ -181,7 +200,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find . -maxdepth 2 -name "*.zip" -o -name "*.tar.gz" | while read f; do
+          find . -maxdepth 3 \( -name "*.exe" -o -name "*.deb" -o -name "*.rpm" -o -name "*.dmg" \) | while read f; do
             mv "$f" release/
           done
 
@@ -208,19 +227,48 @@ jobs:
             **Snapshot:** ${{ steps.version.outputs.snapshot }}
 
             ### Downloads
-            - **Windows:** `kaula-${{ steps.version.outputs.version }}-windows-x64.zip`
-            - **Linux:** `kaula-${{ steps.version.outputs.version }}-linux-x64.tar.gz`
-            - **macOS:** `kaula-${{ steps.version.outputs.version }}-macos-x64.tar.gz`
+
+            #### Windows
+            - **Installer (recommended):** `kaula-${{ steps.version.outputs.version }}-windows-x64.exe`
+            - ZIP archive: `kaula-${{ steps.version.outputs.version }}-windows-x64.zip`
+
+            #### Linux
+            - **Debian/Ubuntu:** `kaula_${{ steps.version.outputs.version }}_amd64.deb`
+            - **Fedora/RHEL:** `kaula-${{ steps.version.outputs.version }}-1.x86_64.rpm`
+            - TAR archive: `kaula-${{ steps.version.outputs.version }}-linux-x64.tar.gz`
+
+            #### macOS
+            - **DMG (recommended):** `kaula-${{ steps.version.outputs.version }}-macos-x64.dmg`
+            - TAR archive: `kaula-${{ steps.version.outputs.version }}-macos-x64.tar.gz`
 
             ### Installation
+
+            #### Windows
+            Run the `.exe` installer and follow the prompts. The installer adds Kaula to your PATH.
+
+            #### Linux (Debian/Ubuntu)
             ```bash
-            # Extract and add to PATH
-            # Windows
-            unzip kaula-*.zip
-            # Linux/macOS
-            tar -xzf kaula-*.tar.gz
+            sudo dpkg -i kaula_*.deb
+            sudo apt-get install -f  # if needed
+            ```
+
+            #### Linux (Fedora/RHEL)
+            ```bash
+            sudo rpm -i kaula-*.rpm
+            ```
+
+            #### macOS
+            Open the `.dmg` and drag Kaula to Applications. Add `/Applications/Kaula.app/Contents/MacOS/bin` to your PATH.
+
+            ### Verification
+            ```bash
+            kaulac --version
             ```
           files: |
+            release/*.exe
+            release/*.deb
+            release/*.rpm
+            release/*.dmg
             release/*.zip
             release/*.tar.gz
           draft: false
