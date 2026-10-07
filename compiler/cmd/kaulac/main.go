@@ -427,6 +427,40 @@ func isFmtSubcommand(tok string) bool {
 	}
 }
 
+// compilerValueFlags 是需要吃掉「下一个参数当值」的旗标。漏掉任何一个都会把它的值
+// 当成输入文件（`--boot pvh` 曾让 pvh 变成 inputFile，boot 模式被静默忽略）。
+// 名单必须与 config.loadFlags 里注册的非 bool 旗标保持一致。
+// main 的预扫描和 unittest 的参数拆分共用这一份名单。
+var compilerValueFlags = map[string]bool{
+	"-o": true, "--output": true,
+	"-output-dir": true, "--output-dir": true,
+	"-template": true, "--template": true,
+	"-include": true, "--include": true,
+	"-stdlib": true, "--stdlib": true,
+	"-pkglib": true, "--pkglib": true,
+	"-source-dir": true, "--source-dir": true,
+	"-target": true, "--target": true,
+	"-opt": true, "--opt": true,
+	"-target-triple": true, "--target-triple": true,
+	"-link-script": true, "--link-script": true,
+	"-entry": true, "--entry": true,
+	"-output-format": true, "--output-format": true,
+	"-boot": true, "--boot": true,
+	"-boot-file": true, "--boot-file": true,
+	"-boot-arch": true, "--boot-arch": true,
+	"-cc": true, "--cc": true,
+	"-cflags": true, "--cflags": true,
+	"-defines": true, "--defines": true,
+	"-libs": true, "--libs": true,
+	"-queue": true, "--queue": true,
+	"-spendable": true, "--spendable": true,
+	"-memory-limit": true, "--memory-limit": true,
+	"-timeout": true, "--timeout": true,
+	"-debug-level": true, "--debug-level": true,
+	"-analyze-pkg": true, "--analyze-pkg": true,
+	"-build-pkglib": true, "--build-pkglib": true,
+}
+
 func main() {
  // Test subcommands own their flags and must bypass compiler flag pre-scanning.
  if len(os.Args) > 1 && os.Args[1] == "test" {
@@ -439,18 +473,16 @@ func main() {
  // 目标是单个已存在的 .kl 文件时走常规编译流程（下方预扫描会置 testMode）；
  // 无参、传目录或路径不存在时进入批量模式，逐个文件以子进程复用该流程。
  if len(os.Args) > 1 && os.Args[1] == "unittest" {
-  rest := os.Args[2:]
-  if !isSingleFileTarget(rest) {
+  // 先把旗标（含取值旗标的值）和位置参数分开再判断：否则
+  // `unittest x.kl --verbose` 因参数数 != 1 被当成批量模式，子进程收到同样的
+  // 参数又进批量模式，无限自我调用；`--stdlib <path>` 的值也会被当成目标路径。
+  positional, flags := splitUnittestArgs(os.Args[2:])
+  if !isSingleFileTarget(positional) {
    root := "."
-   var extra []string
-   for _, a := range rest {
-    if strings.HasPrefix(a, "-") {
-     extra = append(extra, a)
-    } else {
-     root = a
-    }
+   if len(positional) > 0 {
+    root = positional[len(positional)-1]
    }
-   os.Exit(runUnittestBatch(root, extra))
+   os.Exit(runUnittestBatch(root, flags))
   }
  }
  totalStart := time.Now()
@@ -482,38 +514,7 @@ func main() {
 	positionalArgs := []string{}
 	args := os.Args[1:]
 	knownSubcommands := map[string]bool{"compile": true, "run": true, "build": true, "check": true, "test": true, "unittest": true}
-	// 需要吃掉「下一个参数当值」的旗标。漏掉任何一个都会把它的值当成输入文件
-	// （`--boot pvh` 曾让 pvh 变成 inputFile，boot 模式被静默忽略）。
-	// 名单必须与 config.loadFlags 里注册的非 bool 旗标保持一致。
-	valueFlags := map[string]bool{
-		"-o": true, "--output": true,
-		"-output-dir": true, "--output-dir": true,
-		"-template": true, "--template": true,
-		"-include": true, "--include": true,
-		"-stdlib": true, "--stdlib": true,
-		"-pkglib": true, "--pkglib": true,
-		"-source-dir": true, "--source-dir": true,
-		"-target": true, "--target": true,
-		"-opt": true, "--opt": true,
-		"-target-triple": true, "--target-triple": true,
-		"-link-script": true, "--link-script": true,
-		"-entry": true, "--entry": true,
-		"-output-format": true, "--output-format": true,
-		"-boot": true, "--boot": true,
-		"-boot-file": true, "--boot-file": true,
-		"-boot-arch": true, "--boot-arch": true,
-		"-cc": true, "--cc": true,
-		"-cflags": true, "--cflags": true,
-		"-defines": true, "--defines": true,
-		"-libs": true, "--libs": true,
-		"-queue": true, "--queue": true,
-		"-spendable": true, "--spendable": true,
-		"-memory-limit": true, "--memory-limit": true,
-		"-timeout": true, "--timeout": true,
-		"-debug-level": true, "--debug-level": true,
-		"-analyze-pkg": true, "--analyze-pkg": true,
-		"-build-pkglib": true, "--build-pkglib": true,
-	}
+	valueFlags := compilerValueFlags
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -1245,6 +1246,22 @@ func main() {
 				src = "fetched"
 			}
 			fmt.Printf("[pkg] %s %s (%s)\n", r.Name, r.Version, src)
+		}
+
+		// 传递依赖闭包：遍历每个已解析包的 depends_on 声明，
+		// 自动拉取间接依赖（如 kaulaweb → webview）
+		if transitive, tErr := pkgmgr.ResolveTransitiveClosure(registry, results); tErr != nil {
+			fmt.Printf("[pkg] warning: transitive deps: %v\n", tErr)
+		} else if len(transitive) > 0 {
+			results = append(results, transitive...)
+			// 也把传递依赖写入项目锁（保证可复现构建）
+			for _, t := range transitive {
+				lock.SetPackage(t.Name, t.Version, pkgmgr.LockSourceTransitive, registry)
+				fmt.Printf("[pkg] %s %s (transitive)\n", t.Name, t.Version)
+			}
+			if saveErr := pkgmgr.SaveProjectLock(projectDir, lock); saveErr != nil {
+				fmt.Printf("[pkg] warning: failed to update kaula.lock: %v\n", saveErr)
+			}
 		}
 	}
 

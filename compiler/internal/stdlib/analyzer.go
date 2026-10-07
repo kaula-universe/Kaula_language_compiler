@@ -1068,12 +1068,35 @@ func (result *LibAnalysisResult) GenerateConfig() ([]byte, error) {
 	return data, nil
 }
 
-// WriteConfig 将分析结果写入 JSON 配置文件
+// WriteConfig 将分析结果写入 JSON 配置文件。
+// 如果已有配置文件存在，会保留 depends_on 等手动声明的字段。
 func (result *LibAnalysisResult) WriteConfig(pkgDir string) error {
 	data, err := result.GenerateConfig()
 	if err != nil {
 		return err
 	}
+
 	configPath := filepath.Join(pkgDir, result.Name+".json")
+
+	// 保留已有配置文件中的手动声明字段（如 depends_on）
+	if existing, exErr := os.ReadFile(configPath); exErr == nil {
+		var existingCfg struct {
+			DependsOn []string `json:"depends_on"`
+		}
+		if json.Unmarshal(existing, &existingCfg) == nil && len(existingCfg.DependsOn) > 0 {
+			var newCfg map[string]interface{}
+			if json.Unmarshal(data, &newCfg) == nil {
+				depArr := make([]interface{}, len(existingCfg.DependsOn))
+				for i, d := range existingCfg.DependsOn {
+					depArr[i] = d
+				}
+				newCfg["depends_on"] = depArr
+				if merged, mErr := json.MarshalIndent(newCfg, "", "  "); mErr == nil {
+					data = merged
+				}
+			}
+		}
+	}
+
 	return os.WriteFile(configPath, data, 0644)
 }
