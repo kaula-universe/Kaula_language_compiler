@@ -174,6 +174,48 @@ func (d Dependency) GetGitURL() string {
 	return d.Git
 }
 
+// DependsOnEntry 表示包配置文件 (<name>.json) 中 depends_on 的一个条目。
+// 支持两种格式：
+//   1. 纯包名字符串: "webview"                           → {Name: "webview"}
+//   2. 带 URL 对象:  {"name": "webview", "git": "https://..."} → 完整字段
+type DependsOnEntry struct {
+	Name   string `json:"name"`
+	Git    string `json:"git,omitempty"`
+	Tag    string `json:"tag,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	Commit string `json:"commit,omitempty"`
+}
+
+// IsGit 检查此条目是否指定了自定义 Git 仓库地址
+func (e DependsOnEntry) IsGit() bool {
+	return e.Git != ""
+}
+
+// UnmarshalJSON 自定义反序列化: 兼容字符串和对象两种格式
+func (e *DependsOnEntry) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		e.Name = name
+		return nil
+	}
+	type Alias DependsOnEntry
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return fmt.Errorf("invalid depends_on entry: expected string or {name, git, ...}: %w", err)
+	}
+	*e = DependsOnEntry(alias)
+	return nil
+}
+
+// MarshalJSON 自定义序列化: 纯名字条目输出为字符串，有 URL 的输出为对象
+func (e DependsOnEntry) MarshalJSON() ([]byte, error) {
+	if !e.IsGit() {
+		return json.Marshal(e.Name)
+	}
+	type Alias DependsOnEntry
+	return json.Marshal(Alias(e))
+}
+
 // PatchConfig 本地路径覆盖配置
 type PatchConfig struct {
 	Path string `json:"path"` // 本地包目录的绝对或相对路径

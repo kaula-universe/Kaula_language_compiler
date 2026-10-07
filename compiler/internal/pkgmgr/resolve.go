@@ -264,14 +264,15 @@ func UpdateDependencies(registry string, deps map[string]config.Dependency, proj
 
 // readDependsOn 从包的 pkglib 配置 (<name>.json) 中提取 depends_on 列表。
 // 也尝试读取 kaula.json 的 dependencies 字段（用于纯 Kaula 包）。
-func readDependsOn(dir, name string) []string {
-	var deps []string
+// 返回的条目中，纯名字的条目 Name 即为包名；带 Git URL 的条目会包含完整信息。
+func readDependsOn(dir, name string) []config.DependsOnEntry {
+	var deps []config.DependsOnEntry
 
-	// 1. 读 <name>.json 的 depends_on 字段
+	// 1. 读 <name>.json 的 depends_on 字段（支持字符串和对象两种格式）
 	cfgFile := filepath.Join(dir, name+".json")
 	if data, err := os.ReadFile(cfgFile); err == nil {
 		var raw struct {
-			DependsOn []string `json:"depends_on"`
+			DependsOn []config.DependsOnEntry `json:"depends_on"`
 		}
 		if err := json.Unmarshal(data, &raw); err == nil && len(raw.DependsOn) > 0 {
 			deps = append(deps, raw.DependsOn...)
@@ -282,20 +283,27 @@ func readDependsOn(dir, name string) []string {
 	kaulaFile := filepath.Join(dir, "kaula.json")
 	if data, err := os.ReadFile(kaulaFile); err == nil {
 		var raw struct {
-			Dependencies map[string]interface{} `json:"dependencies"`
+			Dependencies map[string]config.Dependency `json:"dependencies"`
 		}
 		if err := json.Unmarshal(data, &raw); err == nil && len(raw.Dependencies) > 0 {
-			for depName := range raw.Dependencies {
+			for depName, dep := range raw.Dependencies {
 				// 避免重复添加（已在 depends_on 中）
 				found := false
 				for _, d := range deps {
-					if d == depName {
+					if d.Name == depName {
 						found = true
 						break
 					}
 				}
 				if !found {
-					deps = append(deps, depName)
+					entry := config.DependsOnEntry{Name: depName}
+					if dep.IsGitDependency() {
+						entry.Git = dep.Git
+						entry.Tag = dep.Tag
+						entry.Branch = dep.Branch
+						entry.Commit = dep.Commit
+					}
+					deps = append(deps, entry)
 				}
 			}
 		}
@@ -330,38 +338,53 @@ func ResolveTransitiveClosure(registry string, direct []ResolveResult) ([]Resolv
 		queue = queue[1:]
 
 		subs := readDependsOn(current.Dir, current.Name)
-		for _, depName := range subs {
-			if resolved[depName] {
+		for _, entry := range subs {
+			if resolved[entry.Name] {
 				continue
 			}
-			resolved[depName] = true
+			resolved[entry.Name] = true
 
 			// 先检查缓存是否已有
 			root, rootErr := CacheRoot()
 			if rootErr != nil {
 				return nil, rootErr
 			}
-			dst := pkgDir(root, depName)
-			if locked, lErr := LoadResolved(root, depName); lErr == nil && locked != nil {
+			dst := pkgDir(root, entry.Name)
+			if locked, lErr := LoadResolved(root, entry.Name); lErr == nil && locked != nil {
 				if _, statErr := os.Stat(filepath.Join(dst, ".git")); statErr == nil {
 					allNew = append(allNew, ResolveResult{
-						Name:    depName,
+						Name:    entry.Name,
 						Version: locked.Version,
 						Dir:     dst,
 						Source:  LockSourceLock,
 					})
 					queue = append(queue, ResolveResult{
-						Name: depName, Dir: dst, Version: locked.Version,
+						Name: entry.Name, Dir: dst, Version: locked.Version,
 					})
 					continue
 				}
 			}
 
-			// 联网拉取（"*" 表示接受任意版本）
-			fmt.Printf("[pkg] transitive: %s <- %s\n", depName, current.Name)
-			fr, fErr := Fetch(registry, depName, "*")
+			// 联网拉取：优先使用自定义 Git URL，否则从注册源拉取
+			var fr *FetchResult
+			var fErr error
+			if entry.IsGit() {
+				// 从指定的 Git 仓库拉取
+				dep := config.Dependency{
+					Git:    entry.Git,
+					Tag:    entry.Tag,
+					Branch: entry.Branch,
+					Commit: entry.Commit,
+				}
+				fmt.Printf("[pkg] transitive: %s <- %s (git: %s)\n", entry.Name, current.Name, entry.Git)
+				fr, fErr = FetchGitDependency(entry.Name, dep)
+			} else {
+				// 从注册源拉取（"*" 表示接受任意版本）
+				fmt.Printf("[pkg] transitive: %s <- %s\n", entry.Name, current.Name)
+				fr, fErr = Fetch(registry, entry.Name, "*")
+			}
 			if fErr != nil {
-				return nil, fmt.Errorf("transitive dependency %s (required by %s): %w", depName, current.Name, fErr)
+				return nil, fmt.Errorf("transitive dependency %s (required by %s): %w", entry.Name, current.Name, fErr)
 			}
 
 			newResult := ResolveResult{

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"kaula/internal/config"
 )
 
 // ClangASTNode 表示 clang -ast-dump=json 输出的 AST 节点
@@ -1081,16 +1083,12 @@ func (result *LibAnalysisResult) WriteConfig(pkgDir string) error {
 	// 保留已有配置文件中的手动声明字段（如 depends_on）
 	if existing, exErr := os.ReadFile(configPath); exErr == nil {
 		var existingCfg struct {
-			DependsOn []string `json:"depends_on"`
+			DependsOn []config.DependsOnEntry `json:"depends_on"`
 		}
 		if json.Unmarshal(existing, &existingCfg) == nil && len(existingCfg.DependsOn) > 0 {
 			var newCfg map[string]interface{}
 			if json.Unmarshal(data, &newCfg) == nil {
-				depArr := make([]interface{}, len(existingCfg.DependsOn))
-				for i, d := range existingCfg.DependsOn {
-					depArr[i] = d
-				}
-				newCfg["depends_on"] = depArr
+				newCfg["depends_on"] = existingCfg.DependsOn
 				if merged, mErr := json.MarshalIndent(newCfg, "", "  "); mErr == nil {
 					data = merged
 				}
