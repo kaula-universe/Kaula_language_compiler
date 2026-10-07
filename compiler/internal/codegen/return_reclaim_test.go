@@ -30,7 +30,7 @@ fn main() { println("s=", sum_via_ptr()) }
 	cfg := config.DefaultConfig()
 	cg := NewCodeGenerator(cfg)
 	out := cg.Generate(prog)
-	start := strings.Index(out, "K_sum_via_ptr(void)")
+	start := strings.Index(out, "sum_via_ptr(void)")
 	if start < 0 {
 		t.Fatalf("function body not generated:\n%s", out)
 	}

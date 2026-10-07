@@ -41,7 +41,7 @@ fn test_expected_to_fail() {
     assert(1 == 2)
 }
 `)
-	if !strings.Contains(out, `__kaula_run_test("test_expected_to_fail", NULL, K_test_expected_to_fail, 0, 1)`) {
+	if !strings.Contains(out, `__kaula_run_test("test_expected_to_fail", NULL, test_expected_to_fail, 0, 1)`) {
 		t.Errorf("should_panic test must be dispatched with should_panic=1, generated:\n%s", out)
 	}
 	if !strings.Contains(out, "if (should_panic) {") {
@@ -57,7 +57,7 @@ fn test_plain() {
     assert(1 == 1)
 }
 `)
-	if !strings.Contains(out, `__kaula_run_test("test_plain", NULL, K_test_plain, 0, 0)`) {
+	if !strings.Contains(out, `__kaula_run_test("test_plain", NULL, test_plain, 0, 0)`) {
 		t.Errorf("plain test must be dispatched with should_panic=0, generated:\n%s", out)
 	}
 }
@@ -90,7 +90,7 @@ fn test_odd_quote() {
 		t.Errorf("bare quote in description must be escaped, generated:\n%s", out)
 	}
 	// 转义后 run_test 的实参必须是完整闭合的字符串字面量
-	if !strings.Contains(out, `__kaula_run_test("test_odd_quote", "a \" b", K_test_odd_quote, 0, 0)`) {
+	if !strings.Contains(out, `__kaula_run_test("test_odd_quote", "a \" b", test_odd_quote, 0, 0)`) {
 		t.Errorf("escaped description must remain one well-formed C literal, generated:\n%s", out)
 	}
 }

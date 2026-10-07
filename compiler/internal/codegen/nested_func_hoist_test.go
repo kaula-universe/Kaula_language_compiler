@@ -29,7 +29,7 @@ func nestedFnCode(t *testing.T, src string) string {
 
 var wsRe = regexp.MustCompile(`[ \t]+`)
 
-// hasDefOutsideMain 判断 "<type> K_name(params) {" 形式的定义是否出现在 main 之外
+// hasDefOutsideMain 判断 "<type> name(params) {" 形式的定义是否出现在 main 之外
 func hasDefOutsideMain(cCode, header string) bool {
 	norm := wsRe.ReplaceAllString(cCode, " ")
 	mainIdx := strings.Index(norm, "int main()")
@@ -52,19 +52,19 @@ func TestNestedFuncHoistedOutOfFunctionBody(t *testing.T) {
 		"}\n")
 
 	// 1) 定义必须提升到 main 之外
-	if !hasDefOutsideMain(cCode, "int64_t K_add2(int64_t x)") {
+	if !hasDefOutsideMain(cCode, "int64_t add2(int64_t x)") {
 		t.Errorf("nested function must be hoisted out of main's body; got:\n%s", cCode)
 	}
 	// 2) 调用点前必须有原型声明（否则 clang 报隐式声明）
 	norm := wsRe.ReplaceAllString(cCode, " ")
-	if !strings.Contains(norm, "int64_t K_add2(int64_t x);") {
+	if !strings.Contains(norm, "int64_t add2(int64_t x);") {
 		t.Errorf("forward declaration for nested function missing; got:\n%s", cCode)
 	}
 	// 3) main 的函数体内部不得出现函数定义
 	if idx := strings.Index(norm, "int main() {"); idx >= 0 {
 		body := norm[idx:]
 		end := matchBraceEnd(body)
-		if i := strings.Index(body[:end], "K_add2(int64_t x) {"); i >= 0 {
+		if i := strings.Index(body[:end], "add2(int64_t x) {"); i >= 0 {
 			t.Errorf("nested function definition appears inside main's body:\n%s", cCode)
 		}
 	}
@@ -86,9 +86,9 @@ func TestNestedFuncNestedTwice(t *testing.T) {
 		"}\n")
 
 	for _, header := range []string{
-		"int64_t K_inner(int64_t y)",
-		"int64_t K_outer(int64_t x)",
-		"int64_t K_deeper(int64_t z)",
+		"int64_t inner(int64_t y)",
+		"int64_t outer(int64_t x)",
+		"int64_t deeper(int64_t z)",
 	} {
 		if !hasDefOutsideMain(cCode, header) {
 			t.Errorf("%s must be hoisted out of main's body; got:\n%s", header, cCode)
@@ -97,9 +97,9 @@ func TestNestedFuncNestedTwice(t *testing.T) {
 	// 两层嵌套的原型声明同样必须存在
 	norm := wsRe.ReplaceAllString(cCode, " ")
 	for _, proto := range []string{
-		"int64_t K_inner(int64_t y);",
-		"int64_t K_outer(int64_t x);",
-		"int64_t K_deeper(int64_t z);",
+		"int64_t inner(int64_t y);",
+		"int64_t outer(int64_t x);",
+		"int64_t deeper(int64_t z);",
 	} {
 		if !strings.Contains(norm, proto) {
 			t.Errorf("forward declaration %q missing:\n%s", proto, cCode)
@@ -119,7 +119,7 @@ func TestNestedFuncCaptureHoisted(t *testing.T) {
 	norm := wsRe.ReplaceAllString(cCode, " ")
 	// 捕获参数的具体形态由 capture.go 决定（值捕获 / 指针捕获），
 	// 这里只要求：定义（以 ") {" 结尾）在 main 之外 + 调用点转发捕获变量
-	defIdx := defHeaderIndex(norm, "K_addSeed(")
+	defIdx := defHeaderIndex(norm, "addSeed(")
 	if defIdx < 0 {
 		t.Fatalf("capturing nested function definition not found; got:\n%s", cCode)
 	}
@@ -127,7 +127,7 @@ func TestNestedFuncCaptureHoisted(t *testing.T) {
 		t.Errorf("capturing nested function must be hoisted out of main's body (def@%d main@%d):\n%s",
 			defIdx, mainIdx, cCode)
 	}
-	if !strings.Contains(norm, "K_addSeed(2,") {
+	if !strings.Contains(norm, "addSeed(2,") {
 		t.Errorf("captured call must forward the captured variable; got:\n%s", cCode)
 	}
 }
@@ -138,7 +138,7 @@ func TestTopLevelFuncNotHoisted(t *testing.T) {
 		"fn main() {\n    i64 v = helper(1)\n}\n")
 	norm := wsRe.ReplaceAllString(cCode, " ")
 	mainIdx := strings.Index(norm, "int main()")
-	defIdx := strings.Index(norm, "int64_t K_helper(int64_t x) {")
+	defIdx := strings.Index(norm, "int64_t helper(int64_t x) {")
 	if defIdx < 0 || mainIdx < 0 || defIdx > mainIdx {
 		t.Errorf("top-level function must stay at file scope before main (def@%d main@%d):\n%s",
 			defIdx, mainIdx, cCode)
@@ -202,8 +202,8 @@ func TestNoFunctionDefinitionNestedInAnyBody(t *testing.T) {
 	norm := wsRe.ReplaceAllString(cCode, " ")
 	mainIdx := strings.Index(norm, "int main()")
 	for _, header := range []string{
-		"int64_t K_outer(int64_t x)",
-		"int64_t K_branch(int64_t y)",
+		"int64_t outer(int64_t x)",
+		"int64_t branch(int64_t y)",
 	} {
 		i := strings.Index(norm, header+" {")
 		if i < 0 {

@@ -48,6 +48,10 @@ type CodeGenerator struct {
 	usedModules       []string
 	trackedModules    map[string]bool
 
+	// prefixBindings: 前缀展开期的 $参数绑定栈（内层前缀优先），
+	// 由 generatePrefixCallBody 推入/弹出
+	prefixBindings []map[string]PrefixParamBinding
+
 	typeGenerator       *TypeGenerator
 	functionGenerator   *FunctionGenerator
 	expressionGenerator *ExpressionGenerator
@@ -274,6 +278,11 @@ type CodeGenerator struct {
 	externOriginVars  map[string]bool
 	varOrigins        map[string]string
 	promotedVars      map[string]bool
+	// ownedObjVars: 本作用域内由类构造函数新建的对象（`Elem e = Elem()`）。
+	// 这类对象归当前作用域所有，一旦把指针交给可能长期持有的被调方
+	// （vector_push_back 等 C 侧容器）就必须提升；而 elem_at()/vector_get()
+	// 取回的借用指针不在此列——拷贝它们会让容器本体与副本失联。
+	ownedObjVars map[string]bool
 	earlyFreedVars    map[string]bool
 	userFreedVars     map[string]bool // 用户显式调用 *_free 释放的指针
 	exportedFuncNames map[string]bool
@@ -385,7 +394,7 @@ func (cg *CodeGenerator) EnsureDeepPromoteCB(kaulaType string) string {
 		return "__kaula_deeppromote_" + kaulaType
 	}
 
-	cTagName := "K_" + kaulaType // class 在 C 中 typedef 为 struct K_<Name>
+	cTagName := kaulaType // class 在 C 中 typedef 为 struct <Name>（typedef 名 <Name>）
 
 	var body strings.Builder
 	body.WriteString(fmt.Sprintf(
@@ -871,6 +880,12 @@ func (cg *CodeGenerator) RecordVarOriginFromAST(name string, expr ast.Expression
 	if fnName == "" {
 		return
 	}
+	// 类实例构造（`Elem e = Elem()`）：本作用域新建的堆对象，所有权在当前
+	// 作用域，登记为 owned obj——实参交给可能持有它的被调方前需要 promote。
+	if cg.IsClassType(fnName) {
+		cg.ownedObjVars[name] = true
+		return
+	}
 	// KMM 分配函数
 	if kmmAllocFuncs[fnName] {
 		cg.varOrigins[name] = OriginKmm
@@ -938,6 +953,19 @@ func (cg *CodeGenerator) ResetLifetimeFlags(name string) {
 	delete(cg.promotedVars, name)
 	delete(cg.assignEscapedVars, name)
 	delete(cg.earlyFreedVars, name)
+	delete(cg.ownedObjVars, name)
+}
+
+// MarkOwnedObj 标记变量是本作用域新建的类实例（所有权在当前作用域）
+func (cg *CodeGenerator) MarkOwnedObj(name string) {
+	if name != "" {
+		cg.ownedObjVars[name] = true
+	}
+}
+
+// IsOwnedObj 查询变量是否是本作用域新建的类实例
+func (cg *CodeGenerator) IsOwnedObj(name string) bool {
+	return cg.ownedObjVars[name]
 }
 
 // ResetUserFreedVars 清空"用户已释放"集合（函数入口调用）。
@@ -1260,6 +1288,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		externOriginVars:     make(map[string]bool),
 		varOrigins:           make(map[string]string),
 		promotedVars:         make(map[string]bool),
+		ownedObjVars:         make(map[string]bool),
 		earlyFreedVars:       make(map[string]bool),
 		exportedFuncNames:    make(map[string]bool),
 		deepPromoteCBEmitted: make(map[string]struct{}),
@@ -1990,7 +2019,7 @@ static inline String string_concat_float(String s, double v) {
 
 	// #[derive] 派生函数前向声明
 	for _, d := range deriveTypes {
-		cName := "K_" + d.TypeName
+		cName := d.TypeName
 		for _, trait := range d.Traits {
 			trait = strings.TrimSpace(trait)
 			switch strings.ToLower(trait) {
@@ -2006,7 +2035,7 @@ static inline String string_concat_float(String s, double v) {
 
 	// #[command] 解析函数前向声明
 	for _, cmd := range commands {
-		cName := "K_" + cmd.StructName
+		cName := cmd.StructName
 		forwardDecls.WriteString(fmt.Sprintf("%s* %s_parse(int argc, char* argv[]);\n", cName, cmd.StructName))
 	}
 
@@ -2162,11 +2191,12 @@ static inline String string_concat_float(String s, double v) {
 			// （C 报 invalid storage class）。
 			if cg.TestMode && len(testFunctions) > 0 {
 				runner := cg.attributeFeat.GenerateTestRunner(testFunctions)
-				shell := "int main() {\n    {{main_code}}\n    return 0;\n}"
-				if strings.Contains(result, shell) {
-					result = strings.ReplaceAll(result, shell, runner)
+				if replaced, ok := replaceMainShellWithRunner(result, runner); ok {
+					result = replaced
 				} else {
-					result = strings.ReplaceAll(result, "{{main_code}}", runner)
+					// 自定义模板没有标准 main 壳：去掉占位符后把 runner 追加到文件末尾，
+					// 保证它位于文件作用域，而不是被嵌进某个函数体。
+					result = strings.ReplaceAll(result, "{{main_code}}", "") + runner
 				}
 			} else {
 				result = strings.ReplaceAll(result, "{{main_code}}", mainCode.String())
@@ -2237,8 +2267,19 @@ static inline String string_concat_float(String s, double v) {
 		}
 
 		funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
-		// class 全局变量初始化注入 main 函数体开头 (运行时构造)
-		if classInitCode.Len() > 0 {
+		// class 全局变量初始化 + 顶层可执行语句注入 main 函数体开头 (运行时构造)
+		//
+		// 顶层语句（tree/prefix 语句、函数外的普通调用等）在"无 fn main"的分支里由
+		// 模板壳承载（{{main_code}} / mainHeader）。本分支用户已定义 fn main，没有
+		// 该出口，mainCode 此前被整段静默丢弃——写在函数外的语句"编译成功但永不执行"。
+		// 这里注入到 main 体开头：class 全局先初始化，随后顶层语句，最后才是用户 main
+		// 的函数体，与"无 fn main 时顶层语句即 main 体"的语义保持一致。
+		mainFirstLine := 0 // 首条顶层语句在 functionCode 中的行号（源码映射用）
+		if classInitCode.Len() > 0 || mainCode.Len() > 0 {
+			payload := classInitCode.String()
+			if mainCode.Len() > 0 {
+				payload += mainCode.String()
+			}
 			mainFunc := functionCode.String()
 			idx := strings.Index(mainFunc, "int main() {")
 			if idx < 0 {
@@ -2248,11 +2289,22 @@ static inline String string_concat_float(String s, double v) {
 				braceIdx := strings.Index(mainFunc[idx:], "{")
 				if braceIdx >= 0 {
 					insertAt := idx + braceIdx + 1
-					mainFunc = mainFunc[:insertAt] + "\n" + classInitCode.String() + mainFunc[insertAt:]
+					if mainCode.Len() > 0 {
+						// 首条顶层语句位于 functionCode 第 (C + nci + 2) 行：
+						// "{"行 = C+1，class 初始化占 nci 行，之后才是首条顶层语句；
+						// 源码映射约定 functionCode 第 1 行 = funcOffset，故减 1
+						linesBeforeBrace := strings.Count(mainFunc[:insertAt], "\n")
+						mainFirstLine = funcOffset + linesBeforeBrace +
+							strings.Count(classInitCode.String(), "\n") + 1
+					}
+					mainFunc = mainFunc[:insertAt] + "\n" + payload + mainFunc[insertAt:]
 				}
 			}
 			functionCode.Reset()
 			functionCode.WriteString(mainFunc)
+		}
+		if mainFirstLine > 0 {
+			mainOffset = mainFirstLine
 		}
 		resultBuilder.WriteString(functionCode.String())
 
@@ -2908,6 +2960,34 @@ func (cg *CodeGenerator) findPrefixStatement(name string) *ast.PrefixStatement {
 	return cg.findPrefixInStatements(cg.program.Statements, name)
 }
 
+// PrefixParamBinding 前缀参数的一次绑定：实参生成的 C 表达式及其类型提示
+type PrefixParamBinding struct {
+	Code string // 实参生成的 C 表达式
+	Kind string // exprgen 类型提示："s"/"d"/"f"/"cstr"/"obj"（推导失败为空）
+}
+
+// pushPrefixBindings 推入一层前缀参数绑定（generatePrefixCallBody 展开时调用）
+func (cg *CodeGenerator) pushPrefixBindings(bindings map[string]PrefixParamBinding) {
+	cg.prefixBindings = append(cg.prefixBindings, bindings)
+}
+
+// popPrefixBindings 弹出最内层前缀参数绑定
+func (cg *CodeGenerator) popPrefixBindings() {
+	if len(cg.prefixBindings) > 0 {
+		cg.prefixBindings = cg.prefixBindings[:len(cg.prefixBindings)-1]
+	}
+}
+
+// lookupPrefixBinding 自内向外查找 $参数 绑定
+func (cg *CodeGenerator) lookupPrefixBinding(name string) (PrefixParamBinding, bool) {
+	for i := len(cg.prefixBindings) - 1; i >= 0; i-- {
+		if b, ok := cg.prefixBindings[i][name]; ok {
+			return b, true
+		}
+	}
+	return PrefixParamBinding{}, false
+}
+
 // findPrefixInStatements 递归搜索 statements 中的 prefix 语句
 func (cg *CodeGenerator) findPrefixInStatements(stmts []ast.Statement, name string) *ast.PrefixStatement {
 	for _, stmt := range stmts {
@@ -3048,7 +3128,8 @@ func (cg *CodeGenerator) isUserKaulaFunc(name string) bool {
 }
 
 // UserFuncCName 返回 Kaula 用户函数在 C 侧的符号名：
-//   - 用户自定义 fn 统一加 K_ 前缀，避开 C 保留字（int/double/...）与 C 库符号；
+//   - 用户自定义 fn 保持原名（不再加 K_ 前缀：定义端与调用端统一用原名，
+//     避免 export 定义端裸名、调用端 K_ 名的跨文件不一致）；
 //   - 程序中显式 extern 声明的函数保持原名（用户引入的 C 符号，F15：
 //     此前 max/min/abs 重定向先于 extern 判定，extern fn abs 调用被改
 //     成 kaula_abs 与声明符号不一致）；
@@ -3060,18 +3141,8 @@ func (cg *CodeGenerator) UserFuncCName(name string) string {
 	if name == "" || name == "main" {
 		return name
 	}
-	// export 函数保持原名（FFI 边界，外部 C 代码直接用原名调用）
-	if cg.exportedFuncNames != nil && cg.exportedFuncNames[name] {
-		return name
-	}
-	// 跨文件 import 的 export 函数同样保持原名：
-	// 定义端（被导入文件）以原名输出，调用端必须与之一致，否则链接失败
-	// （如 path_import 的 export fn hello_from_a 被调用时生成 K_hello_from_a）。
-	if cg.localImportExportFuncs != nil && cg.localImportExportFuncs[name] {
-		return name
-	}
 	if cg.isUserKaulaFunc(name) {
-		return "K_" + name
+		return name
 	}
 	// 显式 extern 声明优先于 max/min/abs 惯用名重定向（F15）
 	if cg.externFuncNames != nil && cg.externFuncNames[name] {

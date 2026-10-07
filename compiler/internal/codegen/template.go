@@ -41,15 +41,25 @@ func (tm *TemplateManager) AddTemplateDir(dir string) {
 	tm.templateDirs = append(tm.templateDirs, dir)
 }
 
+// normalizeTemplateEOL 把模板换行统一为 LF。
+// Windows 上 core.autocrlf=true 会把签出的 *.tmpl 转成 CRLF，而 codegen 按 LF
+// 精确匹配模板片段（如测试模式替换 main 壳）。不规范化时匹配失败，#[test]
+// runner 会被嵌进模板的 int main() 里，C 编译报 "function definition is not
+// allowed here"。
+func normalizeTemplateEOL(s string) string {
+	return strings.ReplaceAll(s, "\r\n", "\n")
+}
+
 // LoadTemplate 加载模板
 func (tm *TemplateManager) LoadTemplate(name, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	tm.templates[name] = string(data)
+	content := normalizeTemplateEOL(string(data))
+	tm.templates[name] = content
 	if tm.cacheEnabled {
-		tm.cache[name] = string(data)
+		tm.cache[name] = content
 	}
 	return nil
 }
@@ -69,9 +79,10 @@ func (tm *TemplateManager) LoadTemplateByName(name string) error {
 		path := filepath.Join(dir, name+(".tmpl"))
 		data, err := os.ReadFile(path)
 		if err == nil {
-			tm.templates[name] = string(data)
+			content := normalizeTemplateEOL(string(data))
+			tm.templates[name] = content
 			if tm.cacheEnabled {
-				tm.cache[name] = string(data)
+				tm.cache[name] = content
 			}
 			return nil
 		}

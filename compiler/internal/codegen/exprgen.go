@@ -343,6 +343,13 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		}
 	}
 
+	// 前缀展开期：$param 替换为调用点实参生成的表达式（绑定优先于常量内联）
+	if e.IsPrefixVar || strings.HasPrefix(e.Name, "$") {
+		if b, ok := eg.codegen.lookupPrefixBinding(strings.TrimPrefix(e.Name, "$")); ok {
+			return b.Code
+		}
+	}
+
 	// 编译期常量内联：如果在常量表中找到，直接返回字面量
 	// 这实现了真正的编译期常量求值，const 变量引用会被替换为求值后的字面量
 	if val, ok := eg.codegen.constTable[e.Name]; ok {
@@ -2140,6 +2147,10 @@ func registeredReturnInferType(rt string) (string, bool) {
 }
 
 func (eg *ExpressionGenerator) inferType(expr ast.Expression) string {
+	// $param 的类型取决于绑定的实参，随调用点变化，不能走表达式缓存
+	if id, ok := expr.(*ast.Identifier); ok && id.IsPrefixVar {
+		return eg.inferTypeUncached(expr)
+	}
 	// 缓存命中：同一表达式指针直接返回上次推导结果
 	if cached, ok := eg.typeCache[expr]; ok {
 		return cached
@@ -2163,6 +2174,13 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.ObjectLiteral:
 		return "obj"
 	case *ast.Identifier:
+		// 前缀 $param：类型取绑定实参在调用点的类型提示，
+		// 否则会落到下方默认 "d"，让 `$s + "x"` 被判成数字拼接
+		if e.IsPrefixVar || strings.HasPrefix(e.Name, "$") {
+			if b, ok := eg.codegen.lookupPrefixBinding(strings.TrimPrefix(e.Name, "$")); ok && b.Kind != "" {
+				return b.Kind
+			}
+		}
 		sym := eg.codegen.currentScope.GetSymbol(e.Name)
 		if sym != nil {
 			switch sym.Type {
@@ -4048,7 +4066,7 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) string {
 	if len(sl.Fields) == 0 {
 		if sl.TypeName != "" {
-			return fmt.Sprintf("(K_%s){0}", sl.TypeName)
+			return fmt.Sprintf("(%s){0}", kaulaStructTag(sl.TypeName))
 		}
 		return "{0}"
 	}
@@ -4059,7 +4077,7 @@ func (eg *ExpressionGenerator) generateStructLiteral(sl *ast.StructLiteral) stri
 	}
 	inner := "{" + strings.Join(parts, ",") + "}"
 	if sl.TypeName != "" {
-		return fmt.Sprintf("(K_%s)%s", sl.TypeName, inner)
+		return fmt.Sprintf("(%s)%s", kaulaStructTag(sl.TypeName), inner)
 	}
 	return inner
 }

@@ -1,4 +1,5 @@
 #include "kaula.h"
+#include "path_tokenizer.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -134,15 +135,15 @@ PrefixNode* find_prefix(PrefixSystem* system, const char* path) {
     char* path_copy = kmm_v4_strdup(path);
     if (!path_copy) return NULL;
 
-    char* saveptr = NULL;
-    char* token = strtok_r(path_copy, ".", &saveptr);
-    while (token) {
-        node = find_child(node, token);
+    char* next = NULL;
+    char* segment = kaula_path_next_segment(path_copy, &next);
+    while (segment) {
+        node = find_child(node, segment);
         if (!node) {
             kmm_v4_free(path_copy);
             return NULL;
         }
-        token = strtok_r(NULL, ".", &saveptr);
+        segment = kaula_path_next_segment(NULL, &next);
     }
 
     kmm_v4_free(path_copy);

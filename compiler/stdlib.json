@@ -198,6 +198,10 @@
   },
   "std.string": {
     "header": "std/string/string.h",
+    "types": {
+      "String": {},
+      "StringBuilder": {}
+    },
     "string_create": {
       "args": [
         "const char*"
@@ -4031,9 +4035,21 @@
   },
   "std.regex": {
     "header": "regex/regex.h",
+    "types": {
+      "Regex": {},
+      "RegexMatch": {},
+      "RegexCapture": {}
+    },
     "regex_create": {
       "args": [
-        "char*"
+        "const char*"
+      ],
+      "return": "Regex*"
+    },
+    "regex_create_ex": {
+      "args": [
+        "const char*",
+        "u32"
       ],
       "return": "Regex*"
     },
@@ -4054,72 +4070,167 @@
       ],
       "return": "char*"
     },
-    "regex_match": {
+    "regex_pattern": {
+      "args": [
+        "const Regex*"
+      ],
+      "return": "char*"
+    },
+    "regex_flags": {
+      "args": [
+        "const Regex*"
+      ],
+      "return": "u32"
+    },
+    "regex_group_count": {
+      "args": [
+        "const Regex*"
+      ],
+      "return": "size_t"
+    },
+    "regex_group_name": {
       "args": [
         "const Regex*",
-        "char*"
+        "size_t"
+      ],
+      "return": "char*"
+    },
+    "regex_group_index": {
+      "args": [
+        "const Regex*",
+        "const char*"
+      ],
+      "return": "i64"
+    },
+    "regex_full_match": {
+      "args": [
+        "const Regex*",
+        "const char*"
       ],
       "return": "bool_t"
     },
-    "regex_find": {
+    "regex_search": {
       "args": [
         "const Regex*",
-        "char*",
+        "const char*"
+      ],
+      "return": "bool_t"
+    },
+    "regex_find_first": {
+      "args": [
+        "const Regex*",
+        "const char*",
+        "size_t",
+        "size_t*",
         "size_t*"
       ],
-      "return": "RegexMatch*"
+      "return": "bool_t"
     },
     "regex_find_all": {
       "args": [
         "const Regex*",
-        "char*",
+        "const char*",
         "size_t*"
       ],
       "return": "RegexMatch*"
     },
+    "regex_find": {
+      "args": [
+        "const Regex*",
+        "const char*",
+        "size_t*"
+      ],
+      "return": "RegexMatch*"
+    },
+    "regex_captures": {
+      "args": [
+        "const Regex*",
+        "const char*",
+        "size_t*"
+      ],
+      "return": "RegexCapture*"
+    },
     "regex_replace": {
       "args": [
         "const Regex*",
-        "char*",
-        "char*"
+        "const char*",
+        "const char*"
+      ],
+      "return": "String"
+    },
+    "regex_replace_first": {
+      "args": [
+        "const Regex*",
+        "const char*",
+        "const char*"
       ],
       "return": "String"
     },
     "regex_split": {
       "args": [
         "const Regex*",
-        "char*",
+        "const char*",
+        "size_t",
         "size_t*"
       ],
       "return": "String*"
     },
-    "regex_capture_groups": {
+    "regex_quote": {
       "args": [
-        "const Regex*",
-        "char*",
-        "size_t*"
+        "const char*"
       ],
-      "return": "RegexMatch*"
+      "return": "String"
+    },
+    "regex_free_matches": {
+      "args": [
+        "RegexMatch*",
+        "size_t"
+      ]
+    },
+    "regex_free_strings": {
+      "args": [
+        "String*",
+        "size_t"
+      ]
+    },
+    "regex_set_step_limit": {
+      "args": [
+        "Regex*",
+        "size_t"
+      ]
+    },
+    "regex_aborted": {
+      "args": [
+        "const Regex*"
+      ],
+      "return": "bool_t"
     },
     "regex_match_simple": {
       "args": [
-        "char*",
-        "char*"
+        "const char*",
+        "const char*"
+      ],
+      "return": "bool_t"
+    },
+    "regex_search_simple": {
+      "args": [
+        "const char*",
+        "const char*"
       ],
       "return": "bool_t"
     },
     "regex_replace_simple": {
       "args": [
-        "char*",
-        "char*",
-        "char*"
+        "const char*",
+        "const char*",
+        "const char*"
       ],
       "return": "String"
     },
     "regex_find_simple": {
       "args": [
-        "char*",
-        "char*",
+        "const char*",
+        "const char*",
         "size_t*"
       ],
       "return": "RegexMatch*"

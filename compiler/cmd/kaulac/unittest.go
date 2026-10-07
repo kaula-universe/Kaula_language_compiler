@@ -141,6 +141,28 @@ func runUnittestBatch(root string, extraArgs []string) int {
 	return 0
 }
 
+// splitUnittestArgs 把 unittest 的参数拆成位置参数（文件/目录）和编译旗标。
+// 取值旗标（如 --stdlib <path>）连同其值一起归入 flags，避免值被误当成目标路径；
+// `--flag=value` 形式本身以 '-' 开头，自然归入 flags。
+func splitUnittestArgs(args []string) (positional, flags []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case compilerValueFlags[a]:
+			flags = append(flags, a)
+			if i+1 < len(args) {
+				flags = append(flags, args[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "-"):
+			flags = append(flags, a)
+		default:
+			positional = append(positional, a)
+		}
+	}
+	return positional, flags
+}
+
 // isSingleFileTarget 判断 unittest 的目标是否可以直接走单文件编译流程。
 // 只有「恰好一个已存在的 .kl 文件」才走单文件路径，其余（无参 / 目录 /
 // 不存在的路径）都交给批量模式，以便批量复用单文件流程。

@@ -308,15 +308,15 @@ func TestEnsureDeepPromoteCB_NestedPointersAndInlineClass(t *testing.T) {
 	got := cg.deepPromoteCBCode.String()
 	t.Logf("--- deep promote CBs ---\n%s", got)
 
-	// 断言 1：嵌套指针 child *Node → kmm_v4_promote_deep(self->child, sizeof(K_Node), __kaula_deeppromote_Node)
+	// 断言 1：嵌套指针 child *Node → kmm_v4_promote_deep(self->child, sizeof(Node), __kaula_deeppromote_Node)
 	// 核查表 Bug 2 隐患②：cb 不能是 NULL（否则多级嵌套指针只提升 pointee 的字节，内部指针仍悬垂）
-	if !strings.Contains(got, "kmm_v4_promote_deep(self->child, sizeof(K_Node), __kaula_deeppromote_Node)") {
+	if !strings.Contains(got, "kmm_v4_promote_deep(self->child, sizeof(Node), __kaula_deeppromote_Node)") {
 		t.Errorf("nested Node* child should pass __kaula_deeppromote_Node as cb (not NULL); got:\n%s", got)
 	}
 	// 断言 2：Inner 字段（Kaula class 始终是指针存储，即使 Nullable=false）
 	// → 对应第三个参数必须是 __kaula_deeppromote_Inner（证明是递归合成的子 cb 而非 NULL）。
 	// （如果将来新增"struct 值类型内嵌"语法，可以在这里加值字段 cb 直调的断言）
-	if !strings.Contains(got, "kmm_v4_promote_deep(self->inner, sizeof(K_Inner), __kaula_deeppromote_Inner)") {
+	if !strings.Contains(got, "kmm_v4_promote_deep(self->inner, sizeof(Inner), __kaula_deeppromote_Inner)") {
 		t.Errorf("Node.inner (Inner*) should deep-promote with Inner's cb (NULL would leave its `parent*` dangling); got:\n%s", got)
 	}
 	// 断言 3：String label → string_clone_global(self->label)
@@ -328,7 +328,7 @@ func TestEnsureDeepPromoteCB_NestedPointersAndInlineClass(t *testing.T) {
 		t.Errorf("void* opaque fields must carry opaque-no-op annotation; got:\n%s", got)
 	}
 	// 断言 5：Inner 的 parent *Node → 也递归（证明互指场景下 no 死循环 + 非 NULL）
-	if !strings.Contains(got, "kmm_v4_promote_deep(self->parent, sizeof(K_Node), __kaula_deeppromote_Node)") {
+	if !strings.Contains(got, "kmm_v4_promote_deep(self->parent, sizeof(Node), __kaula_deeppromote_Node)") {
 		t.Errorf("Inner.parent (*Node) should deep-promote with Node's cb (NULL would be Bug 2 nested dangling); got:\n%s", got)
 	}
 }

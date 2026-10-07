@@ -1622,6 +1622,161 @@ func (p *PrefixCallExpression) AddParam(name string, expr Expression) {
 	p.Params[name] = expr
 }
 
+// ---- prefix 参数辅助（sema 与 codegen 共用，语义见 docs/tutorials/prefix-system.md） ----
+//
+// 前缀模板体约定：
+//   - 裸 `$name` 语句是参数声明；调用时未绑定则作为调用体拼接点（$body 占位）；
+//   - `$name = value` 是带默认值的参数声明；
+//   - 其余位置的 `$name` 是参数引用，调用时必须绑定（除非有默认值）；
+//   - 调用体中的 `name = value`（name 已声明为参数）是参数绑定。
+
+// PrefixParamKind 前缀体内 $参数 的出现形式
+type PrefixParamKind int
+
+const (
+	// PrefixParamBare 裸 `$name` 语句：参数声明，未绑定时是调用体拼接点
+	PrefixParamBare PrefixParamKind = iota
+	// PrefixParamDefault `$name = value` 语句：带默认值的参数声明
+	PrefixParamDefault
+	// PrefixParamExprRef 表达式中的 `$name` 引用
+	PrefixParamExprRef
+)
+
+// PrefixParamRef 前缀体内一处 $参数 出现
+type PrefixParamRef struct {
+	Name  string
+	Kind  PrefixParamKind
+	Value Expression // 仅 Kind==PrefixParamDefault 时为默认值表达式
+	Pos   Position
+}
+
+// BarePrefixParamName 识别裸 `$name` 参数声明语句，返回参数名
+func BarePrefixParamName(stmt Statement) (string, bool) {
+	if stmt == nil {
+		return "", false
+	}
+	es, ok := stmt.(*ExpressionStatement)
+	if !ok {
+		return "", false
+	}
+	id, ok := es.Expression.(*Identifier)
+	if !ok || !id.IsPrefixVar {
+		return "", false
+	}
+	return id.Name, true
+}
+
+// PrefixParamDefaultDecl 识别 `$name = value` 参数声明语句，返回参数名与默认值表达式
+func PrefixParamDefaultDecl(stmt Statement) (string, Expression, bool) {
+	if stmt == nil {
+		return "", nil, false
+	}
+	es, ok := stmt.(*ExpressionStatement)
+	if !ok {
+		return "", nil, false
+	}
+	be, ok := es.Expression.(*BinaryExpression)
+	if !ok || be.Operator != "=" {
+		return "", nil, false
+	}
+	id, ok := be.Left.(*Identifier)
+	if !ok || !id.IsPrefixVar || be.Right == nil {
+		return "", nil, false
+	}
+	return id.Name, be.Right, true
+}
+
+// CollectPrefixParamRefs 遍历前缀模板体，按出现顺序收集全部 $参数 出现。
+// 只按可识别的节点类型下钻：遍历不到的节点按漏报处理（不误报）。
+func CollectPrefixParamRefs(body []Statement) []PrefixParamRef {
+	var refs []PrefixParamRef
+	collect := func(node Node) {
+		if id, ok := node.(*Identifier); ok && id.IsPrefixVar {
+			refs = append(refs, PrefixParamRef{Name: id.Name, Kind: PrefixParamExprRef, Pos: id.Pos})
+		}
+	}
+	for _, stmt := range body {
+		handled := false
+		if name, ok := BarePrefixParamName(stmt); ok {
+			refs = append(refs, PrefixParamRef{Name: name, Kind: PrefixParamBare, Pos: stmt.GetPosition()})
+			handled = true
+		} else if name, value, ok := PrefixParamDefaultDecl(stmt); ok {
+			refs = append(refs, PrefixParamRef{Name: name, Kind: PrefixParamDefault, Value: value, Pos: stmt.GetPosition()})
+			traverseNode(value, collect)
+			handled = true
+		}
+		if !handled {
+			traverseNode(stmt, collect)
+		}
+	}
+	return refs
+}
+
+// DeclaredPrefixParams 返回模板体内声明/引用的全部 $参数名
+func DeclaredPrefixParams(body []Statement) map[string]bool {
+	declared := make(map[string]bool)
+	for _, ref := range CollectPrefixParamRefs(body) {
+		declared[ref.Name] = true
+	}
+	return declared
+}
+
+// DefaultPrefixParams 按体内出现顺序返回带默认值的参数声明（默认值表达式在其中）
+func DefaultPrefixParams(body []Statement) []PrefixParamRef {
+	var defaults []PrefixParamRef
+	for _, ref := range CollectPrefixParamRefs(body) {
+		if ref.Kind == PrefixParamDefault {
+			defaults = append(defaults, ref)
+		}
+	}
+	return defaults
+}
+
+// RequiredPrefixParams 返回必须由调用方绑定的参数（按首次出现顺序去重）：
+// 在表达式中被引用、且没有默认值的 $参数。裸声明（如 $body 占位）不算必需。
+func RequiredPrefixParams(body []Statement) []string {
+	refs := CollectPrefixParamRefs(body)
+	hasDefault := make(map[string]bool)
+	for _, ref := range refs {
+		if ref.Kind == PrefixParamDefault {
+			hasDefault[ref.Name] = true
+		}
+	}
+	var required []string
+	seen := make(map[string]bool)
+	for _, ref := range refs {
+		if ref.Kind != PrefixParamExprRef || hasDefault[ref.Name] || seen[ref.Name] {
+			continue
+		}
+		seen[ref.Name] = true
+		required = append(required, ref.Name)
+	}
+	return required
+}
+
+// CollectBodyParams 把调用体中 `name = expr` 形式的参数赋值（name 已声明为
+// 前缀参数的普通标识符）从 Body 移入 Params；其余语句保留在 Body。
+// 幂等：已移入 Params 的语句不会被重复处理。
+func (p *PrefixCallExpression) CollectBodyParams(declared map[string]bool) {
+	if len(declared) == 0 || len(p.Body) == 0 {
+		return
+	}
+	rest := make([]Statement, 0, len(p.Body))
+	for _, stmt := range p.Body {
+		if es, ok := stmt.(*ExpressionStatement); ok {
+			if be, ok := es.Expression.(*BinaryExpression); ok && be.Operator == "=" {
+				if id, ok := be.Left.(*Identifier); ok && !id.IsPrefixVar &&
+					declared[id.Name] && be.Right != nil {
+					p.AddParam(id.Name, be.Right)
+					continue
+				}
+			}
+		}
+		rest = append(rest, stmt)
+	}
+	p.Body = rest
+}
+
 // BlockStatement 表示块语句
 type BlockStatement struct {
 	Statements []Statement
