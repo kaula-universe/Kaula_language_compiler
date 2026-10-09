@@ -181,14 +181,25 @@ type InstrumentationTable struct {
 }
 
 /*
- * 这张表与 concIoTypeOf（codegen 侧的操作码映射）必须逐项一致。
+ * 一致性铁律（文档 §9.1 / §1.4 ABI 约定）：
+ * 本表里每一项 SuspendIO / SuspendSleep 都必须能在 concIoTypeOf
+ * （codegen 侧操作码映射）里查到对应内核操作码（KAULA_IO_READ /
+ * WRITE / SLEEP）。内核只实现这三种操作码，CONNECT / ACCEPT 是
+ * 「保留：内核不实现」。
  *
- * 两边不一致的后果是"状态机切好了、调用却没改写"：分析阶段认它是挂起点，
- * 于是把函数体切成多段并插入 pc 赋值；lowering 阶段找不到对应操作码，
- * 调用原样生成。生成的 C 编译得过、跑得动，只是那个 Worker 原地阻塞在
- * IO 上 —— I4 静默失效，没有任何诊断。
+ * 只在单侧登记的后果是"状态机切好了、调用却没改写"：分析阶段认它是
+ * 挂起点，于是把函数体切成多段并插入 pc 赋值；lowering 阶段找不到对应
+ * 操作码，调用原样生成。生成的 C 编译得过、跑得动，只是那个 Worker 原地
+ * 阻塞在 IO 上 —— I4 静默失效，没有任何诊断。
  *
- * 往这张表加条目前，先确认 concIoTypeOf 里有它。
+ * 因此本表是 concIoTypeOf 的「子集」：凡是进来的 IO / 定时函数，先确认
+ * concIoTypeOf 里有它。下面 net_read / web_get / web_post / subprocess_wait
+ * 曾经登记过，但都不满足这条铁律，已全部移出：
+ *   - net_read：幻影名（std/net 真实 API 是 socket_*，无此函数），且缺操作码；
+ *   - web_get / web_post：幻影名（std/web 只有 http server，无此函数），且缺操作码；
+ *   - subprocess_wait：真实存在，但做的是 waitpid / WaitForSingleObject，
+ *     不是单 fd read/write/sleep，内核无对应操作码；改走阻塞车道
+ *     （见下方 MarkBlocking），而非静默失效。
  */
 var instrumentTable = &InstrumentationTable{
 	entries: map[string]SuspendKind{
@@ -203,23 +214,18 @@ var instrumentTable = &InstrumentationTable{
 		 */
 		"net_recv":  SuspendIO,
 		"net_send":  SuspendIO,
-		"net_read":  SuspendIO,
 		"net_write": SuspendIO,
-		"web_get":   SuspendIO,
-		"web_post":  SuspendIO,
 		// 文件
 		"fs_read":  SuspendIO,
 		"fs_write": SuspendIO,
-		// 进程
-		"subprocess_wait": SuspendIO,
 		// 定时
 		// 四种粒度都要登记：只登记毫秒版的话，亚毫秒定时无法成为挂起点，
 		// 挂起路径的开销就测不出来（毫秒粒度把吞吐钉死在 ~1000/s/任务）。
-		"time_sleep":        SuspendSleep,
-		"time_sleep_us":     SuspendSleep,
-		"time_sleep_ns":     SuspendSleep,
+		"time_sleep":         SuspendSleep,
+		"time_sleep_us":      SuspendSleep,
+		"time_sleep_ns":      SuspendSleep,
 		"time_sleep_seconds": SuspendSleep,
-		"time_after":        SuspendSleep,
+		"time_after":         SuspendSleep,
 		// 并发原语
 		"handle_await": SuspendAwait,
 		"future_await": SuspendAwait,
@@ -250,6 +256,20 @@ func MarkBlocking(name string) {
 // IsBlocking 判断是否被标记为阻塞
 func IsBlocking(name string) bool {
 	return blockingHints[name]
+}
+
+// 已知阻塞的内建 std 函数（无对应内核 IO 操作码）。
+//
+// 这些函数做的是 waitpid / WaitForSingleObject 之类「占住线程」的阻塞操作，
+// 不是单 fd read/write/sleep，内核的 IoDriver 接管不了。把它们登记到阻塞车道
+// 白名单，让并发内核把任务移交给 Block Lane 线程就地执行（I5），而不是在
+// Worker 上原地阻塞、也不是当成可插桩 IO 去查一个不存在的操作码（那会 I4
+// 静默失效）。
+//
+// 与用户在源码里写 #[hint(blocking)] 走的是同一张表（blockingHints），只是
+// 这里提前把已知的内建阻塞 std 函数登记好——它们的实现在 C 里，挂不了 kl 属性。
+func init() {
+	MarkBlocking("subprocess_wait")
 }
 
 // ========== 分析 ==========
