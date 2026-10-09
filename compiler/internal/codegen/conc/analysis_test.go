@@ -64,6 +64,29 @@ func TestLookup(t *testing.T) {
 	}
 }
 
+// TestSuspendPointTableNoSilentFailure 守住「挂起点表 ⊆ concIoTypeOf」铁律。
+//
+// 进 instrumentTable 却拿不到内核操作码的函数会被切成挂起点、却在 lowering
+// 阶段查不到操作码 —— 生成的 C 编译得过、跑得动，只是 Worker 原地阻塞（I4
+// 静默失效）。本测试锁死曾经漂移过的四个名字：它们要么根本不是真实 std 函数
+// （net_read / web_get / web_post），要么不是单 fd read/write/sleep
+// （subprocess_wait 是 waitpid）。前三者必须彻底退出挂起点表；subprocess_wait
+// 改走阻塞车道（IsBlocking），而非静默失效。
+func TestSuspendPointTableNoSilentFailure(t *testing.T) {
+	for _, name := range []string{"net_read", "web_get", "web_post"} {
+		if k := Lookup(name); k != SuspendNone {
+			t.Errorf("%s 是幻影名且缺内核操作码，不应在挂起点表里，实际 %v", name, k)
+		}
+	}
+	// subprocess_wait：退出 SuspendIO，但作为已知阻塞函数走阻塞车道。
+	if k := Lookup("subprocess_wait"); k != SuspendNone {
+		t.Errorf("subprocess_wait 不应再是 SuspendIO（内核无对应操作码），实际 %v", k)
+	}
+	if !IsBlocking("subprocess_wait") {
+		t.Errorf("subprocess_wait 应登记为阻塞车道函数（MarkBlocking），实际未登记")
+	}
+}
+
 func TestRegister(t *testing.T) {
 	Register("my_custom_io", SuspendIO)
 	if Lookup("my_custom_io") != SuspendIO {
