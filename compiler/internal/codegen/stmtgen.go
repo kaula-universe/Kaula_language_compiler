@@ -58,6 +58,9 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 		return sg.codegen.typeGenerator.GenerateTypeAliasStatement(s)
 	case *ast.IfStatement:
 		return sg.generateIfStatement(s)
+	case *ast.SwitchStatement:
+		// 跳转表语句：由 internal/opt 的「if 链转跳转表」优化产出
+		return sg.generateSwitchStatement(s)
 	case *ast.WhileStatement:
 		return sg.generateWhileStatement(s)
 	case *ast.ForInStatement:

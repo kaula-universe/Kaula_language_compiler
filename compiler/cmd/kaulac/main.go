@@ -15,6 +15,7 @@ import (
 	"kaula/internal/formatter"
 	"kaula/internal/i18n"
 	"kaula/internal/lexer"
+	"kaula/internal/opt"
 	"kaula/internal/parser"
 	"kaula/internal/pkgcmd"
 	"kaula/internal/pkgmgr"
@@ -194,6 +195,11 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	// 2) 变量声明/字面量的 convertType 需要映射 K_ 前缀 C 名
 	localCG.SetLocalPubTypes(localPubTypes)
 	localCG.SetLocalImportReturnTypes(collectLocalPubFuncReturns(localProgram, depDir))
+	// 前端 AST 优化（if 链转跳转表）：被导入文件同样要走一遍，
+	// 否则本地库与主程序会拿到不同形态的代码。
+	if opt.Enabled(s.cfg.ResolveOptLevel(s.cfg.OptLevel)) {
+		opt.OptimizeProgram(localProgram, opt.DefaultOptions())
+	}
 	localOutput := localCG.Generate(localProgram)
 
 	// 收集本地文件依赖的 std 模块头文件（如 math/math.h、memory/memory.h），
@@ -1432,6 +1438,15 @@ func main() {
 		cg.SetLocalPubTypes(localPubTypes)
 	}
 	cg.SetLocalImportReturnTypes(localImportReturns)
+
+	// 前端 AST 优化：语义分析与 SOR/逃逸分析都已完成，此处改写 AST 是安全的。
+	// pass 只产出 codegen 已支持的节点（如 SwitchStatement），因此 codegen 无需感知优化。
+	if opt.Enabled(optLevel) {
+		optRes := opt.OptimizeProgram(program, opt.DefaultOptions())
+		if optRes.JumpTables > 0 && os.Getenv("KAULAC_VERBOSE") != "" {
+			fmt.Printf("[opt] if 链转跳转表: %d 处\n", optRes.JumpTables)
+		}
+	}
 
 	output := cg.Generate(program)
 	usedModules := cg.GetUsedModules()

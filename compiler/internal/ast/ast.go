@@ -202,6 +202,26 @@ func traverseNode(node Node, visitor func(Node)) {
 		for _, stmt := range n.Else {
 			traverseNode(stmt, visitor)
 		}
+	case *SwitchStatement:
+		if n.Scrutinee != nil {
+			traverseNode(n.Scrutinee, visitor)
+		}
+		for _, c := range n.Cases {
+			if c == nil {
+				continue
+			}
+			for _, v := range c.Values {
+				if v != nil {
+					traverseNode(v, visitor)
+				}
+			}
+			for _, stmt := range c.Body {
+				traverseNode(stmt, visitor)
+			}
+		}
+		for _, stmt := range n.Default {
+			traverseNode(stmt, visitor)
+		}
 	case *WhileStatement:
 		if n.Condition != nil {
 			traverseNode(n.Condition, visitor)
