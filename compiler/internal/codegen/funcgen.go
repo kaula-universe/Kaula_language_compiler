@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"kaula/internal/ast"
 	"kaula/internal/codegen/conc"
+	"os"
 	"sort"
 	"strings"
 )
@@ -445,9 +446,17 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	savedScopeDepth := fg.codegen.kmmScopeDepth
 	savedEmitsPromote := fg.codegen.funcEmitsPromote
 	savedHasCheckpoint := fg.codegen.funcHasKMMCheckpoint
+	// mark 回收模式同样是 per-function 的：本函数体内若定义嵌套函数，嵌套函数
+	// 的生成会改写这些状态，必须在返回前恢复，否则外层后续 KMM 区间的
+	// start/end 会错位（mark save 配 scope pop → 生成不可编译的 C）。
+	savedUseMark := fg.codegen.kmmUseMark
+	savedMarkStack := fg.codegen.kmmMarkStack
+	savedFnMark := fg.codegen.kmmFnMark
 	fg.codegen.kmmScopeDepth = 0
 	fg.codegen.funcEmitsPromote = false
 	fg.codegen.funcHasKMMCheckpoint = false
+	// 进入时必须重置，避免嵌套函数继承外层模式
+	fg.codegen.SetKMMUseMark(false)
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
 	builder.WriteString(returnType)
@@ -526,6 +535,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		// 跨函数分析：结合函数签名判断是否需要 KMM
 		useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
 		if useKMM {
+			// 递归环内函数改用 mark 回收：必须在函数体生成之前决定，
+			// 因为函数体内所有块级/函数级 KMM 区间都要按同一模式发射。
+			fg.codegen.SetKMMUseMark(fg.shouldUseKMMMarkForFunc(stmt))
 			fg.codegen.EnterKMMScope()
 			// Phase 2：在生成函数体之前设置函数级 checkpoint 标志，
 			// 使循环 codegen 能检测到并降级为 offset 回收
@@ -576,10 +588,18 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		// 判定在函数体生成之后：需要知道实际改写了多少个尾调用点（实参引用本帧
 		// 会被回收的对象时会在生成期退回真实调用），以及是否处于互递归环
 		// （互递归每层同样 push 作用域，深度一样受限）。
-		if plan.selfCalls > 0 || fg.inRecursionCycle(stmt.Name) {
-			tco := fg.codegen.TcoState()
-			if tco == nil || tco.converted < plan.selfCalls {
-				fg.codegen.AddRecursionScopeNote(stmt.Name)
+		// 只有该函数自身每层真的 push KMM 作用域（useKMM）才会消耗槽位；
+		// 环上但不 push 的伙伴函数（如互递归里不分配的那一半）不受上限约束，
+		// 对它们提示"加 #[no_kmm]"是无效建议，故以前会误报。
+		if useKMM && (plan.selfCalls > 0 || fg.inRecursionCycle(stmt.Name)) {
+			// mark 回收模式下递归不再消耗 scope 栈槽位，深度不受
+			// KMM_V4_MAX_SCOPE_DEPTH 约束，该诊断已不适用——继续提示会误导
+			// 用户去加 #[no_kmm] 或放宽上限（两者都是有害的建议）。
+			if !fg.codegen.KMMUseMark() {
+				tco := fg.codegen.TcoState()
+				if tco == nil || tco.converted < plan.selfCalls {
+					fg.codegen.AddRecursionScopeNote(stmt.Name)
+				}
 			}
 		}
 
@@ -605,10 +625,10 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			builder.WriteString(bodyIndent + "    ")
 			// 命名作用域：作用域栈溢出（递归深度超过 KMM_V4_MAX_SCOPE_DEPTH）时
 			// 运行期能打印出是哪个函数每层都在分配
-			builder.WriteString(fg.kmmScopeStartNamed(stmt.Name))
+			builder.WriteString(fg.codegen.KMMStart(fg.codegen.UserFuncCName(stmt.Name)))
 			builder.WriteString(bodyCode)
 			builder.WriteString(bodyIndent + "    ")
-			builder.WriteString("} KMM_V4_SCOPE_END;\n")
+			builder.WriteString(fg.codegen.KMMEnd())
 			if !fg.codegen.funcEmitsPromote {
 				builder.WriteString(bodyIndent + "    ")
 				builder.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
@@ -652,6 +672,10 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	fg.codegen.kmmScopeDepth = savedScopeDepth
 	fg.codegen.funcEmitsPromote = savedEmitsPromote
 	fg.codegen.funcHasKMMCheckpoint = savedHasCheckpoint
+	// mark 回收模式的对称恢复（与上面的保存配对）
+	fg.codegen.kmmUseMark = savedUseMark
+	fg.codegen.kmmMarkStack = savedMarkStack
+	fg.codegen.kmmFnMark = savedFnMark
 	// 恢复外层函数的 survivor 回收边界
 	fg.codegen.survivorStopScope = prevStopScope
 	return builder.String()
@@ -939,6 +963,8 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	useKMM := !stmt.NoKMM && fg.shouldUseKMMScopeForBody(stmt.Body)
+	// main 不参与 mark 回收（不是递归环成员），但必须显式关闭以切断继承
+	fg.codegen.SetKMMUseMark(false)
 	if useKMM {
 		fg.codegen.EnterKMMScope()
 		// Phase 2：在生成函数体之前设置函数级 checkpoint 标志，
@@ -1000,10 +1026,10 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 		code.WriteString(fg.codegen.indentString())
 		code.WriteString("kmm_survivor_checkpoint_t __surv_cp = kmm_v4_survivor_checkpoint();\n")
 		code.WriteString(fg.codegen.indentString())
-		code.WriteString(fg.kmmScopeStartNamed(stmt.Name))
+		code.WriteString(fg.codegen.KMMStart(funcName))
 		code.WriteString(finalBody.String())
 		code.WriteString(fg.codegen.indentString())
-		code.WriteString("} KMM_V4_SCOPE_END;\n")
+		code.WriteString(fg.codegen.KMMEnd())
 		if !fg.codegen.funcEmitsPromote {
 			code.WriteString(fg.codegen.indentString())
 			code.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim */\n")
@@ -1038,6 +1064,35 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 // "递归且每层都分配"的函数；TLS 只多一个指针，不影响每帧布局。
 func (fg *FunctionGenerator) kmmScopeStartNamed(kaulaFuncName string) string {
 	return fmt.Sprintf("KMM_V4_SCOPE_NAMED(\"%s\") {\n", fg.codegen.UserFuncCName(kaulaFuncName))
+}
+
+// shouldUseKMMMarkForFunc 判定当前函数是否改用 base 感知的
+// kmm_v4_mark_save/restore 替代 kmm_v4_scope_push/pop。
+//
+// 动机：KMM_V4_MAX_SCOPE_DEPTH（默认 1024）是 TLS 里的定长数组，每层递归
+// 消耗一个槽位，"递归 + 每层分配"撞上就直接 abort。mark 存在 C 栈局部
+// 变量里，不占槽位，深度回到只受 C 栈约束的量级。语义与 scope 等价：
+// 退出区间即回卷 thread heap offset 回收区间内分配（每层仍回收，内存行为不变）。
+//
+// 只对"处于递归环 + 函数级启用 KMM"的普通函数开启，逐项排除无法保证
+// start/end 严格配对或依赖作用域栈状态的形态：
+//   - 并发函数：conc 守卫状态机/IO 重写会按 kmmScopeDepth 发射 scope_pop；
+//   - asm / inline / no_kmm / 注解函数：不走常规函数体包裹；
+//   - 嵌套函数（含捕获）：形参回写与提升路径更复杂，保守跳过。
+func (fg *FunctionGenerator) shouldUseKMMMarkForFunc(stmt *ast.FunctionStatement) bool {
+	if os.Getenv("KAULA_KMM_MARK") == "0" {
+		return false
+	}
+	if stmt.IsConcurrent || stmt.IsAsm || stmt.Inline || stmt.NoKMM {
+		return false
+	}
+	if stmt.Annotation != ast.TreeAnnotationNone {
+		return false
+	}
+	if len(stmt.Captures) > 0 || stmt.Name == "main" {
+		return false
+	}
+	return fg.inRecursionCycle(stmt.Name)
 }
 
 // inRecursionCycle 判断函数是否处于递归环中：直接自递归，或经由其他函数

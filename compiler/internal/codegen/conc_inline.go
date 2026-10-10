@@ -87,6 +87,24 @@ func hasNestedFnDef(body []ast.Statement) bool {
 // bodyHasSuspendCall 递归判断函数体是否含挂起调用（std 可插桩 IO /
 // blocking 标注 / 嵌套 conc fn 的挂起点）。保守：无法确定的一律视为有。
 func bodyHasSuspendCall(fn *ast.FunctionStatement, fns map[string]*ast.FunctionStatement) bool {
+	return bodyHasSuspendCallVisited(fn, fns, map[string]bool{})
+}
+
+// bodyHasSuspendCallVisited 带"展开中"集合的实现。
+//
+// visiting 是必需的：遇到用户 conc fn 会展开其函数体继续查挂起点，若该函数
+// 自递归或互递归，展开会无限循环直接把编译器栈打爆（历史上 conc 自递归会让
+// kaulac 栈溢出崩溃）。已在展开路径上的函数直接返回 false——它的挂起性由
+// 环上其它分支判定，语义不变（只要任一真实挂起点可达，仍会被检出）。
+func bodyHasSuspendCallVisited(fn *ast.FunctionStatement, fns map[string]*ast.FunctionStatement, visiting map[string]bool) bool {
+	if fn == nil {
+		return false
+	}
+	if visiting[fn.Name] {
+		return false
+	}
+	visiting[fn.Name] = true
+	defer delete(visiting, fn.Name)
 	var scan func(stmts []ast.Statement) bool
 	scan = func(stmts []ast.Statement) bool {
 		for _, st := range stmts {
@@ -95,15 +113,15 @@ func bodyHasSuspendCall(fn *ast.FunctionStatement, fns map[string]*ast.FunctionS
 			}
 			switch s := st.(type) {
 			case *ast.ExpressionStatement:
-				if exprHasSuspendCall(s.Expression, fns) {
+				if exprHasSuspendCallVisited(s.Expression, fns, visiting) {
 					return true
 				}
 			case *ast.VariableDeclaration:
-				if exprHasSuspendCall(s.Value, fns) {
+				if exprHasSuspendCallVisited(s.Value, fns, visiting) {
 					return true
 				}
 			case *ast.ReturnStatement:
-				if exprHasSuspendCall(s.Value, fns) {
+				if exprHasSuspendCallVisited(s.Value, fns, visiting) {
 					return true
 				}
 			case *ast.BlockStatement:
@@ -111,21 +129,21 @@ func bodyHasSuspendCall(fn *ast.FunctionStatement, fns map[string]*ast.FunctionS
 					return true
 				}
 			case *ast.IfStatement:
-				if exprHasSuspendCall(s.Condition, fns) || scan(s.Body) ||
+				if exprHasSuspendCallVisited(s.Condition, fns, visiting) || scan(s.Body) ||
 					(s.Else != nil && scan(s.Else)) {
 					return true
 				}
 			case *ast.WhileStatement:
-				if exprHasSuspendCall(s.Condition, fns) || scan(s.Body) {
+				if exprHasSuspendCallVisited(s.Condition, fns, visiting) || scan(s.Body) {
 					return true
 				}
 			case *ast.ForStatement:
 				if s.Init != nil {
-					if vd, ok := s.Init.(*ast.VariableDeclaration); ok && exprHasSuspendCall(vd.Value, fns) {
+					if vd, ok := s.Init.(*ast.VariableDeclaration); ok && exprHasSuspendCallVisited(vd.Value, fns, visiting) {
 						return true
 					}
 				}
-				if exprHasSuspendCall(s.Condition, fns) || scan(s.Body) {
+				if exprHasSuspendCallVisited(s.Condition, fns, visiting) || scan(s.Body) {
 					return true
 				}
 			case *ast.ForInStatement:
@@ -140,6 +158,10 @@ func bodyHasSuspendCall(fn *ast.FunctionStatement, fns map[string]*ast.FunctionS
 }
 
 func exprHasSuspendCall(e ast.Expression, fns map[string]*ast.FunctionStatement) bool {
+	return exprHasSuspendCallVisited(e, fns, map[string]bool{})
+}
+
+func exprHasSuspendCallVisited(e ast.Expression, fns map[string]*ast.FunctionStatement, visiting map[string]bool) bool {
 	if e == nil {
 		return false
 	}
@@ -153,24 +175,24 @@ func exprHasSuspendCall(e ast.Expression, fns map[string]*ast.FunctionStatement)
 		if k != conc.SuspendNone {
 			return true
 		}
-		// 用户 conc fn：递归查其函数体
+		// 用户 conc fn：递归查其函数体（visiting 切断递归环）
 		if target, ok := fns[name]; ok && target.IsConcurrent {
-			return bodyHasSuspendCall(target, fns)
+			return bodyHasSuspendCallVisited(target, fns, visiting)
 		}
 		// 未知函数：保守视为挂起
 		return true
 	case *ast.BinaryExpression:
-		return exprHasSuspendCall(x.Left, fns) || exprHasSuspendCall(x.Right, fns)
+		return exprHasSuspendCallVisited(x.Left, fns, visiting) || exprHasSuspendCallVisited(x.Right, fns, visiting)
 	case *ast.UnaryExpression:
-		return exprHasSuspendCall(x.Right, fns)
+		return exprHasSuspendCallVisited(x.Right, fns, visiting)
 	case *ast.IndexExpression:
-		return exprHasSuspendCall(x.Index, fns) || exprHasSuspendCall(x.Object, fns)
+		return exprHasSuspendCallVisited(x.Index, fns, visiting) || exprHasSuspendCallVisited(x.Object, fns, visiting)
 	case *ast.MemberAccessExpression:
-		return exprHasSuspendCall(x.Object, fns)
+		return exprHasSuspendCallVisited(x.Object, fns, visiting)
 	case *ast.MemberExpression:
-		return exprHasSuspendCall(x.Object, fns)
+		return exprHasSuspendCallVisited(x.Object, fns, visiting)
 	case *ast.TypeCastExpression:
-		return exprHasSuspendCall(x.Expression, fns)
+		return exprHasSuspendCallVisited(x.Expression, fns, visiting)
 	case *ast.SpawnExpression:
 		return false // spawn 是并发提交，不阻塞当前函数体
 	case *ast.AwaitExpression:
@@ -698,4 +720,3 @@ func replaceIdentsInExpr(e ast.Expression, repl map[string]ast.Expression) ast.E
 	}
 	return e
 }
-

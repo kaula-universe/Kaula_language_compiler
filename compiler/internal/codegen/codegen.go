@@ -238,6 +238,21 @@ type CodeGenerator struct {
 	offsetScopeDepth int // 跟踪 offset_save/restore scope 嵌套深度，用于相邻 scope 合并优化
 	tryAssignCounter int // := 错误传播赋值的临时变量计数器
 
+	// kmmUseMark：当前函数用 base 感知的 kmm_v4_mark_save/restore 替代
+	// kmm_v4_scope_push/pop。mark 落在 C 栈局部变量里，不占用
+	// g_kmm_v4_scope_stack 的定长槽位，因此递归/深层嵌套不再受
+	// KMM_V4_MAX_SCOPE_DEPTH（默认 1024）约束，深度只受 C 栈限制。
+	// 仅对"处于递归环 + 函数级启用 KMM"的普通函数开启，语义与 scope 等价
+	// （退出区间即回卷 thread heap offset 回收区间内分配）。
+	kmmUseMark bool
+	// kmmMarkSeq：mark 变量名序号（per-codegen 单调递增，保证嵌套/多函数不重名）
+	kmmMarkSeq int
+	// kmmMarkStack：当前未闭合的 KMM 区间 mark 变量名栈（函数级在最底）
+	kmmMarkStack []string
+	// kmmFnMark：当前函数的函数级 mark 变量名，供 return/TCO 提前退出时
+	// 一次性回卷到函数入口（等价于由内向外逐层 pop 的净效果）
+	kmmFnMark string
+
 	// 方案 C：survivor 段 checkpoint/rewind 追踪
 	// funcEmitsPromote: 当前函数是否发射了 kmm_v4_scope_promote_p（yield/extract/return promote）
 	// 若为 true，则函数出口/return 不发射 survivor_rewind（survivor 对象已逃逸到调用方）
@@ -733,6 +748,114 @@ func (cg *CodeGenerator) ExitKMMScope() {
 	if cg.kmmScopeDepth > 0 {
 		cg.kmmScopeDepth--
 	}
+}
+
+// SetKMMUseMark 设置当前函数是否使用 mark 回收替代 scope push/pop。
+// 每个函数生成入口都必须显式设置（true/false），避免嵌套函数继承外层模式。
+func (cg *CodeGenerator) SetKMMUseMark(v bool) {
+	cg.kmmUseMark = v
+	cg.kmmMarkStack = nil
+	// 函数级 mark 用固定名：函数体（含 return / 尾调用）是在函数级 start
+	// 发射**之前**生成的，提前退出路径必须此刻就能拿到这个名字，否则会
+	// 生成不回卷的 return（每层泄漏一层分配）。C 函数作用域互相独立，
+	// 固定名不会冲突。
+	if v {
+		cg.kmmFnMark = "__kmm_fnmark"
+	} else {
+		cg.kmmFnMark = ""
+	}
+}
+
+// KMMUseMark 当前函数是否处于 mark 回收模式
+func (cg *CodeGenerator) KMMUseMark() bool {
+	return cg.kmmUseMark
+}
+
+// KMMMarkName 分配一个新的 mark 变量名并压栈（mark 模式下使用）
+func (cg *CodeGenerator) KMMMarkName(prefix string) string {
+	cg.kmmMarkSeq++
+	name := fmt.Sprintf("__kmm_%s%d", prefix, cg.kmmMarkSeq)
+	cg.kmmMarkStack = append(cg.kmmMarkStack, name)
+	return name
+}
+
+// KMMStart 生成 KMM 区间起始代码（mark 模式产出 mark save + 裸块，
+// 否则产出 KMM_V4_SCOPE_START/NAMED + do 块）。owner 非空表示函数级命名作用域。
+func (cg *CodeGenerator) KMMStart(owner string) string {
+	// 块级（owner == ""）只有在函数级已经开出 mark（kmmFnMark 非空）时才跟随
+	// mark 模式。否则（如闭包/嵌套函数体这类没有函数级包裹的路径）退回
+	// scope 模式，避免出现"块级 mark 却没有函数级 mark"的半吊子状态。
+	if cg.kmmUseMark && (owner != "" || cg.kmmFnMark != "") {
+		var name string
+		if owner != "" {
+			// 复用 SetKMMUseMark 预置的固定名（return/TCO 路径已引用它）
+			if cg.kmmFnMark == "" {
+				cg.kmmFnMark = "__kmm_fnmark"
+			}
+			name = cg.kmmFnMark
+			cg.kmmMarkStack = append(cg.kmmMarkStack, name)
+		} else {
+			name = cg.KMMMarkName("mark")
+		}
+		return "kmm_v4_mark_t " + name + " = kmm_v4_mark_save(); {\n"
+	}
+	if owner != "" {
+		return "KMM_V4_SCOPE_NAMED(\"" + owner + "\") {\n"
+	}
+	return "KMM_V4_SCOPE_START {\n"
+}
+
+// KMMEnd 生成 KMM 区间结束代码（与 KMMStart 配对，mark 模式回卷到栈顶 mark）
+func (cg *CodeGenerator) KMMEnd() string {
+	if cg.kmmUseMark && len(cg.kmmMarkStack) > 0 {
+		name := cg.kmmMarkStack[len(cg.kmmMarkStack)-1]
+		cg.kmmMarkStack = cg.kmmMarkStack[:len(cg.kmmMarkStack)-1]
+		return "} kmm_v4_mark_restore(" + name + ");\n"
+	}
+	return "} KMM_V4_SCOPE_END;\n"
+}
+
+// KMMExitToFunctionMark return / 尾调用等提前退出路径的区间回卷代码。
+// 非 mark 模式沿用"按 kmmScopeDepth 逐层 pop"；mark 模式只需一次回卷到
+// 函数入口 mark——由内向外逐层回卷的净效果就是把 offset 恢复到函数入口。
+func (cg *CodeGenerator) KMMExitToFunctionMark() string {
+	if cg.kmmUseMark {
+		if cg.kmmFnMark != "" {
+			return "kmm_v4_mark_restore(" + cg.kmmFnMark + ");\n"
+		}
+		return ""
+	}
+	var b strings.Builder
+	for i := 0; i < cg.kmmScopeDepth; i++ {
+		b.WriteString("kmm_v4_scope_pop();\n")
+	}
+	return b.String()
+}
+
+// KMMNeedsExitPop 提前退出路径是否需要发射区间回卷代码
+func (cg *CodeGenerator) KMMNeedsExitPop() bool {
+	if cg.kmmUseMark {
+		return cg.kmmFnMark != ""
+	}
+	return cg.kmmScopeDepth > 0
+}
+
+// KMMExitPopLines 提前退出（return / 尾调用）路径的区间回卷代码，每行已带缩进。
+func (cg *CodeGenerator) KMMExitPopLines(indent string) string {
+	if !cg.KMMNeedsExitPop() {
+		return ""
+	}
+	code := strings.TrimRight(cg.KMMExitToFunctionMark(), "\n")
+	if code == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(code, "\n") {
+		b.WriteString(indent)
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // PropagateInitSize 在 yield/extract 转移时把源对象的大小登记传播给目标变量

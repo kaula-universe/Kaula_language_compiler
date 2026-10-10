@@ -1533,17 +1533,17 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 	thenPromoted = sg.codegen.DiffPromotedVars(promotedSnapshot)
 
 	if useOffset {
-		code += sg.codegen.indentString() + "size_t _if_scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_t _if_scope_start = kmm_v4_mark_save();\n"
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_if_scope_start);\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_restore(_if_scope_start);\n"
 	} else if useKMM {
 		// 缺口6优化：作用域级 survivor checkpoint/rewind
 		// 块入口 checkpoint，块出口 rewind（如果块内没有 promote）
 		// 提前回收块内大对象，减少内存峰值
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __if_surv_cp = kmm_v4_survivor_checkpoint();\n"
-		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMStart("")
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 		// 只有块内没有新增 promote 时才 rewind（promote 的对象需要长期持有）
 		if len(thenPromoted) == 0 {
 			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__if_surv_cp); /* survivor: scope reclaim */\n"
@@ -1623,15 +1623,15 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 		sg.codegen.MergePromotedFromBranches(thenPromoted, elsePromoted)
 
 		if useOffsetElse {
-			code += sg.codegen.indentString() + "size_t _else_scope_start = kmm_v4_offset_save();\n"
+			code += sg.codegen.indentString() + "kmm_v4_mark_t _else_scope_start = kmm_v4_mark_save();\n"
 			code += elseCode.String()
-			code += sg.codegen.indentString() + "kmm_v4_offset_restore(_else_scope_start);\n"
+			code += sg.codegen.indentString() + "kmm_v4_mark_restore(_else_scope_start);\n"
 		} else if useKMMElse {
 			// 缺口6优化：作用域级 survivor checkpoint/rewind
 			code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __else_surv_cp = kmm_v4_survivor_checkpoint();\n"
-			code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+			code += sg.codegen.indentString() + sg.codegen.KMMStart("")
 			code += elseCode.String()
-			code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+			code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 			if len(elsePromoted) == 0 {
 				code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__else_surv_cp); /* survivor: scope reclaim */\n"
 			}
@@ -1761,25 +1761,25 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 		// survivor scope 外层包裹 + offset 内层回收：survivor 变量走 checkpoint/rewind，
 		// bump 分配走 offset_save/restore 轻量回收，避免每次迭代完整 survivor 开销
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
-		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
-		code += sg.codegen.indentString() + "    size_t _loop_scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMStart("")
+		code += sg.codegen.indentString() + "    kmm_v4_mark_t _loop_scope_start = kmm_v4_mark_save();\n"
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "    kmm_v4_offset_restore(_loop_scope_start);\n"
-		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		code += sg.codegen.indentString() + "    kmm_v4_mark_restore(_loop_scope_start);\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 		if len(whilePromoted) == 0 {
 			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__while_surv_cp); /* survivor: scope reclaim */\n"
 		}
 	} else if useOffset {
 		// 纯 bump 分配：offset_save/restore 轻量回收，无 survivor checkpoint 开销
-		code += sg.codegen.indentString() + "size_t _loop_scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_t _loop_scope_start = kmm_v4_mark_save();\n"
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_loop_scope_start);\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_restore(_loop_scope_start);\n"
 	} else if useKMM {
 		// 纯 survivor 类型：完整 survivor checkpoint/rewind
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
-		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMStart("")
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 		if len(whilePromoted) == 0 {
 			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__while_surv_cp); /* survivor: scope reclaim */\n"
 		}
@@ -2686,25 +2686,25 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 	if useKMM && useOffset {
 		// survivor scope 外层 + offset 内层
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __for_surv_cp = kmm_v4_survivor_checkpoint();\n"
-		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
-		code += sg.codegen.indentString() + "    size_t _for_scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMStart("")
+		code += sg.codegen.indentString() + "    kmm_v4_mark_t _for_scope_start = kmm_v4_mark_save();\n"
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "    kmm_v4_offset_restore(_for_scope_start);\n"
-		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		code += sg.codegen.indentString() + "    kmm_v4_mark_restore(_for_scope_start);\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 		code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__for_surv_cp); /* survivor: for-range scope reclaim */\n"
 	} else if useOffset {
 		// 纯 bump 分配：offset 轻量回收
-		code += sg.codegen.indentString() + "size_t _for_scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_t _for_scope_start = kmm_v4_mark_save();\n"
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_for_scope_start);\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_restore(_for_scope_start);\n"
 	} else if useKMM {
 		// 纯 survivor 类型：完整 survivor checkpoint/rewind
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __for_surv_cp = kmm_v4_survivor_checkpoint();\n"
-		code += sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMStart("")
 		sg.codegen.indent++
 		code += bodyCode.String()
 		sg.codegen.indent--
-		code += sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n"
+		code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 		code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__for_surv_cp); /* survivor: for-range scope reclaim */\n"
 	} else {
 		code += bodyCode.String()
@@ -2964,16 +2964,11 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 		b.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* survivor: reclaim on return */\n")
 	}
 
-	// 在 return 前补 scope_pop，防止作用域泄漏
-	// kmmScopeDepth 跟踪当前活跃的 do-while(0) KMM 作用域数量
-	// （作用域合并优化确保内层不会重复创建 scope，所以 depth 通常为 0 或 1）
-	if sg.codegen.kmmScopeDepth > 0 {
-		indent := sg.codegen.indentString()
-		for i := 0; i < sg.codegen.kmmScopeDepth; i++ {
-			b.WriteString(indent)
-			b.WriteString("kmm_v4_scope_pop();\n")
-		}
-	}
+	// 在 return 前补区间回卷，防止作用域泄漏
+	// 非 mark 模式：kmmScopeDepth 跟踪当前活跃的 do-while(0) KMM 作用域数量，
+	// 逐个 pop（作用域合并优化确保内层不会重复创建 scope，depth 通常为 0 或 1）；
+	// mark 模式：一次性回卷到函数入口 mark（等价于由内向外逐层回卷的净效果）。
+	b.WriteString(sg.codegen.KMMExitPopLines(sg.codegen.indentString()))
 
 	// 尾调用改写：到这一步 free / rewind / scope_pop 已按 return 路径发射完毕，
 	// 正是尾跳转需要的前置动作（本层对象已释放、作用域已回收）。剩下的只是
@@ -3087,13 +3082,13 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		code := "{\n"
 		sg.codegen.indent++
 		sg.codegen.EnterOffsetScope()
-		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_t _scope_start = kmm_v4_mark_save();\n"
 		code += sg.generateStmtsWithLiveness(stmt.Statements, nil)
 		// 方案 A：per-object survivor 回收（在 offset_restore 前发射，末尾是 return 时跳过）
 		if !lastStmtIsReturn(stmt.Statements) {
 			code += sg.generateSurvivorFreeForScope()
 		}
-		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_restore(_scope_start);\n"
 		sg.codegen.ExitOffsetScope()
 		sg.codegen.indent--
 		code += indent + "}\n"
@@ -3110,13 +3105,13 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		code := "{\n"
 		sg.codegen.indent++
 		sg.codegen.EnterOffsetScope()
-		code += sg.codegen.indentString() + "size_t _scope_start = kmm_v4_offset_save();\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_t _scope_start = kmm_v4_mark_save();\n"
 		code += sg.generateStmtsWithLiveness(stmt.Statements, nil)
 		// 方案 A：per-object survivor 回收（在 offset_restore 前发射，末尾是 return 时跳过）
 		if !lastStmtIsReturn(stmt.Statements) {
 			code += sg.generateSurvivorFreeForScope()
 		}
-		code += sg.codegen.indentString() + "kmm_v4_offset_restore(_scope_start);\n"
+		code += sg.codegen.indentString() + "kmm_v4_mark_restore(_scope_start);\n"
 		sg.codegen.ExitOffsetScope()
 		sg.codegen.indent--
 		code += indent + "}\n"
@@ -3134,7 +3129,7 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		return code
 	}
 
-	code := "KMM_V4_SCOPE_START {\n"
+	code := sg.codegen.KMMStart("")
 	sg.codegen.indent++
 	// 与实际发射的 scope_push 配对：块内 return 必须显式 pop 这一帧。
 	sg.codegen.EnterKMMScope()
@@ -3156,7 +3151,7 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 	}
 
 	sg.codegen.indent--
-	code += indent + "} KMM_V4_SCOPE_END;\n"
+	code += indent + sg.codegen.KMMEnd()
 	sg.codegen.ExitScope()
 	return code
 }
@@ -4609,10 +4604,7 @@ func (sg *StatementGenerator) generateVoidTcoTailCall(call *ast.CallExpression) 
 		b.WriteString(sg.codegen.indentString())
 		b.WriteString("kmm_v4_survivor_rewind(__surv_cp); /* tco: reclaim this frame */\n")
 	}
-	for i := 0; i < sg.codegen.kmmScopeDepth; i++ {
-		b.WriteString(sg.codegen.indentString())
-		b.WriteString("kmm_v4_scope_pop();\n")
-	}
+	b.WriteString(sg.codegen.KMMExitPopLines(sg.codegen.indentString()))
 	sg.emitTcoRebindAndGoto(&b, call)
 	sg.codegen.TcoState().MarkTcoConverted()
 	return b.String()

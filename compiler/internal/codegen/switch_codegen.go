@@ -169,14 +169,14 @@ func (sg *StatementGenerator) generateSwitchBranchBody(body []ast.Statement) str
 
 	var code strings.Builder
 	if useOffset {
-		code.WriteString(sg.codegen.indentString() + "size_t _sw_scope_start = kmm_v4_offset_save();\n")
+		code.WriteString(sg.codegen.indentString() + "kmm_v4_mark_t _sw_scope_start = kmm_v4_mark_save();\n")
 		code.WriteString(bodyCode.String())
-		code.WriteString(sg.codegen.indentString() + "kmm_v4_offset_restore(_sw_scope_start);\n")
+		code.WriteString(sg.codegen.indentString() + "kmm_v4_mark_restore(_sw_scope_start);\n")
 	} else if useKMM {
 		code.WriteString(sg.codegen.indentString() + "kmm_survivor_checkpoint_t __sw_surv_cp = kmm_v4_survivor_checkpoint();\n")
-		code.WriteString(sg.codegen.indentString() + "KMM_V4_SCOPE_START {\n")
+		code.WriteString(sg.codegen.indentString() + sg.codegen.KMMStart(""))
 		code.WriteString(bodyCode.String())
-		code.WriteString(sg.codegen.indentString() + "} KMM_V4_SCOPE_END;\n")
+		code.WriteString(sg.codegen.indentString() + sg.codegen.KMMEnd())
 		if len(sg.codegen.DiffPromotedVars(promotedSnapshot)) == 0 {
 			code.WriteString(sg.codegen.indentString() + "kmm_v4_survivor_rewind(__sw_surv_cp); /* survivor: scope reclaim */\n")
 		}

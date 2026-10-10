@@ -854,9 +854,50 @@ static inline size_t kmm_v4_offset_save(void) {
 
 // kmm_v4_offset_restore: 恢复 thread heap offset（scope 回退）
 // 修复 #19：只恢复 per-thread heap offset，不影响其他线程
+// 注意：本函数**无 refill 保护**。若 save/restore 区间内发生 thread_heap_refill，
+// base 已变、旧 offset 属于已废弃的旧 TLAB，直接写回会把 bump 指针回卷进新
+// TLAB，覆盖 refill 之后分配的存活对象。新代码请一律改用下面的
+// kmm_v4_mark_save / kmm_v4_mark_restore（base 感知版本）。
 #ifndef KMM_V4_OFFSET_RESTORE_IMPL
 static inline void kmm_v4_offset_restore(size_t saved) {
     g_kmm_v4_thread_heap.offset = saved;
+}
+#endif
+
+// ==================== base 感知的 mark save/restore ====================
+// 与 scope push/pop 语义等价（退出区间时回卷 thread heap offset 回收区间内分配），
+// 但 mark 保存在 **C 栈局部变量** 中，不占用 g_kmm_v4_scope_stack 的定长槽位，
+// 因此不受 KMM_V4_MAX_SCOPE_DEPTH 约束：递归/深层嵌套不再触发作用域栈溢出 abort。
+//
+// 相对 kmm_v4_offset_save/restore 补上 refill 保护：restore 时校验 base，
+//   - base 未变   → 精确回卷 offset；
+//   - base 已变（区间内 refill 过）→ 沿用 scope_pop 的 Bug A 修复：保留新 TLAB、
+//     置 offset=0，避免把指针回卷进新 TLAB 踩坏存活对象。
+typedef struct {
+    uint8_t* base;
+    size_t   offset;
+} kmm_v4_mark_t;
+
+#ifndef KMM_V4_MARK_IMPL
+static inline kmm_v4_mark_t kmm_v4_mark_save(void) {
+    kmm_v4_mark_t m;
+    m.base   = g_kmm_v4_thread_heap.base;
+    m.offset = g_kmm_v4_thread_heap.offset;
+    return m;
+}
+
+static inline void kmm_v4_mark_restore(kmm_v4_mark_t m) {
+    if (KMM_V4_LIKELY(g_kmm_v4_thread_heap.base == m.base)) {
+        g_kmm_v4_thread_heap.offset = m.offset;
+    } else {
+        // 区间内发生过 refill：旧 offset 对当前 TLAB 无意义，从头复用新 TLAB。
+        // 旧 TLAB 内存仍在池中，其中已提升（survivor）或仍被引用的对象不受影响。
+        g_kmm_v4_thread_heap.offset = 0;
+    }
+    // 与 scope_pop 对称：回卷后归还全空扩展段（仅 LEVEL 0，见 scope_pop 注释）。
+#if KMM_THREAD_SAFETY_LEVEL == 0
+    kmm_v4_pool_trim_tail(g_kmm_v4_offset);
+#endif
 }
 #endif
 
