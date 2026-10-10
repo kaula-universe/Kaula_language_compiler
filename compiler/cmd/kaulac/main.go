@@ -1335,6 +1335,17 @@ func main() {
 	localPubVars := collectLocalPubVars(program, inputDir)
 	localPubTypes := collectLocalPubTypes(program, inputDir)
 	localImportReturns := collectLocalPubFuncReturns(program, inputDir)
+
+	// 让语义分析知道"哪些 if 链会被前端自动折叠成跳转表"，从而抑制已无意义的
+	// "建议改用 match" 告警。只在前端优化确实会运行时注入：-O0 或
+	// KAULA_OPT_DISABLE=1 下链不会被优化，告警也就仍然成立。
+	if opt.Enabled(optLevel) {
+		optOpts := opt.DefaultOptions()
+		sema.IfChainWillBeOptimized = func(stmt *ast.IfStatement) bool {
+			return opt.CanConvertIfChain(stmt, optOpts)
+		}
+	}
+
 	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes)
 	stage2Time := time.Since(stage2Start)
 	if verbose { fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time) }

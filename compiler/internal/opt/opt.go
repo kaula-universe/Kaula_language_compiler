@@ -34,6 +34,24 @@ func DefaultOptions() Options {
 	}
 }
 
+// CanConvertIfChain 判定该 if/else-if 链是否满足跳转表改写条件（只判定、不改写）。
+//
+// 供前端诊断复用：满足条件的链会被自动折叠成一次分派，此时再提示用户
+// "建议改用 match" 已无意义（分派已被编译器优化，手工改 match 反而丢掉
+// 自动优化）。判定条件与实际改写完全一致（同一套 trySwitch 守卫），
+// 因此不会出现"抑制了告警却没优化"的情况。
+func CanConvertIfChain(ifs *ast.IfStatement, opts Options) bool {
+	if ifs == nil || !opts.EnableJumpTable {
+		return false
+	}
+	if opts.MinJumpCases <= 0 {
+		opts.MinJumpCases = DefaultOptions().MinJumpCases
+	}
+	p := &ifChainOptimizer{opts: opts}
+	_, ok := p.trySwitch(ifs)
+	return ok
+}
+
 // Result 一次优化运行的统计，供构建日志/诊断使用。
 type Result struct {
 	// JumpTables 被改写成跳转表的 if 链数量。

@@ -2249,10 +2249,25 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	}
 }
 
+// IfChainWillBeOptimized 由编译流水线注入：判定该 if/else-if 链是否会被前端
+// 跳转表优化自动折叠。
+//
+// 用注入而不是直接依赖 opt 包，是为了让 sema 保持"不知道优化 pass 存在"
+// 的依赖方向；未注入时（单测、其它调用方）返回 false，行为与改动前一致
+// ——所有链照旧告警。
+var IfChainWillBeOptimized func(stmt *ast.IfStatement) bool
+
 // checkIfChainForMatch 检测 if-else if 链中的连续单变量 == 比较
 // 例如: if (x == a) { ... } else if (x == b) { ... } else if (x == c) { ... }
 // 触发 warning, 建议改用 match 表达式
 func (sa *SemanticAnalyzer) checkIfChainForMatch(stmt *ast.IfStatement) {
+	// 该链会被前端跳转表优化自动折叠成一次分派时，这条建议已无意义：
+	// 顺序比较已经被编译器消掉，手工改写成 match 反而丢掉自动优化。
+	// 判定由编译流水线注入（见 IfChainWillBeOptimized），未注入或优化关闭
+	// （-O0 / KAULA_OPT_DISABLE）时保持原有告警行为。
+	if IfChainWillBeOptimized != nil && IfChainWillBeOptimized(stmt) {
+		return
+	}
 	// 收集链上所有分支: 每个分支的条件是否是 同一变量 == 值
 	var chainVars []string
 	cur := stmt
