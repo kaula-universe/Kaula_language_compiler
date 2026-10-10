@@ -445,6 +445,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 与外层隔离：生成后恢复，保证外层后续语句的作用域深度不受影响。
 	savedScopeDepth := fg.codegen.kmmScopeDepth
 	savedEmitsPromote := fg.codegen.funcEmitsPromote
+	savedEmitsInternalPromote := fg.codegen.funcEmitsInternalPromote
 	savedHasCheckpoint := fg.codegen.funcHasKMMCheckpoint
 	// mark 回收模式同样是 per-function 的：本函数体内若定义嵌套函数，嵌套函数
 	// 的生成会改写这些状态，必须在返回前恢复，否则外层后续 KMM 区间的
@@ -454,7 +455,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	savedFnMark := fg.codegen.kmmFnMark
 	fg.codegen.kmmScopeDepth = 0
 	fg.codegen.funcEmitsPromote = false
+	fg.codegen.funcEmitsInternalPromote = false
 	fg.codegen.funcHasKMMCheckpoint = false
+	// 形参/幸存副本持有者的登记是 per-function 的：必须在登记本函数形参之前清空，
+	// 否则上一个函数的形参名会残留，导致本函数的同名局部变量被误判为"非函数局部"
+	// （内部 promote 被错判为向外 → 白白放弃 survivor_rewind → survivor 段泄漏）。
+	fg.codegen.ResetFunctionLocalState()
 	// 进入时必须重置，避免嵌套函数继承外层模式
 	fg.codegen.SetKMMUseMark(false)
 
@@ -554,6 +560,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		}
 		// 方案 C：重置 promote 标志，body 生成期间若发射 promote_p 则置 true
 		fg.codegen.funcEmitsPromote = false
+		fg.codegen.funcEmitsInternalPromote = false
 
 		var bodyBuilder strings.Builder
 		bodyIndent := fg.codegen.indentString()
@@ -671,6 +678,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 恢复外层函数的 kmmScopeDepth 等 per-function 状态（嵌套函数隔离的对称恢复）
 	fg.codegen.kmmScopeDepth = savedScopeDepth
 	fg.codegen.funcEmitsPromote = savedEmitsPromote
+	fg.codegen.funcEmitsInternalPromote = savedEmitsInternalPromote
 	fg.codegen.funcHasKMMCheckpoint = savedHasCheckpoint
 	// mark 回收模式的对称恢复（与上面的保存配对）
 	fg.codegen.kmmUseMark = savedUseMark
@@ -973,6 +981,7 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	}
 	// 方案 C：重置 promote 标志
 	fg.codegen.funcEmitsPromote = false
+	fg.codegen.funcEmitsInternalPromote = false
 
 	var bodyBuilder strings.Builder
 	// 用户显式释放的指针：作用域末尾 per-object 回收必须跳过（否则 double free）

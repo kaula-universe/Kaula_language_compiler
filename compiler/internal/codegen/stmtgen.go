@@ -2912,6 +2912,17 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 
 	// 方案 C：若函数不向外 promote，return 前回卷 survivor 段
 	// （若 return 自身 promote 了返回值，funcEmitsPromote 已为 true，跳过）
+	//
+	// 追加保护：返回值本身若已是某次 promote 产出的幸存副本的持有者
+	// （如 `keep = p` 之后 `return keep`），rewind 会把该副本连同 survivor
+	// 段一起回卷，调用方拿到悬垂指针。这类副本必须活过函数返回，故与
+	// "向外 promote" 同等对待——抑制 rewind。
+	// 注意：被 promote 的源变量其 DropAction 已变为 DropNone，
+	// sorNeedsReturnPromote 会返回 false（不再重复 promote），
+	// 因此这里不能只依赖 funcEmitsPromote，必须显式查持有者身份。
+	if returnVarName != "" && sg.codegen.IsPromoteHolder(returnVarName) {
+		sg.codegen.funcEmitsPromote = true
+	}
 	// 只有函数级 useKMM 生成了 __surv_cp 声明时才发射 rewind(否则引用未声明变量)
 	rewindOnReturn := sg.codegen.kmmScopeDepth > 0 && !sg.codegen.funcEmitsPromote && sg.codegen.funcHasKMMCheckpoint
 
@@ -3806,10 +3817,10 @@ func (sg *StatementGenerator) generateYieldStatement(stmt *ast.YieldStatement) s
 			} else {
 				sizeExpr = "sizeof(*" + srcCode + ")"
 			}
-			// promote 被跳过时保持普通所有权转移（不标记 funcEmitsPromote）
+			// promote 被跳过时保持普通所有权转移（不标记 promote）
 			if line := sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", srcIdent.Name); line != "" {
 				b.WriteString(line)
-				sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+				sg.markCrossScopePromote(stmt.Target)
 			}
 		}
 	}
@@ -3865,20 +3876,27 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	// 判断目标类型，决定是否需要 promote
 	needsPromote := false
 	dstName := ""
+	// containerName：真正"持有"promote 副本的那个变量名。
+	// 普通赋值就是目标变量本身；写穿（obj.field / arr[i]）则是容器变量。
+	// 它决定 promote 属于"内部"还是"向外"——见下方 funcEmitsInternalPromote。
+	containerName := ""
 
 	switch dst := bin.Left.(type) {
 	case *ast.Identifier:
 		// 普通变量赋值：使用现有的跨作用域判断
 		dstName = dst.Name
+		containerName = dst.Name
 		needsPromote = sg.needsAssignEscapePromote(srcIdent.Name, dst.Name)
 	case *ast.MemberAccessExpression:
 		// 存入结构体字段：obj.field = ptr
 		// 目标对象（obj）的生命周期通常比源更长（外层变量/全局/参数），保守 promote
 		// 如果 obj 是当前作用域声明的局部变量且与源同层，可能不需要 promote，但保守处理
 		dstName = "struct_field"
+		containerName = "struct_field"
 		needsPromote = true
 		// 例外：如果 obj 是当前作用域声明的局部变量（与源同层或更内层），且不是指针类型，可能不需要 promote
 		if objIdent, ok := dst.Object.(*ast.Identifier); ok {
+			containerName = objIdent.Name
 			if sg.codegen.IsVarDeclaredInCurrentScope(objIdent.Name) {
 				// obj 是当前作用域局部变量，检查其声明深度
 				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
@@ -3895,9 +3913,11 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		// 存入数组元素：arr[i] = ptr
 		// 目标数组（arr）的生命周期通常比源更长，保守 promote
 		dstName = "array_element"
+		containerName = "array_element"
 		needsPromote = true
 		// 例外：如果 arr 是当前作用域声明的局部变量且与源同层或更内层，可能不需要 promote
 		if arrIdent, ok := dst.Object.(*ast.Identifier); ok {
+			containerName = arrIdent.Name
 			if sg.codegen.IsVarDeclaredInCurrentScope(arrIdent.Name) {
 				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
 					if dstDepth, dstOk := sg.codegen.declScopeDepth[arrIdent.Name]; dstOk {
@@ -3925,6 +3945,20 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		sizeExpr = "sizeof(*" + srcIdent.Name + ")"
 	}
 	var b strings.Builder
+	// 目标变量已持有上一份幸存副本（第二轮及以后）：必须先释放旧副本再挂新副本。
+	//
+	// 这是 survivor 段单调增长的直接成因。动态池下 kmm_v4_survivor_rewind 只是
+	// flush「已 free 的延迟槽位」构成的 TLS 垃圾箱，**不会**回收从未 free 的存活
+	// 槽位；而 assign-escaped 的源变量被抑制了块尾 survivor_free，于是循环里
+	// 每轮 promote 一份副本、旧副本无人接管 —— 副本数与迭代次数等比例增长。
+	// 典型触发写法即 `keep = p` / `cur = nd` 这类游标推进。
+	//
+	// survivor_free 对 NULL 与非 survivor 段指针（作用域段对象）均返回 false 且
+	// 无副作用，故首次赋值（目标还是 NULL 或指向作用域段）时调用也安全。
+	if sg.canReleasePreviousSurvivorCopy(dstName, containerName) {
+		b.WriteString(sg.codegen.indentString())
+		b.WriteString("kmm_v4_survivor_free(" + containerName + "); /* release previous survivor copy */\n")
+	}
 	// promote 被跳过（拷贝大小不可信）时：不能抑制 src 的 free，也不能标记
 	// funcEmitsPromote——否则既没有幸存副本，又关掉了函数出口的回收。
 	// 直接返回 "" 让调用方回退到普通赋值路径。
@@ -3933,15 +3967,91 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	} else {
 		b.WriteString(line)
 	}
-	sg.codegen.funcEmitsPromote = true          // 方案 C：函数出口跳过 survivor_rewind
+	// 方案 C 分类：promote 副本留在函数内 vs 随目标逃出函数。
+	//
+	// 只有「向外」（副本的所有权随目标离开本函数）才置 funcEmitsPromote
+	// 抑制函数出口的 survivor_rewind——否则 rewind 会回卷掉已交出去的副本。
+	//
+	// 若副本的持有者是本函数体内的局部变量/局部容器（containerName 是函数局部
+	// 且非形参），则函数返回时该副本连同持有者一起成为垃圾，属于「内部」promote：
+	// 记到 funcEmitsInternalPromote，**不**抑制 rewind。
+	// 这里若一律按向外处理，循环里每轮 promote 一份、出口又不回卷，
+	// survivor 段就单调增长（`keep = p` / `cur = nd` 这类游标写法即典型），
+	// 等价于内存泄漏。
+	sg.markCrossScopePromote(containerName)
 	sg.codegen.MarkAssignEscaped(srcIdent.Name) // 抑制 src 的块尾 per-object free
-	sg.codegen.MarkPromoted(srcIdent.Name)       // reaching definition：防止 return 时重复 promote
+	sg.codegen.MarkPromoted(srcIdent.Name)      // reaching definition：防止 return 时重复 promote
 	if dstName != "" && dstName != "struct_field" && dstName != "array_element" {
 		sg.codegen.PropagateInitSize(dstName, srcIdent.Name)
 	}
 	b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression))
 	b.WriteString(";\n")
 	return b.String()
+}
+
+// canReleasePreviousSurvivorCopy 判断能否在挂新副本前释放目标持有的旧副本。
+//
+// 注意这里判断的是**要不要发射这条 free 语句**，而不是"运行期第几轮"。
+// 循环体在编译期只生成一份代码、运行期执行 N 次，因此 free 必须无条件发射，
+// 让它在每一轮都释放上一轮的旧副本；首轮目标是 NULL 或指向作用域段，
+// kmm_v4_survivor_free 对这两种情况都返回 false 且无副作用。
+//
+// 五个条件缺一不可：
+//  1. 必须是"给变量重新赋值"（dstName 是普通变量名），不能是写穿
+//     （struct_field / array_element）。写穿时 containerName 是容器变量、
+//     但被改写的是容器的**某个字段/元素**而不是容器本身——释放容器会
+//     连带释放容器指向的整个对象，而紧接着的 `cur->next = nd` 还要往里写，
+//     直接变成 use-after-free（`cur->next = nd` 这类链表构建即典型）。
+//  2. 目标是本函数局部变量——形参/全局指向的内存不归本函数回收；
+//  3. 目标没有把副本分给别人——一旦发生过 `old = keep`（源被登记为
+//     assign-escaped / promoted），旧副本就另有持有者，释放会让 old 悬垂。
+//     此时宁可不回收（保守退化到修复前的行为），也不能引入 use-after-free；
+//  4. 本次赋值确实是"跨作用域"（当前块深于目标声明块）——即典型的
+//     循环内赋值 / 块内赋值给外层变量，这正是副本数随迭代次数累积的场景。
+//     同层赋值一轮只 promote 一次，不存在累积，无需多发射一次 free。
+func (sg *StatementGenerator) canReleasePreviousSurvivorCopy(dstName, holder string) bool {
+	// 条件 1：写穿目标一律不放行（容器不是被替换的对象）
+	if dstName == "" || dstName == "struct_field" || dstName == "array_element" {
+		return false
+	}
+	if holder == "" || holder == "struct_field" || holder == "array_element" {
+		return false
+	}
+	if !sg.codegen.IsFunctionLocalVar(holder) {
+		return false
+	}
+	if sg.codegen.IsAssignEscaped(holder) || sg.codegen.IsPromoted(holder) {
+		return false
+	}
+	holderDepth, recorded := sg.codegen.declScopeDepth[holder]
+	if !recorded {
+		return false
+	}
+	return sg.codegen.scopeDepth > holderDepth
+}
+
+// markCrossScopePromote 登记一次「跨作用域 promote」，并把它归类为内部或向外。
+//
+// 分类的唯一判据是：promote 出来的幸存副本的持有者 holder 是否留在本函数内。
+//   - holder 是本函数体内声明的局部变量（且非形参）→ 内部 promote：
+//     函数返回时副本连同持有者一起成为垃圾，函数出口必须仍能 survivor_rewind
+//     回收它，故只置 funcEmitsInternalPromote（不抑制 rewind）。
+//   - 否则（全局 / 形参 / 未记录的外部内存）→ 向外 promote：
+//     副本在本函数返回后仍被外部持有，置 funcEmitsPromote 抑制 rewind，
+//     否则回卷会把外部持有的副本一并回收，留下悬垂指针。
+//
+// 内部 promote 若不区分出来、一律按向外处理，循环体内每轮 promote 一份而出口
+// 又不回卷，survivor 段就会单调增长——`keep = p`、`cur = nd` 这类游标写法
+// 会退化成事实上的内存泄漏。
+func (sg *StatementGenerator) markCrossScopePromote(holder string) {
+	if sg.codegen.IsFunctionLocalVar(holder) {
+		sg.codegen.funcEmitsInternalPromote = true
+		// 持有者是局部变量：它现在指向幸存段副本。若后续 return 该变量，
+		// rewind 会回卷掉副本 → 返回的指针悬垂，故登记为持有者供 return 判定。
+		sg.codegen.MarkPromoteHolder(holder)
+		return
+	}
+	sg.codegen.funcEmitsPromote = true
 }
 
 // structuralNeedsAssignEscapePromote 结构化所有权基础层的跨域赋值 promote 判断（不依赖 SOR）。
@@ -4140,10 +4250,10 @@ func (sg *StatementGenerator) generateExtractStatement(stmt *ast.ExtractStatemen
 			} else {
 				sizeExpr = "sizeof(*" + baseCode + ")"
 			}
-			// promote 被跳过时保持普通 extract 语义（不标记 funcEmitsPromote）
+			// promote 被跳过时保持普通 extract 语义（不标记 promote）
 			if line := sg.emitPromoteForType(stmt.Target, sizeExpr, "promote cross-scope", baseIdent.Name); line != "" {
 				b.WriteString(line)
-				sg.codegen.funcEmitsPromote = true // 方案 C：标记函数有 promote
+				sg.markCrossScopePromote(stmt.Target)
 			}
 		}
 	}

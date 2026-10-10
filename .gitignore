@@ -3,6 +3,7 @@
 *.core
 
 # 编译器产物
+compiler/kaulac
 compiler/kaulac.exe
 compiler/version.json
 cache/

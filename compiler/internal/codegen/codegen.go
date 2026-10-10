@@ -254,9 +254,19 @@ type CodeGenerator struct {
 	kmmFnMark string
 
 	// 方案 C：survivor 段 checkpoint/rewind 追踪
-	// funcEmitsPromote: 当前函数是否发射了 kmm_v4_scope_promote_p（yield/extract/return promote）
-	// 若为 true，则函数出口/return 不发射 survivor_rewind（survivor 对象已逃逸到调用方）
+	// funcEmitsPromote: 当前函数是否发射了「向外」的 kmm_v4_scope_promote_p
+	//   —— 即 promote 出的幸存副本的所有权已移交给调用方（return promote）
+	//     或被调方/线程（arg/thread promote）。
+	// 若为 true，则函数出口/return 不发射 survivor_rewind——
+	// 否则 rewind 会把已移交出去的副本连同 survivor 段一起回卷，造成悬垂指针。
 	funcEmitsPromote bool
+	// funcEmitsInternalPromote: 当前函数发射的 promote 全部是「内部」promote
+	//   —— promote 目标（或其容器）是本函数体内声明的局部变量、且不是形参，
+	//      函数退出时这些幸存副本连同持有者一起成为垃圾。
+	// 内部 promote **不**抑制 survivor_rewind：否则每轮循环 promote 一份、
+	// 函数出口又不回卷，survivor 段单调增长（等同于泄漏）。
+	// 与 funcEmitsPromote 分工：前者=所有权出函数（必须保活），后者=留在函数内（可回收）。
+	funcEmitsInternalPromote bool
 	// funcHasKMMCheckpoint: 当前函数入口是否生成了 __surv_cp checkpoint 声明
 	// (仅函数级 useKMM 时生成; return 里的 survivor_rewind(__surv_cp) 引用它, 无声明时不能发射)
 	funcHasKMMCheckpoint bool
@@ -281,6 +291,17 @@ type CodeGenerator struct {
 	//  2. 其块尾 per-object survivor_free 必须抑制——否则会释放幸存副本，
 	//     使新持有者悬垂（声明还在、内容丢失）。
 	assignEscapedVars map[string]bool
+
+	// promoteHolders: **持有** promote 出来的幸存副本的变量名集合（赋值/提取的目标）。
+	// 与 assignEscapedVars（标记**源**变量、用于抑制源自身的 free）互补：
+	// 这里标记的是目标变量，用于 return 判定——若返回值正是某个幸存副本的持有者，
+	// rewind 会回卷掉该副本，返回的指针随即悬垂，故必须抑制 rewind。
+	promoteHolders map[string]bool
+
+	// paramNames: 当前函数形参名集合。形参指向的内存属于调用方，
+	// 写穿形参（obj.field = p / arr[i] = p）等于把对象交回调用方，
+	// 因此形参**不是**"函数局部"——用于区分内部 promote 与向外 promote。
+	paramNames map[string]bool
 
 	// 结构化所有权基础层扩展（从 SOR 下移的能力 + 多分配器 origin 追踪）：
 	// externFuncNames: 程序中声明的 extern 函数名集合
@@ -1407,6 +1428,8 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		sorInitSizes:         make(map[string]int),
 		declScopeDepth:       make(map[string]int),
 		assignEscapedVars:    make(map[string]bool),
+		promoteHolders:       make(map[string]bool),
+		paramNames:           make(map[string]bool),
 		externFuncNames:      make(map[string]bool),
 		externOriginVars:     make(map[string]bool),
 		varOrigins:           make(map[string]string),
@@ -2600,7 +2623,55 @@ func (cg *CodeGenerator) AddSymbol(name, symbolType string, nullable bool, scope
 	if _, ok := cg.declScopeDepth[name]; !ok {
 		cg.declScopeDepth[name] = cg.scopeDepth
 	}
+	// 形参登记：形参指向的内存属于调用方，写穿形参即把对象交回调用方，
+	// 因此形参不能算"函数局部"（区分内部 promote / 向外 promote 的判据之一）。
+	if scope == "parameter" {
+		cg.paramNames[name] = true
+	}
 	cg.currentScope.AddSymbol(name, symbolType, nullable, scope, line, column)
+}
+
+// IsFunctionLocalVar 报告变量是否确定为本函数体内声明的局部变量。
+// 判据：本函数内声明过（declScopeDepth 有记录）**且**不是形参。
+// 全局、形参、外部符号一律返回 false——它们指向的内存生命周期跨越函数边界，
+// 写到那里的对象在函数返回后仍然存活，不能随 survivor 段一起回卷。
+func (cg *CodeGenerator) IsFunctionLocalVar(name string) bool {
+	if name == "" {
+		return false
+	}
+	if cg.paramNames[name] {
+		return false
+	}
+	_, ok := cg.declScopeDepth[name]
+	return ok
+}
+
+// MarkPromoteHolder 登记持有 promote 幸存副本的变量（赋值的目标侧）。
+func (cg *CodeGenerator) MarkPromoteHolder(name string) {
+	if name != "" {
+		cg.promoteHolders[name] = true
+	}
+}
+
+// IsPromoteHolder 查询变量是否持有 promote 出来的幸存副本。
+// return 判定用它：返回值若是幸存副本的持有者，rewind 会回卷掉该副本 → 悬垂。
+func (cg *CodeGenerator) IsPromoteHolder(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.promoteHolders[name]
+}
+
+// ResetFunctionLocalState 清空 per-function 的形参与 promote 持有者登记。
+// 两者都是纯粹的 per-function 语义，函数切换时必须清掉，否则上一个函数的
+// 形参名会被下一个函数误判为"非局部"（漏掉内部 promote 回收），或把幸存副本
+// 持有者的身份带到无关函数上（无谓地抑制 rewind）。
+// 注意：declScopeDepth **不**清理——它是既有的跨阶段结构，清理会改变
+// 深度判定既有行为；同一个名字在新函数里若重新声明，AddSymbol 的
+// "首次才记录"语义已保证不会把形参误记为局部。
+func (cg *CodeGenerator) ResetFunctionLocalState() {
+	cg.paramNames = make(map[string]bool)
+	cg.promoteHolders = make(map[string]bool)
 }
 
 // GetSymbol 获取一个符号
