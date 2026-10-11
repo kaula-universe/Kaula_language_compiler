@@ -437,14 +437,21 @@ bool kmm_v4_survivor_paged_contains(const void* ptr) {
     return __atomic_load_n(&hdr->alive, __ATOMIC_ACQUIRE) == 1;
 }
 
-// P1 · 方案 8：页大小在进程生命周期内恒定，缓存首次 sysconf 结果。
+// P1 · 方案 8：页大小在进程生命周期内恒定，缓存首次查询结果。
 // 旧实现每次页式对象释放都调一次 sysconf(_SC_PAGESIZE)，是纯粹的重复
 // libc 开销。多线程并发首次写入得到的是同一个值，属良性竞争，无需加锁。
+// Windows 无 sysconf：改用 GetSystemInfo（静态页大小，ULONG_MAX = "未知"）。
 static size_t g_kmm_v4_page_size_cached = 0;
 static size_t kmm_v4_page_size(void) {
     size_t ps = g_kmm_v4_page_size_cached;
     if (KMM_V4_UNLIKELY(ps == 0)) {
+#ifdef _WIN32
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        ps = (size_t)si.dwPageSize;
+#else
         ps = (size_t)sysconf(_SC_PAGESIZE);
+#endif
         if (ps == 0) ps = KMM_V4_PAGE_SIZE;  // 兜底：退回编译期估算值
         g_kmm_v4_page_size_cached = ps;
     }

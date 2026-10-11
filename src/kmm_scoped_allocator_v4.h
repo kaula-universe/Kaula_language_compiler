@@ -1503,8 +1503,14 @@ static inline void* kmm_v4_promote(void* ptr, size_t size) {
 // kmm_v4_promote_deep（递归）并把字段改写为新地址。cb 接收提升后的新对象
 // 地址，返回 0 表示成功，非 0 表示失败（此时释放已分配的幸存段内存）。
 typedef int (*kmm_v4_promote_cb_t)(void* promoted_obj);
+extern int kmm_v4_pool_owned(const void* ptr);  // 前置声明（本文件内先于 .c 使用）
 static inline void* kmm_v4_promote_deep(void* ptr, size_t size, kmm_v4_promote_cb_t cb) {
     if (KMM_V4_UNLIKELY(ptr == NULL)) return NULL;
+    // 护栏：与 kmm_v4_scope_promote_p_deep 保持一致——指针不属于主池/扩展段
+    // （即已位于幸存段的长寿命对象，或 malloc/FFI 外部指针）时，直接原样返回，
+    // 不做拷贝改写。否则库侧用 kmm_v4_global_alloc/all_global 分配的数组
+    // （如 ML 权重）会被按 sizeof(元素) 截断成 8 字节副本，数组元素全部丢失。
+    if (KMM_V4_UNLIKELY(!kmm_v4_pool_owned(ptr))) return ptr;
     void* dst = kmm_v4_alloc_global(size);
     if (KMM_V4_UNLIKELY(dst == NULL)) return NULL;
     if (size > 0) memcpy(dst, ptr, size);
