@@ -444,6 +444,11 @@ func compoundAssignToBinaryOp(op string) string {
 }
 
 // generateBinaryExpression 生成二元表达式代码
+//
+// 重要不变量：left/right 在下面只生成一次，之后所有分支（含 PLUS）都必须
+// 复用这两个字符串。任何分支若再对 e.Left/e.Right 调一次 GenerateExpression，
+// 每棵子树就会被生成两次，递归下去 T(n)=2·T(n-1)，n 层左结合的 + 链直接
+// 变成 O(2ⁿ)（28 个节点曾实测出 2400 万次调用、编译十几分钟不结束）。
 func (eg *ExpressionGenerator) generateBinaryExpression(e *ast.BinaryExpression) string {
 	// 复合赋值转换：a += b → a = a + b
 	if op := compoundAssignToBinaryOp(e.Operator); op != "" {
@@ -650,7 +655,7 @@ skip_constant_fold:
 	case "ASSIGN", "=":
 		return left + " = " + right
 	case "PLUS", "+":
-		return eg.generatePlusOperation(e.Left, e.Right)
+		return eg.generatePlusOperation(e.Left, e.Right, left, right)
 	case "MINUS", "-":
 		// 缺口4：整数溢出检查（debug 模式默认启用）
 		if eg.codegen.enableOverflowCheck && eg.isIntegerExpr(e.Left) && eg.isIntegerExpr(e.Right) {
@@ -765,11 +770,14 @@ skip_constant_fold:
 }
 
 // generatePlusOperation 生成加法操作代码
-func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression) string {
+//
+// leftStr/rightStr 必须是调用方（generateBinaryExpression）已经生成好的 C 表达式，
+// 本函数绝不能再对 left/right 调 GenerateExpression —— 那是 O(2ⁿ) 指数爆炸的
+// 根因。同时复用调用方的字符串也顺带拿到了 AST 级括号修正
+// （astBinaryNeedsParens），此前 PLUS 分支是唯一绕过该修正的分支。
+func (eg *ExpressionGenerator) generatePlusOperation(left, right ast.Expression, leftStr, rightStr string) string {
 	leftType := eg.inferType(left)
 	rightType := eg.inferType(right)
-	leftStr := eg.GenerateExpression(left)
-	rightStr := eg.GenerateExpression(right)
 
 	// 编译期字符串字面量拼接
 	if leftType == "s" && rightType == "s" {
