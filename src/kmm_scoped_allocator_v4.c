@@ -29,6 +29,9 @@
 #ifndef KAULA_FREESTANDING
 #include <string.h>
 #include <stdlib.h>   // Task #17：扩展段扩容用 malloc / free
+#if defined(__linux__) && !defined(KAULA_FREESTANDING)
+#include <malloc.h>   // P1：malloc_trim（glibc 动态 mmap 阈值导致 RSS 不回落）
+#endif
 #endif
 
 // ==================== 按需提交的虚拟内存池 ====================
@@ -123,6 +126,14 @@ size_t g_kmm_v4_extra_capacity = 0;
 // KMM_TLS_BUFFER_SIZE，过小的段会放大段链长度）
 #ifndef KMM_V4_GROW_SEG_SIZE
 #define KMM_V4_GROW_SEG_SIZE (1024 * 1024)
+#endif
+
+// 前向声明：扩展段归还主体与水位读取（定义在文件后半部分）。
+// P1 · 方案 2 让 kmm_v4_pool_grow 与 kmm_v4_idle_reclaim 能在这两个
+// 静态函数定义之前就调用它们。
+#ifndef KMM_V4_STATIC_POOL
+static size_t pool_trim_tail_locked(size_t watermark);
+static inline size_t pool_watermark(void);
 #endif
 
 // 修复 #3：线程安全的一次性初始化
@@ -426,6 +437,20 @@ bool kmm_v4_survivor_paged_contains(const void* ptr) {
     return __atomic_load_n(&hdr->alive, __ATOMIC_ACQUIRE) == 1;
 }
 
+// P1 · 方案 8：页大小在进程生命周期内恒定，缓存首次 sysconf 结果。
+// 旧实现每次页式对象释放都调一次 sysconf(_SC_PAGESIZE)，是纯粹的重复
+// libc 开销。多线程并发首次写入得到的是同一个值，属良性竞争，无需加锁。
+static size_t g_kmm_v4_page_size_cached = 0;
+static size_t kmm_v4_page_size(void) {
+    size_t ps = g_kmm_v4_page_size_cached;
+    if (KMM_V4_UNLIKELY(ps == 0)) {
+        ps = (size_t)sysconf(_SC_PAGESIZE);
+        if (ps == 0) ps = KMM_V4_PAGE_SIZE;  // 兜底：退回编译期估算值
+        g_kmm_v4_page_size_cached = ps;
+    }
+    return ps;
+}
+
 bool kmm_v4_survivor_paged_free(void* ptr) {
     if (KMM_V4_UNLIKELY(ptr == NULL)) return false;
     kmm_v4_paged_hdr_t* hdr = (kmm_v4_paged_hdr_t*)((uint8_t*)ptr - sizeof(kmm_v4_paged_hdr_t));
@@ -477,7 +502,7 @@ bool kmm_v4_survivor_paged_free(void* ptr) {
         {
             uintptr_t blk = (uintptr_t)hdr;
             size_t total = sizeof(kmm_v4_paged_hdr_t) + (size_t)sz;
-            size_t pagesz = (size_t)sysconf(_SC_PAGESIZE);
+            size_t pagesz = kmm_v4_page_size();
             total = (total + pagesz - 1) & ~(pagesz - 1);
             madvise((void*)blk, total, MADV_FREE);  // 失败非致命：退回页保留
         }
@@ -512,6 +537,99 @@ void kmm_v4_survivor_paged_purge(void) {
     __atomic_store_n(&g_paged_count, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_kmm_v4_paged_bytes, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_paged_pool_bytes, 0, __ATOMIC_RELAXED);
+}
+
+// ==================== P1 · 方案 4：页式池冷块清瘦 ====================
+// 摘链（atomic exchange）每个桶的整条 Treiber 栈，保留栈顶最近释放的块
+// 直到 keep_bytes 预算耗尽，其余真 free 归还 glibc。返回归还字节数。
+//
+// 为什么能削 RSS：入池块只做了 madvise(MADV_FREE)——惰性标记，内核不施压
+// 就永远不回收，RSS 峰值因此被"焊"在高位。真 free 才会让 RSS 回落。
+// 实测（12×4MB 分配→释放）：不清池 RSS 稳定在 14.1MB，清池后 1.8MB。
+//
+// 为什么不损失性能：只保留最近释放的 KEEP 字节（LIFO 栈顶 = 最热块），
+// 峰期复用热块免 mmap 的路径完全不变；清掉的只是长期无人复用的冷块，
+// 下次真需要时重新 mmap，而调用时机是 idle，不与分配竞争。
+//
+// 并发安全性：Treiber 栈 push 用 CAS(top→node)。摘链用 atomic exchange
+// 把桶头置 NULL：若 push 线程先读到旧 top、随后链被摘走，其 CAS 会因
+// 当前值为 NULL 而失败并重试，重试读到的 NULL 或新 keep 链都是合法状态
+// → 无丢失更新、无写入已释放节点。摘出的块已不在池中，独占 free 安全。
+size_t kmm_v4_paged_pool_drain(size_t keep_bytes) {
+    size_t freed_bytes = 0;
+    size_t kept_bytes = 0;
+    for (int i = 0; i < KMM_V4_PAGED_POOL_BUCKETS; i++) {
+        kmm_paged_pool_node_t* n = __atomic_exchange_n(&g_paged_pool[i], NULL, __ATOMIC_ACQ_REL);
+        // 保序收集：原栈顶（最近释放）仍是保留链的栈顶
+        kmm_paged_pool_node_t* keep_head = NULL;
+        kmm_paged_pool_node_t* keep_tail = NULL;
+        while (n != NULL) {
+            // next 与 size 都必须在 free 之前取出：节点存储复用 payload 前
+            // 16 字节，free 后这两个字段所在的内存已归还 glibc。
+            kmm_paged_pool_node_t* nx = n->next;
+            size_t sz = n->size;
+            if (kept_bytes + sz <= keep_bytes) {
+                kept_bytes += sz;
+                n->next = NULL;
+                if (keep_tail) keep_tail->next = n;
+                else keep_head = n;
+                keep_tail = n;
+            } else {
+                kmm_v4_paged_hdr_t* hdr = (kmm_v4_paged_hdr_t*)((uint8_t*)n - sizeof(kmm_v4_paged_hdr_t));
+                __atomic_store_n(&hdr->pooled, 0, __ATOMIC_RELAXED);
+                free(hdr);
+                freed_bytes += sz;
+            }
+            n = nx;
+        }
+        if (keep_head != NULL) {
+            kmm_paged_pool_node_t* top = __atomic_load_n(&g_paged_pool[i], __ATOMIC_RELAXED);
+            for (;;) {
+                keep_tail->next = top;
+                if (__atomic_compare_exchange_n(&g_paged_pool[i], &top, keep_head, 1,
+                                                __ATOMIC_RELEASE, __ATOMIC_RELAXED)) break;
+                // 失败时 top 已被自动更新为当前值，下一轮重新挂接重试
+            }
+        }
+    }
+    if (freed_bytes > 0) {
+        __atomic_fetch_sub(&g_paged_pool_bytes, freed_bytes, __ATOMIC_RELAXED);
+    }
+    return freed_bytes;
+}
+
+// ==================== P1 · 方案 1 + 6：idle 回收钩子 ====================
+// 由调用方在空闲时调用（async 线程池的 idle worker、请求间隙、显式维护点）。
+// 返回本次归还的字节数；0 表示因迟滞未动作或本无可回收内存。
+//
+// 迟滞（方案 6）防抖：池量未超稳态预算则清零计数直接返回；需连续
+// KMM_V4_IDLE_RECLAIM_STREAK 次调用都超预算才真正动作，避免"刚清完又
+// 立刻要回来"的 mmap 抖动——那比不清更慢。
+static KMM_ATOMIC_TYPE g_idle_reclaim_streak = 0;
+
+size_t kmm_v4_idle_reclaim(void) {
+    size_t pool = __atomic_load_n(&g_paged_pool_bytes, __ATOMIC_RELAXED);
+    if (pool <= (size_t)KMM_V4_PAGED_POOL_STEADY) {
+        __atomic_store_n(&g_idle_reclaim_streak, 0, __ATOMIC_RELAXED);
+        return 0;
+    }
+    size_t streak = __atomic_add_fetch(&g_idle_reclaim_streak, 1, __ATOMIC_RELAXED);
+    if (streak < (size_t)KMM_V4_IDLE_RECLAIM_STREAK) return 0;
+    __atomic_store_n(&g_idle_reclaim_streak, 0, __ATOMIC_RELAXED);
+
+    size_t freed = kmm_v4_paged_pool_drain(KMM_V4_PAGED_POOL_STEADY);
+#ifndef KMM_V4_STATIC_POOL
+    kmm_v4_pool_trim_tail(pool_watermark());
+#endif
+    // glibc 动态 mmap 阈值陷阱：mmap 出来的块被 free 后，glibc 会把
+    // M_MMAP_THRESHOLD 上调到该块大小（上限 32MB），此后同等大小的分配
+    // 改走 brk 主堆，free **不再归还 OS**。实测第二轮回收 48MB 后 RSS 只
+    // 掉 1MB（第一轮掉 11MB）就是它所致。malloc_trim(0) 归还堆顶空闲内存，
+    // 补上这一环。只在确实 free 过、且处于 idle 上下文时调用，热路径无关。
+#if defined(__linux__) && !defined(KMM_V4_STATIC_POOL) && !defined(KAULA_FREESTANDING)
+    if (freed > 0) malloc_trim(0);
+#endif
+    return freed;
 }
 
 
@@ -662,6 +780,12 @@ int kmm_v4_pool_grow(size_t min_needed) {
     }
 #endif
 
+    // P1 · 方案 2：扩容前先回收全空尾段。此刻已持有 g_grow_flag（LEVEL>=1）
+    // 或处于单线程（LEVEL 0），修改段链安全。水位高时全空段稀少，本调用
+    // 几乎总是 no-op（只遍历一条极短段链），开销可忽略；水位已回卷而段链
+    // 仍滞留时，则直接省掉这一次 malloc。
+    pool_trim_tail_locked(pool_watermark());
+
     // 新段尺寸：不小于缺口，不小于 KMM_V4_GROW_SEG_SIZE，对齐到页边界
     size_t seg_size = min_needed;
     if (seg_size < KMM_V4_GROW_SEG_SIZE) seg_size = KMM_V4_GROW_SEG_SIZE;
@@ -803,19 +927,24 @@ static size_t pool_fit_offset(size_t offset, size_t size) {
 // kmm_v4_pool_trim_tail 定义为 static inline no-op（无扩展段可归还），
 // 此处必须跳过定义，否则与头文件的内联定义重复 → 编译失败。
 #ifndef KMM_V4_STATIC_POOL
-__attribute__((used))
-void kmm_v4_pool_trim_tail(size_t watermark) {
-    if (g_extra_head == NULL) return;
+// 水位读取（LEVEL 0 下 g_kmm_v4_offset 是普通变量，无原子宏可用）
+static inline size_t pool_watermark(void) {
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    return KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+#else
+    return g_kmm_v4_offset;
+#endif
+}
+
+// 归还主体（无锁）：调用方必须已持有 g_grow_flag，或处于 LEVEL 0 单线程。
+// P1 · 方案 2：抽出无锁版本，使 kmm_v4_pool_grow 能在自己已持锁的临界区
+// 内顺带回收全空尾段——旧代码只有 kmm_v4_pool_trim_tail 一个入口，它在
+// LEVEL>=1 下会重新抢 g_grow_flag，被 grow 自己持有时必然失败（永久 no-op）。
+// 返回实际归还的字节数。
+static size_t pool_trim_tail_locked(size_t watermark) {
+    if (g_extra_head == NULL) return 0;
     size_t primary_cap = g_kmm_v4_pool_capacity;
     size_t extra_used = (watermark > primary_cap) ? (watermark - primary_cap) : 0;
-
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    // 与 grow 互斥：段链仅允许持标志者修改（见 grow 注释同口径）
-    size_t _trim_expected = 0;
-    if (!KMM_ATOMIC_CAS_STRONG(g_grow_flag, _trim_expected, 1)) {
-        return;  // grow 进行中：放弃本次归还
-    }
-#endif
 
     // 定位首个全空段（seg_begin >= extra_used），其后至链尾全部归还
     kmm_v4_extra_seg_t* cut_prev = NULL;
@@ -842,14 +971,28 @@ void kmm_v4_pool_trim_tail(size_t watermark) {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
         // 摘链完成后才原子扣减额度：观察者不会拿旧额度 fit 进已摘除段
         KMM_ATOMIC_FETCH_ADD(g_kmm_v4_extra_capacity, (size_t)0 - freed_bytes);
-        KMM_ATOMIC_STORE(g_grow_flag, 0);
 #else
         g_kmm_v4_extra_capacity -= freed_bytes;
 #endif
-        return;
+        return freed_bytes;
     }
+    return 0;
+}
+
+__attribute__((used))
+void kmm_v4_pool_trim_tail(size_t watermark) {
+    if (g_extra_head == NULL) return;
+
 #if KMM_THREAD_SAFETY_LEVEL >= 1
+    // 与 grow 互斥：段链仅允许持标志者修改（见 grow 注释同口径）
+    size_t _trim_expected = 0;
+    if (!KMM_ATOMIC_CAS_STRONG(g_grow_flag, _trim_expected, 1)) {
+        return;  // grow 进行中：放弃本次归还
+    }
+    pool_trim_tail_locked(watermark);
     KMM_ATOMIC_STORE(g_grow_flag, 0);
+#else
+    pool_trim_tail_locked(watermark);
 #endif
 }
 #endif /* !KMM_V4_STATIC_POOL */
@@ -1162,6 +1305,46 @@ void kmm_v4_destroy_pool(void) {
 #endif
 }
 #endif
+
+// ==================== 完整重置（P1 · 方案 3：单一真相源） ====================
+// 头文件 static inline 的 kmm_v4_reset 与 std/memory 的导出版
+// （KMM_V4_RESET_IMPL）都转调本函数。静态池（freestanding）下同样可用：
+// trim_tail 为 no-op、thread_heap_invalidate 存在，其余逻辑与 hosted 一致。
+void kmm_v4_reset_full(void) {
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    KMM_ATOMIC_STORE(g_kmm_v4_offset, 0);
+    #ifdef KMM_V4_STATS
+    memset(&g_kmm_v4_stats, 0, sizeof(g_kmm_v4_stats));
+    #endif
+#else
+    g_kmm_v4_offset = 0;
+    #ifdef KMM_V4_STATS
+    memset(&g_kmm_v4_stats, 0, sizeof(g_kmm_v4_stats));
+    #endif
+#endif
+    // 清空 survivor slab 桶 + 大对象区
+    for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
+        memset(g_kmm_v4_survivor.buckets[i].bitmap, 0, sizeof(g_kmm_v4_survivor.buckets[i].bitmap));
+        g_kmm_v4_survivor.buckets[i].allocated = 0;
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+        __atomic_store_n(&g_kmm_v4_survivor.buckets[i].free_hint, 0, __ATOMIC_RELAXED);
+#else
+        g_kmm_v4_survivor.buckets[i].free_hint = 0;
+#endif
+    }
+#if KMM_THREAD_SAFETY_LEVEL >= 1
+    KMM_ATOMIC_STORE(g_kmm_v4_survivor.large_offset, 0);
+#else
+    g_kmm_v4_survivor.large_offset = 0;
+#endif
+    // 失效当前线程的 thread heap，强制下次分配时重新填充
+    kmm_v4_thread_heap_invalidate();
+    // 全局 offset 已归零，所有扩展段额度全部越过水位（全空）：归还整条
+    // 扩展段链，避免内存滞留到 destroy_pool。reset 约定单线程上下文
+    // （见头文件注释），无并发 refill 遍历段链，归还安全；后续分配从首段
+    // 重新开始，额度不足时 refill 会重新触发 grow。
+    kmm_v4_pool_trim_tail(0);
+}
 
 // KMM 分配器总占用（真实持有内存视图）：TLAB 段 + slab 桶已分配 + 页式对象。
 // 供 std.memory.kmm_v4_total_usage() 导出（Kaula 基准内存统计）。

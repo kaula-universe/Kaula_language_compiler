@@ -672,6 +672,10 @@
     "kmm_v4_reset": {
       "args": []
     },
+    "kmm_v4_idle_reclaim": {
+      "args": [],
+      "return": "size_t"
+    },
     "std_release": {
       "args": [
         "void()"

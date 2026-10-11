@@ -119,32 +119,50 @@ void kmm_v4_offset_restore(size_t saved) {
  * ============================================================================ */
 
 size_t kmm_v4_usage(void) {
+    // P1：与头文件 inline 版口径一致——主池 offset **加上** survivor 段用量。
+    // 旧实现只返回 offset，漏掉 slab 桶与大对象区，导致 P1 诊断时
+    // "峰值后是否回落"被低估（survivor 段的滞留完全不可见）。
 #if KMM_THREAD_SAFETY_LEVEL >= 1
-    return KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+    return KMM_ATOMIC_LOAD(g_kmm_v4_offset) + kmm_v4_survivor_usage();
 #else
-    return g_kmm_v4_offset;
+    return g_kmm_v4_offset + kmm_v4_survivor_usage();
 #endif
 }
 
 size_t kmm_v4_available(void) {
+    // P1：与头文件 inline 版口径一致（多段感知）。旧实现用
+    // KMM_V4_POOL_SIZE - offset，一旦 offset 越过首段容量（扩展段生效）
+    // 就会 size_t 下溢，返回一个天文数字的"可用量"。
 #if KMM_THREAD_SAFETY_LEVEL >= 1
-    return KMM_V4_POOL_SIZE - KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+    size_t _off = KMM_ATOMIC_LOAD(g_kmm_v4_offset);
+    size_t _primary_left = (_off < g_kmm_v4_pool_capacity) ? (g_kmm_v4_pool_capacity - _off) : 0;
+    size_t _extra_used = (_off > g_kmm_v4_pool_capacity) ? (_off - g_kmm_v4_pool_capacity) : 0;
+    size_t _extra_cap = KMM_ATOMIC_LOAD(g_kmm_v4_extra_capacity);
+    size_t _extra_left = (_extra_cap > _extra_used) ? (_extra_cap - _extra_used) : 0;
+    return _primary_left + _extra_left + kmm_v4_survivor_available();
 #else
-    return KMM_V4_POOL_SIZE - g_kmm_v4_offset;
+    size_t _primary_left = (g_kmm_v4_offset < g_kmm_v4_pool_capacity) ? (g_kmm_v4_pool_capacity - g_kmm_v4_offset) : 0;
+    size_t _extra_used = (g_kmm_v4_offset > g_kmm_v4_pool_capacity) ? (g_kmm_v4_offset - g_kmm_v4_pool_capacity) : 0;
+    size_t _extra_left = (g_kmm_v4_extra_capacity > _extra_used) ? (g_kmm_v4_extra_capacity - _extra_used) : 0;
+    return _primary_left + _extra_left + kmm_v4_survivor_available();
 #endif
 }
 
 size_t kmm_v4_capacity(void) {
-    return KMM_V4_POOL_SIZE;
+    // 多段扩容后真实容量 = 首段 + 已安装扩展段；宏 KMM_V4_POOL_SIZE 只是首段。
+    return g_kmm_v4_pool_capacity + g_kmm_v4_extra_capacity;
 }
 
 void kmm_v4_reset(void) {
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    KMM_ATOMIC_STORE(g_kmm_v4_offset, 0);
-#else
-    g_kmm_v4_offset = 0;
-#endif
+    // P1 · 方案 3：转调单一真相源 kmm_v4_reset_full()，补齐原先漏掉的
+    // survivor 段清空 / thread heap 失效 / 扩展段 trim_tail。旧实现只写
+    // offset=0，用户显式调用后扩展段与 survivor 仍滞留 → RSS 不回落。
+    kmm_v4_reset_full();
 }
+
+// 注意：kmm_v4_idle_reclaim 的实现在 src/kmm_scoped_allocator_v4.c 中
+// （无 KMM_V4_*_IMPL 宏，热路径零改动）。此处只经 memory.h 声明导出给
+// Kaula 代码，不可再定义同名函数——会导致 multiple definition 或自递归。
 
 /* ============================================================================
  * 与 std_malloc 的对比 API

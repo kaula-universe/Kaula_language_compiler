@@ -699,6 +699,39 @@ extern size_t g_kmm_v4_alloc_count;
 extern uint8_t* kmm_v4_thread_heap_refill(size_t min_needed);
 extern void kmm_v4_thread_heap_invalidate(void);
 
+// 完整重置（P1 削峰平谷 · 方案 3）：主池 offset 归零 + survivor 段清空 +
+// thread heap 失效 + 扩展段 trim_tail。头文件 inline 版 kmm_v4_reset 与
+// std/memory 的导出版（KMM_V4_RESET_IMPL）**共用这一份实现**，避免两份
+// 语义漂移——历史上 memory.c 的导出版只写了 offset=0，导致用户调用
+// std.memory.kmm_v4_reset() 后扩展段与 survivor 段仍滞留，RSS 不回落。
+// 本声明不受 KMM_V4_*_IMPL / KMM_V4_EXTERNAL_DECLS 宏约束，恒定可用。
+extern void kmm_v4_reset_full(void);
+
+// ---- P1 削峰平谷：冷块回收（方案 1 / 4 / 6） ----
+// 稳态热池预算：idle 回收后**保留**这么多字节的池化块（LIFO 栈顶 = 最近
+// 释放 = 最可能复用）。保留热块 ⇒ 峰期"免 mmap 复用"的快路径完全不变，
+// 这是本方案不损失性能的关键；清掉的只是长期无人复用的冷块。
+// 设为 0 表示 idle 时清空整个池（RSS 最省，但下一轮峰值要重新 mmap）。
+#ifndef KMM_V4_PAGED_POOL_STEADY
+    #define KMM_V4_PAGED_POOL_STEADY (4ull * 1024 * 1024)  // 默认 4MB
+#endif
+
+// 迟滞计数：需连续这么多次 idle 调用都观察到"池量超稳态预算"才真正回收。
+// 防止"刚清完立刻又要回来"的 mmap 抖动（那比不清更慢）。1 = 不迟滞。
+#ifndef KMM_V4_IDLE_RECLAIM_STREAK
+    #define KMM_V4_IDLE_RECLAIM_STREAK 2
+#endif
+
+// 页式池冷块清瘦：保留 keep_bytes 字节的最近释放块，其余 free 归还 glibc。
+// 并发安全（Treiber 栈 exchange 摘链），返回归还字节数。
+extern size_t kmm_v4_paged_pool_drain(size_t keep_bytes);
+
+// idle 回收钩子：调用方在空闲时调用（async idle worker / 请求间隙 / 显式
+// 维护点）。做两件事——清页式池冷块（把 MADV_FREE 的惰性标记换成真归还，
+// RSS 立降）+ 归还全空扩展段。热路径零改动，故无性能损失。
+// 返回本次归还字节数，0 表示因迟滞未动作或无内存可回收。
+extern size_t kmm_v4_idle_reclaim(void);
+
 // ==================== Survivor 段（方案 A：slab 分配器 + per-object free） ====================
 // 修复设计层面问题：survivor 段原为全局池的 bump 子区域，单调增长无回收。
 // 方案 A：slab 分配器，按 size class 分桶 + bitmap，支持 per-object free。
@@ -1837,39 +1870,9 @@ extern kmm_context_t g_kmm_ctx;
 // 修复 #5：reset 只在单线程上下文调用，重置全局 offset + 失效所有 thread heap
 // 方案 A：同时重置 survivor 段（清空所有 slab 桶 bitmap + 大对象区 offset）
 static inline void kmm_v4_reset(void) {
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    KMM_ATOMIC_STORE(g_kmm_v4_offset, 0);
-    #ifdef KMM_V4_STATS
-    memset(&g_kmm_v4_stats, 0, sizeof(g_kmm_v4_stats));
-    #endif
-#else
-    g_kmm_v4_offset = 0;
-    #ifdef KMM_V4_STATS
-    memset(&g_kmm_v4_stats, 0, sizeof(g_kmm_v4_stats));
-    #endif
-#endif
-    // 方案 A：清空 survivor slab 桶 + 大对象区
-    for (int i = 0; i < KMM_V4_SLAB_BUCKETS; i++) {
-        memset(g_kmm_v4_survivor.buckets[i].bitmap, 0, sizeof(g_kmm_v4_survivor.buckets[i].bitmap));
-        g_kmm_v4_survivor.buckets[i].allocated = 0;
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-        __atomic_store_n(&g_kmm_v4_survivor.buckets[i].free_hint, 0, __ATOMIC_RELAXED);
-#else
-        g_kmm_v4_survivor.buckets[i].free_hint = 0;
-#endif
-    }
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-    KMM_ATOMIC_STORE(g_kmm_v4_survivor.large_offset, 0);
-#else
-    g_kmm_v4_survivor.large_offset = 0;
-#endif
-    // 失效当前线程的 thread heap，强制下次分配时重新填充
-    kmm_v4_thread_heap_invalidate();
-    // Task #25：全局 offset 已归零，所有扩展段额度全部越过水位（全空）：
-    // 归还整条扩展段链，避免内存滞留到 destroy_pool。reset 约定单线程
-    // 上下文（见上方注释），无并发 refill 遍历段链，归还安全；后续分配
-    // 从首段重新开始，额度不足时 refill 会重新触发 grow。
-    kmm_v4_pool_trim_tail(0);
+    // 行为与下方 .c 中的 kmm_v4_reset_full 完全一致（单一真相源）。
+    // reset 不在热路径，多一次非内联调用无可测量影响。
+    kmm_v4_reset_full();
 }
 #endif
 
