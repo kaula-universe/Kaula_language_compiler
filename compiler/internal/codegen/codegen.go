@@ -303,6 +303,65 @@ type CodeGenerator struct {
 	// 因此形参**不是**"函数局部"——用于区分内部 promote 与向外 promote。
 	paramNames map[string]bool
 
+	// safeLocalContainers: 当前函数的「安全局部容器」集合（方案 A'）。
+	//
+	// 安全局部容器 = 在本函数内分配的局部变量，且**从不逃逸**：
+	//   - 不作为 return 值出现；
+	//   - 不作为调用实参出现；
+	//   - 不作为赋值右值出现（g = cur / other.field = cur）；
+	//   - 不作为 yield 值出现。
+	//
+	// 对这类容器，`cur.next = nd` 这类**写穿**不 promote 源，且该写穿所在的
+	// 循环体放弃 mark_restore（循环级回卷）——对象留在 bump 区连续排布，
+	// 函数出口 scope_pop 一锅端回收。这同时消除 survivor 段单调泄漏（写穿不再
+	// 每轮 promote 一份副本）与链损坏（容器/节点不再被 bump 复用覆盖）。
+	//
+	// 安全性：集合外的容器一律走旧路径（promote + 回卷，靠泄漏换正确性），
+	// 所以判错的最坏后果只是"该回收的没回收"，不会引入 use-after-free。
+	// 逐函数重建（ResetFunctionLocalState），与 paramNames 同生命周期。
+	safeLocalContainers map[string]bool
+
+	// suppressLoopRewind: 当前正在生成的循环体内，是否出现过「写穿安全局部容器
+	// 而放弃 promote」的点（方案 A'）。true 表示该循环必须放弃 mark_restore ——
+	// 否则回卷后的复用分配会覆盖刚写穿的链节点。
+	// 由 generateAssignEscapeStatement 打点，generateWhileStatement 消费；
+	// 处理完一个循环后由调用方 ResetSuppressLoopRewind 清除。
+	suppressLoopRewind bool
+
+	// writtenThroughContainers: 当前函数内被**写穿**过的「安全局部容器」名集合
+	// （obj.field = p / arr[i] = p 的目标容器，方案 A'）。
+	//
+	// 用途：区分「写穿 + 游标推进」与「纯游标推进」两种形态。
+	//   - 纯游标推进（keep = p，无写穿）→ 走旧路径（promote + 回卷），
+	//     这是 c983678 已修好的形态，必须保持；
+	//   - 写穿 + 游标推进（cur.next = nd; cur = nd）→ 游标推进也**不 promote**，
+	//     整条链留在 bump 区（方案 A' 的核心）。
+	// 由预扫描（ScanSafeLocalContainers 的伴生输出）在函数入口一次性填好。
+	writtenThroughContainers map[string]bool
+
+	// chainLinkedVars: 被**写穿进安全局部容器**的源对象名集合（方案 A'，`cur.next = nd` 里的 nd）。
+	//
+	// 这些对象已经挂在链上（由容器持有），游标变量随后不再引用它们；
+	// liveness 分析若按"游标的最后使用点"判定，会误以为对象已死而发射 early free
+	// → 直接 use-after-free。故 generateEarlyFreeForStmtIndex 必须豁免它们。
+	chainLinkedVars map[string]bool
+
+	// chainEscapingVars: 「写穿容器的链首已随返回值离开函数」的容器名集合（方案 A'）。
+	//
+	// 典型 `i64 head = as<i64>(cur); ...; return head`：head 是地址值、与 cur
+	// 之间没有可识别的指针别名对，逃逸传播不会把 cur 标为 assign-escaped；
+	// 但 cur 指向的正是链首节点。此时若照常对 cur 发射 early free，释放的就是
+	// 链首节点 → 下一轮分配回收该槽位 → 链首被覆写（n 大时才暴露）。
+	// 与 chainLinkedVars 分工：那个管"挂进去的 nd"，这个管"容器 cur"。
+	chainEscapingVars map[string]bool
+
+	// escapedVars: 当前函数内逃逸过的变量名集合（含别名闭包传播）。
+	//
+	// 用途：写穿 promote 的外向/内部分类必须看**容器是否逃逸**，
+	// 而不是只看容器是否函数局部（`Node* head = cur; return head` 中
+	// cur 是函数局部但已通过别名逃逸）。见 markCrossScopePromote。
+	escapedVars map[string]bool
+
 	// 结构化所有权基础层扩展（从 SOR 下移的能力 + 多分配器 origin 追踪）：
 	// externFuncNames: 程序中声明的 extern 函数名集合
 	// externOriginVars: 初始值来自 extern 函数返回的变量集合（向后兼容）
@@ -1429,7 +1488,12 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		declScopeDepth:       make(map[string]int),
 		assignEscapedVars:    make(map[string]bool),
 		promoteHolders:       make(map[string]bool),
-		paramNames:           make(map[string]bool),
+		paramNames:               make(map[string]bool),
+		safeLocalContainers:      make(map[string]bool),
+		writtenThroughContainers: make(map[string]bool),
+		chainLinkedVars:          make(map[string]bool),
+		chainEscapingVars:        make(map[string]bool),
+		escapedVars:              make(map[string]bool),
 		externFuncNames:      make(map[string]bool),
 		externOriginVars:     make(map[string]bool),
 		varOrigins:           make(map[string]string),
@@ -2672,6 +2736,129 @@ func (cg *CodeGenerator) IsPromoteHolder(name string) bool {
 func (cg *CodeGenerator) ResetFunctionLocalState() {
 	cg.paramNames = make(map[string]bool)
 	cg.promoteHolders = make(map[string]bool)
+	cg.safeLocalContainers = make(map[string]bool)
+	cg.writtenThroughContainers = make(map[string]bool)
+	cg.chainLinkedVars = make(map[string]bool)
+	cg.chainEscapingVars = make(map[string]bool)
+	cg.escapedVars = make(map[string]bool)
+}
+
+// SetSafeLocalContainers 以预扫描结果替换当前函数的「安全局部容器」集合（方案 A'）。
+// 由 GenerateFunctionStatement 在生成函数体之前调用（此时形参尚未登记，
+// 集合来自纯词法 AST 遍历，与符号表无关）。
+func (cg *CodeGenerator) SetSafeLocalContainers(names map[string]bool) {
+	if names == nil {
+		cg.safeLocalContainers = make(map[string]bool)
+		return
+	}
+	cg.safeLocalContainers = names
+}
+
+// SetWrittenThroughContainers 记录当前函数内被写穿过的「安全局部容器」名集合。
+// 与 SetSafeLocalContainers 一同由函数入口的预扫描结果填好。
+func (cg *CodeGenerator) SetWrittenThroughContainers(names map[string]bool) {
+	if names == nil {
+		cg.writtenThroughContainers = make(map[string]bool)
+		return
+	}
+	cg.writtenThroughContainers = names
+}
+
+// IsSafeLocalContainer 报告 name 是否为「安全局部容器」（方案 A'）。
+// 只有集合内的容器，其写穿点才允许"不 promote + 抑制循环回卷"。
+func (cg *CodeGenerator) IsSafeLocalContainer(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.safeLocalContainers[name]
+}
+
+// IsWrittenThroughContainer 报告 name 是否为「被写穿过的安全局部容器」（方案 A'）。
+// 游标推进（cur = nd）据此判断：只有该游标所在的链曾发生写穿，才随链一起
+// 放弃 promote，避免把"纯游标推进"（keep = p，已由 c983678 修好）误伤。
+func (cg *CodeGenerator) IsWrittenThroughContainer(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.writtenThroughContainers[name]
+}
+
+// SetChainLinkedVars 记录被写穿进安全局部容器的源对象名集合。
+func (cg *CodeGenerator) SetChainLinkedVars(names map[string]bool) {
+	if names == nil {
+		cg.chainLinkedVars = make(map[string]bool)
+		return
+	}
+	cg.chainLinkedVars = names
+}
+
+// IsChainLinked 报告 name 是否为「已挂在链上的对象」（方案 A'）。
+// 这类对象的 early free 必须豁免：对象由容器持有，游标不再引用并不代表它死了。
+func (cg *CodeGenerator) IsChainLinked(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.chainLinkedVars[name]
+}
+
+// SetChainEscapingVars 记录「写穿容器的链首被带出函数」的容器名集合。
+//
+// 与 ChainLinked 的区别：ChainLinked 说的是**挂进去的对象**（nd）不能提前释放；
+// ChainEscaping 说的是**容器本身**（cur）不能提前释放——因为 cur 指向的
+// 正是链首节点，而 `i64 head = as<i64>(cur); ...; return head` 把链首
+// 交了出去。见 SafeContainerScan.ChainEscaping 的注释。
+func (cg *CodeGenerator) SetChainEscapingVars(names map[string]bool) {
+	if names == nil {
+		cg.chainEscapingVars = make(map[string]bool)
+		return
+	}
+	cg.chainEscapingVars = names
+}
+
+// IsChainEscaping 报告 name 是否为「链首已随返回值离开函数」的写穿容器。
+//
+// 这类容器的 early free 必须豁免：释放它就等于释放链首节点，
+// 调用方/后续读取会踩空（n 小时 slab 未耗尽所以不暴露，n 大时必崩）。
+func (cg *CodeGenerator) IsChainEscaping(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.chainEscapingVars[name]
+}
+
+// SetEscapedVars 记录当前函数内逃逸过的变量名集合（含别名闭包传播）。
+func (cg *CodeGenerator) SetEscapedVars(names map[string]bool) {
+	if names == nil {
+		cg.escapedVars = make(map[string]bool)
+		return
+	}
+	cg.escapedVars = names
+}
+
+// IsEscapedVar 报告 name 是否在本函数内逃逸（return / 实参 / 别名传播等）。
+// 写穿 promote 的外向/内部分类用它：容器逃逸 → 副本必须活过函数返回。
+func (cg *CodeGenerator) IsEscapedVar(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.escapedVars[name]
+}
+
+// MarkSuppressLoopRewind 打点：当前循环体内出现了「写穿安全局部容器」的点，
+// 该循环必须放弃 mark_restore（方案 A'）。
+func (cg *CodeGenerator) MarkSuppressLoopRewind() {
+	cg.suppressLoopRewind = true
+}
+
+// ResetSuppressLoopRewind 清除打点。进入一个循环体前调用，避免上一个循环的
+// 打点污染下一个循环。
+func (cg *CodeGenerator) ResetSuppressLoopRewind() {
+	cg.suppressLoopRewind = false
+}
+
+// hasSuppressLoopRewind 查询当前循环体的打点状态。
+func (cg *CodeGenerator) hasSuppressLoopRewind() bool {
+	return cg.suppressLoopRewind
 }
 
 // GetSymbol 获取一个符号

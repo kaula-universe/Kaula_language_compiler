@@ -461,6 +461,16 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 否则上一个函数的形参名会残留，导致本函数的同名局部变量被误判为"非函数局部"
 	// （内部 promote 被错判为向外 → 白白放弃 survivor_rewind → survivor 段泄漏）。
 	fg.codegen.ResetFunctionLocalState()
+	// 方案 A'：函数级预扫描「安全局部容器」集合。
+	// 纯词法 AST 遍历，必须在生成函数体之前完成——stmtgen 在处理写穿
+	// （obj.field = p / arr[i] = p）与循环体 mark_restore 时会查询该集合。
+	// 详见 safe_container_scan.go 与 docs/perf/P0-survivor-leak.md §6。
+	scan := ScanSafeLocalContainers(stmt.Body, stmt.Params)
+	fg.codegen.SetSafeLocalContainers(scan.Safe)
+	fg.codegen.SetWrittenThroughContainers(scan.WrittenThrough)
+	fg.codegen.SetChainLinkedVars(scan.ChainLinked)
+	fg.codegen.SetChainEscapingVars(scan.ChainEscaping)
+	fg.codegen.SetEscapedVars(scan.Escaped)
 	// 进入时必须重置，避免嵌套函数继承外层模式
 	fg.codegen.SetKMMUseMark(false)
 

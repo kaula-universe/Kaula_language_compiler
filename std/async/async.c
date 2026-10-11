@@ -51,11 +51,25 @@ LightAsyncLoop* light_async_loop_create() {
 }
 
 // 閿€姣佽交閲忕骇寮傛浜嬩欢寰幆
+//
+// 幂等：销毁后把 thread_pool 置空，第二次调用直接返回。
+//
+// 不加这层保护时，重复 destroy 会把同一个 thread_pool 交给
+// thread_pool_destroy 两次：该函数无"已销毁"标记，第二次直接解引用已被
+// 回收的 impl（impl->running = 0 起手），运行期 SIGSEGV。
+// test/stdlib_async_safety.kl 里有明确标注"重复销毁 (危险)"的用例，
+// 它在 4a19705..c983678 全区间稳定 exit 139——即该崩溃长期存在于基线，
+// 不是某一轮引入的回归，只是一直没人跑这条用例。
+//
+// 只置空 thread_pool 字段、不释放 loop 本身：loop 由 KMM 管理（kmm_v4_malloc），
+// 其回收归作用域，调用方不需要也不应该在 destroy 里再 free 一次。
+// 这也让"destroy 后再次 destroy"与"destroy null"两个边界都安全。
 void light_async_loop_destroy(LightAsyncLoop* loop) {
-    if (loop && loop->thread_pool) {
+    if (!loop) return;
+    if (loop->thread_pool) {
         thread_pool_destroy(loop->thread_pool);
+        loop->thread_pool = NULL;  // 幂等护栏：防止重复销毁同一线程池
     }
-    (void)loop;
 }
 
 // 娣诲姞寮傛浠诲姟鍒板惊鐜紙鏃犻攣Michael-Scott闃熷垪锛?

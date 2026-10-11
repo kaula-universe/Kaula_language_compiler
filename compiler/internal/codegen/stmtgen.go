@@ -1706,6 +1706,11 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	// 缺口6优化：快照 promotedVars，用于判断循环体内是否有 promote
 	whilePromotedSnapshot := sg.codegen.SnapshotPromotedVars()
 
+	// 方案 A'：本循环体的「写穿安全局部容器」打点从零开始，
+	// 避免上一个循环的打点污染（whilePromotedSnapshot 只跟踪变量级 promote，
+	// 看不到写穿目标，故用独立打点）。
+	sg.codegen.ResetSuppressLoopRewind()
+
 	// Phase 1+2 优化：区分 survivor 类型变量和 bump 分配
 	// - survivor 类型变量（指针/string/slice/map）需要完整 survivor checkpoint/rewind
 	// - bump 分配（kmm_v4_malloc等）只需 offset_save/restore 轻量回收
@@ -1757,23 +1762,43 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	// 缺口6优化：计算循环体内新增 promote 的变量
 	whilePromoted := sg.codegen.DiffPromotedVars(whilePromotedSnapshot)
 
+	// 方案 A'：循环体是否写穿了「安全局部容器」。
+	//
+	// 判定用 whilePromotedSnapshot 的时机不可靠（它只记录 promote 的**变量**，
+	// 不记录写穿目标），这里直接让 body 生成期打点：generateAssignEscapeStatement
+	// 在"因安全局部容器而放弃 promote"时调用 MarkSuppressLoopRewind()。
+	// 该打点是 per-scope 的，进入循环体前后分别 Reset/Mark。
+	suppressLoopRewind := sg.codegen.hasSuppressLoopRewind()
+
 	if useKMM && useOffset {
 		// survivor scope 外层包裹 + offset 内层回收：survivor 变量走 checkpoint/rewind，
 		// bump 分配走 offset_save/restore 轻量回收，避免每次迭代完整 survivor 开销
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + sg.codegen.KMMStart("")
-		code += sg.codegen.indentString() + "    kmm_v4_mark_t _loop_scope_start = kmm_v4_mark_save();\n"
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "    kmm_v4_mark_t _loop_scope_start = kmm_v4_mark_save();\n"
+		}
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "    kmm_v4_mark_restore(_loop_scope_start);\n"
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "    kmm_v4_mark_restore(_loop_scope_start);\n"
+		}
 		code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 		if len(whilePromoted) == 0 {
 			code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__while_surv_cp); /* survivor: scope reclaim */\n"
 		}
 	} else if useOffset {
 		// 纯 bump 分配：offset_save/restore 轻量回收，无 survivor checkpoint 开销
-		code += sg.codegen.indentString() + "kmm_v4_mark_t _loop_scope_start = kmm_v4_mark_save();\n"
+		//
+		// 方案 A'：若循环体写穿了安全局部容器，放弃循环级回卷 —— 对象必须留在
+		// bump 区连续排布（否则回卷后的复用分配会覆盖刚链好的节点），
+		// 由函数出口 scope_pop 统一回收。
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "kmm_v4_mark_t _loop_scope_start = kmm_v4_mark_save();\n"
+		}
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "kmm_v4_mark_restore(_loop_scope_start);\n"
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "kmm_v4_mark_restore(_loop_scope_start);\n"
+		}
 	} else if useKMM {
 		// 纯 survivor 类型：完整 survivor checkpoint/rewind
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __while_surv_cp = kmm_v4_survivor_checkpoint();\n"
@@ -2631,6 +2656,8 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 
 	sg.codegen.indent++
 	sg.codegen.EnterScope("forrange_body")
+	// 方案 A'：本循环体的「写穿安全局部容器」打点从零开始（同 while）。
+	sg.codegen.ResetSuppressLoopRewind()
 	if guardDepth >= 0 {
 		// 守卫：迭代变量从 Frame 恢复
 		code += sg.codegen.indentString()
@@ -2682,21 +2709,32 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 	}
 	sg.codegen.ExitScope()
 
+	// 方案 A'：循环体写穿了安全局部容器 → 放弃循环级回卷（同 while）。
+	suppressLoopRewind := sg.codegen.hasSuppressLoopRewind()
+
 	// 生成 scope 包裹代码
 	if useKMM && useOffset {
 		// survivor scope 外层 + offset 内层
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __for_surv_cp = kmm_v4_survivor_checkpoint();\n"
 		code += sg.codegen.indentString() + sg.codegen.KMMStart("")
-		code += sg.codegen.indentString() + "    kmm_v4_mark_t _for_scope_start = kmm_v4_mark_save();\n"
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "    kmm_v4_mark_t _for_scope_start = kmm_v4_mark_save();\n"
+		}
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "    kmm_v4_mark_restore(_for_scope_start);\n"
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "    kmm_v4_mark_restore(_for_scope_start);\n"
+		}
 		code += sg.codegen.indentString() + sg.codegen.KMMEnd()
 		code += sg.codegen.indentString() + "kmm_v4_survivor_rewind(__for_surv_cp); /* survivor: for-range scope reclaim */\n"
 	} else if useOffset {
 		// 纯 bump 分配：offset 轻量回收
-		code += sg.codegen.indentString() + "kmm_v4_mark_t _for_scope_start = kmm_v4_mark_save();\n"
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "kmm_v4_mark_t _for_scope_start = kmm_v4_mark_save();\n"
+		}
 		code += bodyCode.String()
-		code += sg.codegen.indentString() + "kmm_v4_mark_restore(_for_scope_start);\n"
+		if !suppressLoopRewind {
+			code += sg.codegen.indentString() + "kmm_v4_mark_restore(_for_scope_start);\n"
+		}
 	} else if useKMM {
 		// 纯 survivor 类型：完整 survivor checkpoint/rewind
 		code += sg.codegen.indentString() + "kmm_survivor_checkpoint_t __for_surv_cp = kmm_v4_survivor_checkpoint();\n"
@@ -3419,6 +3457,33 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 			freed[name] = true
 			continue
 		}
+		// 方案 A'（链首保活）：函数级预扫描判定该变量是**写穿容器的链首别名**时
+		// 不提前释放。
+		//
+		// 典型场景 `i64 head = as<i64>(cur); ...; return head`：head 是地址值、
+		// 与 cur 之间没有指针别名对，逃逸传播不会把 cur 标为 assign-escaped；
+		// 但 cur 此刻**正是链首所在节点**，liveness 在此处的最后使用点
+		// （`cur = nd` 之前的写穿）发射 survivor_free 就会释放链首，
+		// 下一轮分配回收该槽位 → 链首被覆写（n 大时才崩，n 小时 slab 未耗尽）。
+		//
+		// 注意：这里刻意只查 ChainEscaping（"链首被带出函数"这一精确判据），
+		// **不能**放宽到整个 escapedVars。escapedVars 是词法粗判的逃逸集合，
+		// 含大量"只是出现在 return/实参表达式里、但对象本身仍归本函数"的场景
+		// （如 `nodes` 是循环内作用域缓冲、只在 build/inorder 里被借用），
+		// 用它当闸门会误伤这些变量的正常提前释放 → 作用域缓冲不再回收，
+		// RSS 随轮数暴涨（alloc_bench [sor] 实测 9.9MB → 7GB 后被 OOM kill）。
+		if sg.codegen.IsChainEscaping(name) {
+			freed[name] = true
+			continue
+		}
+		// 方案 A'：已挂在链上的对象不提前释放。
+		// 对象经写穿（cur.next = nd）由容器持有，游标变量随后不再引用它；
+		// liveness 若按游标处的最后使用点判定就会把它当垃圾回收，
+		// 而它其实还在链上被读 → use-after-free。豁免之。
+		if sg.codegen.IsChainLinked(name) {
+			freed[name] = true
+			continue
+		}
 		// 多分配器 origin 追踪：extern 来源不释放，libc 用 free，kmm 用 survivor_free
 		origin := sg.codegen.GetVarOrigin(name)
 		if origin == OriginExtern {
@@ -3857,7 +3922,7 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 			return prefix + sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression) + ";\n"
 		}
 	}
-	srcIdent, okSrc := bin.Right.(*ast.Identifier)
+	srcIdent, okSrc := unwrapAssignSource(bin.Right)
 	if !okSrc {
 		return ""
 	}
@@ -3886,6 +3951,16 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		// 普通变量赋值：使用现有的跨作用域判断
 		dstName = dst.Name
 		containerName = dst.Name
+		// 方案 A'：游标推进（cur = nd）——若目标是被写穿过的安全局部容器，
+		// 则不 promote。理由见 docs/perf/P0-survivor-leak.md §6：
+		// 写穿（cur.next = nd）已让整条链落在 bump 区，游标推进若单独 promote，
+		// 就会把"链上每个节点"逐一搬到 survivor 段（泄漏），且链条存活方式不一致
+		// （容器在 bump 区、节点在 survivor 段）导致回卷后链断裂。
+		// 目标不在集合内（形参/全局/未写穿容器等）→ 保持旧行为。
+		if sg.codegen.IsWrittenThroughContainer(dst.Name) {
+			sg.codegen.MarkSuppressLoopRewind()
+			return ""
+		}
 		needsPromote = sg.needsAssignEscapePromote(srcIdent.Name, dst.Name)
 	case *ast.MemberAccessExpression:
 		// 存入结构体字段：obj.field = ptr
@@ -3897,6 +3972,17 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		// 例外：如果 obj 是当前作用域声明的局部变量（与源同层或更内层），且不是指针类型，可能不需要 promote
 		if objIdent, ok := dst.Object.(*ast.Identifier); ok {
 			containerName = objIdent.Name
+			// 方案 A'：写穿进「安全局部容器」时不 promote。
+			//
+			// 该容器从不逃逸，其对象在函数出口随 scope_pop 一锅端回收；
+			// 留在 bump 区比 promote 到 survivor 段更优——既避免每轮新增一份
+			// 幸存副本（survivor 段单调泄漏），也让整条链在同一 bump 段连续
+			// 排布、不被循环回卷后的复用分配覆盖（链损坏）。
+			// 对应的 mark_restore 抑制见 generateWhileStatement（A'3）。
+			if sg.codegen.IsSafeLocalContainer(objIdent.Name) {
+				sg.codegen.MarkSuppressLoopRewind()
+				return ""
+			}
 			if sg.codegen.IsVarDeclaredInCurrentScope(objIdent.Name) {
 				// obj 是当前作用域局部变量，检查其声明深度
 				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
@@ -3918,6 +4004,11 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 		// 例外：如果 arr 是当前作用域声明的局部变量且与源同层或更内层，可能不需要 promote
 		if arrIdent, ok := dst.Object.(*ast.Identifier); ok {
 			containerName = arrIdent.Name
+			// 方案 A'：同 MemberAccessExpression，写穿进安全局部容器不 promote。
+			if sg.codegen.IsSafeLocalContainer(arrIdent.Name) {
+				sg.codegen.MarkSuppressLoopRewind()
+				return ""
+			}
 			if sg.codegen.IsVarDeclaredInCurrentScope(arrIdent.Name) {
 				if srcDepth, srcOk := sg.codegen.declScopeDepth[srcIdent.Name]; srcOk {
 					if dstDepth, dstOk := sg.codegen.declScopeDepth[arrIdent.Name]; dstOk {
@@ -3978,7 +4069,7 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	// 这里若一律按向外处理，循环里每轮 promote 一份、出口又不回卷，
 	// survivor 段就单调增长（`keep = p` / `cur = nd` 这类游标写法即典型），
 	// 等价于内存泄漏。
-	sg.markCrossScopePromote(containerName)
+	sg.markCrossScopePromoteFor(containerName, dstName == "struct_field" || dstName == "array_element")
 	sg.codegen.MarkAssignEscaped(srcIdent.Name) // 抑制 src 的块尾 per-object free
 	sg.codegen.MarkPromoted(srcIdent.Name)      // reaching definition：防止 return 时重复 promote
 	if dstName != "" && dstName != "struct_field" && dstName != "array_element" {
@@ -3987,6 +4078,36 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	b.WriteString(sg.codegen.expressionGenerator.GenerateExpression(stmt.Expression))
 	b.WriteString(";\n")
 	return b.String()
+}
+
+// unwrapAssignSource 从赋值右值里取出"被赋值的源标识符"，穿透纯地址转换包装。
+//
+// 修正如 `cur.next = as<i64>(nd)` / `g = as<void*>(p)` / `x = (p)` 这类右值：
+// 它们本质上是"把 nd 这个对象挂出去"，但 AST 上是 TypeCastExpression /
+// ParenExpression 而非 Identifier。此前直接用 `bin.Right.(*ast.Identifier)`
+// 断言，这类写法一律断言失败 → 整个赋值逃逸路径提前 return →
+// **promote 从不发射**（静默缺陷：跨作用域场景下产生悬垂）。
+//
+// 只穿透**不改变对象身份**的包装：
+//   - as<T>(expr)：唯一允许的强转形式，运行时零开销（直接映射 C 的 ((T)(e))）；
+//   - (expr)：ParenExpression，字段名是 Inner。
+//
+// 不穿透成员访问 / 索引 / 调用——那些返回的是别的对象（或新对象），
+// 不是"本次赋值把源对象交出去"这一语义。
+func unwrapAssignSource(expr ast.Expression) (*ast.Identifier, bool) {
+	for expr != nil {
+		switch e := expr.(type) {
+		case *ast.Identifier:
+			return e, true
+		case *ast.ParenExpression:
+			expr = e.Inner
+		case *ast.TypeCastExpression:
+			expr = e.Expression
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 // canReleasePreviousSurvivorCopy 判断能否在挂新副本前释放目标持有的旧副本。
@@ -4032,7 +4153,7 @@ func (sg *StatementGenerator) canReleasePreviousSurvivorCopy(dstName, holder str
 
 // markCrossScopePromote 登记一次「跨作用域 promote」，并把它归类为内部或向外。
 //
-// 分类的唯一判据是：promote 出来的幸存副本的持有者 holder 是否留在本函数内。
+// 分类的判据是：promote 出来的幸存副本的持有者 holder 是否留在本函数内。
 //   - holder 是本函数体内声明的局部变量（且非形参）→ 内部 promote：
 //     函数返回时副本连同持有者一起成为垃圾，函数出口必须仍能 survivor_rewind
 //     回收它，故只置 funcEmitsInternalPromote（不抑制 rewind）。
@@ -4043,7 +4164,27 @@ func (sg *StatementGenerator) canReleasePreviousSurvivorCopy(dstName, holder str
 // 内部 promote 若不区分出来、一律按向外处理，循环体内每轮 promote 一份而出口
 // 又不回卷，survivor 段就会单调增长——`keep = p`、`cur = nd` 这类游标写法
 // 会退化成事实上的内存泄漏。
+//
+// 写穿场景的补充判据（containerName 是容器变量、dstName 是 "struct_field"/
+// "array_element"）：副本存活于**容器的字段/元素**里，其生命周期取决于
+// **容器**是否逃逸，而不是容器是否为函数局部。`Node* cur = ...; Node* head =
+// cur; ...; return as<i64>(head)` 里 cur 是函数局部、但整条链随 head 逃逸——
+// 此时若按"局部容器 → 内部 promote"处理，函数出口的 survivor_rewind 会把
+// return 出去的链一并回收，调用方拿到悬垂指针（读链即 SIGSEGV）。
+// 故写穿时必须先查容器的逃逸性：容器逃逸 → 按向外 promote。
 func (sg *StatementGenerator) markCrossScopePromote(holder string) {
+	sg.markCrossScopePromoteFor(holder, false)
+}
+
+// markCrossScopePromoteFor 是 markCrossScopePromote 的完整形态。
+// writeThrough=true 表示 holder 是**写穿容器**（副本存入其字段/元素），
+// 此时额外查 holder 的逃逸性来决定外向/内部。
+func (sg *StatementGenerator) markCrossScopePromoteFor(holder string, writeThrough bool) {
+	// 写穿且容器逃逸 → 副本必须活过函数返回（向外 promote）。
+	if writeThrough && sg.codegen.IsEscapedVar(holder) {
+		sg.codegen.funcEmitsPromote = true
+		return
+	}
 	if sg.codegen.IsFunctionLocalVar(holder) {
 		sg.codegen.funcEmitsInternalPromote = true
 		// 持有者是局部变量：它现在指向幸存段副本。若后续 return 该变量，
@@ -4555,6 +4696,17 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 				b.WriteString("/* structural: skip survivor_free on return for ")
 				b.WriteString(name)
 				b.WriteString(" (assign-escaped, ownership moved out) */\n")
+				continue
+			}
+			// 方案 A'：逃逸变量跳过（其对象被 return/实参/别名交给了函数外，
+			// 或与这样的对象互为别名）。典型：`Node* head = cur; ...; return head`
+			// 里 cur 本身没被 promote 标记，但它与 head 指向同一对象；
+			// 在 return 处释放 cur 会把 return 出去的链尾一并释放 → 悬垂。
+			if sg.codegen.IsEscapedVar(name) {
+				b.WriteString(indent)
+				b.WriteString("/* structural: skip survivor_free on return for ")
+				b.WriteString(name)
+				b.WriteString(" (escaped / aliased with an outgoing object) */\n")
 				continue
 			}
 			// 已提升到幸存段的变量：所有权已移交给被调方/全局，出口不得回收

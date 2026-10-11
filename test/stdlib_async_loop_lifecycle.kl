@@ -1,0 +1,63 @@
+# async_loop_lifecycle.kl —— 事件循环生命周期边界（重复 destroy / 用法序）
+#
+# 背景：light_async_loop_destroy 原先不幂等——销毁后 thread_pool 字段未置空，
+# 第二次调用把同一个池交给 thread_pool_destroy，后者无"已销毁"标记，
+# 直接解引用已回收的 impl → SIGSEGV。该崩溃在 4a19705..c983678 全区间稳定
+# 复现（exit 139），test/stdlib_async_safety.kl 里有对应用例但一直被忽略。
+#
+# 本用例把这条边界单独固化，作为后续改动（P0/P1 涉及 KMM 回收路径）的护栏：
+# destroy 必须幂等，且与 null 入参、创建-销毁-再创建交替使用都安全。
+
+import std.io
+import std.async
+import std.concurrent
+
+fn noop(arg: void*) {
+}
+
+fn check(bool cond, string label) {
+    if !cond {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    # 1. 重复销毁同一循环（原崩溃点）
+    LightAsyncLoop* a = std.async.light_async_loop_create()
+    check(a != null, "create a")
+    std.async.light_async_loop_destroy(a)
+    std.async.light_async_loop_destroy(a)
+    std.async.light_async_loop_destroy(a)
+
+    # 2. 创建-销毁交替，确认幂等护栏没有误伤正常路径
+    i64 i = 0
+    while i < 8 {
+        LightAsyncLoop* b = std.async.light_async_loop_create()
+        check(b != null, "create in loop")
+        std.async.light_async_loop_destroy(b)
+        i += 1
+    }
+
+    # 3. 队列内容 + 销毁（任务计数与回收路径叠加）
+    LightAsyncLoop* c = std.async.light_async_loop_create()
+    i64 j = 0
+    while j < 64 {
+        std.async.light_async_loop_add(c, noop, null)
+        j += 1
+    }
+    i32 sz = std.async.light_async_loop_size(c)
+    check(sz == 64, "queued 64 tasks")
+    std.async.light_async_loop_destroy(c)
+    std.async.light_async_loop_destroy(c)
+
+    # 4. start/stop 后再 destroy（两次）
+    LightAsyncLoop* d = std.async.light_async_loop_create()
+    std.async.light_async_loop_start(d)
+    check(std.async.light_async_loop_is_running(d), "running after start")
+    std.async.light_async_loop_stop(d)
+    check(!std.async.light_async_loop_is_running(d), "not running after stop")
+    std.async.light_async_loop_destroy(d)
+    std.async.light_async_loop_destroy(d)
+
+    std.io.println("PASS async_loop_lifecycle")
+}

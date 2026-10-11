@@ -1,0 +1,108 @@
+# leak_writethrough.kl —— P0 回归：写穿 + 游标推进的 survivor 段泄漏（**安全局部容器**形态）
+#
+# 场景（用户清单里的 s1_list 等价形态）：
+#   while i < n {
+#       Node* nd = alloc(16)
+#       cur.next = nd      # 写穿：只改容器的字段
+#       cur = nd           # 游标推进：普通赋值
+#   }
+# 基线（c983678）下，游标推进被当作跨作用域逃逸 → 每轮 promote 一份 survivor
+# 副本；而该 promote 归为「内部 promote」不抑制函数出口 rewind，动态池下
+# rewind 只 flush TLS 垃圾箱、不回收从未 free 的存活槽位 → 副本数随迭代次数
+# 线性增长，跨调用累积（静默泄漏）。
+#
+# 本用例是方案 A' 的**正向**判据：容器 cur **确实**不逃逸（只在本函数内使用、
+# 不 return、不作实参、不被闭包捕获）→ 落入「安全局部容器」集合 →
+# 写穿不 promote、循环体不做 mark_restore、对象留在 bump 区由 scope_pop 统一回收。
+# 此时水位必须与轮数无关。
+#
+# 与 leak_container_escape.kl 的分工：
+#   本文件 = 安全容器（不逃逸）→ 要求 growth == 0；
+#   那个文件 = 逃逸容器（链首随 return 出去）→ 只要求回读正确、允许水位上涨
+#   （旧路径「用泄漏换正确性」的既定代价）。
+
+import std.io
+import std.memory
+
+struct Node {
+    value: i64
+    next: i64
+}
+
+# 构建 n 节点链并**在函数内消费**：容器 cur 随函数返回死亡（不逃逸）。
+# 返回求和结果（标量），而不是链首地址——这才是"安全局部容器"的定义形态。
+fn build_and_sum(i64 n) i64 {
+    Node* cur = std.memory.kmm_v4_alloc(16)
+    cur.value = -1
+    cur.next = -1
+    i64 head = as<i64>(cur)
+    i64 i = 0
+    while i < n {
+        Node* nd = std.memory.kmm_v4_alloc(16)
+        nd.value = i
+        nd.next = -1
+        cur.next = as<i64>(nd)
+        cur = nd
+        i += 1
+    }
+    # 就地回读求和：head 只在本函数内使用，绝不作为返回值/实参流出。
+    i64 s = 0
+    i64 p = head
+    i64 steps = 0
+    while p != -1 && steps <= n + 4 {
+        Node* np = as<Node*>(p)
+        s += np.value
+        p = np.next
+        steps += 1
+    }
+    if steps > n + 4 {
+        return -999999
+    }
+    return s
+}
+
+fn check(bool cond, string label) {
+    if !cond {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    i64 n = 2000
+    i64 rounds = 50
+    # 期望值 = 头节点 value(-1) + 每轮节点 value(0..n-1)。
+    i64 expect = -1
+    i64 i = 0
+    while i < n {
+        expect += i
+        i += 1
+    }
+
+    # 第一轮：回读校验（正确性，兼抓悬垂/成环）
+    i64 s0 = build_and_sum(n)
+    check(s0 == expect, "writethrough chain content")
+
+    # 单轮后的水位
+    i64 after1 = std.memory.kmm_v4_total_usage()
+
+    # 继续跑满 rounds 轮：容器随每轮函数返回死亡，水位不得累积
+    i64 r = 1
+    while r < rounds {
+        i64 h = build_and_sum(n)
+        check(h == expect, "writethrough round content")
+        r += 1
+    }
+    i64 afterN = std.memory.kmm_v4_total_usage()
+
+    # 关键断言：轮数从 1 涨到 rounds，水位增幅必须远小于每轮 2000 个副本的
+    # 累积量（2000*16*49 ≈ 1.5MB）。阈值取 64KB：正常收敛时应为 0。
+    i64 growth = afterN - after1
+    std.io.println("[leak_writethrough] after1=", after1, " afterN=", afterN, " growth=", growth)
+    check(growth < 65536, "writethrough survivor watermark does not grow with rounds")
+
+    # 再跑一轮并回读，确认没有因回收而悬垂
+    i64 sL = build_and_sum(n)
+    check(sL == expect, "writethrough chain content after many rounds")
+
+    std.io.println("PASS leak_writethrough")
+}
