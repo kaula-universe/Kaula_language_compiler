@@ -338,6 +338,15 @@ struct KaulaTask {
     uint32_t            flags;
 
     /*
+     * KMM 作用域栈兜底基线（见 kaula_conc_worker.c 的 guard 注释）。
+     * 记录本任务首次执行前 TLS 作用域栈的深度；每次 DONE/SUSPEND/BLOCKED
+     * 出口把深度拉回该值，防止 `conc fn` 内提前 return 漏弹栈而累积
+     * 撑爆定长栈（KMM_V4_MAX_SCOPE_DEPTH）。
+     * UINT32_MAX 表示「尚未记录」。深度远小于 1024，窄化安全。
+     */
+    uint32_t            kmm_entry_depth;
+
+    /*
      * 内联结果槽：kaula_handle_complete() 用它存标量结果，
      * 避免为每个已完成句柄额外分配一块结果内存。
      * result 原子指针指向 &inline_result，await_into 拷走。

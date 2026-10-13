@@ -682,6 +682,45 @@ extern size_t g_kmm_v4_offset;
 // 作用域栈（线程本地，支持嵌套作用域）
 extern KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack;
 
+/*
+ * ---- 作用域栈深度的读写（runtime 兜底用） ----
+ *
+ * 用途：把「提前 return 漏弹栈」这类 codegen 疏漏的正确性从
+ * 「生成器处处小心」收敛到「runtime 单点兜底」。
+ *
+ * 并发内核在执行一个 task 之前记录当前 TLS 深度，task 完成/挂起时
+ * 校验深度是否回到记录值；不一致说明该 task 的路径上有 push/pop 失配，
+ * 由 runtime 强制回卷，避免污染后续 task 甚至撑爆定长栈（默认 1024，
+ * 溢出即 abort）。
+ *
+ * 语义：仅操作本线程 TLS，与 kmm_v4_scope_push/pop 同域，无锁。
+ * 回卷只减不增（kmm_v4_scope_depth_restore 在 depth 更小时才裁剪），
+ * 因此对「本来配对正确」的路径是零开销空操作。
+ */
+static inline size_t kmm_v4_scope_depth_get(void) {
+    return g_kmm_v4_scope_stack.depth;
+}
+
+/*
+ * 把本线程作用域栈深度恢复到 `depth`。
+ *
+ * 只在当前深度**更深**时裁剪（反向恢复不做事：那意味着 caller 记错了，
+ * 凭空加深度会制造假的合法帧）。返回被裁剪的层数（0 表示本来就配平）。
+ *
+ * 不触碰 g_kmm_v4_scope_owner：那个符号是各 TU 各自的 static TLS（仅用于
+ * 溢出诊断），这里够不着也不该够着 —— 回卷后 owner 可能指得过深，但它
+ * 只在 abort 诊断路径读，不影响正确性。
+ */
+static inline size_t kmm_v4_scope_depth_restore(size_t depth) {
+    kmm_scope_stack_t* stack = &g_kmm_v4_scope_stack;
+    if (stack->depth <= depth) {
+        return 0;
+    }
+    size_t trimmed = stack->depth - depth;
+    stack->depth = depth;
+    return trimmed;
+}
+
 // Per-thread heap（线程本地）
 extern KMM_TLS kmm_thread_heap_t g_kmm_v4_thread_heap;
 

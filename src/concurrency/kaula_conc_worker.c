@@ -17,6 +17,11 @@
 #include "kaula_conc_io_backend.h"
 #include "kaula_conc_block_lane.h"
 #include "kaula_conc_metrics.h"
+/*
+ * KMM 作用域栈兜底：需要 kmm_v4_scope_depth_get/restore（见下方 guard）。
+ * worker 原本不直接依赖分配器头，为单点兜底显式引入。
+ */
+#include "../kmm_scoped_allocator_v4.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -267,6 +272,49 @@ static void kaula_worker_check_local_timers(KaulaWorker* w) {
     w->local_timers_min_deadline = new_min; /* keep 空时为 UINT64_MAX */
     /* keep 空 → 不再为定时器而睡，清镜像（notify_shard 可重新唤醒本 Worker） */
     atomic_store_explicit(&w->has_local_timer, keep != NULL, memory_order_release);
+}
+
+/* ========== KMM 作用域栈兜底 ========== */
+
+/*
+ * 一个 task 的两次 resume 之间，TLS 作用域栈深度必须回到任务进入时的值：
+ *
+ *   - 正常路径：resume 内 push/pop 配对，返回时深度 == 进入深度，本函数
+ *     是零开销空操作（restore 只在更深时裁剪，相等直接返回 0）。
+ *   - 缺陷路径：`conc fn` 里从块级 KMM 区间（KMM_V4_SCOPE_START）内部
+ *     提前 return，return 绕过了 KMM_V4_SCOPE_END 的弹栈。每执行一次就在
+ *     本线程 TLS 定长栈上永久泄漏一帧，累计到 KMM_V4_MAX_SCOPE_DEPTH
+ *     （默认 1024）后 abort —— 连接关闭潮汐下必现。
+ *
+ * 真修复在 codegen 侧（generateConcReturn 已补齐 DONE 出口的弹栈）。
+ * 这里做单点兜底：把深度拉回本任务进入时的值，任何非配平的出口都被
+ * runtime 收口，正确性不再依赖「生成器处处小心」。
+ *
+ * 记录策略：基线 `task->kmm_entry_depth` 在**首次进入任务体之前**采集
+ * （见 execute_task 调用点），之后跨挂起/重入沿用。这样即使某次 resume
+ * 泄漏了帧，也在该次出口被拉回基线，不会跨任务扩散。
+ *
+ * 为什么在 SUSPEND 出口也要恢复：挂起语义要求「挂起后如同未执行」，
+ * 定长栈若在挂起期间残留深层帧，会挤占其它任务的深度额度（同一 Worker
+ * 上多个任务共享 TLS 栈），同样可能撑爆。
+ *
+ * 调用点：owner 线程（执行 resume_fn 的同一个 Worker）——与 KMM 的
+ * TLS 亲和性一致，无需额外同步。
+ */
+static void kaula_kmm_scope_guard_task(KaulaWorker* w, KaulaTask* task,
+                                       KaulaResumeStatus status) {
+    (void)w;
+    switch (status) {
+    case KAULA_RESUME_DONE:
+    case KAULA_RESUME_SUSPEND:
+    case KAULA_RESUME_BLOCKED:
+        break;
+    default:
+        /* BUDGET_EXHAUSTED 等重入路径不改变作用域归属（未离开任务体）。 */
+        return;
+    }
+    /* 基线在进入任务体前由 execute_task 写入；这里只做收敛。 */
+    kmm_v4_scope_depth_restore((size_t)task->kmm_entry_depth);
 }
 
 /* ========== 唤醒 ========== */
@@ -584,7 +632,36 @@ void kaula_worker_execute_task(KaulaWorker* w, KaulaTask* task) {
             fn = task->enter_fn;
         }
         task->resume_count++;
+
+        /*
+         * KMM 作用域栈兜底 · 记录基线（必须在 fn 之前）。
+         *
+         * 基线是「本任务未占用任何作用域」时的栈深度（即调用者上下文
+         * 的深度，通常为 0）。必须在进入任务体之前采，否则任务体若
+         * 泄漏帧，采到的就是「已污染」的假基线，兜底失效。
+         * 只在首次执行记录：SUSPEND 后重入时深度已被上一次兜底拉回
+         * 基线，重新采会采到同一个值，没有意义且多一次 TLS 读。
+         */
+        if (task->kmm_entry_depth == (uint32_t)-1) {
+            task->kmm_entry_depth = (uint32_t)kmm_v4_scope_depth_get();
+        }
+
         KaulaResumeResult result = fn(task->frame);
+
+        /*
+         * KMM 作用域栈兜底 · 出口收敛（防 codegen 疏漏）。
+         *
+         * 一个 task 的 resume 可能从块级 KMM 区间（KMM_V4_SCOPE_START）
+         * 内部提前 return，而 return 绕过 KMM_V4_SCOPE_END 的弹栈 ——
+         * 每执行一次就在本线程 TLS 定长栈上永久泄漏一帧，累计
+         * KMM_V4_MAX_SCOPE_DEPTH（默认 1024）后 abort。
+         *
+         * 真修复在 codegen 侧（stmtgen 的 generateConcReturn 已补齐弹栈）。
+         * 这里做单点兜底：任何离开任务体的出口都把深度拉回基线，
+         * 正确性不再依赖「生成器处处小心」。对配平正确的路径是零开销
+         * 空操作（kmm_v4_scope_depth_restore 仅在更深时裁剪）。
+         */
+        kaula_kmm_scope_guard_task(w, task, result.status);
 
         switch (result.status) {
         case KAULA_RESUME_DONE:

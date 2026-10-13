@@ -105,6 +105,7 @@ KaulaTask* kaula_task_alloc(void) {
         task->resume_count = 0;
         task->steal_count = 0;
         task->flags = 0;
+        task->kmm_entry_depth = UINT32_MAX;  /* 未记录基线（guard 在首跑时写入） */
         return task;
     }
 
@@ -152,6 +153,7 @@ KaulaTask* kaula_task_alloc(void) {
         task->resume_count = 0;
         task->steal_count = 0;
         task->flags = 0;
+        task->kmm_entry_depth = UINT32_MAX;  /* 未记录基线（guard 在首跑时写入） */
         if (kaula_p_event_create(&task->done_event) != 0) {
             /* event 重建失败：还回池/彻底回收，返回 NULL */
             global_task_pool_push(task);
@@ -167,6 +169,7 @@ KaulaTask* kaula_task_alloc(void) {
     task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
                                               memory_order_relaxed);
     atomic_store_explicit(&task->state, KAULA_TASK_CREATED, memory_order_relaxed);
+    task->kmm_entry_depth = UINT32_MAX;  /* 未记录基线（guard 在首跑时写入） */
     task->created_ns = kaula_p_now_ns();
 
     if (kaula_p_event_create(&task->done_event) != 0) {

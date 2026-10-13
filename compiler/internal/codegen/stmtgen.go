@@ -2841,9 +2841,40 @@ func (sg *StatementGenerator) generateReturnStatement(stmt *ast.ReturnStatement)
  * `return X`  →
  *      f->result = X;
  *      f->pc = -1;
+ *      <KMM 作用域回卷：按当前活跃深度发射 scope_pop / mark_restore>
  *      return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = &f->result };
  *
  * void 函数则只标记完成。
+ *
+ * == 为什么必须在这里回卷 KMM 作用域 ==
+ *
+ * conc fn 的 body 会被块级 KMM 区间（while/for/if/block 各开一层
+ * `KMM_V4_SCOPE_START`，见 stmtgen 各处 KMMStart("")）包裹。这些区间用
+ * `do { ... } while (0); kmm_v4_scope_pop()` 收尾，**正常路径**经宏弹栈，
+ * 而 `return` 直接跳出函数，绕过了 kmm_v4_scope_pop() —— 于是每执行一次
+ * 提前 return，就在本线程 TLS 的定长作用域栈上永久泄漏一帧（16B）。
+ * 单线程累计 KMM_V4_MAX_SCOPE_DEPTH（1024）次即 `KMM FATAL ... aborting`。
+ *
+ * 对「每连接一个 conc fn」的服务形态，连接 churn 就是 DoS：
+ * 客户端反复建连/断连，约 `1024 × worker 数` 次后服务崩溃。
+ * 本基准 order_server.kl 的 `got <= 0`（客户端 EOF）提前 return 正是此路径。
+ *
+ * 挂起 return（conc_io_rewrite.go / concSuspendReturn）早已做同样的配平，
+ * 这里补齐提前 return，二者一致。
+ *
+ * == 深度口径 ==
+ *
+ * 直接用 `kmmScopeDepth`（与挂起 return 同一口径）：它记录「当前生成位置
+ * 已 Enter 未 Exit 的 KMM 区间数」。conc fn 的 body 由 EmitResume 以
+ * `cg.kmmScopeDepth = 0` 起步重新生成，此后各块级 KMMStart("") 与
+ * EnterKMMScope() 成对维护该计数，所以提前 return 处读到的正是
+ * 此刻真正打开的区间层数。
+ *
+ * conc guard 槽位（`if (f->sub[d] == k) { ... }`）是普通 C 花括号，
+ * **不 push KMM 作用域**，因此不计入深度。
+ *
+ * mark 模式（递归环内函数改用 kmm_v4_mark_save/restore）下没有 scope 栈槽位，
+ * 提前退出的净效果是一次回卷到函数入口 mark，走 KMMExitToFunctionMark。
  */
 func (sg *StatementGenerator) generateConcReturn(stmt *ast.ReturnStatement, isVoid bool) string {
 	f := sg.codegen.concFrameVar
@@ -2853,17 +2884,68 @@ func (sg *StatementGenerator) generateConcReturn(stmt *ast.ReturnStatement, isVo
 
 	var b strings.Builder
 
+	// KMM 作用域回卷：提前 return 必须与已发射的区间起始配平。
+	// 放在 `f->pc = -1;` 之前——回卷与返回值写入互不影响，但保持
+	// 「先清理再宣告完成」的次序更贴近普通 fn 的 return 路径。
+	popCode := sg.concKMMExitPopLines()
+
 	if isVoid || stmt.Value == nil {
+		b.WriteString(popCode)
 		b.WriteString(f + "->pc = -1;\n")
 		b.WriteString("return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = NULL };\n")
 		return b.String()
 	}
 
+	/*
+	 * 先求值返回值再回卷：返回值若是作用域内分配的对象，回卷后才拷贝
+	 * 就晚了（悬垂）。return 提升路径（promote）由 SOR 负责，这里只保证
+	 * 表达式求值发生在回卷之前。
+	 */
 	valueCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 	b.WriteString(f + "->result = " + valueCode + ";\n")
+	b.WriteString(popCode)
 	b.WriteString(f + "->pc = -1;\n")
 	b.WriteString("return (KaulaResumeResult){ .status = KAULA_RESUME_DONE, .value = &" +
 		f + "->result };\n")
+	return b.String()
+}
+
+/*
+ * concKMMExitPopLines 产出 conc fn 提前 return 所需的 KMM 作用域回卷代码。
+ *
+ * mark 模式：一次 kmm_v4_mark_restore(<函数入口 mark>)，等价于由内向外逐层回卷。
+ * scope 模式：按词法深度（kmmScopeDepth）逐层发射 kmm_v4_scope_pop()。
+ *
+ * 深度口径必须与挂起 return 完全一致（conc_io_rewrite.go 用
+ * `for i := 0; i < cg.kmmScopeDepth; i++`）—— 二者描述的是同一件事：
+ * 「当前生成位置已 Enter 未 Exit 的 KMM 区间数」。conc guard 槽位
+ * （`if (f->sub[d] == k) { ... }`）是普通 C 花括号，**不 push KMM 作用域**，
+ * 不计入深度；把它算进去会导致多弹一层 → 作用域栈下溢 abort。
+ *
+ * 每行已带缩进（与 generateReturnStatementNormal 的 KMMExitPopLines 口径一致）。
+ */
+func (sg *StatementGenerator) concKMMExitPopLines() string {
+	cg := sg.codegen
+	indent := cg.indentString()
+
+	if cg.kmmUseMark {
+		// mark 模式：函数体（含提前退出路径）由 KMMExitToFunctionMark 一次性回卷。
+		if cg.kmmFnMark == "" {
+			return ""
+		}
+		return indent + "kmm_v4_mark_restore(" + cg.kmmFnMark + ");\n"
+	}
+
+	depth := cg.kmmScopeDepth
+	if depth <= 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	for i := 0; i < depth; i++ {
+		b.WriteString(indent)
+		b.WriteString("kmm_v4_scope_pop();\n")
+	}
 	return b.String()
 }
 
