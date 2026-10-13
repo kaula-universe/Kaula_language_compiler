@@ -1,7 +1,9 @@
 # kaulac：`conc fn` 内 KMM scope 的提前 return 不弹栈（连接潮汐关闭 → 服务 abort）
 
-> **未修复**——本文件是调查记录与修复建议。发现过程：`service3` 基准
-> 定速 6 万请求/秒压测（`--rate 60000`，4096 连接）。
+> **已修复**（commit `5ad6b08`，2025 轮次）。
+> 本文件保留完整调查记录；修复实现与验证证据见文末 **§7 修复落地**。
+>
+> 发现过程：`service3` 基准定速 6 万请求/秒压测（`--rate 60000`，4096 连接）。
 >
 > **严重度**：高（可用性）。任何「KMM 托管函数内提前 return」的执行
 > 都会在**所在线程的 TLS 作用域栈上永久泄漏一帧**（16 B）。
@@ -109,7 +111,7 @@ EOF
 不触发上限。**这是规避不是修复**——长周期运行的服务的关闭次数
 会累计超限，仍需真修复。
 
-## 6. 修复建议（未实施，待独立轮次）
+## 6. 修复建议（已在 §7 实施）
 
 codegen 侧（`compiler/internal/codegen/`，conc fn lowering）：
 
@@ -123,3 +125,84 @@ codegen 侧（`compiler/internal/codegen/`，conc fn lowering）：
 
 > 备注：`-DKMM_V4_MAX_SCOPE_DEPTH=N` 只是抬高上限，**不修复泄漏**，
 > 不推荐作为修复手段；`#[no_kmm]` 可绕过托管但改变内存语义。
+
+---
+
+## 7. 修复落地（commit `5ad6b08`）
+
+建议 1、2 **两条都实现了**（双保险），并按「对 bug 零容忍」补了
+两层回归测试。
+
+### 7.1 codegen 侧（真修复）
+
+`compiler/internal/codegen/stmtgen.go`：
+
+- `generateConcReturn` 原来只发 `f->result = X; f->pc = -1; return DONE;`，
+  现在在 DONE 出口**之前**插入弹栈代码；
+- 新增 `concKMMExitPopLines()`：按 `cg.kmmScopeDepth`（**与挂起路径
+  `conc_io_rewrite.go` 完全相同口径**）emit 对应层数 `kmm_v4_scope_pop()`；
+  mark 模式（`cg.kmmUseMark`）改发 `kmm_v4_mark_restore(cg.kmmFnMark)`；
+- **guard slot 是纯 C 花括号、不进作用域栈，不计入 pop 层数**。
+  （早前误把 `concGuardDepth` 也算进去会多弹一层 → 作用域栈 underflow，
+  同样是 abort，已回退。）
+
+生成 C 比对（`KAULAC_DUMP=1`，`test_kmm_scope_early_return.kl`）：
+提前 return 的分支现在与 SUSPEND 分支一样，DONE 前都有
+`kmm_v4_scope_pop();`（`klc_final.c` `i >= stop - 1` 分支）。
+
+### 7.2 runtime 侧（单点兜底）
+
+`src/concurrency/kaula_conc_worker.c` + `kaula_conc_task.[ch]` +
+`kmm_scoped_allocator_v4.h`：
+
+- task 字段新增 `kmm_entry_depth`（UINT32_MAX = 未记录）；
+- 首次进入任务体**之前**记录基线 = 当前 TLS 作用域栈深度；
+- 任何离开任务体的出口（`KAULA_RESUME_DONE` / `SUSPEND` / `BLOCKED`）
+  调用 `kmm_v4_scope_depth_restore(baseline)` 把深度拉回基线；
+- `kmm_v4_scope_depth_restore` 语义是「仅在更深时裁剪」，因此对
+  本来配平正确的路径是**零开销空操作**。
+
+效果：正确性从「codegen 处处小心」收敛到「runtime 单点兜底」。
+即使将来再出现某条漏弹路径，也退化为「runtime 静默修正」而非 abort。
+
+### 7.3 验证证据
+
+| 验证 | 方法 | 结果 |
+|---|---|---|
+| 复现（无修复） | `test_kmm_scope_early_return.kl`，双修复禁用 | `rc=134` + `KMM FATAL: Scope stack overflow (depth 1024 >= max 1024), aborting` ✅ 与本文档 §1 症状逐字一致 |
+| 修复生效 | 同一用例，双修复启用 | `rc=0`，`kmm_scope_early_return ok n=4096 err=0` ✅ |
+| Go 单测 | `compiler/internal/codegen/conc_kmm_exit_pop_test.go`（断言 DONE 出口有弹栈、深度口径与挂起路径一致） | 通过；禁用修复则该测试失败 ✅ |
+| 全量 Go 测试 | `cd compiler && go test ./...` | 全通过 ✅ |
+| 并发测试套件 | `test/concurrency/run_tests.py` 全量 | 除 3 项 **pre-existing** 失败（`test_task` / `test_ws_deque` / `test_null_handle_probe`，基线 HEAD 同样失败，与本修复无关）外全通过 ✅ |
+| **真实服务 · 4096 连接** | `SVC_WORKERS=4 ./kaula_kl/order_server` + `loadgen 127.0.0.1:8123 4096 20 5` | `TOTAL ok=1,479,589 mismatch=0 errors=0`，服务 **ALIVE** ✅（此前正是此场景 abort） |
+| **真实服务 · 连接关闭潮汐** | 3 轮 × 2048 连接短连接，累计约 6144 次关闭 | 三轮全部 `mismatch=0 errors=0`，服务 **ALIVE** ✅（约为旧阈值 6×） |
+
+### 7.4 新回归测试
+
+- `test/concurrency/test_kmm_scope_early_return.kl`：端到端，
+  4096 次序/并行调用，每次都走「块级 KMM 区间内 + 挂起点之后 + 提前 return」。
+  修复前必崩、修复后必过，是**防回退闸门**。
+  刻意避开另一处**无关**缺陷（带挂起点的 conc fn 里 `break` 会挂死），
+  以免泄漏信号被超时淹没。
+- `compiler/internal/codegen/conc_kmm_exit_pop_test.go`：codegen 单测。
+
+### 7.5 顺带记录（未在本次修复）
+
+排查中发现另一处**独立**缺陷：**带挂起点的 `conc fn` 里 `break`
+会挂死**（含裸 `{ }` 块内的 `break`）。最小复现：
+
+```kaula
+conc fn f(stop: i64) -> i64 {
+    i64 i = 0
+    while i < 1000000 {
+        u8* r = std.memory.kmm_v4_alloc(64)
+        std.memory.kmm_v4_free(r)
+        std.time.time_sleep_us(1)
+        if i >= stop - 1 { break }   // ← 挂死
+        i = i + 1
+    }
+    return stop
+}
+```
+
+已在本文件记录，**留待独立轮次**（与本次 KMM 作用域泄漏无因果关系）。
