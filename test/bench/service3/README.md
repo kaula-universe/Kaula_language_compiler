@@ -107,6 +107,22 @@ python3 run_service3.py --conns 100 --sec 40 --win 5 --rounds 3 \
 python3 run_service3.py --levels baseline --conns 50 --sec 10 --win 5 --rounds 1 --only kaula
 ```
 
+**定速模式**（回答「每秒 N 请求的负载下各服务表现如何」）：
+```bash
+python3 run_service3.py --only kaula,go --levels baseline \
+    --conns 1024 --sec 30 --win 5 --rounds 5 --rate 60000 \
+    --out results_60k.json
+```
+`--rate N` 走 `loadgen` 的**开环序列调度**（第 i 个请求发送于
+`start + i/N`），offered 恒为 N；服务跟不上时 ok 掉队、尾延迟上涨。
+缺省 `--rate 0` 为原闭环模式（连接数即并发度，TPS 是测得的结果）。
+实测报告见 [`REPORT_60K.md`](REPORT_60K.md)。
+
+> ⚠️ Kaula 边连接数上限：`conn_task` 的 `got<=0` 提前 return 不弹
+> KMM 作用域栈（见 [`KBUG_KMM_SCOPE_EARLY_RETURN.md`](KBUG_KMM_SCOPE_EARLY_RETURN.md)），
+> 连接潮汐关闭时每 worker 线程泄漏一帧，`1024 × worker 数` 次后
+> 服务 abort。**Kaula 边 conns 请保持 ≤1024**（规避，非修复）。
+
 ## 6. 文件职责
 
 | 文件 | 职责 |

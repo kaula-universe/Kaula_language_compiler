@@ -6,14 +6,22 @@
 //  3. 每窗口输出一行，供上层做收敛判定（丢弃前 50% 窗口）。
 //  4. 干扰由外部注入，本进程不感知，保证三边口径完全一致。
 //
-// 用法：loadgen <addr:port> <并发连接数> <压测秒数> <窗口秒数> [phase]
+// 用法：loadgen <addr:port> <并发连接数> <压测秒数> <窗口秒数> [phase|rate] [rate]
 //   输出：win,tps,p50,p95,p99,p999,mismatch,errors
-//   末行：TOTAL ok=<n> mismatch=<n> errors=<n> bytes_written=<n>
+//   末行：TOTAL ok=<n> mismatch=<n> errors=<n> offered=<n>
+//
+// 第 5 个参数若为正整数则视为**定速速率**（req/s，开环序列调度）；
+// 否则按历史语义视为 phase（忽略）。第 6 个参数恒为 rate。
+// rate<=0（缺省）为闭环模式：连接数即并发度，TPS 是测得的结果。
+// rate>0 为开环定速模式：以固定速率发送，用于回答
+// 「每秒 N 请求的负载下各服务表现如何」——服务跟不上时
+// offered 仍为 N，而 ok（=TPS×时长）会掉，尾延迟会涨。
 package main
 
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sort"
@@ -36,6 +44,26 @@ var (
 	okTotal  atomic.Int64
 	mismatch atomic.Int64
 	errors   atomic.Int64
+	offered  atomic.Int64 // 定速模式：已取用令牌数（= 实际发送的请求数）
+	errEOF   atomic.Int64 // 连接被对端关闭（服务端主动断连）
+	errTMO   atomic.Int64 // 读超时（30s deadline，请求在服务侧排队过久）
+)
+
+// ---------- 定速调度（开环） ----------
+
+// 序列调度：第 i 个请求（全局单调序号）的发送时刻为
+// paceStart + i/rate。每个客户端 goroutine 发上前各自取号、
+// 睡到自己的时刻——定速精度不依赖任何单线程（令牌桶方案
+// 在千级 goroutine 下会被调度饿饿丢 tick，实测 offered 只有
+// 标称值的 55%~70%，已弃用）。
+//
+// 服务跟不上时客户端仍按时刻表发送；若连接全部忙于等响应，
+// 发送自然滑移——offered（实际发送数）会低于标称，如实反映
+// 「服务在 6 万请求/秒下扛不住」。
+var (
+	paceSeq   atomic.Int64
+	paceStart time.Time
+	paceRate  int
 )
 
 // ---------- 服务端算法的独立复刻（校验用） ----------
@@ -181,6 +209,16 @@ func client(addr string, stop <-chan struct{}, wg *sync.WaitGroup) {
 		default:
 		}
 		seq++
+		// 定速模式：按全局序号睡到本请求的发送时刻，再计时。
+		// 等待不计入 RTT——RTT 只覆盖「请求已交给网络」到「响应收全」。
+		if paceRate > 0 {
+			i := paceSeq.Add(1) - 1
+			target := paceStart.Add(time.Duration(i) * time.Second / time.Duration(paceRate))
+			if d := time.Until(target); d > 0 {
+				time.Sleep(d)
+			}
+			offered.Add(1)
+		}
 		// "O,<seq>,itemA,3,1990\n" —— 手工拼字节，避免 fmt 的分配与格式化开销
 		buf := make([]byte, 0, 32)
 		buf = append(buf, 'O', ',')
@@ -209,6 +247,13 @@ func client(addr string, stop <-chan struct{}, wg *sync.WaitGroup) {
 		elapsed := time.Since(t0).Microseconds()
 		if err != nil {
 			errors.Add(1)
+			// 分类：EOF=服务端主动关闭了连接；timeout=请求在服务侧
+			// 排队超过 30s。两者根因不同，报告必须分开计数。
+			if err == io.EOF {
+				errEOF.Add(1)
+			} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				errTMO.Add(1)
+			}
 			return
 		}
 		if mm, bad := validate(resp, seq, expCk, expTotal); bad {
@@ -246,10 +291,26 @@ func main() {
 	seconds, _ := strconv.Atoi(os.Args[3])
 	winSec, _ := strconv.Atoi(os.Args[4])
 	phase := "load"
+	rate := 0
+	// 第 5 参：正整数 → rate（定速）；否则 → phase（历史语义，忽略）
 	if len(os.Args) > 5 {
-		phase = os.Args[5]
+		if v, err := strconv.Atoi(os.Args[5]); err == nil && v > 0 {
+			rate = v
+		} else {
+			phase = os.Args[5]
+		}
+	}
+	// 第 6 参：恒为 rate
+	if len(os.Args) > 6 {
+		if v, err := strconv.Atoi(os.Args[6]); err == nil && v > 0 {
+			rate = v
+		}
 	}
 	_ = phase
+	if rate > 0 {
+		paceRate = rate
+		paceStart = time.Now()
+	}
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -262,6 +323,7 @@ func main() {
 	time.Sleep(3 * time.Second)
 	okTotal.Store(0)
 	mismatch.Store(0)
+	offered.Store(0)
 
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	win := 0
@@ -291,6 +353,7 @@ func main() {
 	}
 	close(stop)
 	wg.Wait()
-	fmt.Printf("TOTAL ok=%d mismatch=%d errors=%d\n",
-		okTotal.Load(), mismatch.Load(), errors.Load())
+	fmt.Printf("TOTAL ok=%d mismatch=%d errors=%d offered=%d err_eof=%d err_timeout=%d\n",
+		okTotal.Load(), mismatch.Load(), errors.Load(), offered.Load(),
+		errEOF.Load(), errTMO.Load())
 }

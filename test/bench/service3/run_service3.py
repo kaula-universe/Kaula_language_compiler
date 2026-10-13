@@ -24,6 +24,7 @@
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -142,8 +143,12 @@ def parse_windows(out):
     return rows, total
 
 
-def run_once(name, exe, port, level, conns, sec, win):
-    """跑一次：启动服务 -> 注入干扰 -> 压测 -> 收敛 -> 收尾。"""
+def run_once(name, exe, port, level, conns, sec, win, rate=0):
+    """跑一次：启动服务 -> 注入干扰 -> 压测 -> 收敛 -> 收尾。
+
+    rate>0 时走 loadgen 的定速（开环）模式：以固定速率发送，
+    回答「每秒 N 请求负载下各服务表现如何」。
+    """
     if not os.path.exists(exe):
         return {"error": f"二进制不存在: {exe}"}
 
@@ -162,15 +167,25 @@ def run_once(name, exe, port, level, conns, sec, win):
             return {"error": f"服务未就绪: {name} :{port}"}
         dp, desc = start_disturber(level)
         time.sleep(2.5)  # 干扰就绪 + 服务预热
-        r = subprocess.run([LOADGEN, f"127.0.0.1:{port}", str(conns), str(sec), str(win)],
+        r = subprocess.run([LOADGEN, f"127.0.0.1:{port}", str(conns), str(sec), str(win)]
+                           + ([str(rate)] if rate > 0 else []),
                            capture_output=True, text=True, timeout=sec + 120)
         rows, total = parse_windows(r.stdout)
         if not rows:
             return {"error": f"loadgen 无输出: {r.stdout[-300:]} {r.stderr[-300:]}"}
 
-        # 正确性门槛：任何 mismatch/errors 该轮作废
+        # 正确性门槛：任何 mismatch/errors 该轮作废。
+        # 注意：loadgen 窗口行的 errors 字段恒为 0（历史输出格式），
+        # 真实 errors 只在 TOTAL 行——两处都查，避免「连接被杀」被漏检。
         mis = sum(x["mismatch"] for x in rows)
         err = sum(x["errors"] for x in rows)
+        if total:
+            m = re.search(r"mismatch=(\d+)", total)
+            if m:
+                mis = max(mis, int(m.group(1)))
+            m = re.search(r"errors=(\d+)", total)
+            if m:
+                err = max(err, int(m.group(1)))
         if mis > 0 or err > 0:
             return {"error": f"正确性失败 mismatch={mis} errors={err}", "disturb_desc": desc}
 
@@ -190,6 +205,7 @@ def run_once(name, exe, port, level, conns, sec, win):
         out["steady_windows"] = len(steady)
         out["disturb_desc"] = desc
         out["raw"] = rows
+        out["total"] = total
         return out
     finally:
         for p in (dp if isinstance(dp, list) else [dp]) if dp else []:
@@ -201,6 +217,8 @@ def run_once(name, exe, port, level, conns, sec, win):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--conns", type=int, default=100)
+    ap.add_argument("--rate", type=int, default=0,
+                    help="定速模式速率（req/s，开环令牌桶）；0=默认闭环模式")
     ap.add_argument("--sec", type=int, default=30, help="每档压测秒数（不含 3s 预热）")
     ap.add_argument("--win", type=int, default=5, help="采样窗口秒数")
     ap.add_argument("--rounds", type=int, default=3, help="每档重复轮数")
@@ -222,20 +240,28 @@ def main():
     results = {}
     print(f"三方服务基准：{len(names)} 运行时 × {len(levels)} 档 × {args.rounds} 轮 "
           f"= {len(plan)} 次运行，每次 {args.sec}s + 3s 预热", flush=True)
-    print(f"并发连接={args.conns} worker={WORKERS} 窗口={args.win}s\n", flush=True)
+    print(f"并发连接={args.conns} worker={WORKERS} 窗口={args.win}s "
+          f"速率={'定速 %d req/s（开环）' % args.rate if args.rate > 0 else '闭环（TPS 为测得结果）'}\n",
+          flush=True)
 
     for i, (lv, rd, nm) in enumerate(plan, 1):
         exe, port = SERVICES[nm]
         t0 = time.time()
-        r = run_once(nm, exe, port, lv, args.conns, args.sec, args.win)
+        r = run_once(nm, exe, port, lv, args.conns, args.sec, args.win, args.rate)
         dt = time.time() - t0
         results.setdefault(lv, {}).setdefault(nm, []).append(r)
         if "error" in r:
             print(f"[{i}/{len(plan)}] {lv:9s} {nm:6s} ✗ {r['error']}  ({dt:.0f}s)", flush=True)
         else:
+            off = ""
+            if r.get("total") and "offered=" in r["total"]:
+                # 定速模式：offered 为客户端实际发出的请求数；
+                # offered≈ok+在途 才说明客户端没被服务拖成瓶颈
+                o = int(r["total"].split("offered=")[1].split()[0])
+                off = f" offered={o}"
             print(f"[{i}/{len(plan)}] {lv:9s} {nm:6s} "
                   f"TPS={r['tps']:>8.0f} p50={r['p50']:>7.0f} p99={r['p99']:>8.0f} "
-                  f"p999={r['p999']:>9.0f}us  spread(tps)={r['spread_pct']['tps']:>5.1f}%  "
+                  f"p999={r['p999']:>9.0f}us  spread(tps)={r['spread_pct']['tps']:>5.1f}%{off}  "
                   f"({dt:.0f}s)", flush=True)
 
     with open(args.out, "w") as f:
