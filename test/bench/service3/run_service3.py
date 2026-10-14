@@ -48,6 +48,244 @@ NCPU = os.cpu_count() or 32
 WORKERS = 4  # 三边统一的 worker 数（TRANSACTION.md §7）
 
 
+# ============================================================================
+# 内核 + CPU 指标采集（供定速环归因：证明「同 TPS 下内核态成本差异」与
+# 「长时压测下内存是否泄漏」——后者是 CONC 能否抗住亿级请求的关键判据）。
+#
+# 采集口径：
+#   /proc/<pid>/stat  — RSS(页)、utime/stime(时钟滴答)、minflt/majflt、
+#                       nvcswch/nivcswch（自愿/非自愿上下文切换）
+#   /proc/<pid>/status— VmRSS（精确 kB，stat 的 rss 字段偶发为空时兜底）
+#   ss -s             — socket/TCP 汇总（estab/timewait/orphaned）
+#   nstat -a          — 累积 TCP 计数器（重传/ListenDrops/ListenOverflows）
+#   /proc/net/snmp    — TcpRetransSegs 等，nstat 不可用时的兜底
+#
+# 所有计数均为**单调累积**量，指标以「区间增量」呈现，避免绝对值混淆。
+# ============================================================================
+
+# /proc/<pid>/stat 字段下标（0 基）：
+#   9  minflt | 11 majflt | 13 utime(ticks) | 14 stime(ticks)
+#   23 rss(页) | 41 nvcswch | 42 nivcswch
+_PROC_STAT_IDX = {
+    "minflt": 9, "majflt": 11, "utime": 13, "stime": 14,
+    "rss_pages": 23, "nvcswch": 41, "nivcswch": 42,
+}
+
+
+def _sh(cmd):
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def find_pid_by_port(port):
+    """按监听端口找服务进程 PID。
+
+    优先 ss -tlnp 的 pid= 字段；该字段在部分受限环境（无 CAP_NET_ADMIN /
+    独立 netns）不暴露，故退回扫描 /proc/*/net 之外的进程树策略：
+    调用方（run_once）已持有 Popen 句柄，应优先直接传 sp.pid。
+    本函数仅作为「外部已启动服务」场景的兜底。
+    """
+    out = _sh(f"ss -tlnp 2>/dev/null | grep ':{port} '")
+    m = re.search(r"pid=(\d+)", out)
+    if m:
+        return int(m.group(1))
+    # 兜底：按监听端口反查 socket inode → /proc/<pid>/fd 匹配
+    inode = None
+    try:
+        with open("/proc/net/tcp") as f:
+            for line in f.readlines()[1:]:
+                cols = line.split()
+                if len(cols) < 10:
+                    continue
+                local = cols[1]
+                if int(local.split(":")[1], 16) == port and cols[3] == "0A":  # 0A=LISTEN
+                    inode = cols[9]
+                    break
+    except Exception:
+        return None
+    if not inode:
+        return None
+    try:
+        for ent in os.listdir("/proc"):
+            if not ent.isdigit():
+                continue
+            fddir = f"/proc/{ent}/fd"
+            try:
+                for fd in os.listdir(fddir):
+                    try:
+                        if os.readlink(f"{fddir}/{fd}") == f"socket:[{inode}]":
+                            return int(ent)
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+    except Exception:
+        return None
+    return None
+
+
+def read_proc_stat(pid):
+    """读 /proc/<pid>/stat 的关键计数（累积值）。"""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            parts = f.read().split()
+        d = {}
+        for k, i in _PROC_STAT_IDX.items():
+            d[k] = int(parts[i])
+        return d
+    except Exception:
+        return {}
+
+
+def read_vmrss_kb(pid):
+    """精确 RSS（kB）：/proc/<pid>/status 的 VmRSS。"""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return None
+
+
+def ss_summary():
+    """ss -s 汇总：socket 总数 / TCP 各状态。"""
+    out = _sh("ss -s")
+    d = {}
+    m = re.search(r"Total:\s*(\d+)", out)
+    if m:
+        d["sockets_total"] = int(m.group(1))
+    m = re.search(r"TCP:\s*(\d+).*?estab\s*(\d+)", out, re.S)
+    if m:
+        d["tcp_total"] = int(m.group(1))
+        d["tcp_estab"] = int(m.group(2))
+    for state in ("closed", "orphaned", "timewait", "synrecv"):
+        m = re.search(rf"\b{state}\s+(\d+)", out)
+        if m:
+            d["tcp_" + state] = int(m.group(1))
+    return d
+
+
+_NSTAT_KEYS = (
+    "TcpActiveOpens", "TcpPassiveOpens", "TcpInSegs", "TcpOutSegs",
+    "TcpRetransSegs", "TcpExtListenOverflows", "TcpExtListenDrops",
+    "TcpExtTCPBacklogDrop",
+)
+
+
+def nstat_counters():
+    """关键 TCP 累积计数器。
+
+    主通道 nstat -a；不可用时退回 /proc/net/snmp 与 /proc/net/netstat
+    （两者都是内核计数器快照，口径一致）。
+    """
+    out = _sh("nstat -a")
+    d = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] in _NSTAT_KEYS:
+            try:
+                d[parts[0]] = int(parts[1])
+            except ValueError:
+                pass
+    if d.get("TcpRetransSegs") is None or d.get("TcpExtListenDrops") is None:
+        # 补齐缺失键（nstat 在容器内常缺 TcpExt*，/proc/net/netstat 有）
+        fallback = _snmp_tcp()
+        for k, v in fallback.items():
+            d.setdefault(k, v)
+    return d
+
+
+def _snmp_tcp():
+    """从 /proc/net/snmp + /proc/net/netstat 读 TCP 计数器（兜底通道）。"""
+    d = {}
+    try:
+        with open("/proc/net/snmp") as f:
+            lines = f.read().splitlines()
+        for i in range(0, len(lines) - 1, 2):
+            if not lines[i].startswith("Tcp:"):
+                continue
+            names = lines[i].split()[1:]
+            vals = lines[i + 1].split()[1:]
+            m = dict(zip(names, vals))
+            for k in ("InSegs", "OutSegs", "ActiveOpens", "PassiveOpens",
+                      "RetransSegs"):
+                if k in m:
+                    d["Tcp" + k] = int(m[k])
+    except Exception:
+        pass
+    try:
+        with open("/proc/net/netstat") as f:
+            lines = f.read().splitlines()
+        for i in range(0, len(lines) - 1, 2):
+            if not lines[i].startswith("TcpExt:"):
+                continue
+            names = lines[i].split()[1:]
+            vals = lines[i + 1].split()[1:]
+            m = dict(zip(names, vals))
+            for k in ("ListenDrops", "ListenOverflows", "TCPBacklogDrop"):
+                if k in m:
+                    d["TcpExt" + k] = int(m[k])
+    except Exception:
+        pass
+    return d
+
+
+def collect_metrics(pid):
+    """采一次全量指标快照。pid 无效时返回 None（调用方据此跳过指标）。"""
+    if not pid:
+        return None
+    st = read_proc_stat(pid)
+    if not st:
+        return None
+    return {
+        "proc": st,
+        "vmrss_kb": read_vmrss_kb(pid),
+        "ss": ss_summary(),
+        "nstat": nstat_counters(),
+    }
+
+
+def diff_metrics(before, after, wall_s, ok_reqs):
+    """把两次快照转成「区间增量」指标（含每请求字节数——泄漏判据）。"""
+    def d(k):
+        return after["proc"].get(k, 0) - before["proc"].get(k, 0)
+
+    rss_b = before.get("vmrss_kb")
+    rss_a = after.get("vmrss_kb")
+    rss_delta_kb = (rss_a - rss_b) if (rss_a is not None and rss_b is not None) else None
+
+    out = {
+        "rss_before_mb": round(rss_b / 1024, 1) if rss_b is not None else None,
+        "rss_after_mb": round(rss_a / 1024, 1) if rss_a is not None else None,
+        "rss_delta_mb": round(rss_delta_kb / 1024, 1) if rss_delta_kb is not None else None,
+        # 每请求 RSS 增量（字节）：≈0 表示无泄漏；恒定正值 = 每请求泄漏。
+        "rss_per_req_b": (round(rss_delta_kb * 1024 / ok_reqs, 2)
+                          if (rss_delta_kb is not None and ok_reqs > 0) else None),
+        "cpu_user_pct": round(d("utime") / 100.0 / wall_s * 100, 1) if wall_s > 0 else None,
+        "cpu_sys_pct": round(d("stime") / 100.0 / wall_s * 100, 1) if wall_s > 0 else None,
+        "minflt": d("minflt"),
+        "majflt": d("majflt"),
+        "nvcswch": d("nvcswch"),
+        "nivcswch": d("nivcswch"),        "tcp_estab_after": after["ss"].get("tcp_estab"),
+        "tcp_timewait_after": after["ss"].get("tcp_timewait"),
+        "tcp_retrans": None,
+        "tcp_listen_drops": None,
+    }
+    nb, na = before.get("nstat", {}), after.get("nstat", {})
+    if "TcpRetransSegs" in nb and "TcpRetransSegs" in na:
+        out["tcp_retrans"] = na["TcpRetransSegs"] - nb["TcpRetransSegs"]
+    if "TcpExtListenDrops" in nb and "TcpExtListenDrops" in na:
+        out["tcp_listen_drops"] = na["TcpExtListenDrops"] - nb["TcpExtListenDrops"]
+    # 上下文切换合计（调度压力：CONC 的挂起点开销在此体现）
+    out["cswch_total"] = d("nvcswch") + d("nivcswch")
+    return out
+
+
 def wait_port(port, tries=80, timeout=0.5):
     for _ in range(tries):
         try:
@@ -167,9 +405,17 @@ def run_once(name, exe, port, level, conns, sec, win, rate=0):
             return {"error": f"服务未就绪: {name} :{port}"}
         dp, desc = start_disturber(level)
         time.sleep(2.5)  # 干扰就绪 + 服务预热
+
+        # 指标采集：压测前后各采一次快照，用于归因内核态/CPU/内存。
+        # 直接使用 Popen 句柄的 pid（最可靠）；ss 反查仅作兜底。
+        mpid = sp.pid or find_pid_by_port(port)
+        m_before = collect_metrics(mpid)
+        t0 = time.time()
         r = subprocess.run([LOADGEN, f"127.0.0.1:{port}", str(conns), str(sec), str(win)]
                            + ([str(rate)] if rate > 0 else []),
                            capture_output=True, text=True, timeout=sec + 120)
+        wall_s = time.time() - t0
+        m_after = collect_metrics(mpid) if mpid else None
         rows, total = parse_windows(r.stdout)
         if not rows:
             return {"error": f"loadgen 无输出: {r.stdout[-300:]} {r.stderr[-300:]}"}
@@ -206,6 +452,16 @@ def run_once(name, exe, port, level, conns, sec, win, rate=0):
         out["disturb_desc"] = desc
         out["raw"] = rows
         out["total"] = total
+        # 内核 + CPU + 内存指标（定速环归因；rss_per_req_b 是泄漏判据）
+        ok_reqs = sum(x.get("reqs", 0) for x in rows)
+        if total:
+            m = re.search(r"ok=(\d+)", total)
+            if m:
+                ok_reqs = int(m.group(1))
+        if m_before and m_after:
+            out["metrics"] = diff_metrics(m_before, m_after, wall_s, ok_reqs)
+            out["metrics"]["wall_s"] = round(wall_s, 1)
+            out["metrics"]["ok_reqs"] = ok_reqs
         return out
     finally:
         for p in (dp if isinstance(dp, list) else [dp]) if dp else []:
@@ -329,6 +585,34 @@ def summarize(results, levels, names):
             f = lambda a, b_: (b_ / a) if a else float("nan")
             print(f"    {lv:9s} {nm:8s} {f(bt, ct):>8.2f} {f(bp50, cp50):>8.2f} "
                   f"{f(bp99, cp99):>8.2f} {f(bp999, cp999):>8.2f}")
+
+    # ---- 内核 + CPU + 内存指标（泄漏判据）--------------------------------------
+    print("\n" + "=" * 96)
+    print("内核 / CPU / 内存指标（跨轮中位数；rss_per_req_b≈0 且 rss_delta_mb 不随请求数增长 = 无泄漏）")
+    print("=" * 96)
+    mkeys = ("rss_delta_mb", "rss_per_req_b", "cpu_user_pct", "cpu_sys_pct",
+             "cswch_total", "minflt", "tcp_retrans", "tcp_listen_drops")
+    for lv in levels:
+        print(f"\n--- {lv} ---")
+        print(f"    {'runtime':8s} {'ΔRSS(MB)':>9s} {'B/req':>7s} {'u%':>6s} {'s%':>6s} "
+              f"{'cswch':>10s} {'minflt':>10s} {'retrans':>8s} {'lstdrop':>8s}")
+        for nm in names:
+            runs = results.get(lv, {}).get(nm, [])
+            ms = [r["metrics"] for r in runs if "error" not in r and r.get("metrics")]
+
+            def magg(k):
+                vs = [m[k] for m in ms if m.get(k) is not None]
+                return median(vs) if vs else None
+
+            if not ms:
+                print(f"    {nm:8s}   (无指标)")
+                continue
+            fmt = lambda v, w, p=1: (f"{v:>{w}.{p}f}" if isinstance(v, (int, float))
+                                     else f"{'—':>{w}}")
+            print(f"    {nm:8s} {fmt(magg('rss_delta_mb'), 9)} {fmt(magg('rss_per_req_b'), 7, 2)} "
+                  f"{fmt(magg('cpu_user_pct'), 6)} {fmt(magg('cpu_sys_pct'), 6)} "
+                  f"{fmt(magg('cswch_total'), 10, 0)} {fmt(magg('minflt'), 10, 0)} "
+                  f"{fmt(magg('tcp_retrans'), 8, 0)} {fmt(magg('tcp_listen_drops'), 8, 0)}")
 
 
 if __name__ == "__main__":

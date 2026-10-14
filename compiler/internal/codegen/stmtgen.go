@@ -1,11 +1,11 @@
-﻿package codegen
+package codegen
 
 import (
 	"fmt"
-	"math/big"
-	"os"
 	"kaula/internal/ast"
 	"kaula/internal/core"
+	"math/big"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -352,7 +352,6 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			cType, stmt.Name, handleCode, stmt.Name, cType)
 	}
 
-
 	var builder strings.Builder
 	builder.Grow(128)
 
@@ -401,6 +400,18 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 	 */
 	builder.WriteString(sg.stackArrayStaticAssert(stmt, cType, isArray))
 
+	// KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK：conc 守卫降级路径把声明拆成
+	// 「声明 + 槽内赋值」，并以 Value=nil 复用本函数生成类型文本。
+	// 那种情况下初始化式已单独生成，这里**不得**再发射缺省堆分配——
+	// 否则该指针立刻被 `x = <恢复副本>/<槽内赋值>` 覆盖，分配结果永久丢失，
+	// 每次 resume（= 每次请求）泄漏一个 survivor 槽位。
+	// 必须置于 SOR 分支之前：SOR 的 GenerateSmartVarAlloc 同样会在
+	// initValue="" 时发射 `x = kmm_v4_alloc_global(...)` 死分配。
+	if sg.codegen.IsInitializerSupplied(stmt.Name) {
+		return fmt.Sprintf("%s; /* structural: decl only (initializer generated separately) */\n",
+			formatCVarDecl(cType, stmt.Name))
+	}
+
 	// SOR 智能分配路由
 	adapter := sg.codegen.GetSORAdapter()
 	if adapter != nil && adapter.IsActive && !isArray {
@@ -419,6 +430,12 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 			}
 			// 修复 #25：登记编译期可知的堆分配常量大小（promote 回退用）
 			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
+			// KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK：SOR 路由也必须登记分配来源。
+			// 普通声明路径（下方 else 分支）早在 AddSymbol 后即调用
+			// RecordVarOriginFromAST；本分支提前 return 会跳过它，导致
+			// `u8* r = std.memory.kmm_v4_alloc(64)` 的 origin 恒为 unknown，
+			// 进而使「用户显式 free」抑制分支误跳过 survivor 回收 → 槽位泄漏。
+			sg.codegen.RecordVarOriginFromAST(stmt.Name, stmt.Value)
 			// 初始值已是指针（分配调用/别名/取址/成员下标）→ 声明处不再重复分配
 			return adapter.GenerateSmartVarAlloc(cType, stmt.Name, "", initValue,
 				sg.initProvidesPointer(stmt.Value))
@@ -898,9 +915,10 @@ func (sg *StatementGenerator) generateAutoDeclaration(stmt *ast.VariableDeclarat
 
 // generateTryAssignDeclaration 生成 := 错误传播赋值
 // 生成的 C 代码：
-//   ResultType __kaula_try_N = <expr>;
-//   if (__kaula_try_N.kind == 1) { return __kaula_try_N; }
-//   T name = __kaula_try_N.data.Ok_val;
+//
+//	ResultType __kaula_try_N = <expr>;
+//	if (__kaula_try_N.kind == 1) { return __kaula_try_N; }
+//	T name = __kaula_try_N.data.Ok_val;
 func (sg *StatementGenerator) generateTryAssignDeclaration(stmt *ast.VariableDeclaration) string {
 	// 生成唯一临时变量名
 	tryVar := fmt.Sprintf("__kaula_try_%d", sg.codegen.tryAssignCounter)
@@ -1058,7 +1076,7 @@ func (sg *StatementGenerator) handleThreadSpawnEscape(callExpr *ast.CallExpressi
 		if line := sg.emitPromoteForType(ident.Name, sizeExpr, "promote thread arg into "+fnName, ident.Name); line != "" {
 			b.WriteString(line)
 			sg.codegen.MarkAssignEscaped(ident.Name) // 抑制 early free / 作用域回收 / return 回收
-			sg.codegen.MarkPromoted(ident.Name)       // reaching definition：防止 return 时重复 promote
+			sg.codegen.MarkPromoted(ident.Name)      // reaching definition：防止 return 时重复 promote
 			promoted = true
 		}
 	}
@@ -1071,7 +1089,9 @@ func (sg *StatementGenerator) handleThreadSpawnEscape(callExpr *ast.CallExpressi
 
 // generateSpendStatement 生成 spend 强制消费流代码
 // 数组模式：将目标包装为 Spendable → spend_lock → 逐子句 spend_call（标记消费并校验）
-//          → call(default) 时 spend_consume_all → spend_unlock（校验全消费）→ destroy
+//
+//	→ call(default) 时 spend_consume_all → spend_unlock（校验全消费）→ destroy
+//
 // 枚举模式：生成 switch 穷尽分发，default 分支为运行时安全网（编译期已证明不可达）
 func (sg *StatementGenerator) generateSpendStatement(stmt *ast.SpendStatement) string {
 	count, enumName, targetCode := sg.resolveSpendTarget(stmt.Target)
@@ -2889,6 +2909,39 @@ func (sg *StatementGenerator) generateConcReturn(stmt *ast.ReturnStatement, isVo
 	// 「先清理再宣告完成」的次序更贴近普通 fn 的 return 路径。
 	popCode := sg.concKMMExitPopLines()
 
+	/*
+	 * KBUG_CONC_RETURN_SURVIVOR_LEAK 修复②：per-object survivor 回收。
+	 *
+	 * 旧实现只发射 popCode（KMM 作用域回卷），**漏掉了 per-object 回收**。
+	 * 普通 fn 的 return 路径（generateReturnStatementNormal → 
+	 * generateSurvivorFreeForReturn）会对每个 KMM 来源的指针变量发射
+	 * kmm_v4_survivor_free。而 conc fn 的 return 走了这条降级路径，
+	 * 于是「跨挂起点存活、被提升到 survivor 段」的缓冲区永远不会归还。
+	 *
+	 * 典型受害形态（本仓 test/bench/service3 的 order_server.kl）：
+	 *     conc fn conn_task(fd) {
+	 *         u8* buf  = kmm_v4_alloc(8192)   // 跨挂起点 → survivor 段
+	 *         u8* resp = kmm_v4_alloc(64)
+	 *         ...
+	 *         if (got <= 0) { kaula_close(fd); return 0 }   // ← 这里
+	 *     }
+	 * 每连接泄漏 8192+64 = 8256 B。100 连接闭环下每连接存活约 168 请求，
+	 * 折合 8256/168 ≈ 49.1 B/req —— 与实测 49.2 B/req 精确吻合。
+	 *
+	 * 注意两点：
+	 *  1) 回收必须发生在 **scope_pop 之前**：survivor_free 依赖变量当前值，
+	 *     而 scope_pop 只回卷 TLS bump 区、不影响 survivor 段，但保持与普通
+	 *     fn 相同的「先 free 再 pop」次序更安全（普通 fn 也是 freeCode 在
+	 *     KMMExitPopLines 之前）。
+	 *  2) conc fn 的「跨挂起点变量」是在 frame 里（`f->buf`），但它们同时也
+	 *     是本 resume 体的局部量（`uint8_t* buf = f->buf;`），作用域符号表里
+	 *     依然有它们，因此 generateSurvivorFreeForReturn 能正确遍历到。
+	 */
+	freeCode, _ := sg.generateSurvivorFreeForReturn("")
+	if freeCode != "" {
+		b.WriteString(freeCode)
+	}
+
 	if isVoid || stmt.Value == nil {
 		b.WriteString(popCode)
 		b.WriteString(f + "->pc = -1;\n")
@@ -4570,8 +4623,23 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 		if sg.codegen.IsEarlyFreed(name) {
 			continue
 		}
-		// 用户已显式释放的指针跳过（所有权已转移，再释放就是 double free）
-		if sg.codegen.IsUserFreed(name) {
+		// 用户已显式释放的指针 —— 仅当该释放**真的生效**时才跳过。
+		//
+		// KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK：runtime 的 kmm_v4_free() 是彻底
+		// no-op（src/kmm_scoped_allocator_v4.c：「修复 #6：free 为 no-op，
+		// bump allocator 靠 scope 回收」）。因此对 KMM 来源（OriginKmm）的变量：
+		//   - TLAB 分配（kmm_v4_alloc_auto）→ 由 scope_pop 回卷回收，free 是 no-op，
+		//     这里发射 kmm_v4_survivor_free 会命中 TLAB 区间检查并安全返回 false；
+		//   - survivor 分配（kmm_v4_alloc_global/promote）→ **只能**靠
+		//     kmm_v4_survivor_free 回收，若因 IsUserFreed 跳过则槽位永久泄漏
+		//     （实测 ~194 B/请求，slab 区耗尽后降级页式 malloc）。
+		// 结论：OriginKmm 变量不得因 IsUserFreed 跳过回收；其余来源
+		// （libc_malloc 的 free() 生效、extern 交给下游）维持原跳过语义，避免 double free。
+		if os.Getenv("KAULA_DEBUG_ORIGIN") != "" {
+			fmt.Fprintf(os.Stderr, "[ORIGIN] var=%s userFreed=%v origin=%q\n",
+				name, sg.codegen.IsUserFreed(name), sg.codegen.GetVarOrigin(name))
+		}
+		if sg.codegen.IsUserFreed(name) && sg.codegen.GetVarOrigin(name) != OriginKmm {
 			b.WriteString(indent)
 			b.WriteString("/* structural: skip survivor_free for ")
 			b.WriteString(name)
@@ -5030,10 +5098,11 @@ func (sg *StatementGenerator) isPromotableAggregate(name string) bool {
 //   - 普通 POD 指针：kmm_v4_scope_promote_p((void**)&target, sizeExpr)（原路径）
 //
 // 参数：
-//   targetCVar：被 (void**)& 或 string_clone_global 作用的 C 变量（通常是目标名）
-//   sizeExpr：提升大小表达式（用于非 String 的浅拷贝字节数）
-//   commentTag：注释尾部 tag（"promote on return"/"promote cross-scope"/"promote arg into callee"）
-//   promotedSrc：仅调试/注释用，源对象的变量名或代码
+//
+//	targetCVar：被 (void**)& 或 string_clone_global 作用的 C 变量（通常是目标名）
+//	sizeExpr：提升大小表达式（用于非 String 的浅拷贝字节数）
+//	commentTag：注释尾部 tag（"promote on return"/"promote cross-scope"/"promote arg into callee"）
+//	promotedSrc：仅调试/注释用，源对象的变量名或代码
 func (sg *StatementGenerator) emitPromoteForType(targetCVar, sizeExpr, commentTag, promotedSrc string) string {
 	// 任务③：extern 返回值来源的对象强制拒绝跨作用域 promote。
 	// extern 对 SOR 是 opaque：没有字段类型信息、没有分配器归属（可能是 libc/OS 内存），
@@ -5270,6 +5339,7 @@ func (sg *StatementGenerator) needsReturnPromote(name string) bool {
 //   - extern 函数：所有权不透明，指针/String 实参一律保守 promote；
 //   - stdlib FFI 函数：vector_push_back(G_POOL, as<void()>(e)) 之类会把元素
 //     指针存进容器（容器通常是全局的），仅对本作用域新建的类实例 promote。
+//
 // 当前文件定义的 KL 函数暂不做跨函数所有权分析（保守不 promote）。
 func (sg *StatementGenerator) structuralCallArgPromotes(funcName string, args []ast.Expression) []string {
 	if funcName == "" {

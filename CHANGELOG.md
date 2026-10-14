@@ -62,6 +62,29 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **CONC 长时压测下的两处内存泄漏（`service3` 基准定位，合计 ≈240 B/请求）**：
+  - **IoDriver `io_take_fd` 命中节点不释放**（`src/concurrency/kaula_conc_iodriver.c`）：
+    命中分支从桶链表摘下节点后只取走 `p->task`，节点内存既不 `free`
+    也无引用 —— 每次 IO 完成泄漏一个 `KaulaIoPending`（32 B，
+    glibc 实际 chunk 48 B）。100 连接闭环实测 **49.2 B/req**，
+    90s / 490 万请求 → RSS +236 MB，零回收。
+    修复后 `libc_uord` 3.3 MB → **225,952 B 恒定**（零增长）。
+    详见 `test/bench/service3/KBUG_IODRIVER_TAKE_FD_PENDING_LEAK.md`。
+  - **codegen：`kmm_v4_free` 是 no-op + 用户 free 误抑制 survivor 回收 +
+    conc 守卫死分配**（`compiler/internal/codegen/`）：三处叠加导致
+    `conc fn` 循环体内的 KMM 分配在每次 resume 泄漏一个幸存槽。
+    另补 `generateConcReturn` 缺失的 per-object survivor 回收
+    （跨挂起点存活的缓冲区按连接泄漏 8192+64 B）。
+    修复后生成代码死分配 0 处、`unknown origin` 0 处；
+    实测 **184.3 B/req → 0.000 B/req**。
+    详见 `test/bench/service3/KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK.md`。
+  - **端到端验证**：Kaula 服务 `rss_per_req_b` 由 **49.23 降至 0.08**，
+    阶梯压测 120/240/360s（6.5M / 13.3M / **19.9M 请求**）ΔRSS 恒为
+    **0.0 MB**，TPS 无退化（≈55.3k）。
+  - **回归锁**：`test/concurrency/test_iodriver.c` 新增
+    `test_io_completion_no_pending_leak`；`compiler/internal/codegen/`
+    新增 `kmm_free_noop_survivor_test.go`（3 个用例，`git stash` 回退
+    修复后全部 FAIL，确认为真实回归锁）。
 - **`std.regex` 引擎此前不可用（4 处）**：
   - **量词死循环**：`parse_quantifier` 把 `*` 的 `SPLIT` 发射在 body **之后**，
     body 消费失败后跳过分支根本走不到，`a+b` / `a*b` / `[a-c]+` 及

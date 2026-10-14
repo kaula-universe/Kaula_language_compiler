@@ -862,6 +862,100 @@ static void test_metrics_disabled_by_default(void) {
     kaula_runtime_shutdown();
 }
 
+/* ========== 回归：IO 完成路径不得泄漏挂起节点 ========== */
+
+/*
+ * KBUG_IODRIVER_TAKE_FD_PENDING_LEAK 回归锁。
+ *
+ * == 缺陷 ==
+ *
+ * io_take_fd() 命中节点后把 p 从桶链表摘下、只取走 p->task，
+ * 节点内存既不 free 也没有任何引用 —— 每次 IO 完成泄漏一个
+ * KaulaIoPending（32 B，glibc 实际 chunk 48 B）。
+ * service3 基准实测 49.2 B/req，长时压测必 OOM。
+ *
+ * == 判据 ==
+ *
+ *  1) 结构性（本用例）：跑 N 轮「挂起 → 数据到达 → 完成」后，
+ *     pending_count 必须回 0，且每轮都成功完成。
+ *
+ *  2) 代码结构（源码级）：见 compiler 侧等价检查与
+ *     KBUG_IODRIVER_TAKE_FD_PENDING_LEAK.md §3 的对照分析 ——
+ *     io_take_fd 的命中分支必须在取出 task 后 free(p)。
+ *
+ * == 为什么不用 RSS 判据 ==
+ *
+ *  试过「后半程 RSS 增量 ≈ 前半程」，但 2000 轮 × 48 B ≈ 96 KB
+ *  会被 KMM 幸存段与线程栈的正常增长淹没，噪声远大于信号。
+ *  稳态判据改用端到端：run_service3.py 的 metrics 表
+ *  （rss_per_req_b）+ 阶梯压测（KBUG 文档 §5）。
+ *  unit 层只锁「不残留挂起」这一契约。
+ */
+#if !KAULA_PLATFORM_WINDOWS
+#include <stdio.h>
+#endif
+
+static void test_io_completion_no_pending_leak(void) {
+    TEST_CASE("IO 完成路径不泄漏挂起节点（KBUG_IODRIVER_TAKE_FD_PENDING_LEAK）");
+
+    int fds[2] = {-1, -1};
+    if (KAULA_TEST_PIPE_ASYNC(fds) != 0) {
+        TEST_FAIL("创建 pipe 失败");
+        return;
+    }
+
+    KaulaRuntimeConfig cfg = {0};
+    cfg.worker_count = 2;
+    ASSERT_EQ(kaula_runtime_init(&cfg), 0, "初始化应成功");
+
+    /*
+     * 2000 轮「写入 → spawn → await」。
+     * 每轮结束时该 fd 上的挂起记录必须被摘干净 ——
+     * 旧实现在 io_take_fd 摘下节点后不 free，pending_count 虽已减，
+     * 但节点内存仍泄漏；本用例锁的是「计数配对」这一半契约，
+     * 内存那一半由端到端 metrics 锁。
+     */
+    const int ROUNDS = 2000;
+    const char* msg = "leak-probe";
+    size_t msg_len = strlen(msg);
+
+    int ok = 0;
+    for (int i = 0; i < ROUNDS; i++) {
+        ASSERT_EQ(KAULA_TEST_WRITE(fds[1], msg, msg_len), (int)msg_len, "写入 pipe");
+
+        ReadFrame* f = (ReadFrame*)kmm_v4_alloc_global(sizeof(ReadFrame));
+        memset(f, 0, sizeof(*f));
+        f->pc = 0;
+        f->fd = fds[0];
+        f->buf = (char*)kmm_v4_alloc_global(64);
+        memset(f->buf, 0, 64);
+        f->buf_len = 63;
+        atomic_store(&f->resume_calls, 0);
+
+        KaulaHandle h = kaula_spawn(read_resume, f, sizeof(ReadFrame));
+        if (kaula_handle_is_null(h)) break;
+        void* r = kaula_handle_await(h);
+        if ((int)(intptr_t)r == (int)msg_len) ok++;
+
+        /* 每轮都断言：不得有挂起记录跨轮残留（异常路径也要摘干净） */
+        if (kaula_iodriver_pending_count() != 0) {
+            TEST_FAIL("轮次内残留挂起记录：pending_count != 0");
+            KAULA_TEST_CLOSE_FD(fds[0]);
+            KAULA_TEST_CLOSE_FD(fds[1]);
+            kaula_runtime_shutdown();
+            return;
+        }
+    }
+
+    ASSERT_EQ(ok, ROUNDS, "每轮都应读到完整数据");
+    ASSERT_EQ(kaula_iodriver_pending_count(), 0,
+              "所有 IO 完成后不得残留挂起（摘下节点必须成对计数与释放）");
+
+    KAULA_TEST_CLOSE_FD(fds[0]);
+    KAULA_TEST_CLOSE_FD(fds[1]);
+    kaula_runtime_shutdown();
+}
+
 /* ========== 配置 ========== */
 
 static void test_config_env_override(void) {
@@ -978,6 +1072,7 @@ int main(void) {
     TEST_SECTION("IoDriver fd 读写");
     test_fd_suspend_resume();
     test_two_waiters_same_fd();
+    test_io_completion_no_pending_leak();
     TEST_SECTION("阻塞车道");
     test_block_lane_isolation();
     test_block_lane_direct_submit();

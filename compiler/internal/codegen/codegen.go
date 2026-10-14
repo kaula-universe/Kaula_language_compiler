@@ -369,18 +369,22 @@ type CodeGenerator struct {
 	// promotedVars: 已被 promote 的变量集合
 	// earlyFreedVars: 已被 early free 的变量集合
 	// exportedFuncNames: export 函数名集合
-	externFuncNames   map[string]bool
-	externOriginVars  map[string]bool
-	varOrigins        map[string]string
-	promotedVars      map[string]bool
+	externFuncNames  map[string]bool
+	externOriginVars map[string]bool
+	varOrigins       map[string]string
+	promotedVars     map[string]bool
 	// ownedObjVars: 本作用域内由类构造函数新建的对象（`Elem e = Elem()`）。
 	// 这类对象归当前作用域所有，一旦把指针交给可能长期持有的被调方
 	// （vector_push_back 等 C 侧容器）就必须提升；而 elem_at()/vector_get()
 	// 取回的借用指针不在此列——拷贝它们会让容器本体与副本失联。
-	ownedObjVars map[string]bool
-	earlyFreedVars    map[string]bool
-	userFreedVars     map[string]bool // 用户显式调用 *_free 释放的指针
-	exportedFuncNames map[string]bool
+	ownedObjVars   map[string]bool
+	earlyFreedVars map[string]bool
+	userFreedVars  map[string]bool // 用户显式调用 *_free 释放的指针
+	// initializerSuppliedVars：由 conc 守卫降级路径登记——该变量的初始化式
+	// 已单独生成（放入恢复槽位），声明本体不得再发射缺省堆分配。
+	// 见 KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK / conc_guard.go:concGuardedDecl。
+	initializerSuppliedVars map[string]bool
+	exportedFuncNames       map[string]bool
 
 	sourceMap  *SourceMap
 	sourceFile string
@@ -1074,10 +1078,23 @@ func (cg *CodeGenerator) RecordVarOriginFromAST(name string, expr ast.Expression
 		return
 	}
 	fnName := ""
+	if os.Getenv("KAULA_DEBUG_ORIGIN") != "" {
+		fmt.Fprintf(os.Stderr, "[ORIGIN-AST] var=%s exprType=%T funcType=%T\n",
+			name, expr, call.Function)
+	}
 	if fnIdent, ok := call.Function.(*ast.Identifier); ok {
 		fnName = fnIdent.Name
 	} else if member, ok := call.Function.(*ast.MemberExpression); ok {
-		// std.malloc 形式
+		// std.malloc 形式（旧 AST 节点）
+		fnName = member.Member
+	} else if member, ok := call.Function.(*ast.MemberAccessExpression); ok {
+		// std.memory.kmm_v4_alloc 形式（当前解析器产出的节点）。
+		//
+		// KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK：此前只识别 *ast.MemberExpression，
+		// 而实际解析器产出的是 *ast.MemberAccessExpression，导致
+		// `u8* r = std.memory.kmm_v4_alloc(64)` 的 origin 恒为 unknown。
+		// origin=unknown 又使「用户显式 free」分支误判为可跳过回收，
+		// 最终 survivor 槽位永久泄漏（实测 ~194 B/请求）。
 		fnName = member.Member
 	}
 	if fnName == "" {
@@ -1157,6 +1174,13 @@ func (cg *CodeGenerator) ResetLifetimeFlags(name string) {
 	delete(cg.assignEscapedVars, name)
 	delete(cg.earlyFreedVars, name)
 	delete(cg.ownedObjVars, name)
+	// 注意：**不**清除 initializerSuppliedVars。
+	// 该标志由 concGuardedDecl 在调用 generateVariableDeclaration 之前精确
+	// 置位，而后者内部会先 AddSymbol → ResetLifetimeFlags。若在此清除，
+	// 「初始化式已单独生成」的信号会被自己抹掉，声明路径重新发射死分配
+	// （KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK 的复发点）。
+	// 该标志的语义是「本条声明不需要缺省分配」，按声明一次性消费即可；
+	// 同名变量重新声明时由 concGuardedDecl 重新置位，无需在此复位。
 }
 
 // MarkOwnedObj 标记变量是本作用域新建的类实例（所有权在当前作用域）
@@ -1191,6 +1215,22 @@ func (cg *CodeGenerator) MarkUserFreed(name string) {
 // IsUserFreed 查询变量是否已被用户显式释放
 func (cg *CodeGenerator) IsUserFreed(name string) bool {
 	return cg.userFreedVars[name]
+}
+
+// SetInitializerSupplied 登记该变量的初始化式已由调用方单独生成
+// （conc 守卫降级路径：声明被降级为赋值 + 恢复副本）。
+// 声明本体据此跳过「无初始化式 → 缺省堆分配」，避免发射一个结果立刻
+// 被覆盖的死分配（每次 resume 泄漏一个 survivor 槽位）。
+func (cg *CodeGenerator) SetInitializerSupplied(name string) {
+	if name == "" || cg.initializerSuppliedVars == nil {
+		return
+	}
+	cg.initializerSuppliedVars[name] = true
+}
+
+// IsInitializerSupplied 查询变量初始化式是否已单独生成
+func (cg *CodeGenerator) IsInitializerSupplied(name string) bool {
+	return cg.initializerSuppliedVars[name]
 }
 
 // MarkEarlyFreed 标记变量已被 early free（防止 return/块尾重复释放）
@@ -1465,43 +1505,44 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		 * 被卷进守卫槽位：普通函数的语句被包进 `if (f->sub[0] == k)`，
 		 * 而 f 根本不存在。必须显式置 -1（= 不在守卫模式）。
 		 */
-		concGuardDepth:       -1,
-		templateManager:      tm,
-		config:               cfg,
-		pluginManager:        pm,
-		stdlibConfig:         stdlibConfig,
-		treeManager:          treeManager,
-		prefixManager:        prefixManager,
-		symbolTable:          symbolTable,
-		currentScope:         symbolTable,
-		errors:               []string{},
-		userFreedVars:        make(map[string]bool),
-		usedThirdPartyLibs:   make(map[string]bool),
-		localImportFuncs:     make(map[string]bool),
-		genericCache:         make(map[string]*GenericInstanceCache),
-		genericInstantiated:  make(map[string]bool),
-		genericTypeCache:     make(map[string]string),
-		sourceMap:            NewSourceMap("", ""),
-		constTable:           make(map[string]string),
-		arrayLens:            make(map[string]int),
-		sorInitSizes:         make(map[string]int),
-		declScopeDepth:       make(map[string]int),
-		assignEscapedVars:    make(map[string]bool),
-		promoteHolders:       make(map[string]bool),
+		concGuardDepth:           -1,
+		templateManager:          tm,
+		config:                   cfg,
+		pluginManager:            pm,
+		stdlibConfig:             stdlibConfig,
+		treeManager:              treeManager,
+		prefixManager:            prefixManager,
+		symbolTable:              symbolTable,
+		currentScope:             symbolTable,
+		errors:                   []string{},
+		userFreedVars:            make(map[string]bool),
+		initializerSuppliedVars:  make(map[string]bool),
+		usedThirdPartyLibs:       make(map[string]bool),
+		localImportFuncs:         make(map[string]bool),
+		genericCache:             make(map[string]*GenericInstanceCache),
+		genericInstantiated:      make(map[string]bool),
+		genericTypeCache:         make(map[string]string),
+		sourceMap:                NewSourceMap("", ""),
+		constTable:               make(map[string]string),
+		arrayLens:                make(map[string]int),
+		sorInitSizes:             make(map[string]int),
+		declScopeDepth:           make(map[string]int),
+		assignEscapedVars:        make(map[string]bool),
+		promoteHolders:           make(map[string]bool),
 		paramNames:               make(map[string]bool),
 		safeLocalContainers:      make(map[string]bool),
 		writtenThroughContainers: make(map[string]bool),
 		chainLinkedVars:          make(map[string]bool),
 		chainEscapingVars:        make(map[string]bool),
 		escapedVars:              make(map[string]bool),
-		externFuncNames:      make(map[string]bool),
-		externOriginVars:     make(map[string]bool),
-		varOrigins:           make(map[string]string),
-		promotedVars:         make(map[string]bool),
-		ownedObjVars:         make(map[string]bool),
-		earlyFreedVars:       make(map[string]bool),
-		exportedFuncNames:    make(map[string]bool),
-		deepPromoteCBEmitted: make(map[string]struct{}),
+		externFuncNames:          make(map[string]bool),
+		externOriginVars:         make(map[string]bool),
+		varOrigins:               make(map[string]string),
+		promotedVars:             make(map[string]bool),
+		ownedObjVars:             make(map[string]bool),
+		earlyFreedVars:           make(map[string]bool),
+		exportedFuncNames:        make(map[string]bool),
+		deepPromoteCBEmitted:     make(map[string]struct{}),
 		// 缺口4：整数溢出检查。debug 模式默认启用（零开销 __builtin_*_overflow），
 		// release 模式禁用（wrapping 行为，与 C 一致，零开销）。
 		enableOverflowCheck: !cfg.Release,

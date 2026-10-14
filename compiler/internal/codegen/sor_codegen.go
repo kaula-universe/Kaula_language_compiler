@@ -79,16 +79,16 @@ type SORScopeDecision struct {
 // 通过 sor.FullAnalysisResultSerialize() 生成，避免 codegen 对 sor 的直接依赖
 func NewSORCodeGenAdapter(result map[string]interface{}) *SORCodeGenAdapter {
 	adapter := &SORCodeGenAdapter{
-		VarDecisions:       make(map[string]*SORVarDecision),
-		ScopeDecisions:     make(map[int]*SORScopeDecision),
-		scopeNameToID:      make(map[string]int),
-		lastUses:           make(map[string]int),
-		funcSigs:           make(map[string]*SORFuncSig),
-		scopeDropPoints:    make(map[int][]string),
-		externOrigins:      make(map[string]string),
-		funcVarDecisions:   make(map[string]*SORVarDecision),
-		globalDecisions:    make(map[string]*SORVarDecision),
-		currentFunc:        "",
+		VarDecisions:     make(map[string]*SORVarDecision),
+		ScopeDecisions:   make(map[int]*SORScopeDecision),
+		scopeNameToID:    make(map[string]int),
+		lastUses:         make(map[string]int),
+		funcSigs:         make(map[string]*SORFuncSig),
+		scopeDropPoints:  make(map[int][]string),
+		externOrigins:    make(map[string]string),
+		funcVarDecisions: make(map[string]*SORVarDecision),
+		globalDecisions:  make(map[string]*SORVarDecision),
+		currentFunc:      "",
 	}
 	if result == nil {
 		return adapter

@@ -182,8 +182,26 @@ static void io_take_fd(KaulaIoShard* sh, int fd, uint32_t events,
             atomic_fetch_sub_explicit(&g_conc_iodriver.pending_count, 1,
                                       memory_order_relaxed);
             p->got = events;
-            if (n < max_out) out[n++] = p->task;
-            else free(p);   /* 超出本批容量：直接丢弃唤醒（不应发生） */
+            /*
+             * KBUG_IODRIVER_TAKE_FD_PENDING_LEAK：任务指针取出后必须释放节点。
+             *
+             * 旧实现只在「批次容量溢出」的 else 分支 free(p)，正常路径
+             * （out[n++] = p->task）把节点从链表摘走后**再也不 free** ——
+             * 每次 IO 完成泄漏一个 KaulaIoPending（32 B，glibc 实际 chunk
+             * 48 B）。服务每请求一次 net_recv 挂起 → 泄漏 ≈ 48 B/req，
+             * 与实测 49.2 B/req 及 libc_uord 增速 47.55 B/req 吻合。
+             *
+             * owner 语义：p->task 指向的 KaulaTask 由调度器持有，不属于本
+             * 节点；节点只是一次挂起登记的载体，摘下即完成使命，可以安全
+             * 释放。out[] 只保存 task 指针，不引用节点内存。
+             */
+            if (n < max_out) {
+                out[n++] = p->task;
+                free(p);
+            } else {
+                /* 超出本批容量：丢弃唤醒（不应发生），节点同样必须释放 */
+                free(p);
+            }
         } else {
             link = &p->next;
         }

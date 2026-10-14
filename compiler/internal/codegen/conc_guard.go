@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+
 	"sort"
 	"strings"
 
@@ -232,8 +233,20 @@ func (sg *StatementGenerator) concGuardedDecl(vd *ast.VariableDeclaration) strin
 	/*
 	 * 先按「无初始化式」生成一次：符号登记、类型推导、属性前缀都靠它，
 	 * 而它的类型文本在第 0 层会被丢弃、在更深层会被提升到列表作用域。
+	 *
+	 * KBUG_KMM_FREE_NOOP_SURVIVOR_LEAK：必须在这次调用**之前**做两件事，
+	 * 否则声明路径会（a）因看不到初始化式而登记 origin=unknown、（b）对指针
+	 * 类型无条件发射 `T* x = kmm_v4_alloc_global(...)` 死分配（其结果随即被
+	 * 恢复副本/槽内赋值覆盖，每次 resume 泄漏一个 survivor 槽位）：
+	 *   1. 用**原始**初始化式登记分配来源与常量大小；
+	 *   2. 标记「初始化式已单独生成」，令声明本体只出类型、不出缺省分配。
 	 */
 	saved := vd.Value
+	if saved != nil {
+		cg.RecordAllocSizeFromAST(vd.Name, saved)
+		cg.RecordVarOriginFromAST(vd.Name, saved)
+	}
+	cg.SetInitializerSupplied(vd.Name)
 	vd.Value = nil
 	plain := sg.generateVariableDeclaration(vd)
 	vd.Value = saved
