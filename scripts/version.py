@@ -5,14 +5,15 @@ Kaula Version Generator / Kaula 版本号生成器
 Generates snapshot version from git: YY.M.DD-branch-hash
 Generates release version (方案 A 严格减法 / strict subtraction):
     v<MAJOR>.<MINOR>.<PATCH>
-    PATCH = 仓库总提交数 (git rev-list --count HEAD) − 当前 minor 的减法基准 base_total
-    base_total 归档在 scripts/version_history.json，是版本基准的唯一权威来源（不依赖 git tag）。
+    PATCH = 仓库总提交数 (git rev-list --count HEAD) − v1.0 归档提交总数(base_total)
+    减法基准以 v1.0 归档的 base_total 为唯一来源，归档在 scripts/version_history.json
+    （版本基准的唯一权威来源，不依赖 git tag）。当前 minor（v1.1 起）沿用它做减法。
     每个 minor 的第 1 个提交 PATCH = 1（注意不是 0）。
 
 切换 minor / Cut a new minor:
     python scripts/version.py --cut-minor 1.1
-    在“切版提交”创建之前运行：它把旧 minor 最后一个提交的总提交数作为新 minor 的 base_total 归档；
-    随后创建的切版提交（总提交 = base_total + 1）即 v<new>.1。
+    在“切版提交”创建之前运行：它把旧 minor 最后一个提交的总提交数作为新 minor 的归档记录；
+    随后创建的切版提交（总提交 = 基准 + 1）即 v<new>.1。
 
 Usage / 用法:
     python scripts/version.py              # Print version / 打印版本
@@ -100,15 +101,23 @@ def get_current_minor(history: dict) -> str:
     return history.get("current_minor", "1.0")
 
 
+BASELINE_MINOR = "1.0"
+
+
 def get_base_total(history: dict, minor: str) -> int:
-    """Return archived subtraction baseline for a minor."""
+    """Return the subtraction baseline.
+
+    方案 A 的减法基准以 v1.0 归档的提交总数为唯一来源（BASELINE_MINOR），
+    后续 minor（v1.1 起）一律沿用它：v<minor>.N = 总提交数 − v1.0 归档值。
+    这样基准只有一个权威值，不存在跨 minor 冗余失同步的问题。
+    """
     for entry in history.get("versions", []):
-        if entry.get("minor") == minor:
+        if entry.get("minor") == BASELINE_MINOR:
             try:
                 return int(entry.get("base_total", 0))
             except (TypeError, ValueError):
                 return 0
-    raise KeyError(f"minor {minor} 未在 version_history.json 归档")
+    raise KeyError(f"基准 minor {BASELINE_MINOR} 未在 version_history.json 归档")
 
 
 def get_local_ahead(cwd: Path = None) -> int:
@@ -138,22 +147,21 @@ def cut_minor(project_root: Path, new_minor: str) -> dict:
     if new_minor in existing:
         raise SystemExit(f"minor {new_minor} 已归档，不能重复归档")
 
-    # 旧 minor 最后一个提交的总提交数 = 新 minor 的减法基准
+    # 旧 minor 最后一个提交的总提交数 = 新 minor 的归档记录（基准唯一，由 v1.0 持有）
     base_total = get_total_commit_count(project_root)
 
     history.setdefault("versions", []).append({
         "minor": new_minor,
-        "base_total": base_total,
-        "cut_date": datetime.now().strftime("%Y-%m-%d"),
-        "note": f"v{new_minor} 减法基准 = 切换前 v{old_minor} 最后总提交数 {base_total}"
+        "cut_date": datetime.now().strftime("%Y-%m-%d")
     })
     history["current_minor"] = new_minor
     save_history(project_root, history)
 
-    print(f"已归档 minor 基准：v{new_minor} base_total={base_total}（来源 v{old_minor} 最后总提交数）")
+    baseline = get_base_total(history, new_minor)
+    print(f"已归档 minor：v{new_minor}（切换前 v{old_minor} 最后总提交数 {base_total}）")
     print(f"current_minor: {old_minor} -> {new_minor}")
     print("下一步：创建切版提交；提交后 v" + new_minor + ".1 = 总提交 "
-          f"{base_total + 1} − 基准 {base_total}")
+          f"{base_total + 1} − 基准 {baseline}")
     return history
 
 
@@ -183,6 +191,7 @@ def generate_release_version(cwd: Path = None) -> tuple:
     project_root = cwd
     history = load_history(project_root)
     minor = get_current_minor(history)
+    # 减法基准以 v1.0 归档值为唯一来源（与 minor 无关）
     base_total = get_base_total(history, minor)
 
     total = get_total_commit_count(cwd)

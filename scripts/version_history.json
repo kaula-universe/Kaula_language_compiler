@@ -1,19 +1,17 @@
 {
   "schema": 1,
   "current_minor": "1.1",
-  "description": "Kaula 版本号减法基准归档（方案 A 严格减法）。切换 minor 前用 `python scripts/version.py --cut-minor <new>` 归档：把旧 minor 最后一个提交的仓库总提交数(git rev-list --count HEAD) 作为新 minor 的 base_total；新 minor 的版本号 v<minor>.N，N = 仓库总提交数 − base_total，每个 minor 的第 1 个提交 N=1（不是 0）。本文件是版本基准的唯一权威来源，不依赖 git tag。",
+  "description": "Kaula 版本号减法基准归档（方案 A 严格减法）。减法基准以 v1.0 归档的提交总数为唯一来源：v<minor>.N 的 N = 仓库总提交数(git rev-list --count HEAD) − v1.0 归档提交总数(440)，每个 minor 的第 1 个提交 N=1（不是 0）。本文件是版本基准的唯一权威来源，不依赖 git tag。",
   "versions": [
     {
       "minor": "1.0",
-      "base_total": 0,
+      "base_total": 440,
       "cut_date": "2026-03-08",
-      "note": "初始 minor。v1.0 历史与现有 tag(v1.0.185/194/195，位于 develop/feat 分支、非 master 祖先) 一律保持不变；v1.0.N 的 N 即仓库总提交数。"
+      "note": "v1.0 归档提交总数 = 440，作为后续 minor（v1.1 起）的严格减法基准。v1.0 历史与现有 tag(v1.0.185/194/195，位于 develop/feat 分支、非 master 祖先) 一律保持不变。"
     },
     {
       "minor": "1.1",
-      "base_total": 0,
-      "cut_date": "2026-10-05",
-      "note": "v1.1 减法基准 = 0。原值 440 系旧 line 的仓库总提交数；master 线自 1cc3dcb 起为独立历史（根提交无父，见 commit 1cc3dcb），其祖先提交已不存在，440 基准下 patch=总提交−440 恒为负被钳到 0，版本号永久卡在 v1.1.0。修正为 0：master 全历史即 v1.1.x，N = 仓库总提交数。"
+      "cut_date": "2026-10-05"
     }
   ]
 }

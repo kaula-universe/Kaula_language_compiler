@@ -11,18 +11,19 @@ Kaula 使用双版本号系统：发布版本 + 快照版本。
 
 ## 发布版本：minor 归档 + 严格减法（方案 A）
 
-自 v1.1 起，发布版本号采用**严格减法**，版本基准归档在
+自 v1.1 起，发布版本号采用**严格减法**，减法基准以 **v1.0 归档的提交总数**
+（`base_total = 440`）为**唯一来源**，归档在
 [`scripts/version_history.json`](../../scripts/version_history.json)，
-该文件是版本基准的**唯一权威来源，不依赖 git tag**。
+该文件是版本基准的**唯一权威来源，不依赖 git tag**。后续 minor（v1.1 起）一律沿用它。
 
 ### 计算规则
 
 ```
-PATCH = 仓库总提交数(git rev-list --count HEAD) − 当前 minor 的减法基准 base_total
+PATCH = 仓库总提交数(git rev-list --count HEAD) − v1.0 归档提交总数(base_total = 440)
 版本号 = v<MAJOR>.<MINOR>.<PATCH>
 ```
 
-- `base_total`：切换到该 minor 之前，**旧 minor 最后一个提交的仓库总提交数**。
+- `base_total`：**v1.0 归档的提交总数**，作为后续所有 minor 的唯一减法基准。
 - 每个 minor 的**第 1 个提交 PATCH = 1（注意不是 0）**，之后每个提交严格 +1。
 - 因为是严格减法，版本号在历史不被重写的前提下天然单调、可复现。
 
@@ -35,19 +36,19 @@ python scripts/version.py --cut-minor 1.1
 ```
 
 该命令：
-1. 读取旧 minor 最后一个提交的总提交数，作为新 minor 的 `base_total` 归档；
+1. 读取旧 minor 最后一个提交的总提交数，作为该 minor 的归档记录；
 2. 把 `current_minor` 切到新 minor；
-3. 随后创建的切版提交（总提交 = `base_total + 1`）即 `v<new>.1`。
+3. 减法基准不变（始终是 v1.0 的 440），随后创建的切版提交即 `v<new>.1`。
 
-**示例（v1.0 → v1.1）**：切换前 v1.0 最后总提交数为 440，归档为 v1.1 的
-`base_total = 440`；切版提交总提交 441，`PATCH = 441 − 440 = 1` → **v1.1.1**。
+**示例（v1.0 → v1.1）**：v1.0 归档提交总数 440（`base_total = 440`）；切版提交总提交
+441，`PATCH = 441 − 440 = 1` → **v1.1.1**。
 
-**未来 v1.2**：切换时归档 v1.1 最后总提交数 T，`v1.2.N = 总提交数 − T`，
+**未来 v1.2**：基准仍是 v1.0 的 440（不变），`v1.2.N = 总提交数 − 440`，
 切版提交即 v1.2.1。
 
 ### v1.0 历史
 
-v1.0 的 `base_total = 0`，即 `v1.0.N` 的 N 就是仓库总提交数。v1.0 历史与现有
+v1.0 归档的提交总数为 `440`，作为后续所有 minor 的减法基准。v1.0 历史与现有
 tag（`v1.0.185/194/195`，位于 develop/feat 分支、并非 master 祖先）**一律保持
 不变，不得改动或删除**。
 
@@ -104,7 +105,7 @@ compiler/
   version.json          # 版本数据（生成物，被 .gitignore 忽略，不入库）
 scripts/
   version.py            # 版本生成工具（含 --cut-minor）
-  version_history.json  # minor 减法基准归档（入库，唯一权威来源）
+  version_history.json  # 版本基准归档（入库，唯一权威来源；减法基准 = v1.0 提交总数）
 compiler/internal/version/
   version.go            # Go 版本库（读取 version.json）
 toolkit_build.py        # 构建脚本（构建时调用 version.py）

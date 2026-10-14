@@ -3,8 +3,9 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
 > 说明：v1.1 系列的首个发布版本号为 **v1.1.1**。仓库历史中不存在、也不会存在 `v1.1.0`
-> （v1.1 切版基线归档于 `scripts/version_history.json`，不打 tag）。后续 v1.1 修补按
-> v1.1.N 递增。CONC = Continuation-Oriented Native Co-runtime；KMM 当前为 v4。
+> （版本基准归档于 `scripts/version_history.json`，减法基准 = v1.0 归档提交总数 440，
+> 不打 tag）。后续 v1.1 修补按 v1.1.N 递增。CONC = Continuation-Oriented Native Co-runtime；
+> KMM 当前为 v4。
 
 ## [Unreleased]
 
