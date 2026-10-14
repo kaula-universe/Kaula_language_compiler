@@ -89,6 +89,26 @@ extern "C" {
 /* 驱动线程每轮阻塞上限（兜底：即使无事件也要定期复查定时器与提交队列） */
 #define KAULA_IO_BATCH_WAIT_NS       50000000ULL  /* 50ms */
 
+/*
+ * iodriver 每轮最多处理的提交数。
+ *
+ * 为什么要有界：提交队列在高 QPS 下持续非空，若无界排空则步骤 1 永不
+ * 退出，定时器 fire（步骤 2/4）被饿死 —— 到期 sleep 得不到处理，
+ * p99 被顶高。取 256（= KAULA_IO_BATCH_SIZE）：一轮的提交处理量
+ * 与一轮的 IO 事件批量同量级，保证定时器/epoll 每轮都有机会执行。
+ */
+#define KAULA_IODRIVER_SUBMIT_BURST  256
+
+/*
+ * IO 完成批量「铺开唤醒」阈值。
+ *
+ * 一批就绪事件数 >= 此值时，iodriver 用 notify_all 唤醒多个 Worker
+ * 并行排空注入队列；低于此值只 notify_one（保住低并发低抖动）。
+ * 取 KAULA_IO_BATCH_SIZE/4：单 Worker 一轮最多消化约一个 batch，
+ * 超过 1/4 batch 就该并行。详见 iodriver 完成路径的注释与实测表。
+ */
+#define KAULA_IO_WAKE_SPREAD_THRESHOLD (KAULA_IO_BATCH_SIZE / 4)
+
 /* ========== 错误码 ========== */
 
 /*

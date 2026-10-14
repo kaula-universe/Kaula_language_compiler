@@ -244,6 +244,93 @@ static void timer_pool_push(KaulaTimer* t) {
     }
 }
 
+/* ========== 定时器最小堆 ========== */
+
+/*
+ * 二叉最小堆（按 deadline_ns）。仅本 shard 线程读写（单线程不需要锁）。
+ *
+ * 见 kaula_conc_iodriver.h 中 KAULA_TIMER_HEAP_CAP 的说明：
+ * 用 O(log n) 插入 + O(k log n) 取到期，替换旧「无序链表 + 每轮 O(n)
+ * 全扫」，消除 60k/s × 200µs sleep 场景下每 ~200µs 一次 O(n) 扫描
+ * （单 shard 稳态上万定时器）这一主导耗项。
+ */
+
+static inline void timer_heap_swap(KaulaTimer** a, KaulaTimer** b) {
+    KaulaTimer* t = *a; *a = *b; *b = t;
+}
+
+/* 上浮：新元素从尾部往上挪到正确位置 */
+static void timer_heap_up(KaulaIoShard* sh, uint32_t i) {
+    while (i > 0) {
+        uint32_t parent = (i - 1) / 2;
+        if (sh->timer_heap[parent]->deadline_ns <= sh->timer_heap[i]->deadline_ns) {
+            break;
+        }
+        timer_heap_swap(&sh->timer_heap[parent], &sh->timer_heap[i]);
+        i = parent;
+    }
+}
+
+/* 下沉：堆顶被替换后往下挪 */
+static void timer_heap_down(KaulaIoShard* sh, uint32_t i) {
+    uint32_t n = sh->timer_heap_n;
+    for (;;) {
+        uint32_t l = 2 * i + 1;
+        uint32_t r = 2 * i + 2;
+        uint32_t least = i;
+        if (l < n && sh->timer_heap[l]->deadline_ns < sh->timer_heap[least]->deadline_ns) {
+            least = l;
+        }
+        if (r < n && sh->timer_heap[r]->deadline_ns < sh->timer_heap[least]->deadline_ns) {
+            least = r;
+        }
+        if (least == i) break;
+        timer_heap_swap(&sh->timer_heap[i], &sh->timer_heap[least]);
+        i = least;
+    }
+}
+
+/* 入堆；堆满返回 0（调用方退化为溢出链） */
+static int timer_heap_push(KaulaIoShard* sh, KaulaTimer* t) {
+    if (sh->timer_heap_n >= KAULA_TIMER_HEAP_CAP) {
+        return 0;
+    }
+    uint32_t i = sh->timer_heap_n++;
+    sh->timer_heap[i] = t;
+    timer_heap_up(sh, i);
+    return 1;
+}
+
+/* 弹堆顶；空返回 NULL */
+static KaulaTimer* timer_heap_pop(KaulaIoShard* sh) {
+    if (sh->timer_heap_n == 0) {
+        return NULL;
+    }
+    KaulaTimer* top = sh->timer_heap[0];
+    sh->timer_heap_n--;
+    if (sh->timer_heap_n > 0) {
+        sh->timer_heap[0] = sh->timer_heap[sh->timer_heap_n];
+        timer_heap_down(sh, 0);
+    }
+    return top;
+}
+
+static inline KaulaTimer* timer_heap_top(KaulaIoShard* sh) {
+    return sh->timer_heap_n > 0 ? sh->timer_heap[0] : NULL;
+}
+
+/* 重算堆顶缓存（timers_min_deadline），供 fire 的 O(1) 短路 */
+static uint64_t timer_refresh_min(KaulaIoShard* sh) {
+    KaulaTimer* top = timer_heap_top(sh);
+    uint64_t m = (top != NULL) ? top->deadline_ns : KAULA_P_WAIT_FOREVER;
+    /* 溢出链（正常恒空）也要纳入最小值 */
+    for (KaulaTimer* p = sh->timer_overflow; p != NULL; p = p->next) {
+        if (p->deadline_ns < m) m = p->deadline_ns;
+    }
+    sh->timers_min_deadline = m;
+    return m;
+}
+
 static void io_timer_add(KaulaIoShard* sh, KaulaTask* task, uint64_t delay_ns) {
     KaulaTimer* t = timer_pool_pop();
     if (t == NULL) {
@@ -260,26 +347,17 @@ static void io_timer_add(KaulaIoShard* sh, KaulaTask* task, uint64_t delay_ns) {
     uint64_t deadline = kaula_p_now_ns() + delay_ns;
     t->deadline_ns = deadline;
     t->task = task;
-    t->next = sh->timers;
+    t->next = NULL;
 
     /*
-     * 头插 O(1)，链表无序。
-     *
-     * 原实现按 deadline 递增有序插入 —— 全量并发压测暴露：1 万个同
-     * deadline 的 sleep 挂起时，每个插入都要扫到链表尾部，O(n²) 把
-     * 驱动线程卡在插入上（[D] mixed 场景 spawn 阶段 3.8s 的根因）。
-     *
-     * 无序链表 + 最小 deadline 短路（见 io_timers_fire）：
-     *   插入 O(1)；绝大多数 wake 时 min > now，fire 直接短路 O(1)；
-     *   到期那一刻扫描一次 O(n) 批量 fire。并发 sleep 场景总成本 O(n)。
-     * 分散 deadline 会退化为多次 O(n) 扫描 —— sleep 语义天然集中
-     * （同一批挂起的时间窗相近），可接受；极端分散时 IO 数量本就
-     * 被 MAX_PENDING 限住，单次扫描有界。
+     * 入最小堆 O(log n)；堆满（>=65536 在途定时器）退化到线性溢出链，
+     * 不丢任务、不崩。溢出链只在极端突发下短暂存在。
      */
-    sh->timers = t;
-    if (t->deadline_ns < sh->timers_min_deadline) {
-        sh->timers_min_deadline = t->deadline_ns;
+    if (!timer_heap_push(sh, t)) {
+        t->next = sh->timer_overflow;
+        sh->timer_overflow = t;
     }
+    timer_refresh_min(sh);
 }
 
 /*
@@ -301,73 +379,88 @@ static void kaula_inject_batch_flush(KaulaTask** tasks, int n) {
 /* 处理到期定时器；返回距离下一个到期的纳秒数（无定时器时返回 KAULA_P_WAIT_FOREVER） */
 static uint64_t io_timers_fire(KaulaIoShard* sh) {
     KaulaIoDriver* drv = &g_conc_iodriver;
-    if (sh->timers == NULL) {
+    if (sh->timer_heap_n == 0 && sh->timer_overflow == NULL) {
         sh->timers_min_deadline = KAULA_P_WAIT_FOREVER;
         return KAULA_P_WAIT_FOREVER;
     }
 
     uint64_t now = kaula_p_now_ns();
 
-    /* 短路：最近到期时间还没到，本次 wake 无需扫描（O(1)） */
+    /* 短路：最近到期时间还没到，本次 wake 无需动堆（O(1)） */
     if (sh->timers_min_deadline > now) {
         return sh->timers_min_deadline - now;
     }
 
     /*
-     * 至少一个到期：整链扫描一次，把到期者全部 fire，
-     * 未到期者保留并重建链表，同时重算最小 deadline。
+     * 至少一个到期：从最小堆**反复弹堆顶**直到堆顶未到期。
      *
-     * P2.2：到期任务**批量收集**，扫描结束后一次批量注入 + 一次唤醒。
-     * 原实现逐个 kaula_scheduler_resume_task：外部线程（iodriver）不是
-     * owner，Chase-Lev 约束下每个任务都要逐个注入全局队列 + 逐个
-     * notify（pthread_mutex + cond_signal），conc=10000 时 20000 个
-     * 到期任务 = 20000 次锁竞争与唤醒，是 suspend/mixed 落后 Go 的
-     * 直接原因。此改动与 IO 完成路径（P2.1 done_batch 批量注入）对齐。
+     * 只是把「整链扫描 O(n)」换成「O(k log n)」（k=本次到期数）：
+     * 这是本次改造的核心 —— 旧实现在每个到期窗口都要全链扫一遍
+     * （单 shard 上万定时器 × 每 200µs 一轮 = 每秒数十万次无谓访问，
+     * 全串行压在该 shard 线程上，是单 shard p99 ~10-15ms 的主因）。
+     *
+     * P2.2 批量注入保持不变：到期任务批量收集，一次批量注入 +
+     * 一次唤醒，避免逐任务跨线程 notify。
      */
-    KaulaTimer* keep = NULL;
-    KaulaTimer* keep_tail = NULL;
-    uint64_t new_min = KAULA_P_WAIT_FOREVER;
-
     KaulaTask* done_batch[KAULA_IO_BATCH_SIZE * 2];
     int done_n = 0;
 
-    KaulaTimer* cur = sh->timers;
-    while (cur != NULL) {
-        KaulaTimer* next = cur->next;
-        if (cur->deadline_ns <= now) {
-            KaulaTask* task = cur->task;
-            timer_pool_push(cur);       /* P2.2：归还定时器池，替代 free */
-            atomic_fetch_add_explicit(&drv->total_timer_fires, 1,
-                                      memory_order_relaxed);
-            /* 写回 TLS 供 resume_fn 读取，然后交回调度器 */
-            task->io_result = 0;
-            if (done_n < (int)(sizeof(done_batch) / sizeof(done_batch[0]))) {
-                done_batch[done_n++] = task;
-            } else {
-                /* 批次满：先排空（sched_yield 重试，不丢任务），
-                 * 并立即唤醒 Worker 并行消费——不能等整波扫描完再唤醒，
-                 * 否则 fire 串行处理大波到期任务期间 Worker 全部闲置 */
-                kaula_inject_batch_flush(done_batch, done_n);
-                kaula_scheduler_notify_all();
-                done_n = 0;
-                done_batch[done_n++] = task;
-            }
+    KaulaTimer* cur;
+    while ((cur = timer_heap_pop(sh)) != NULL && cur->deadline_ns <= now) {
+        KaulaTask* task = cur->task;
+        timer_pool_push(cur);       /* P2.2：归还定时器池，替代 free */
+        atomic_fetch_add_explicit(&drv->total_timer_fires, 1,
+                                  memory_order_relaxed);
+        /* 写回 TLS 供 resume_fn 读取，然后交回调度器 */
+        task->io_result = 0;
+        if (done_n < (int)(sizeof(done_batch) / sizeof(done_batch[0]))) {
+            done_batch[done_n++] = task;
         } else {
-            cur->next = NULL;
-            if (keep == NULL) {
-                keep = cur;
-                keep_tail = cur;
-            } else {
-                keep_tail->next = cur;
-                keep_tail = cur;
-            }
-            if (cur->deadline_ns < new_min) new_min = cur->deadline_ns;
+            /* 批次满：先排空（sched_yield 重试，不丢任务），
+             * 并立即唤醒 Worker 并行消费——不能等整波处理完再唤醒，
+             * 否则 fire 串行处理大波到期任务期间 Worker 全部闲置 */
+            kaula_inject_batch_flush(done_batch, done_n);
+            kaula_scheduler_notify_all();
+            done_n = 0;
+            done_batch[done_n++] = task;
         }
-        cur = next;
+    }
+    /* 弹出来的第一个未到期者要放回堆 */
+    if (cur != NULL) {
+        timer_heap_push(sh, cur);
     }
 
-    sh->timers = keep;
-    sh->timers_min_deadline = new_min;
+    /*
+     * 溢出链（正常恒空）：堆满时暂存的定时器在每次 fire 时线性扫一遍，
+     * 到期的 fire，未到期的保留。数量少，O(m) 可接受。
+     */
+    if (sh->timer_overflow != NULL) {
+        KaulaTimer** link = &sh->timer_overflow;
+        while (*link != NULL) {
+            KaulaTimer* of = *link;
+            if (of->deadline_ns <= now) {
+                *link = of->next;
+                KaulaTask* task = of->task;
+                timer_pool_push(of);
+                atomic_fetch_add_explicit(&drv->total_timer_fires, 1,
+                                          memory_order_relaxed);
+                task->io_result = 0;
+                if (done_n < (int)(sizeof(done_batch) / sizeof(done_batch[0]))) {
+                    done_batch[done_n++] = task;
+                } else {
+                    kaula_inject_batch_flush(done_batch, done_n);
+                    kaula_scheduler_notify_all();
+                    done_n = 0;
+                    done_batch[done_n++] = task;
+                }
+            } else {
+                link = &of->next;
+            }
+        }
+    }
+
+    /* 重算堆顶缓存（弹出后堆顶变了；溢出链可能仍有残留） */
+    uint64_t new_min = timer_refresh_min(sh);
 
     /* P2.2：批量注入剩余到期任务；有注入就唤醒所有 Worker 并行消化
      * （替代原逐任务 notify_one；任务量大，多 Worker 同时 pop 注入队列） */
@@ -376,7 +469,7 @@ static uint64_t io_timers_fire(KaulaIoShard* sh) {
         kaula_scheduler_notify_all();
     }
 
-    if (keep != NULL) {
+    if (new_min != KAULA_P_WAIT_FOREVER) {
         uint64_t d = new_min - now;
         return d > 0 ? d : 0;
     }
@@ -390,9 +483,21 @@ static void iodriver_loop(void* arg) {
     KaulaIoDriver* drv = &g_conc_iodriver;
 
     while (atomic_load_explicit(&sh->running, memory_order_acquire)) {
-        /* 步骤 1：处理新提交 */
+        /*
+         * 步骤 1：处理新提交。
+         *
+         * 每轮提交处理量**设上限**（KAULA_IODRIVER_SUBMIT_BURST）：
+         * 旧实现 `while (pop != NULL)` 无界排空，高 QPS 下提交队列
+         * 持续非空 → shard 线程永远停在步骤 1，**步骤 2 的
+         * io_timers_fire 被无限推迟** → 到期任务（如 200µs sleep）
+         * 得不到唤醒，p999 被顶到几十毫秒。设上限后每轮必定走到
+         * 步骤 2，保证到期任务被及时 fire（anti-starvation）。
+         */
+        int burst = 0;
         void* item;
-        while ((item = kaula_mpsc_queue_pop(&sh->submit_queue)) != NULL) {
+        while (burst < KAULA_IODRIVER_SUBMIT_BURST &&
+               (item = kaula_mpsc_queue_pop(&sh->submit_queue)) != NULL) {
+            burst++;
             KaulaIoSubmitEntry* e = (KaulaIoSubmitEntry*)item;
             KaulaTask* task = e->task;
             KaulaIoRequest req = e->request;
@@ -546,21 +651,25 @@ static void iodriver_loop(void* arg) {
                 }
             }
 
-            /* 批量注入剩余任务，并唤醒一个 Worker 消费。
+            /* 批量注入剩余任务，并唤醒 Worker 消费。
              *
              * 无 sleep 场景无定时器，io_timers_fire 不触发 notify，
              * 缺此会退化为 1ms park 超时（旧版吞吐 71k 的延迟上限）。
              *
              * 唤醒数权衡（v1.2 实测，4 核 / 100 连接）：
-             *   notify_one  93.7k / p999 3.5ms  ← 最优（p999 与旧版持平）
-             *   notify_n(2) 92.5k / p999 6.5ms  ← 第二个 Worker 的
-             *               woken/park 抖动摊到每个请求，尾延迟翻倍
+             *   notify_one  93.7k / p999 3.5ms  ← 小批最优
+             *   notify_n(2) 92.5k / p999 6.5ms
              *   notify_all  112.9k / p999 5.5ms ← 吞吐 +20% 但 p999 恶化
-             * 本机 4 核下多唤醒不并行增益（任务本来就少），只加抖动。
-             * 大批（batch 满 512）才广播——满时分支另行 notify_all。 */
+             * 小批下多唤醒不并行增益，只加抖动；大批（≥SPREAD 阈值）
+             * 时 done_n 已能喂饱多个 Worker，广播换来吞吐、抖动被摊薄。
+             * 自适应阈值即 KAULA_IO_WAKE_SPREAD_THRESHOLD。 */
             if (done_n > 0) {
                 kaula_inject_batch_flush(done_batch, done_n);
-                kaula_scheduler_notify_one();
+                if (done_n >= KAULA_IO_WAKE_SPREAD_THRESHOLD) {
+                    kaula_scheduler_notify_all();
+                } else {
+                    kaula_scheduler_notify_one();
+                }
             }
         }
 
@@ -615,6 +724,8 @@ int kaula_iodriver_init(void) {
          */
         kaula_p_io_wait_invalidate(&sh->wait);
         sh->timers_min_deadline = KAULA_P_WAIT_FOREVER;
+        sh->timer_heap_n = 0;
+        sh->timer_overflow = NULL;
 
         kaula_mpsc_queue_init(&sh->submit_queue);
 
@@ -698,9 +809,9 @@ void kaula_iodriver_destroy(void) {
             sh->pending[b] = NULL;
         }
 
-        while (sh->timers != NULL) {
-            KaulaTimer* t = sh->timers;
-            sh->timers = t->next;
+        /* 堆内定时器全部回收（归还任务 + 释放） */
+        while (sh->timer_heap_n > 0) {
+            KaulaTimer* t = timer_heap_pop(sh);
             if (t->task != NULL) {
                 t->task->io_result = -ECANCELED;
                 atomic_store_explicit(&t->task->state, KAULA_TASK_READY,
@@ -708,6 +819,18 @@ void kaula_iodriver_destroy(void) {
             }
             free(t);
         }
+        /* 溢出链（正常恒空） */
+        while (sh->timer_overflow != NULL) {
+            KaulaTimer* t = sh->timer_overflow;
+            sh->timer_overflow = t->next;
+            if (t->task != NULL) {
+                t->task->io_result = -ECANCELED;
+                atomic_store_explicit(&t->task->state, KAULA_TASK_READY,
+                                      memory_order_release);
+            }
+            free(t);
+        }
+        sh->timers_min_deadline = KAULA_P_WAIT_FOREVER;
 
         kaula_p_io_wait_destroy(sh->wait);
         /* POSIX 上句柄是含两个 fd 的结构体，不能 = 0（只能整体失效） */

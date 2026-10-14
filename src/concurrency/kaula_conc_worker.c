@@ -458,6 +458,49 @@ KaulaTask* kaula_conc_worker_find_work(KaulaWorker* w) {
             }
             return drained[0];
         }
+
+        /*
+         * 没取到 —— 但**队列可能非空**。
+         *
+         * inject_shard_pop_batch 的 CAS 在竞争窗口里会失败；旧实现在
+         * 重试耗尽后返回 0（=「空」），Worker 据此走向 park，而任务其实
+         * 还在队列里。这是「永久漏唤醒」的确切来源：连接任务的第一条
+         * 请求没人处理，撞满读超时（实测 4096 连接 / 4 Worker 下均匀
+         * 分布 1/4 连接中招）。
+         *
+         * inject_shard_pop_batch 已修（重试耗尽退化为单条 CAS，不谎报
+         * 空）；这里再加一道复核：若整个注入队列确实非空，说明是竞争
+         * 抢空而非真空 —— 自旋收紧一次、重来一轮，绝不 park。
+         *
+         * 加一次上限（4 次）防止病态情况占死 Worker：真到了这一步，
+         * 让出 Worker 由 park 的 1ms 自愈兜底，仍不会永久卡死。
+         */
+        for (int spin = 0; spin < 4; spin++) {
+            if (kaula_scheduler_inject_empty()) {
+                break; /* 真空：安心往下走（窃取 / park） */
+            }
+            got = kaula_scheduler_inject_pop_batch_shard(want, drained, 32);
+            if (got == 0) {
+                for (uint32_t k = 1; k < KAULA_INJECT_SHARDS && got == 0; k++) {
+                    uint32_t si = (want + k) & KAULA_INJECT_SHARD_MASK;
+                    got = kaula_scheduler_inject_pop_batch_shard(si, drained, 32);
+                }
+            }
+            if (got > 0) {
+                for (int j = 0; j < got; j++) {
+                    atomic_store_explicit(&drained[j]->owner, w, memory_order_release);
+                }
+                for (int j = 1; j < got; j++) {
+                    if (!kaula_ws_deque_push_owner(&w->local_queue, drained[j])) {
+                        if (!kaula_scheduler_inject_push(drained[j])) {
+                            kaula_scheduler_notify_one();
+                        }
+                    }
+                }
+                return drained[0];
+            }
+            kaula_p_yield();
+        }
     }
 
     /* 3. 窃取他人（随机起点，避免所有 Worker 撞同一个受害者） */

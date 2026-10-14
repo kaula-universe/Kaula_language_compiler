@@ -186,17 +186,25 @@ static KaulaTask* inject_shard_pop(uint32_t si) {
     return NULL;
 }
 
+/*
+ * 批量弹出的最大 CAS 重试次数。
+ *
+ * 见 inject_shard_pop_batch 尾部注释：重试耗尽**不能**谎报空。
+ * 取 16 足够在正常竞争下拿到批；极端竞争由尾部单任务兜底接手。
+ */
+#define kInjectPopBatchMaxAttempts 16
+
 /* 从指定片批量弹（同一片内一次 CAS 推进 m 个） */
 static int inject_shard_pop_batch(uint32_t si, KaulaTask** out, int max) {
     if (out == NULL || max <= 0) return 0;
     if (max > 64) max = 64;
     KaulaInjectShard* sh = inject_shard(si);
 
-    for (uint64_t attempt = 0; attempt < 8; attempt++) {
+    for (uint64_t attempt = 0; attempt < kInjectPopBatchMaxAttempts; attempt++) {
         uint64_t head = atomic_load_explicit(&sh->head, memory_order_relaxed);
         uint64_t tail = atomic_load_explicit(&sh->tail, memory_order_acquire);
 
-        if (head >= tail) return 0; /* 空 */
+        if (head >= tail) return 0; /* 真空：返回 0 是正确的 */
 
         uint64_t avail = tail - head;
         int m = (avail < (uint64_t)max) ? (int)avail : max;
@@ -215,8 +223,41 @@ static int inject_shard_pop_batch(uint32_t si, KaulaTask** out, int max) {
             return m;
         }
         /* 输者：重试（可能因别的 Worker 抢走了 head） */
+        kaula_p_yield();
     }
-    return 0;
+
+    /*
+     * 重试耗尽 —— **绝不能返回 0**。
+     *
+     * 返回 0 的语义是「本片空」，调用方（find_work）据此转去扫别的片、
+     * 或直接 park。但此刻队列里其实**有任务**：只是在多 Worker 抢同一片
+     * 的窗口里连续 CAS 失败。把它谎报成「空」，Worker 就会去 park，
+     * 任务永久滞留在队列里 —— 这是「一次漏唤醒 = 一个任务永久卡死」的
+     * 确切形状，且无法自愈（每次醒来重试仍可能同样失败）。
+     *
+     * 实测（service3，4096 连接 / 4 Worker）：恰好 1/4 连接的**第一条**
+     * 请求永久无响应（seq=1、elapsed=30s 撞满读超时），conn_id 在
+     * 0..4095 上均匀分布；调大 Worker 数（竞争面收窄）后 errors 归零。
+     *
+     * 兜底：退化为**单任务 CAS**（推进 1 个，冲突窗口最小），成功即返回
+     * 1。单条 CAS 在同样的竞争下失败率极低，且再失败就交给调用方的
+     * 下一轮 —— 但至少要保证「不谎报空」。
+     */
+    {
+        uint64_t head = atomic_load_explicit(&sh->head, memory_order_relaxed);
+        uint64_t tail = atomic_load_explicit(&sh->tail, memory_order_acquire);
+        if (head >= tail) return 0; /* 真的空了 */
+
+        out[0] = atomic_load_explicit(
+            &sh->buffer[head & KAULA_INJECT_SHARD_MASK_CAP], memory_order_acquire);
+        uint64_t expected = head;
+        if (atomic_compare_exchange_strong_explicit(
+                &sh->head, &expected, head + 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            return 1;
+        }
+        return 0; /* 连单条都被抢走：此刻片内确实暂时无货，交由下轮 */
+    }
 }
 
 static int inject_shard_empty(uint32_t si) {
@@ -575,9 +616,42 @@ KaulaHandle kaula_spawn_simple(void* (*fn)(void* frame),
 /* notify_shard 铺开唤醒面的最小片积压深度（见 kaula_scheduler_notify_shard） */
 #define KAULA_NOTIFY_SHARD_SPREAD_MIN 3
 
+/*
+ * 唤醒一个 Worker。
+ *
+ * **必须是轮转，不能总是 worker[0]**。
+ *
+ * 旧实现从 i=0 顺序扫，永远先叫 worker[0]。在「IO 完成后批量注入 +
+ * notify_one」的路径上（iodriver 就绪事件注入、定时器到期注入），
+ * 这意味着**几乎每一次唤醒都落在 worker[0]**：它被叫醒后从注入队列
+ * 取活、执行、再挂起；其余 Worker 一直 park 等自己的 1ms/本地定时器
+ * 超时。实测（service3 基准，4 Worker / 4096 连接 / 60k req/s）：
+ *
+ *   worker[0] CPU 时间  1:33
+ *   worker[1/2/3] 各    ~0:30   ← 只有 worker[0] 的 1/3
+ *
+ * 单 Worker 独吃全部 IO 完成唤醒，其本地队列与注入片深度爆炸 →
+ * p99 从 ~330µs（30k/s 时）劣化到 ~17ms（60k/s 时），p999 抖动到
+ * 近百毫秒。这正是「单点极端排队」的根因。
+ *
+ * 改为**全局轮转**（ticket 原子自增取模）：连续多次 notify_one 会
+ * 依次叫醒不同的 Worker，把唤醒面摊开。轮转只影响「叫谁」，不改变
+ * 「叫醒一个」的语义（仍是最小唤醒成本、不无谓打扰所有 Worker）。
+ *
+ * 跳过未 running 的 Worker；全不可用时才放弃（调用方一般还会再
+ * 触发一轮，不会静默丢唤醒 —— 注入队列里的任务由任一 Worker 的
+ * 1ms park 自愈超时兜底消费）。
+ */
 void kaula_scheduler_notify_one(void) {
     uint32_t n = g_conc_runtime.worker_count;
-    for (uint32_t i = 0; i < n; i++) {
+    if (n == 0) return;
+
+    static _Atomic(uint32_t) rr_ticket = 0;
+    uint32_t start = atomic_fetch_add_explicit(&rr_ticket, 1,
+                                               memory_order_relaxed) % n;
+
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t i = (start + k) % n;
         if (atomic_load_explicit(&g_conc_workers[i].running, memory_order_acquire)) {
             kaula_worker_wake(&g_conc_workers[i]);
             return;

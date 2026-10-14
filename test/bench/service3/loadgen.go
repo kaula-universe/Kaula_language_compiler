@@ -47,6 +47,7 @@ var (
 	offered  atomic.Int64 // 定速模式：已取用令牌数（= 实际发送的请求数）
 	errEOF   atomic.Int64 // 连接被对端关闭（服务端主动断连）
 	errTMO   atomic.Int64 // 读超时（30s deadline，请求在服务侧排队过久）
+	shutdown atomic.Bool  // 收尾中：此后的读错误是唤醒造成的，不计入统计
 )
 
 // ---------- 定速调度（开环） ----------
@@ -181,6 +182,43 @@ func validate(resp []byte, seq int32, expCk uint32, expTotal int32) (mismatch, b
 	return mismatch, false
 }
 
+// ---------- 活动连接登记（收尾唤醒用） ----------
+
+// 为什么需要：client 只在循环顶部检查 stop。若某条连接此刻正阻塞在
+// r.ReadBytes('\n')（服务侧还在排队/回包），close(stop) 无法立刻打断它，
+// 必须等这次读完成，或撞上 30s 的读 deadline。收尾阶段连接一多
+// （conns=4096 实测 err_timeout=1344），大量 goroutine 要各自等满 30s，
+// TOTAL 行才会打印 —— 这批 err_timeout 是**压测器收尾语义**造成的假阳性，
+// 与服务健康度无关（同一时段 ok 数与 conns=512 几乎相同）。
+//
+// 修法：登记所有活动连接，close(stop) 之后统一 SetReadDeadline(now)，
+// 令阻塞中的 ReadBytes 立刻返回超时错误；此时已过测量窗口，不计入统计。
+var (
+	connMu sync.Mutex
+	conns  = make(map[net.Conn]struct{})
+)
+
+func registerConn(c net.Conn) {
+	connMu.Lock()
+	conns[c] = struct{}{}
+	connMu.Unlock()
+}
+
+func unregisterConn(c net.Conn) {
+	connMu.Lock()
+	delete(conns, c)
+	connMu.Unlock()
+}
+
+// wakeAllConns 打断所有仍在阻塞读的连接，使 wg.Wait() 立即收敛。
+func wakeAllConns() {
+	connMu.Lock()
+	for c := range conns {
+		_ = c.SetReadDeadline(time.Now())
+	}
+	connMu.Unlock()
+}
+
 // ---------- 客户端 ----------
 
 func client(addr string, stop <-chan struct{}, wg *sync.WaitGroup) {
@@ -198,7 +236,8 @@ func client(addr string, stop <-chan struct{}, wg *sync.WaitGroup) {
 		errors.Add(1)
 		return
 	}
-	defer c.Close()
+	defer func() { unregisterConn(c); c.Close() }()
+	registerConn(c) // 收尾时统一 SetReadDeadline(now) 打断阻塞中的 ReadBytes
 	r := bufio.NewReaderSize(c, 8192)
 	w := bufio.NewWriterSize(c, 4096)
 	seq := int32(0)
@@ -246,6 +285,11 @@ func client(addr string, stop <-chan struct{}, wg *sync.WaitGroup) {
 		resp, err := r.ReadBytes('\n')
 		elapsed := time.Since(t0).Microseconds()
 		if err != nil {
+			// 收尾唤醒（shutdown）不计入错误：测量窗口已结束，这批
+			// 超时是我们主动打断造成的，不是服务行为。
+			if shutdown.Load() {
+				return
+			}
 			errors.Add(1)
 			// 分类：EOF=服务端主动关闭了连接；timeout=请求在服务侧
 			// 排队超过 30s。两者根因不同，报告必须分开计数。
@@ -351,7 +395,9 @@ func main() {
 			percentile(samples, 0.99), percentile(samples, 0.999), dMis)
 		win++
 	}
+	shutdown.Store(true)
 	close(stop)
+	wakeAllConns() // 打断仍阻塞在 ReadBytes 的连接，避免收尾等满 30s
 	wg.Wait()
 	fmt.Printf("TOTAL ok=%d mismatch=%d errors=%d offered=%d err_eof=%d err_timeout=%d\n",
 		okTotal.Load(), mismatch.Load(), errors.Load(), offered.Load(),

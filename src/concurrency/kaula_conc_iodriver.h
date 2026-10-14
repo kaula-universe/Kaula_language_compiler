@@ -56,7 +56,7 @@ typedef struct KaulaIoPending {
 typedef struct KaulaTimer {
     uint64_t             deadline_ns;
     KaulaTask*           task;
-    struct KaulaTimer*   next;
+    struct KaulaTimer*   next;   /* 溢出链用；堆化后正常路径不用 */
 } KaulaTimer;
 
 /* ========== IoDriver 主结构（sharded epoll：v1.2） ========== */
@@ -72,6 +72,30 @@ typedef struct {
 } IoReadyEvent;
 
 #define KAULA_IO_MAX_SHARDS 64
+
+/*
+ * 定时器最小堆容量（每 shard 一份）。
+ *
+ * 为什么从"无序链表 + 全链扫描"改成二叉最小堆：
+ *
+ *   旧实现 io_timers_fire 每当 timers_min_deadline 到期，就**整链扫描
+ *   一次 O(n)** 挑出到期者。60k/s × 200µs sleep 场景下单 shard 在途
+ *   定时器稳态上万，每 ~200µs 一次 O(n) 全扫 = 每轮几十万次访问，
+ *   全部串行压在该 shard 线程上 —— 实测单 shard 定速 60k/s 的 p99
+ *   被顶到 ~10-15ms（p999 45-320ms），远高于 Go 的 4-5ms。
+ *
+ *   最小堆把「取到期」变成 O(k log n)（k=本次到期数），插入 O(log n)
+ *   取代 O(1) 头插——插入略变贵，但消除了每轮 O(n) 全扫这个
+ *   O(每秒轮数 × n) 的主导项。sleep 天然集中到期，k 通常远小于 n。
+ *
+ * 容量取 65536：与 KAULA_IODRIVER_MAX_PENDING 同量级（挂起上限）。
+ * 堆满时退化到 sh->timer_overflow 线性链（不丢任务、不崩），
+ * 且溢出链只在极端突发下短暂存在。
+ *
+ * 存储：堆是「指针数组」（KaulaTimer*），KaulaTimer 对象仍走无锁池，
+ * 因此每个 shard 只多花 65536×8 = 512KB 指针槽（.bss，按需触达）。
+ */
+#define KAULA_TIMER_HEAP_CAP 65536
 
 /*
  * 一个 shard = 一个 iodriver 线程 + 独立 epoll/kqueue 句柄 + 独立
@@ -92,9 +116,16 @@ struct KaulaIoShard {
     /* fd → Task 挂起表（仅本 shard 线程写） */
     KaulaIoPending*   pending[KAULA_IO_BUCKETS];
 
-    /* 定时器链表（无序头插；timers_min_deadline 供 fire 短路） */
-    KaulaTimer*       timers;
+    /*
+     * 定时器最小堆（按 deadline_ns 排序，仅本 shard 线程读写）。
+     * timers_min_deadline 是堆顶缓存，供 fire 的 O(1) 短路。
+     */
+    KaulaTimer*       timer_heap[KAULA_TIMER_HEAP_CAP];
+    uint32_t          timer_heap_n;
     uint64_t          timers_min_deadline;
+
+    /* 堆满时的线性溢出链（正常路径恒空） */
+    KaulaTimer*       timer_overflow;
 
     /* 就绪批次（epoll/kqueue；IOCP 保持文件级静态，强制 1 shard 安全） */
     IoReadyEvent      ready[KAULA_IO_BATCH_SIZE];

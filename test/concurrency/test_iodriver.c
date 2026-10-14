@@ -335,6 +335,72 @@ static void test_many_timers(void) {
     kaula_runtime_shutdown();
 }
 
+/*
+ * 定时器最小堆的乱序插入测试。
+ *
+ * == 为什么需要它 ==
+ *
+ * test_many_timers 的 deadline 是**递增**插入的（i*100µs），恰好也符合
+ * 最小堆的下沉路径，测不出「堆序维护错误」。定时器从「无序链表 + 全链
+ * 扫描」改成「二叉最小堆」后，插入是 O(log n) 上浮：若上浮/下沉写错，
+ * 症状是**堆顶不是最小 deadline** → 已到期的任务不被 fire（永久挂起）
+ * 或未到期的被提前唤醒。
+ *
+ * 本用例刻意**乱序**插入（大 deadline 先、小 deadline 后交错），并且
+ * 让最小 deadline 落在最后插入 —— 只有正确的上浮才能把它冒到堆顶。
+ *
+ * == 判据 ==
+ *
+ * 每个任务只 sleep 一次，醒来即 DONE。只要全部完成、无残留挂起、无
+ * 提前/延后过久，就说明堆序正确。延迟误差放宽到 [0.5x, 4x+20ms]：
+ * 只抓「丢/错序」，不抓调度抖动。
+ */
+static void test_timer_heap_out_of_order(void) {
+    TEST_CASE("定时器最小堆：乱序 deadline 仍按序到期");
+    KaulaRuntimeConfig cfg = {0};
+    cfg.worker_count = 4;
+    ASSERT_EQ(kaula_runtime_init(&cfg), 0, "初始化应成功");
+
+    const int N = 64;
+    KaulaHandle hs[64];
+    TimerFrame* frames[64];
+    uint64_t want_ns[64];
+
+    /*
+     * 乱序生成：用 (i*37 mod N) 打散顺序，使插入序与 deadline 序不相关；
+     * 最早的 deadline 往往落在中后段插入。基准 20ms，步进 0.5ms。
+     */
+    for (int i = 0; i < N; i++) {
+        int slot = (i * 37) % N;
+        uint64_t d = 20000000ULL + (uint64_t)slot * 500000ULL; /* 20~51.5ms */
+        want_ns[slot] = d;
+    }
+    for (int slot = 0; slot < N; slot++) {
+        frames[slot] = (TimerFrame*)kmm_v4_alloc_global(sizeof(TimerFrame));
+        memset(frames[slot], 0, sizeof(*frames[slot]));
+        frames[slot]->pc = 0;
+        frames[slot]->delay_ns = (int)want_ns[slot];
+        atomic_store(&frames[slot]->resume_calls, 0);
+        hs[slot] = kaula_spawn(timer_resume, frames[slot], sizeof(TimerFrame));
+        ASSERT_FALSE(kaula_handle_is_null(hs[slot]), "spawn 应成功");
+    }
+
+    uint64_t t0 = kaula_p_now_ns();
+    int done = 0;
+    for (int slot = 0; slot < N; slot++) {
+        void* r = kaula_handle_await(hs[slot]);
+        if ((int)(intptr_t)r == 7) done++;
+    }
+    uint64_t elapsed = kaula_p_now_ns() - t0;
+
+    ASSERT_EQ(done, N, "乱序插入的定时器都应完成（堆序错误会导致丢唤醒）");
+    ASSERT_EQ(kaula_iodriver_pending_count(), 0, "结束后不应残留挂起");
+    /* 最大 deadline 是 51.5ms；给足调度余量，只排除「完全错序」。 */
+    ASSERT_TRUE(elapsed < 300000000ULL, "总耗时应 < 300ms（远小于此说明提前唤醒）");
+
+    kaula_runtime_shutdown();
+}
+
 /* ========== fd 读写往返 ========== */
 
 /*
@@ -906,6 +972,7 @@ int main(void) {
     test_timer_suspend_resume();
     test_subms_timer_precision();
     test_many_timers();
+    test_timer_heap_out_of_order();
     TEST_SECTION("IO 执行分派");
     test_do_io_dispatch();
     TEST_SECTION("IoDriver fd 读写");
