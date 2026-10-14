@@ -313,6 +313,24 @@ def kill_tree(p):
         pass
 
 
+def wait_port_free(port, tries=60):
+    """等待端口真正可再次 bind。
+
+    kill_tree 用 SIGKILL 后，内核回收 listen socket 需要一点时间；
+    紧接着的下一轮 Popen 若在窗口内启动，bind 会 EADDRINUSE → 服务
+    退出 → wait_port 超时 → 该轮以 error 收尾（指标表显示 '—'）。
+    这里显式等到端口不再被监听，消除轮间竞态。
+    """
+    for _ in range(tries):
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+            s.close()
+        except OSError:
+            return True          # 连不上 = 已释放
+        time.sleep(0.1)
+    return False
+
+
 def start_disturber(level):
     """返回 (进程, 说明)。level 形如 baseline / cpu50 / mem50 / net。"""
     if level == "baseline":
@@ -407,8 +425,14 @@ def run_once(name, exe, port, level, conns, sec, win, rate=0):
         time.sleep(2.5)  # 干扰就绪 + 服务预热
 
         # 指标采集：压测前后各采一次快照，用于归因内核态/CPU/内存。
-        # 直接使用 Popen 句柄的 pid（最可靠）；ss 反查仅作兜底。
-        mpid = sp.pid or find_pid_by_port(port)
+        #
+        # PID 解析必须**优先按监听端口反查**，不能只信 sp.pid：
+        # Kaula 服务的 runtime 惰性初始化会派生工作进程，Popen 句柄的
+        # sp.pid 可能是已退出的中间进程 —— 拿它读 /proc 会失败
+        # （read_proc_stat 返回 {} / read_vmrss_kb 返回 None），
+        # 指标表就会显示 '—'。端口反查（/proc/net/tcp inode →
+        # /proc/*/fd 匹配）拿到的是真正持有 listen socket 的进程。
+        mpid = find_pid_by_port(port) or sp.pid
         m_before = collect_metrics(mpid)
         t0 = time.time()
         r = subprocess.run([LOADGEN, f"127.0.0.1:{port}", str(conns), str(sec), str(win)]
@@ -467,7 +491,7 @@ def run_once(name, exe, port, level, conns, sec, win, rate=0):
         for p in (dp if isinstance(dp, list) else [dp]) if dp else []:
             kill_tree(p)
         kill_tree(sp)
-        time.sleep(0.6)  # 端口回收
+        wait_port_free(port)  # 消除轮间 bind 竞态（见 wait_port_free 注释）
 
 
 def main():
