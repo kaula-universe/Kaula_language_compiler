@@ -644,6 +644,93 @@ kmm_v4_survivor_rewind(cp);
 pointer to integer or pointer"），所以 `KMM_ATOMIC_TYPE` 保持普通整型，
 原子性完全由内建函数提供。
 
+### 2.6.1 宏口径必须跨 TU 一致（-O0 的坑）
+
+这一节记录一个真实踩过的坑，因为它是**静默**的。
+
+`KMM_THREAD_SAFETY_LEVEL` 有两个来源：
+
+1. 命令行 `-D`（优先）；
+2. 头文件里由 `__OPTIMIZE__` 推出的 `KMM_V4_OPT_LEVEL` 再推导。
+
+`__OPTIMIZE__` 只在 `-O1` 及以上定义。于是同一个程序里，如果编译器给"生成的
+那个 TU"带了 `-DKMM_THREAD_SAFETY_LEVEL=1`，而 `std/*.o` 各自按 `-O0` 重新推导，
+就会出现：
+
+| TU | 来源 | 展开值 |
+|---|---|---|
+| 生成 TU | `-DKMM_THREAD_SAFETY_LEVEL=1` | 1 |
+| std .o（`-O0`） | `__OPTIMIZE__` 未定义 → `KMM_V4_OPT_LEVEL=0` | **0** |
+| std .o（`-O1/-O2/-O3`） | 推导 | 1 |
+
+注意方向：**缺的总是 `-O0` 那一侧**。`-D` 只作用于它所在的 TU，管不到独立的
+`.o`；编译器强制的那一侧是 1，所以只有 `-O0` 构建会出现两套口径。
+
+**为什么危险**：宏决定 `extern` 声明类型、`struct` 布局和 `static inline` 副本。
+C 不把链接期类型当契约，两套副本能链上、能跑，只在特定分配路径上读错半个字
+或者漏掉原子性 —— 属于"能编译、能过测试、偶尔错"的一类。
+
+**现在的约束**（三层）：
+
+1. **类型不随级别变形**。`KMM_ATOMIC_TYPE` 固定为 `kmm_atomic_t`（`size_t`），
+   只由目标决定；`KMM_THREAD_SAFETY_LEVEL` 只决定**操作方式**（原子内建 vs
+   普通读写）。第 8 层有 `sizeof` / `_Alignof` 静态断言兜底。
+2. **构建系统统一派发宏**。`kaulac` 的 `hostSemanticDefines` 是唯一来源，PCH、
+   `std/*.o`、runtime `.o`、生成 TU 四处共用同一份，不再各写各的
+   （旧代码在 4 处分别拼 `-DKMM_THREAD_SAFETY_LEVEL=1`，改一处忘一处）。
+3. **缓存判据带语义指纹**。`.o` 旁边有 `.stamp`（编译语义的 SHA-256），
+   参与指纹的是四类输入：
+   - **宏集**（`-D`，含用户 `-D` 与池容量）
+   - **优化级别**（`-O`，因为它决定 `__OPTIMIZE__`，进而决定默认口径）
+   - **`CFlags` 与编译器前缀**（`-ffreestanding` 等写死语义）
+   - **交叉编译目标**（`-target` / `-mcmodel` / 架构默认特性）
+   - **源码内容**
+
+   任一变化就重编；只比 mtime 会把加了 `-D` 之前的旧 `.o` 当新产物复用。
+
+   目标那一维是补测时发现漏掉的：`std/*.o` 与 `kmm_v4_fs.o` 按 target 分目录
+   存放，但指纹里若不含 `-target`，同一目录下换架构就会撞车。表现是
+   `ld.lld: error: xxx.o is incompatible with elf64-littleaarch64`，单独重跑
+   又正常。现在命令行与指纹共用 `bootArchArgs(cfg)` 一个函数，从结构上排除了
+   "改了命令行忘了改指纹"。
+
+PCH 同理：`.gch` 里存的是预处理之后的 token 流，生成时生效的宏被固化了。
+所以它的生成参数必须与消费它的 `.o` 同源，缓存判据也不能只看 `kaula.h` 的
+mtime（`src/*.h` 任意一个改动都要重建）。
+
+这里还有一个比宏更隐蔽的同类：**语义 CFlags**。clang 把 `-fwrapv` 的状态
+也写进 PCH，而生成 TU 的 `clangArgs` 里一直带着 `-fwrapv`。两侧不一致的
+报错是：
+
+```
+error: signed integer overflow handling differs in PCH file vs. current file
+```
+
+它跟宏口径是同一类问题的两个面：**任何"写进 PCH 的编译语义"都必须两侧
+同源**。现在 `-fwrapv -fno-strict-aliasing` 收敛到 `tuSemanticCFlags` 一个
+变量，PCH 生成与生成 TU 各自 `append` 它，物理上不存在"改一侧忘另一侧"。
+`semantic_defines_test.go` 里有一条测试直接数 `main.go` 里该字面量出现
+次数必须为 1，防的就是有人绕过常量又写一遍。
+
+反过来说，看到这个报错**不要**去关 `-include-pch`：那只是把症状按下去，
+真正该做的是让两侧参数同源。
+
+用 `-DKMM_V4_PRINT_CONFIG` 可以把某个 TU 实际生效的配置打出来核对：
+`Thread Safety: Level N` 与 `Opt Level: M` 应与你期望的一致。
+
+**怎么自己验证**（不用读反汇编）：对同一个头文件比 `-E -dM` 的输出即可。
+
+```bash
+clang -O0                                  -I src -E -dM probe.c | grep KMM_THREAD_SAFETY_LEVEL
+#   → #define KMM_THREAD_SAFETY_LEVEL 0     ← 没有任何 -D 时的默认，修复前 std .o 就是这个
+clang -O0 -DKMM_THREAD_SAFETY_LEVEL=1      -I src -E -dM probe.c | grep KMM_THREAD_SAFETY_LEVEL
+#   → #define KMM_THREAD_SAFETY_LEVEL 1     ← 现在所有 TU（含 std .o）都带这个 -D
+```
+
+产物侧也有一个便宜的旁证：`-O0` 下 `std` 的 `kmm_v4.o` 里 `lock` 前缀指令
+（`lock cmpxchg` / `lock xadd`）的数量应**不为零**。修复前 `-O0` 走到 level 0，
+这些原子操作会退化成普通 `mov`/`add`，数量为零。
+
 ## 2.7 32 位目标的 8 字节对齐
 
 i386 上 `uint64_t` 的自然对齐只有 4 字节。clang 对未对齐的 8 字节原子操作不敢

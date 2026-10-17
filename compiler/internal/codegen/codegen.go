@@ -2589,8 +2589,16 @@ static inline String string_concat_float(String s, double v) {
 	 *
 	 * 定义 TU 选择"无入口"：让生成结果停留在 includes + 类型 + 原型 + 函数体。
 	 * 入口 TU 则按正常规则（有 main 走模板、无 main 走 main 壳）。
+	 *
+	 * 这里**不能**再附加 !cg.config.Freestanding 之类的条件。曾经有过：
+	 * emitEntry := !(cg.tuMode == "definition" && !cg.config.Freestanding)
+	 * 效果是裸机下永远走"有入口"分支，生成 _kaula_entry 的完整程序模板，
+	 * 而调用方（kaulac 的单 TU 注入路径）拿到的 art.Source 里根本没有
+	 * 可注入的"纯定义"——跨文件符号（如 stat_helper.report）在裸机下
+	 * 凭空消失，报错只是 C 阶段的 implicit declaration。
+	 * 是否拆 TU 由调用方决定；这里只按 tuMode 字面语义执行。
 	 */
-	emitEntry := !(cg.tuMode == "definition" && cg.config != nil && !cg.config.Freestanding)
+	emitEntry := !(cg.tuMode == "definition" && cg.config != nil)
 
 	if !emitEntry {
 		// 定义 TU：不输出任何入口壳，但保留完整声明/定义节。

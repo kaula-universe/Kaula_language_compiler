@@ -340,31 +340,74 @@ extern "C" {
     #endif
 #endif
 
+// ---- KMM_ATOMIC_TYPE 必须与优化级别无关（宏口径一致性约束）----
+//
+// 这个 typedef 出现在 extern 声明、struct 成员和 sizeof 里，是**跨 TU 的
+// 类型契约**。一旦让它随 KMM_THREAD_SAFETY_LEVEL（进而随 -O）变形，
+// 同一程序里就会同时存在两种类型的同名符号：
+//
+//   TU A（用户 TU，-DKMM_THREAD_SAFETY_LEVEL=1）  extern KMM_ATOMIC_TYPE g_kmm_v4_offset;
+//   TU B（std .o，-O0 由 __OPTIMIZE__ 推导出 level 0） extern size_t      g_kmm_v4_offset;
+//
+// 这带来的**可见症状**（实测）：std .o 用 -O0 编译时，头文件里
+// __OPTIMIZE__ 未定义 → KMM_V4_OPT_LEVEL=0 → KMM_THREAD_SAFETY_LEVEL=0，
+// 而用户 TU 由 kaulac 无条件带 -DKMM_THREAD_SAFETY_LEVEL=1（优先于推导）：
+// 同一个程序里并存 level 0 / level 1 两套 KMM inline 副本。
+// 注意方向：-D 只作用于它所在的那个 TU，管不到独立的 std .o；
+// 编译器强制的一侧是 1，所以**缺的总是 -O0 那一侧**，-O1/-O2/-O3 两侧都是 1。
+//
+// 现在两侧都退化成 size_t，C 又不把链接期类型当契约，所以**当前二进制看不出来**
+// ——这正是最坏的情形：错误被隐藏，直到将来把底层类型换成 _Atomic size_t
+// （对齐/大小可能与 size_t 不同）才以静默的 ABI 错配爆发。
+// 所以底层类型只由目标决定（与 -O、与线程安全级别无关），
+// KMM_THREAD_SAFETY_LEVEL 只决定**操作方式**（原子内建 vs 普通读写）。
+//
+// 为什么不直接上 _Atomic size_t：src/ 与 src/concurrency/ 里有约 60 处
+// 直接对 KMM_ATOMIC_TYPE 变量写 __atomic_*（clang 明确拒绝 _Atomic 地址，
+// 报 "address argument to atomic operation must be a pointer to integer or
+// pointer"），本头文件的 BORROW 宏兜不住这些调用点；而 _Atomic size_t 与
+// size_t 的大小/对齐在所有目标上一致（第 8 层静态断言兜底），换成 _Atomic
+// 对现有二进制零收益、只带来内部 ABI 分层（.c 里 extern 声明必须与定义
+// 逐字一致，否则 -O0 下直接 redefinition 编译失败）。
+// 若将来真要提高原子类型契约，需要一并把 .c 的裸 __atomic 调用收敛到
+// KMM_ATOMIC_* 宏，二者必须同轮完成。
+typedef size_t kmm_atomic_t;
+#define KMM_ATOMIC_TYPE kmm_atomic_t
+
 // 原子操作支持（基于线程安全级别）
 // 修复 #14：区分循环 CAS（weak）和非循环 CAS（strong）
 #if KMM_THREAD_SAFETY_LEVEL >= 1
 // 统一使用 GCC/Clang 内置原子函数（__atomic_*）。
 // 注意：__atomic_* 不接受 _Atomic 限定类型，clang 会报
-// "address argument to atomic operation must be a pointer to integer or pointer"，
-// 因此 KMM_ATOMIC_TYPE 保持普通整型，原子性完全由内置函数提供。
+// "address argument to atomic operation must be a pointer to integer or pointer"。
+// 下面统一经 KMM_ATOMIC_BORROW 交给 __atomic_*：借出物与 (var) 同地址、
+// 同宽同对齐（"第 8 层"有静态断言），由此把"底层类型"与"操作方式"解耦
+// ——负载类型将来若变化，改这里的 typedef 一处即可。
+// LOAD 传的是**表达式**而非临时变量：无锁 size_t 内建不取地址，
+// 优化后不会残留临时变量。
+// 注意 level 0 分支里 LOAD 返回的是**右值** (size_t)(var)，
+// 不能写 &KMM_ATOMIC_LOAD(x)，也不能拿它当赋值目标。
+#define KMM_ATOMIC_BORROW(var) (*(size_t *)(void *)&(var))
 #define KMM_USE_ATOMICS 1
-#define KMM_ATOMIC_TYPE size_t
-#define KMM_ATOMIC_LOAD(var) __atomic_load_n(&(var), __ATOMIC_RELAXED)
-#define KMM_ATOMIC_STORE(var, val) __atomic_store_n(&(var), (val), __ATOMIC_RELAXED)
+#define KMM_ATOMIC_LOAD(var) __atomic_load_n(&KMM_ATOMIC_BORROW(var), __ATOMIC_RELAXED)
+#define KMM_ATOMIC_STORE(var, val) \
+    __atomic_store_n(&KMM_ATOMIC_BORROW(var), (size_t)(val), __ATOMIC_RELAXED)
 // 循环 CAS（允许伪失败，循环重试）
 #define KMM_ATOMIC_CAS_WEAK(var, expected, desired) \
-    __atomic_compare_exchange_n(&(var), &(expected), (desired), 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
+    __atomic_compare_exchange_n(&KMM_ATOMIC_BORROW(var), \
+                                &(expected), (size_t)(desired), 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
 // 非循环 CAS（不允许伪失败，单次判断）
 #define KMM_ATOMIC_CAS_STRONG(var, expected, desired) \
-    __atomic_compare_exchange_n(&(var), &(expected), (desired), 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
+    __atomic_compare_exchange_n(&KMM_ATOMIC_BORROW(var), \
+                                &(expected), (size_t)(desired), 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
 #define KMM_ATOMIC_FETCH_ADD(var, val) \
-    __atomic_fetch_add(&(var), (val), __ATOMIC_RELAXED)
+    __atomic_fetch_add(&KMM_ATOMIC_BORROW(var), (size_t)(val), __ATOMIC_RELAXED)
 #else
 // 单线程模式，无原子操作
 #define KMM_USE_ATOMICS 0
-#define KMM_ATOMIC_TYPE size_t
-#define KMM_ATOMIC_LOAD(var) (var)
-#define KMM_ATOMIC_STORE(var, val) ((var) = (val))
+#define KMM_ATOMIC_BORROW(var) (var)
+#define KMM_ATOMIC_LOAD(var) ((size_t)(var))
+#define KMM_ATOMIC_STORE(var, val) do { (var) = (val); } while (0)
 #define KMM_ATOMIC_CAS_WEAK(var, expected, desired) \
     (((var) == (expected)) ? ((var) = (desired), 1) : ((expected) = (var), 0))
 #define KMM_ATOMIC_CAS_STRONG(var, expected, desired) \
@@ -491,6 +534,12 @@ _Static_assert(KMM_V4_ALIGNMENT >= 8, "Alignment must be at least 8 bytes");
 _Static_assert(KMM_CACHE_LINE_SIZE >= 16, "Cache line size must be at least 16 bytes");
 _Static_assert(KMM_V4_PAGE_SIZE >= 4096, "Page size must be at least 4KB");
 _Static_assert(KMM_TLS_BUFFER_SIZE >= KMM_V4_PAGE_SIZE, "TLAB size must be at least one page");
+// KMM_ATOMIC_TYPE 与 size_t 同宽同对齐：KMM_ATOMIC_* 宏依赖这一点
+// （它们把 _Atomic 变量借到普通 size_t 临时变量上做 __atomic_* 内建，
+//  借出的地址必须能代表原对象）。任何目标上不满足都必须编译期失败，
+//  而不是在运行期静默读错半个字。
+_Static_assert(sizeof(KMM_ATOMIC_TYPE) == sizeof(size_t), "KMM_ATOMIC_TYPE must match size_t width");
+_Static_assert(_Alignof(KMM_ATOMIC_TYPE) == _Alignof(size_t), "KMM_ATOMIC_TYPE must match size_t alignment");
 
 // ==================== 第 9 层：配置信息输出（调试用）====================
 
@@ -653,11 +702,11 @@ extern size_t g_kmm_v4_pool_capacity;
 // 扩展段额度统计（Task #17）：已安装扩展段的总额度（字节）。
 // 已消耗部分 = max(0, g_kmm_v4_offset - g_kmm_v4_pool_capacity)，由统一
 // offset 直接派生，不单独维护计数器。
-#if KMM_THREAD_SAFETY_LEVEL >= 1
+// 这里**不能**再按 KMM_THREAD_SAFETY_LEVEL 分叉写 extern：extern 声明的
+// 类型必须与 .c 里的定义逐字一致，而定义已固定为 KMM_ATOMIC_TYPE。
+// 历史上这里写成 level>=1 时 KMM_ATOMIC_TYPE / 否则 size_t，两边恰好都
+// 是 size_t 才没炸；一旦底层类型变化就会变成跨 TU 类型不一致。
 extern KMM_ATOMIC_TYPE g_kmm_v4_extra_capacity;
-#else
-extern size_t g_kmm_v4_extra_capacity;
-#endif
 
 // 池耗尽时追加新段（至少 min_needed 字节），成功返回 1；
 // 不可扩容（freestanding）或 malloc 失败返回 0（实现见 .c）
@@ -673,11 +722,11 @@ extern void kmm_v4_pool_trim_tail(size_t watermark);
 #endif
 
 // 全局 offset（单调递增，仅 CAS 推进，永不回退）
-#if KMM_THREAD_SAFETY_LEVEL >= 1
+// extern 类型必须与 .c 定义逐字一致，且**不随级别变形**。
+// 这一行原本按 KMM_THREAD_SAFETY_LEVEL 分成 KMM_ATOMIC_TYPE / size_t 两支：
+// -O0 下 std .o 推出 level 0 取第二支、用户 TU 推出 level 1 取第一支，
+// 就是"同一符号两种声明"的原发现场。现在两支恒等，分叉已无意义。
 extern KMM_ATOMIC_TYPE g_kmm_v4_offset;
-#else
-extern size_t g_kmm_v4_offset;
-#endif
 
 // 作用域栈（线程本地，支持嵌套作用域）
 extern KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack;
@@ -725,13 +774,9 @@ static inline size_t kmm_v4_scope_depth_restore(size_t depth) {
 extern KMM_TLS kmm_thread_heap_t g_kmm_v4_thread_heap;
 
 #ifdef KMM_V4_DEBUG
-#if KMM_THREAD_SAFETY_LEVEL >= 1
+// 同上：extern 类型与 .c 定义一致，不随级别变形。
 extern KMM_ATOMIC_TYPE g_kmm_v4_peak;
 extern KMM_ATOMIC_TYPE g_kmm_v4_alloc_count;
-#else
-extern size_t g_kmm_v4_peak;
-extern size_t g_kmm_v4_alloc_count;
-#endif
 #endif
 
 // Thread heap refill 函数声明（实现在 .c 文件中）

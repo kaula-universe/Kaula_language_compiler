@@ -293,7 +293,10 @@ func (cfg *Config) ResolveOptLevel(optOverride string) string {
 		level = "-O3"
 	}
 	if optOverride != "" {
-		level = "-" + optOverride
+		// 约定形式：--opt O0（不带前缀），历史上也接受 --opt -O0。
+		// 旧实现无条件拼 "-"：传 "-O0" 会得到 "--O0" → 不在白名单 →
+		// 静默回落 -O2，用户以为开了 -O0，实际是 -O2（宏口径也跟着变）。
+		level = "-" + strings.TrimPrefix(optOverride, "-")
 	}
 
 	// 验证优化级别

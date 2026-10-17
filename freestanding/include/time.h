@@ -15,13 +15,27 @@ extern "C" {
 
 #define CLOCKS_PER_SEC 1000000L
 
-#ifndef __DEFINED_struct_timespec
+/*
+ * 保护宏必须同时认 glibc / Linux 自己用的那几个（_STRUCT_TIMESPEC、
+ * __timeval_defined），否则同一个 TU 里既包含本 shim 又（直接或间接）
+ * 包含 glibc 的 <time.h> 时，struct timespec 会被定义两遍，
+ * clang 直接报 "redefinition of 'timespec'"。
+ *
+ * 典型触发面：裸机程序 import 了 std.concurrent 之类会拉进
+ * src/concurrency/kaula_conc_platform.h 的模块，而该头文件在非
+ * KAULA_FREESTANDING 分支里用的是系统 <time.h>。""/<> 两种包含方式
+ * 会解析到不同文件，光靠本 shim 自己的 KAULA_FS_COMPAT_TIME_H 挡不住。
+ * 这里改为"谁的保护区先立起来就认谁的"，两种顺序都能编过。
+ */
+#if !defined(__DEFINED_struct_timespec) && !defined(_STRUCT_TIMESPEC)
 #define __DEFINED_struct_timespec
+#define _STRUCT_TIMESPEC 1
 struct timespec { time_t tv_sec; long tv_nsec; };
 #endif
 
-#ifndef __DEFINED_struct_timeval
+#if !defined(__DEFINED_struct_timeval) && !defined(__timeval_defined)
 #define __DEFINED_struct_timeval
+#define __timeval_defined 1
 struct timeval { time_t tv_sec; long tv_usec; };
 #endif
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"kaula/internal/ast"
 	"kaula/internal/cache"
 	"kaula/internal/codegen"
@@ -159,12 +160,27 @@ func instNameToFuncNames(instName string, defined map[string]string) []string {
 // 返回: (pub 函数名集合, export 函数名集合, 合并后的 C 函数定义代码, 被导入文件内容哈希表)
 // 哈希表覆盖传递闭包内所有实际读取的 .kl 文件（绝对路径 -> SHA256），
 // 供增量缓存键校验使用
+// precompileLocalImports 单 TU 路径：把各本地 import 的 C 源拼成一段注入代码。
+//
+// 注意这里必须传 split=true 才能拿到源文本：tuResult() 在 tuSplit==false 时
+// 直接返回 nil（见 localCompileState.tuResult），而 TU 的 Source 只在拆分
+// 模式下才产出。历史上这里传 false，于是 split==nil → 恒返回空代码，
+// 下游"注入本地 import"变成了空操作：跨文件符号（stat_helper.report 之类）
+// 在 --freestanding 下凭空消失，报错停在 C 阶段 implicit declaration。
+// 托管路径因为走真正的多 TU 编译，不会命中这条分支，所以这个坑只在裸机暴露。
 func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, map[string]bool, string, []string, []string, map[string]string) {
-	pubFuncs, exportFuncs, headers, usedModules, fileHashes, split := precompileLocalImportsSplit(program, inputDir, stdlibConfig, cfg, errorCollector, false)
+	pubFuncs, exportFuncs, headers, usedModules, fileHashes, split := precompileLocalImportsWithHeader(
+		program, inputDir, stdlibConfig, cfg, errorCollector, true, nil, "")
 	if split == nil {
 		return pubFuncs, exportFuncs, "", headers, usedModules, fileHashes
 	}
 	var allCode strings.Builder
+	// prelude 汇总了跨文件类型定义，注入时必须放在各 TU 源之前，
+	// 否则源里的类型引用在单 TU 下不可见。
+	if split.Prelude != "" {
+		allCode.WriteString(split.Prelude)
+		allCode.WriteByte('\n')
+	}
 	for _, tu := range split.TUs {
 		allCode.WriteString(tu.Source)
 		allCode.WriteByte('\n')
@@ -1970,13 +1986,39 @@ func main() {
 	var importFileHashes map[string]string
 	var split *tuSplitResult
 	wantMultiTU := hasLocalImports(program)
-	if wantMultiTU {
+	/*
+	 * 裸机（--freestanding）暂不支持多 TU 拆分：链接走
+	 * linkFreestandingDirectly + ld.lld，输入组织与托管路径不同
+	 * （见 concurrentCompile 里的门控）。
+	 *
+	 * 关键在于**必须在这里就退回去**，而不是只在下游选编译函数时挡住：
+	 * 这里传 split=true 会让 localCompileState 走 TUArtifacts 路径，
+	 * 从而不再产出可注入的 localImportCode；下游再退回单 TU，就成了
+	 * "既不拆 TU、也不注入"——跨文件符号（stat_helper.report 等）凭空消失，
+	 * 表现是 C 编译期 implicit declaration 或链接期 undefined symbol，
+	 * 与"注入这一步被跳过了"隔了好几层（test/memA..memD、memMT_* 全中）。
+	 *
+	 * 退回后走 split=false，即引入多 TU 之前的单 TU + 注入路径。
+	 */
+	tuSplitSupported := cfg == nil || !cfg.Freestanding
+	if wantMultiTU && tuSplitSupported {
 		// 两遍：probe 只算泛型归属并收集接口段，第二遍才真正产出 C 源。
 		// 接口段必须先在 probe 里齐备——每个 TU 生成时都要看到全部 TU 的
 		// 接口（库之间可互相调用），而它只能在"全部文件都跑过一遍"之后完整。
 		tuOwnerIndex = buildGenericOwnerIndex(program, inputDir, stdlibConfig, cfg, errorCollector)
 		localImportFuncs, localImportExportFuncs, localHeaders, localUsedModules, importFileHashes, split =
 			precompileLocalImportsWithHeader(program, inputDir, stdlibConfig, cfg, errorCollector, true, tuOwnerIndex.Lookup, tuOwnerIndex.HeaderBlock)
+	} else if wantMultiTU {
+		/*
+		 * 裸机：不支持多 TU 拆分，走"单 TU + 注入"。
+		 *
+		 * 必须走 precompileLocalImports（它会拼出可注入的 C 代码），
+		 * 而不是上面那条 split=false 的 WithHeader 分支：后者的返回值
+		 * tuResult() 在 tuSplit==false 时是 nil，既拿不到 Source 也不产出
+		 * 注入代码，等于本地 import 的定义被整个丢掉。
+		 */
+		localImportFuncs, localImportExportFuncs, localImportCode, localHeaders, localUsedModules, importFileHashes =
+			precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
 	} else {
 		localImportFuncs, localImportExportFuncs, localImportCode, localHeaders, localUsedModules, importFileHashes =
 			precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
@@ -2007,7 +2049,20 @@ func main() {
 	multiTUEnabled := false
 	var tuBuild *multiTUBuild
 	var tuDir string
-	if wantMultiTU && split != nil && len(split.TUs) > 0 {
+	/*
+	 * 裸机（--freestanding）暂不支持多 TU 拆分：它的链接走
+	 * linkFreestandingDirectly + ld.lld，输入组织与托管路径完全不同，
+	 * 见 concurrentCompile 里的门控。
+	 *
+	 * 这里必须**在启用时就挡住**，不能只在下游挡：一旦 multiTUEnabled
+	 * 为 true，下面"本地 import 函数定义注入"那一步就会被跳过，而定义
+	 * TU 又不会被编进裸机链接 —— 结果是 stat_helper.report 这类跨文件
+	 * 符号凭空消失，报错是链接期 undefined symbol，与"注入没做"这件事
+	 * 隔着好几层，极难定位（test/memA..memD、memMT_* 全部命中）。
+	 *
+	 * 挡住之后退回单 TU + 注入，行为与引入多 TU 之前完全一致。
+	 */
+	if wantMultiTU && tuSplitSupported && split != nil && len(split.TUs) > 0 {
 		tuBuild = assembleMultiTU(split, tuOwnerIndex, cfg, func(c *codegen.CodeGenerator) string {
 			// c 是刻意新建的实例：cg 的 TU 状态字段在 Generate 时复位，
 			// 复用会让单 TU 回退路径读到多 TU 残留。注入项这里逐项补齐 ——
@@ -2738,6 +2793,143 @@ func cacheTargetKey(cfg *config.Config, optLevel string, poolCapacity int) strin
 	sum := sha256.Sum256([]byte(key))
 	// 前缀保留可读性（ls 一眼能看出是哪个目标的缓存），后缀保证唯一
 	return sanitizeCacheKey(mode+"-"+target+"-"+optLevel) + "-" + hex.EncodeToString(sum[:6])
+}
+
+// ==================== 预编译产物的宏语义契约与缓存指纹 ====================
+//
+// 背景（本文件若干处引用的"两套口径"问题）：
+//
+//	kaula.h → kmm_scoped_allocator_v4.h 里的 KMM_THREAD_SAFETY_LEVEL 会决定
+//	extern 类型、struct 布局与 static inline 副本。它有两个来源：
+//	  1) 命令行 -D（优先）；
+//	  2) 头文件里由 __OPTIMIZE__ 推出的 KMM_V4_OPT_LEVEL 再推导。
+//	- -O0 下 __OPTIMIZE__ 不定义 → 推导出 0；
+//	- -O1/-O2/-O3 定义 → 推导出 1。
+//	编译器给生成 TU 的命令行是无条件的 -DKMM_THREAD_SAFETY_LEVEL=1，
+//	但 -D 只作用于它所属的那个 TU —— 独立的 std .o / runtime .o 会各自重新
+//	推导。于是 -O0 构建里同时存在 level 1（生成 TU）与 level 0（std .o）。
+//
+//	这是"宏口径必须跨 TU 一致"的硬约束：宏本身就该定义在构建系统这一层，
+//	由构建系统统一派发，不能留给每个 TU 各自从 -O 猜。
+//
+// hostSemanticDefines 是构建系统派发给**所有**托管 TU 的那一组宏；源上
+// 只有这一处，PCH / std 模块 / runtime 模块 / 生成 TU 都引用它。
+var hostSemanticDefines = []string{"-DKMM_THREAD_SAFETY_LEVEL=1"}
+
+// tuSemanticCFlags 是"改变代码语义而非仅影响优化"的编译选项，
+// 必须同时出现在 **PCH 生成** 与 **生成 TU 编译** 两侧。
+//
+// 这不是风格问题：clang 把 -fwrapv 的状态写进 PCH，两侧不一致就直接报
+// signed integer overflow handling differs in PCH file vs. current file。
+// 而一旦为了"让报错消失"把 -include-pch 关掉，PCH 就等于永久废弃。
+// 之前这两侧各写一行字面量，合并/重构时漏掉一侧是迟早的事
+// （本次 rebase 就真的漏了一次，表现是 114 个用例全红）。
+// 现在两侧都引用这一个切片，从结构上消除漂移。
+var tuSemanticCFlags = []string{"-fwrapv", "-fno-strict-aliasing"}
+
+// cfgCFlags 取用户自定义 C 编译参数（cfg 可能为 nil，如库调用路径）。
+func cfgCFlags(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.CFlags
+}
+
+// semanticFingerprint 返回"能改变预处理器输出"的那部分构建语义。
+//
+// 只取语义项、忽略路径/时间/临时文件等与产物无关的噪声：否则 fingerprints
+// 会随 workDir 变动而失效，每次构建都全量重编。
+func semanticFingerprint(cc, optLevel, srcPath string, defines []string, cflags []string, sanitizeFlags []string) string {
+	var parts []string
+	parts = append(parts, "cc="+cc, "opt="+optLevel, "src="+srcContentDigest(srcPath))
+	for _, d := range defines {
+		parts = append(parts, "D:"+d)
+	}
+	for _, f := range cflags {
+		parts = append(parts, "F:"+f)
+	}
+	for _, f := range sanitizeFlags {
+		parts = append(parts, "S:"+f)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:12])
+}
+
+// srcContentDigest 取源文件内容摘要（含头文件由 mtime 判据兜底）。
+//
+// 用内容而非 mtime：checkout/rsync/容器镜像会把 mtime 重置为同一时刻，
+// 仅靠 mtime 的缓存会在"内容变了但时间没变"时静默复用旧产物。
+// 读失败退化为空串（调用方仍有 mtime 判据与真正的编译错误兜底）。
+func srcContentDigest(srcPath string) string {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+// objectStampPath 是 .o 旁边的一份 sidecar，记录"这个 .o 是用哪组语义编出来的"。
+//
+// 为什么不能只比 mtime：给 std 模块补了 -D 之后，.c 没动、.o 比 .c 新，
+// 旧判据会把上一轮（旧宏集）的 .o 直接复用 —— 构建看着"没变化"，
+// 二进制却还是两套口径。指纹不匹配即视为过期。
+func objectStampPath(objPath string) string { return objPath + ".stamp" }
+
+func objectStampMatches(objPath, stamp string) bool {
+	b, err := os.ReadFile(objectStampPath(objPath))
+	if err != nil {
+		return false
+	}
+	return string(b) == stamp
+}
+
+func writeObjectStamp(objPath, stamp string) {
+	// 失败不影响正确性：只是下次会重编一次。
+	_ = os.WriteFile(objectStampPath(objPath), []byte(stamp), 0644)
+}
+
+// bootArchArgs 返回裸机分支对模块 .o 追加的"目标相关"参数
+// （-target / -mcmodel / 架构默认特性）。
+//
+// 这些参数直接决定产物的机器类型与 ABI，是**编译语义**而非可选项，
+// 因此必须同时出现在命令行与指纹里。两处共用本函数是刻意的：
+// 一旦哪天再加一个 -march，忘了同步进指纹就会重新引入静默复用旧产物的 bug。
+func bootArchArgs(cfg *config.Config) []string {
+	if cfg == nil || !cfg.Freestanding {
+		return nil
+	}
+	arch := resolveBootArch(cfg)
+	out := []string{"-target", effectiveTargetTriple(cfg)}
+	out = append(out, archCodeModel(arch)...)
+	out = append(out, archDefaultCFlags(arch, cfg.CFlags)...)
+	return out
+}
+
+// moduleObjectStamp 计算 std / freestanding 模块 .o 的语义指纹。
+func moduleObjectStamp(cc string, prefix []string, optLevel, srcPath string, defines, cflags []string, freestanding bool, archArgs ...string) string {
+	flags := append([]string{}, prefix...)
+	if freestanding {
+		// 这些不是"用户可选项"，而是本分支写死的编译语义，必须计入指纹。
+		flags = append(flags, "-ffreestanding", "-fno-pic")
+	}
+	flags = append(flags, archArgs...)
+	return semanticFingerprint(cc, optLevel, srcPath, defines, cflags, flags)
+}
+
+// runtimeObjectStamp 计算 src/ 下 runtime .o（KMM / spend_call / allocator /
+// concurrency 内核）的语义指纹。
+func runtimeObjectStamp(cc string, prefix []string, optLevel, srcPath string, defines, cflags []string, freestanding bool, archArgs ...string) string {
+	flags := append([]string{}, prefix...)
+	if freestanding {
+		flags = append(flags, "-ffreestanding", "-nostdlib", "-fno-pic")
+	}
+	flags = append(flags, archArgs...)
+	return semanticFingerprint(cc, optLevel, srcPath, defines, cflags, flags)
 }
 
 // atomicObjectPath 为并行构建生成一个独占的目标文件路径。
@@ -4114,6 +4306,37 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		}
 	}
 
+	// ---- 预编译产物的"宏语义契约" ----
+	//
+	// std .o / runtime .o 是独立 TU：**生成 TU 上的 -D 传不进来**。
+	// 而它们与生成 TU 共用同一批头（kaula.h → kmm_scoped_allocator_v4.h），
+	// 头里的 KMM_THREAD_SAFETY_LEVEL 会决定 extern 类型、struct 布局和
+	// inline 副本。所以"编译器强制给生成 TU 的宏"必须同时给到每一个
+	// 预编译 TU，否则同一个程序里会链进两套口径。
+	//
+	// 实测（主仓当前代码，clang 18）：
+	//   生成 TU   ：-DKMM_THREAD_SAFETY_LEVEL=1（下方 clangArgs），恒为 1
+	//   std .o -O0：__OPTIMIZE__ 未定义 → KMM_V4_OPT_LEVEL=0 → 推导出 0
+	//   std .o -O1/-O2/-O3：推导出 1
+	// 即**缺的总是 -O0 那一侧**：-D 只作用于它所在的 TU，管不到独立 .o。
+	//
+	// 这里把宏集抽成一份定义，PCH / std 模块 / runtime 模块 / 生成 TU 四处
+	// 共用，杜绝"改了一处忘了另一处"。
+	semanticDefines := append([]string{}, hostSemanticDefines...)
+	if cfg != nil {
+		for _, define := range cfg.CDefines {
+			semanticDefines = append(semanticDefines, "-D"+define)
+		}
+	}
+	moduleSemanticDefines := append([]string{}, semanticDefines...)
+	if isFreestanding {
+		moduleSemanticDefines = append(moduleSemanticDefines, "-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL")
+		moduleSemanticDefines = append(moduleSemanticDefines, "-target", effectiveTargetTriple(cfg))
+	}
+	if poolCapacity > 0 {
+		moduleSemanticDefines = append(moduleSemanticDefines, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+	}
+
 	// 预编译对象缓存目录（PCH + std .o 共用）
 	//
 	// 必须按"目标指纹"分子目录。.o 的机器类型 / 浮点 ABI / 宏集全由目标决定：
@@ -4129,75 +4352,102 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		return fmt.Errorf("创建 std 模块对象缓存目录失败 (%s): %w", objectCacheDir, err)
 	}
 
-	// 预编译头文件 (PCH)：将 kaula.h 预编译为 .gch，加速 clang 头文件解析
+	// 预编译头文件 (PCH)：将 kaula.h 预编译为 .gch
 	//
-	// 缓存键必须包含"影响 PCH 内容的全部输入"，不能只看 kaula.h 的 mtime：
-	// gch 里存的是**预处理之后**的状态（宏值、-fwrapv 这类语义开关都在里面），
-	// 只改 -DKMM_V4_POOL_SIZE 或加个 -fwrapv 而 kaula.h 没动，旧 gch 的 mtime
-	// 仍比 .h 新，会被误判为"可用"，随后每个 TU 都报
-	// "signed integer overflow handling differs in PCH file vs. current file"。
-	// 把模板命令（编译器路径 + 优化级 + 宏 + 目录）算进文件名，键变了就是新文件。
-	pchSig := strings.Join(append([]string{clangPath, optLevel,
-		fmt.Sprintf("pool=%d", poolCapacity), fmt.Sprintf("dbg=%v", cfg != nil && cfg.Debug)},
-		append(append(append([]string{}, validSrcPaths...), validStdPaths...), validFreePaths...)...), "\x00")
-	pchSum := sha256.Sum256([]byte(pchSig))
-	pchPath := filepath.Join(objectCacheDir, "kaula-"+hex.EncodeToString(pchSum[:6])+".h.gch")
-	pchNeedsRebuild := true
-	// pchUsable 决定是否把 -include-pch 交给 clang：只有 gch 确实存在且
-	// 不比 kaula.h 旧时才用。否则宁可多花解析时间，也不能拿一份过期 PCH
-	// 去编译——那会以"宏/类型对不上"的诡异形式报错，且报错点远离根因。
+	// PCH 是"宏与编译语义的冻结体"：.gch 里存的是预处理之后的 token 流，
+	// 生成时生效的每一个宏取值都被固化了。所以它的缓存新鲜度**不能只看
+	// kaula.h 的 mtime**——同一份 kaula.h 在 -O0 与 -O2 下展开出的
+	// KMM_V4_OPT_LEVEL / KMM_THREAD_SAFETY_LEVEL / TLAB 大小完全不同。
+	// 旧实现只比 mtime，且把 -DKMM_THREAD_SAFETY_LEVEL=1 写死在生成命令里，
+	// 于是在目标指纹目录内，一次 -O0 构建留下的 .gch 会被后续 -O2 构建静默
+	// 复用，反之亦然 —— 这正是"把宏不一致冻结成静默错误"的载体。
+	//
+	// 现在 PCH **只在本函数内被 std .o / runtime .o 消费**（生成 TU 不查 PCH，
+	// 见下方 clangArgs 处的注释），所以它的生成参数直接复用 moduleSemanticDefines，
+	// 与那些 .o 的编译命令同源；缓存判据是 PCH 及其源头的 mtime
+	// （kaula.h + src 下全部 .h，避免"只改了子头"被漏判）。
+	pchPath := filepath.Join(objectCacheDir, "kaula.h.gch")
+	pchFresh := false
+	// pchUsable 决定是否把 -include-pch 交给 clang：只有 gch 确实存在、
+	// 不比 kaula.h 旧、且本轮生成成功时才为真。否则宁可多花解析时间，
+	// 也不能拿一份过期/半成品的 PCH 去编译 —— 那会以"宏/类型对不上"
+	// 的诡异形式报错，且报错点远离根因。
 	pchUsable := false
 	if kaulaSrcPath != "" {
 		hInfo, hErr := os.Stat(filepath.Join(kaulaSrcPath, "kaula.h"))
 		gchInfo, gchErr := os.Stat(pchPath)
-		if hErr == nil && gchErr == nil {
-			if !hInfo.ModTime().After(gchInfo.ModTime()) {
-				pchNeedsRebuild = false
-				pchUsable = true
+		if hErr == nil && gchErr == nil &&
+			(gchInfo.ModTime().After(hInfo.ModTime()) || gchInfo.ModTime().Equal(hInfo.ModTime())) {
+			pchFresh = true
+			for _, p := range validSrcPaths {
+				entries, err := os.ReadDir(p)
+				if err != nil {
+					continue
+				}
+				for _, e := range entries {
+					if e.IsDir() || filepath.Ext(e.Name()) != ".h" {
+						continue
+					}
+					if fi, ierr := e.Info(); ierr == nil && fi.ModTime().After(gchInfo.ModTime()) {
+						pchFresh = false
+						break
+					}
+				}
+				if !pchFresh {
+					break
+				}
 			}
 		}
 	}
-	if pchNeedsRebuild && kaulaSrcPath != "" {
-		pchCmd := compilerCommand(clangPath, "-x", "c-header", "-c", filepath.Join(kaulaSrcPath, "kaula.h"), "-o", pchPath, optLevel)
+	if pchFresh {
+		pchUsable = true
+		if verboseMode {
+			fmt.Printf("[Compile] PCH cache hit: %s\n", pchPath)
+		}
+	} else {
+		pchArgs := []string{"-x", "c-header", "-c", filepath.Join(kaulaSrcPath, "kaula.h"), "-o", pchPath, optLevel}
 		for _, p := range validSrcPaths {
-			pchCmd.Args = append(pchCmd.Args, "-I", p)
+			pchArgs = append(pchArgs, "-I", p)
 		}
 		for _, p := range validStdPaths {
-			pchCmd.Args = append(pchCmd.Args, "-I", p)
+			pchArgs = append(pchArgs, "-I", p)
 		}
 		for _, p := range validFreePaths {
-			pchCmd.Args = append(pchCmd.Args, "-I", p)
+			pchArgs = append(pchArgs, "-I", p)
 		}
 		/*
 		 * 语义相关选项必须与真正编译 TU 时**完全一致**，否则 clang 会拒绝
-		 * 复用 PCH（报 "signed integer overflow handling differs in PCH
-		 * file vs. current file"，或各种宏/语言模式不一致）。
-		 * 这正是 PCH 长期被注释掉的真因：这里原先漏了 -fwrapv /
-		 * -fno-strict-aliasing，只要有人把 -include-pch 打开就全量报错。
+		 * 复用 PCH：
+		 *     error: signed integer overflow handling differs in
+		 *            PCH file vs. current file
+		 * 这正是 PCH 长期只能靠"别打开 -include-pch"来回避的真因 ——
+		 * 生成侧漏了 -fwrapv / -fno-strict-aliasing，而生成 TU 的
+		 * clangArgs 里是有的（见下方 clangArgs 处），两边一对就炸。
+		 *
+		 * 顺序不能反过来指望：这些是"构建语义"，不是"用户可选优化"。
+		 * 任何人往生成 TU 加语义开关，都必须同步加到这一行，
+		 * 否则 -include-pch 一开就是全量报错。
 		 */
-		pchCmd.Args = append(pchCmd.Args, "-fwrapv", "-fno-strict-aliasing")
+		pchArgs = append(pchArgs, tuSemanticCFlags...)
 		if cfg != nil && cfg.Debug {
-			pchCmd.Args = append(pchCmd.Args, "-g")
+			pchArgs = append(pchArgs, "-g")
 			if cfg.DebugLevel == "full" {
-				pchCmd.Args = append(pchCmd.Args, "-gdwarf-4")
+				pchArgs = append(pchArgs, "-gdwarf-4")
 			}
 		}
-		pchCmd.Args = append(pchCmd.Args, "-DKMM_THREAD_SAFETY_LEVEL=1")
-		if poolCapacity > 0 {
-			pchCmd.Args = append(pchCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
-		}
-		if err := pchCmd.Run(); err == nil {
+		pchArgs = append(pchArgs, moduleSemanticDefines...)
+		if err := compilerCommand(clangPath, pchArgs...).Run(); err == nil {
 			pchUsable = true
 			if verboseMode {
 				fmt.Printf("[Compile] PCH generated: %s\n", pchPath)
 			}
-		} else if verboseMode {
-			// 生成失败不是致命错误：退回逐 TU 解析头文件，仅慢一些。
-			fmt.Printf("[Compile] PCH 生成失败，回退头文件解析: %v\n", err)
-		}
-	} else if kaulaSrcPath != "" {
-		if verboseMode {
-			fmt.Printf("[Compile] PCH cache hit: %s\n", pchPath)
+		} else {
+			// PCH 只是加速手段：失败不影响正确性（clang 找不到可用 .gch 就
+			// 正常解析头文件）。这里保留静默降级，但不再掩盖"参数分叉"，
+			// 因为参数已经与 std .o 同源。
+			if verboseMode {
+				fmt.Printf("[Compile] PCH generation failed, falling back to header parsing\n")
+			}
 		}
 	}
 
@@ -4222,8 +4472,9 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		}
 	}
 	clangArgs = append(clangArgs, "-I", workDir)
-	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
-	clangArgs = append(clangArgs, "-DKMM_THREAD_SAFETY_LEVEL=1")
+	clangArgs = append(clangArgs, tuSemanticCFlags...)
+	// 语义宏（与 std .o / runtime .o 共用同一份定义，杜绝口径分叉）
+	clangArgs = append(clangArgs, semanticDefines...)
 	// 链接器优化：Windows 强制 lld（MSVC ABI 兼容性）；Linux/macOS 优先 lld（更快），不可用时回退默认
 	if runtime.GOOS == "windows" {
 		clangArgs = append(clangArgs, "-fuse-ld=lld")
@@ -4375,6 +4626,9 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 						}
 						objFullPath := filepath.Join(objectCacheDir, objName)
 
+						// 缓存判据 = mtime 新于源 + 编译指令指纹一致。
+						// 只比 mtime 时，加了/改了 -D 的构建会复用上一轮的 .o
+						// （跨 flag 串缓存），这正是两套 KMM 口径能长期并存的原因。
 						needsRebuild := true
 						cInfo, cErr := os.Stat(cFullPath)
 						oInfo, oErr := os.Stat(objFullPath)
@@ -4382,6 +4636,9 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 							if oInfo.ModTime().After(cInfo.ModTime()) || oInfo.ModTime().Equal(cInfo.ModTime()) {
 								needsRebuild = false
 							}
+						}
+						if !needsRebuild && !objectStampMatches(objFullPath, moduleObjectStamp(compilerCmd, compilerPrefix, optLevel, cFullPath, moduleSemanticDefines, cfgCFlags(cfg), isFreestanding, bootArchArgs(cfg)...)) {
+							needsRebuild = true
 						}
 
 						moduleSources = append(moduleSources, moduleSource{
@@ -4442,6 +4699,14 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 				// 单独重跑又好了。这里做两件事把这一类瞬时失败吃掉：
 				//   1) 每次编译前确保目录还在（开头只 MkdirAll 过一次）
 				//   2) 失败后退避重试两次
+				objStamp := moduleObjectStamp(compilerCmd, compilerPrefix, optLevel, cPath, moduleSemanticDefines, cfgCFlags(cfg), isFreestanding, bootArchArgs(cfg)...)
+				// 保留真正执行的最后一条命令，失败时原样打出来。
+				// 这里不能再自己拼一个"看起来差不多"的命令：之前是
+				// compilerCommand(cmd, "-c", optLevel, cPath, "-o", objPath)，
+				// 把 -target / -ffreestanding / -D / -I 全丢了，
+				// 排障时看到的命令与实际执行的不一致（裸机下甚至看不到
+				// -target，会误判成"没传目标三元组"而白查一轮）。
+				var ranCmd *exec.Cmd
 				output, err := func() (string, error) {
 					var lastOut string
 					var lastErr error
@@ -4457,20 +4722,16 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 						// 裸机：模块 .o 必须与最终链接同目标（机器类型 / 浮点 ABI /
 						// 静态池宏）。少了 -target 就会编出 COFF 目标文件，链接 ELF 时报
 						// "xxx.o is incompatible with elf_x86_64"。
-						if isFreestanding {
-							cmd.Args = append(cmd.Args,
-								"-target", effectiveTargetTriple(cfg),
-								"-ffreestanding", "-fno-pic",
-								"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL")
-							cmd.Args = append(cmd.Args, archCodeModel(resolveBootArch(cfg))...)
-							cmd.Args = append(cmd.Args, archDefaultCFlags(resolveBootArch(cfg), cfg.CFlags)...)
-							for _, flag := range cfg.CFlags {
-								cmd.Args = append(cmd.Args, flag)
-							}
-							for _, define := range cfg.CDefines {
-								cmd.Args = append(cmd.Args, "-D"+define)
-							}
+						// 与指纹同源（bootArchArgs），避免"改了命令行忘了改指纹"。
+						cmd.Args = append(cmd.Args, bootArchArgs(cfg)...)
+						for _, flag := range cfgCFlags(cfg) {
+							cmd.Args = append(cmd.Args, flag)
 						}
+						// 与生成 TU 完全同一组"语义宏"（-DKMM_THREAD_SAFETY_LEVEL=1、
+						// 用户 -D、池容量、裸机 -target/-DKAULA_FREESTANDING/-DKMM_V4_STATIC_POOL）。
+						// 缺了它们，-O0 构建出的 std .o 会从头文件推导出
+						// KMM_THREAD_SAFETY_LEVEL=0，与生成 TU 的 1 并存两套口径。
+						cmd.Args = append(cmd.Args, moduleSemanticDefines...)
 						for _, p := range validSrcPaths {
 							cmd.Args = append(cmd.Args, "-I", p)
 						}
@@ -4487,7 +4748,10 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 							cmd.Args = append(cmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
 						}
 						lastOut, lastErr = compileToObjectAtomic(cmd, objPath)
+						ranCmd = cmd
 						if lastErr == nil {
+							// 记下"这批宏编出来的"，下次改宏集就失配重编。
+							writeObjectStamp(objPath, objStamp)
 							return lastOut, nil
 						}
 					}
@@ -4498,7 +4762,7 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 					// 含完整命令行 / cwd / 临时目录：std 模块是并发编译的，
 					// 缺少上下文时"unable to make temporary file"这类报错无法定位
 					rebuildErrors = append(rebuildErrors, formatCommandFailure(
-						"  "+filepath.Base(cPath), compilerCommand(compilerCmd, append(compilerPrefix, "-c", optLevel, cPath, "-o", objPath)...), err, []byte(output)))
+						"  "+filepath.Base(cPath), ranCmd, err, []byte(output)))
 					errMu.Unlock()
 				}
 			}(ms.cPath, ms.objPath)
@@ -4536,12 +4800,9 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		if _, err := os.Stat(runtimeSrc); err == nil {
 			rtObj := filepath.Join(objectCacheDir, "kaula_fs_runtime.o")
 			rtArgs := append([]string{}, compilerPrefix...)
-			rtArgs = append(rtArgs, "-c", optLevel, "-ffreestanding", "-nostdlib",
-				"-fno-pic", "-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL")
-			// 与最终链接同目标：机器类型 / 浮点 ABI 必须一致
-			rtArgs = append(rtArgs, "-target", effectiveTargetTriple(cfg))
-			rtArgs = append(rtArgs, archCodeModel(resolveBootArch(cfg))...)
-			rtArgs = append(rtArgs, archDefaultCFlags(resolveBootArch(cfg), cfg.CFlags)...)
+			rtArgs = append(rtArgs, "-c", optLevel, "-ffreestanding", "-nostdlib", "-fno-pic")
+			// 与最终链接同目标：机器类型 / 浮点 ABI 必须一致（-target 在 bootArchArgs 内）
+			rtArgs = append(rtArgs, bootArchArgs(cfg)...)
 			for _, p := range validSrcPaths {
 				rtArgs = append(rtArgs, "-I", p)
 			}
@@ -4555,12 +4816,12 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 			if poolCapacity > 0 {
 				rtArgs = append(rtArgs, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
 			}
-			for _, flag := range cfg.CFlags {
+			for _, flag := range cfgCFlags(cfg) {
 				rtArgs = append(rtArgs, flag)
 			}
-			for _, define := range cfg.CDefines {
-				rtArgs = append(rtArgs, "-D"+define)
-			}
+			// 语义宏与托管路径同源（含 -DKAULA_FREESTANDING / -DKMM_V4_STATIC_POOL /
+			// -DKMM_THREAD_SAFETY_LEVEL=1 / 用户 -D / 池容量）。
+			rtArgs = append(rtArgs, moduleSemanticDefines...)
 			rtArgs = append(rtArgs, runtimeSrc, "-o", rtObj)
 			if runtime.GOOS == "windows" {
 				rtArgs = append(rtArgs, "-mstack-probe-size=2147483647")
@@ -4652,6 +4913,9 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 					}
 				}
 			}
+			if !needsRebuild && !objectStampMatches(rsObj, runtimeObjectStamp(compilerCmd, compilerPrefix, optLevel, rsSrc, moduleSemanticDefines, cfgCFlags(cfg), isFreestanding, bootArchArgs(cfg)...)) {
+				needsRebuild = true
+			}
 			if needsRebuild {
 				rsCmd := compilerCommand(compilerCmd, append(compilerPrefix, "-c", optLevel, rsSrc, "-o", rsObj)...)
 				if runtime.GOOS == "windows" {
@@ -4667,25 +4931,23 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 					rsCmd.Args = append(rsCmd.Args, "-I", p)
 				}
 				if isFreestanding {
-					// 静态池 + 无 libc + 同目标：与 boot 路径 (compileBootKernel 3.5) 保持一致
-					rsCmd.Args = append(rsCmd.Args, "-ffreestanding", "-nostdlib", "-fno-pic",
-						"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL",
-						"-target", effectiveTargetTriple(cfg))
-					rsCmd.Args = append(rsCmd.Args, archCodeModel(resolveBootArch(cfg))...)
-					rsCmd.Args = append(rsCmd.Args, archDefaultCFlags(resolveBootArch(cfg), cfg.CFlags)...)
-					for _, flag := range cfg.CFlags {
-						rsCmd.Args = append(rsCmd.Args, flag)
-					}
-					for _, define := range cfg.CDefines {
-						rsCmd.Args = append(rsCmd.Args, "-D"+define)
-					}
+					// 静态池 + 无 libc + 同目标：与 boot 路径 (compileBootKernel 3.5) 保持一致。
+					// bootArchArgs 含 -target：漏掉它，kmm_v4_fs.o 会按宿主默认三元组
+					// （x86_64-linux-gnu）编，链接 aarch64/riscv64 时直接 incompatible。
+					rsCmd.Args = append(rsCmd.Args, "-ffreestanding", "-nostdlib", "-fno-pic")
+					rsCmd.Args = append(rsCmd.Args, bootArchArgs(cfg)...)
 				}
-				if poolCapacity > 0 {
-					rsCmd.Args = append(rsCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
+				for _, flag := range cfgCFlags(cfg) {
+					rsCmd.Args = append(rsCmd.Args, flag)
 				}
+				// 与生成 TU / std .o 同一组语义宏：
+				// KMM 分配器（g_kmm_v4_offset 等）的类型与 inline 副本必须同口径，
+				// 否则 -O0 构建下生成 TU（level 1）与 runtime .o（推导 level 0）分叉。
+				rsCmd.Args = append(rsCmd.Args, moduleSemanticDefines...)
 				if output, err := compileToObjectAtomic(rsCmd, rsObj); err != nil {
 					fmt.Printf("[Compile] Warning: %s compilation failed: %v\n%s\n", oName, err, output)
 				} else {
+					writeObjectStamp(rsObj, runtimeObjectStamp(compilerCmd, compilerPrefix, optLevel, rsSrc, moduleSemanticDefines, cfgCFlags(cfg), isFreestanding, bootArchArgs(cfg)...))
 					fmt.Printf("[Compile] %s compiled\n", oName)
 				}
 			}
@@ -4784,7 +5046,7 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		}
 	} // end if !cfg.Freestanding
 
-	clangArgs = append(clangArgs, "-fwrapv", "-fno-strict-aliasing")
+	clangArgs = append(clangArgs, tuSemanticCFlags...)
 
 	// 添加 Windows 系统库链接（裸机模式跳过）
 	if runtime.GOOS == "windows" && (cfg == nil || !cfg.Freestanding) {

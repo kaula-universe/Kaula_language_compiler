@@ -47,11 +47,10 @@ uint8_t* g_kmm_v4_pool = NULL;
 size_t g_kmm_v4_pool_capacity = 0;
 #endif
 
-#if KMM_THREAD_SAFETY_LEVEL >= 1
+// 定义的类型必须与头文件 extern 声明**逐字一致**，且不随 KMM_THREAD_SAFETY_LEVEL
+// 变形：std .o 与用户 TU 可能从不同的 -O 推出不同的级别（见头文件
+// "KMM_ATOMIC_TYPE 必须与优化级别无关"一节）。级别只影响操作方式。
 KMM_ATOMIC_TYPE g_kmm_v4_offset = 0;
-#else
-size_t g_kmm_v4_offset = 0;
-#endif
 
 KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack = { .frames = {{0, 0}}, .depth = 0 };
 
@@ -74,13 +73,8 @@ size_t   g_kmm_v4_survivor_large_capacity = 0;
 kmm_survivor_state_t g_kmm_v4_survivor = {0};
 
 #ifdef KMM_V4_DEBUG
-#if KMM_THREAD_SAFETY_LEVEL >= 1
 KMM_ATOMIC_TYPE g_kmm_v4_peak = 0;
 KMM_ATOMIC_TYPE g_kmm_v4_alloc_count = 0;
-#else
-size_t g_kmm_v4_peak = 0;
-size_t g_kmm_v4_alloc_count = 0;
-#endif
 #endif
 
 kmm_context_t g_kmm_ctx = { .is_initialized = false };
@@ -88,11 +82,9 @@ kmm_context_t g_kmm_ctx = { .is_initialized = false };
 // 已提交的字节数（始终 >= g_kmm_v4_offset）
 // Task #25（审计 D2）：LEVEL>=1 时 refill 并发耗尽会并发调用
 // pool_commit_up_to 做 read-modify-write，原子化同 survivor 计数器口径。
-#if KMM_THREAD_SAFETY_LEVEL >= 1
+// 类型固定为 KMM_ATOMIC_TYPE（不随级别变形）：KMM_ATOMIC_STORE 在 level 0 下
+// 也只是普通赋值，零开销。
 static KMM_ATOMIC_TYPE g_committed_bytes = 0;
-#else
-static size_t g_committed_bytes = 0;
-#endif
 
 // ==================== 多段自动扩容（Task #17） ====================
 // 全局池耗尽时通过系统 malloc 追加新段（链式段表，追加到链尾以保持
@@ -115,11 +107,18 @@ kmm_v4_extra_seg_t* g_kmm_v4_extra_tail = NULL;  // 段链尾（追加/归还用
 #define g_extra_head g_kmm_v4_extra_head
 #define g_extra_tail g_kmm_v4_extra_tail
 
-#if KMM_THREAD_SAFETY_LEVEL >= 1
+// 类型固定为 KMM_ATOMIC_TYPE（不随级别变形）。
 KMM_ATOMIC_TYPE g_kmm_v4_extra_capacity = 0;
+/*
+ * 互斥标志只在"动态池 + 需要线程安全"时才存在：
+ *   - 静态池（裸机）不扩容，trim_tail 也不接管归还，用不到；
+ *   - level 0 是单线程口径，Double-Checked Locking 整段被编译掉。
+ * 任一条件不成立就只剩一个没人读的 static 变量 —— 除了 -Wunused-variable，
+ * 更糟的是它会让读者以为该路径在这个配置下仍然存在。
+ * 下面的使用点用同样的条件包着，两边必须一起改。
+ */
+#if !defined(KMM_V4_STATIC_POOL) && KMM_THREAD_SAFETY_LEVEL >= 1
 static KMM_ATOMIC_TYPE g_grow_flag = 0;  // 0=空闲, 1=扩容中
-#else
-size_t g_kmm_v4_extra_capacity = 0;
 #endif
 
 // 单个扩展段的最小尺寸（默认 1MB，可 -D 覆盖；每次 refill 仅消耗
@@ -137,11 +136,11 @@ static inline size_t pool_watermark(void);
 #endif
 
 // 修复 #3：线程安全的一次性初始化
-#if KMM_THREAD_SAFETY_LEVEL >= 1
-#if !defined(KMM_V4_STATIC_POOL)
+// 标志类型固定（不随级别变形），level 0 下整段双检锁被编译掉，
+// 标志本身也就没有意义，跟着一起去掉（否则只是 -Wunused-variable）。
+#if !defined(KMM_V4_STATIC_POOL) && KMM_THREAD_SAFETY_LEVEL >= 1
 // 使用原子标志做双检锁
 static KMM_ATOMIC_TYPE g_pool_init_flag = 0;
-#endif
 #endif
 
 // ==================== 平台虚拟内存 ====================
@@ -241,9 +240,12 @@ void kmm_v4_pool_commit(size_t needed) {
 
 // ==================== Survivor 段初始化与提交 ====================
 
-#ifndef KMM_V4_STATIC_POOL
-// 线程安全的 survivor 段一次性初始化标志
+#if !defined(KMM_V4_STATIC_POOL)
+// 线程安全的 survivor 段一次性初始化标志。
+// level 0（单线程）下双检锁被编译掉，标志同样不需要存在。
+#if KMM_THREAD_SAFETY_LEVEL >= 1
 static KMM_ATOMIC_TYPE g_survivor_init_flag = 0;
+#endif
 
 // 动态池（方案 A）：survivor 元数据由 header 的 kmm_v4_survivor_lazy_init
 // 一次性建立（50 档 bucket_size/slots_count，slots=NULL 懒分配）。
@@ -859,26 +861,48 @@ static uint8_t* pool_offset_to_addr(size_t offset) {
 int kmm_v4_pool_owned(const void* ptr) {
     if (ptr == NULL) return 0;
     const uint8_t* p = (const uint8_t*)ptr;
-    int dbg = getenv("KMM_DBG_OWNED") != NULL;
+    /*
+     * 调试开关必须是**编译期**常量，不能在函数体里调 getenv()。
+     *
+     * 这个文件同时编成托管版与 "*-none-elf" 裸机版。裸机版走
+     * -ffreestanding -nostdlib，头文件那头把 libc 的 <stdlib.h>/<stdio.h>
+     * 全部屏蔽，函数体里再出现 getenv / fprintf / stderr 就是"隐式声明 +
+     * 未定义标识符"的硬错误（C99 起隐式声明不再合法）：
+     *
+     *     error: call to undeclared function 'getenv'
+     *     error: use of undeclared identifier 'stderr'
+     *
+     * 后果不是"少打一行日志"，而是 kmm_v4_fs.o 编不出来 → 链接期缺
+     * g_kmm_v4_scope_stack / g_kmm_v4_survivor / ... 一整套符号，
+     * 而驱动方只看到 ld.lld 的 undefined symbol，根因被掩埋。
+     *
+     * 现在：托管版用环境变量控制（保持原有排障手感），裸机版恒关，
+     * 输出统一走 KMM_V4_DIAGF（freestanding 下降级为 ((void)0)）。
+     */
+#if (defined(KAULA_FREESTANDING) || defined(KAULA_NO_LIBC))
+    const int dbg = 0;
+#else
+    const int dbg = getenv("KMM_DBG_OWNED") != NULL;
+#endif
 #ifndef KMM_V4_STATIC_POOL
     if (g_kmm_v4_pool != NULL &&
         p >= g_kmm_v4_pool && p < g_kmm_v4_pool + g_kmm_v4_pool_capacity) {
-        if (dbg) fprintf(stderr, "[kmm_owned] %p in primary pool\n", ptr);
+        if (dbg) KMM_V4_DIAGF("[kmm_owned] %p in primary pool\n", ptr);
         return 1;
     }
 #else
     if (p >= g_kmm_v4_pool && p < g_kmm_v4_pool + g_kmm_v4_pool_capacity) {
-        if (dbg) fprintf(stderr, "[kmm_owned] %p in static pool\n", ptr);
+        if (dbg) KMM_V4_DIAGF("[kmm_owned] %p in static pool\n", ptr);
         return 1;
     }
 #endif
     for (kmm_v4_extra_seg_t* s = g_extra_head; s != NULL; s = s->next) {
         if (p >= s->base && p < s->base + s->capacity) {
-            if (dbg) fprintf(stderr, "[kmm_owned] %p in extra seg\n", ptr);
+            if (dbg) KMM_V4_DIAGF("[kmm_owned] %p in extra seg\n", ptr);
             return 1;
         }
     }
-    if (dbg) fprintf(stderr, "[kmm_owned] %p NOT owned (pool=%p cap=%zu)\n",
+    if (dbg) KMM_V4_DIAGF("[kmm_owned] %p NOT owned (pool=%p cap=%zu)\n",
                      ptr, (void*)g_kmm_v4_pool, g_kmm_v4_pool_capacity);
     return 0;
 }
@@ -1013,7 +1037,12 @@ void kmm_v4_pool_trim_tail(size_t watermark) {
 // 返回 thread heap 的起始地址，如果失败返回 NULL
 uint8_t* kmm_v4_thread_heap_refill(size_t min_needed) {
     pool_ensure_init();
+#ifndef KMM_V4_STATIC_POOL
+    // 动态池：g_kmm_v4_pool 是 mmap 出来的指针，可能还没就位。
+    // 静态池下它是 BSS 里的数组，地址恒非空 —— 这个判断会是恒真比较
+    // （-Wpointer-bool-conversion），所以只在动态池分支里写。
     if (!g_kmm_v4_pool) return NULL;
+#endif
 
     // thread heap 大小：至少 KMM_TLS_BUFFER_SIZE，或 min_needed（对齐后）
     const size_t mask = KMM_V4_ALIGNMENT - 1;
@@ -1117,7 +1146,11 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
     }
 
     // 修复 #8：检查 ptr 是否在 pool 区间内
-    if (g_kmm_v4_pool != NULL &&
+    // 静态池下 g_kmm_v4_pool 是 BSS 里的数组，非空判断恒真且会触发
+    // -Wtautological-pointer-compare，所以用一个在两种模式下都成立的
+    // 判据：只比区间，不判指针非空（动态池此时已由 pool_ensure_init
+    // 建池，未建池时 capacity 为 0，区间判据自然为假）。
+    if (g_kmm_v4_pool_capacity > 0 &&
         (uint8_t*)ptr >= g_kmm_v4_pool &&
         (uint8_t*)ptr < g_kmm_v4_pool + g_kmm_v4_pool_capacity) {
         // pool 内指针：always-copy（无法得知 old size，保守复制 size 字节）
