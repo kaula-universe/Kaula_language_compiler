@@ -1,11 +1,10 @@
 package main
 
 import (
- "flag"
 	"crypto/sha256"
-	"sync/atomic"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"kaula/internal/ast"
 	"kaula/internal/cache"
@@ -22,16 +21,18 @@ import (
 	"kaula/internal/sema"
 	"kaula/internal/sor"
 	"kaula/internal/stdlib"
+	"kaula/internal/testrunner"
 	"kaula/internal/timeout"
 	"kaula/internal/version"
-	"kaula/internal/testrunner"
- "kaula/internal/workspace"
+	"kaula/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,22 +48,157 @@ func localImportFiles(imp *ast.ImportStatement) []string {
 	return nil
 }
 
+// localImportTU 一个被 import 的 .kl 文件产出的独立 C 翻译单元。
+//
+// TU 拆分模式下，每个定义文件不再把函数体"文本提取"后注入主 TU，而是保留
+// 完整的 C 源（含自己的 #include / 类型 / 原型 / 函数体），由 C 编译器单独
+// 编译成 .o，与主 TU 并行编译后统一链接。
+//
+// 为什么不继续文本提取：提取是"猜"的 —— 它靠大括号计数猜函数边界，丢掉
+// 了类型定义、extern 声明、文件作用域 static 函数、`static` 全局变量等
+// 一切"看起来不像函数"的东西，只能靠注释逐条打补丁（_fltused /
+// _kaula_entry / 跨文件 typedef ...）。任何一个新特性都会再撞一次，
+// 而拆 TU 后 C 编译器自己就是判据。
+type localImportTU struct {
+	// Path .kl 源文件绝对路径（稳定排序与报错定位用）
+	Path string
+	// Source 完整的 C 源
+	Source string
+	// Prelude 本 TU 贡献给跨 TU 前置段的类型定义
+	Prelude string
+	// Header 本 TU 的接口头（extern 变量 / 泛型实例原型 / static 函数原型）
+	Header string
+	// GenericDefs 本 TU 定义的泛型实例 C 名
+	GenericDefs []string
+	// UsedModules 本 TU 依赖的 std 模块（链接时合并）
+	UsedModules []string
+}
+
+// tuSplitResult TU 拆分的中间结果（供入口做归属决策与生成注入）
+type tuSplitResult struct {
+	TUs     []*localImportTU
+	Prelude string
+	Headers string
+	Owners  map[string]string // 泛型实例 C 名 -> 归属 TU 的 .kl 路径
+}
+
+// ownerLookup 泛型实例归属判定：inst 实例是否由路径 tuPath 的 TU 负责定义。
+type ownerLookup func(inst, tuPath string) bool
+
+// genericOwnerIndex 泛型实例归属索引。
+//
+// 为什么需要它：同一个泛型实例（identity<i32>）可能被多个 TU 同时实例化。
+// 每个 TU 各写一份函数体 → 链接期重复定义；谁都不写 → 链接期未定义。
+//
+// 归属规则（确定性，只看文件内容与路径，与遍历/并发顺序无关）：
+//
+//	第 1 优先：定义了泛型模板（fn f<T>）的那个文件 —— 实例函数体自然属于
+//	          模板所在处，符合"模板在哪儿，实例就在哪儿"的直觉；
+//	第 2 优先：模板文件自身没实例化时，取全体实例化者中**绝对路径最小**的。
+//
+// 入口 TU 不参与定义：它只消费库里的实例。这样增删调用点不会引起归属漂移
+// （否则主程序删掉一处调用，实例定义就会从"主 TU"漂到"库 TU"或不复存在）。
+//
+// 两遍编译的代价：第 1 遍（probe）只为知道"每个文件实例化了哪些实例"，
+// 不落盘；算出归属后第 2 遍按归属产出定义/原型。相比链接期 duplicate symbol
+// 再回头排查，这个代价是划算的 —— 而且 probe 复用正式生成同一条流水线，
+// 不存在两套推断规则漂移的风险。
+type genericOwnerIndex struct {
+	// Defined 泛型函数名 -> 定义它的 .kl 绝对路径
+	Defined map[string]string
+	// Requesters 泛型实例 C 名 -> 实例化它的 .kl 绝对路径（去重、排序）
+	Requesters map[string][]string
+	// Owner 泛型实例 C 名 -> 归属 .kl 绝对路径
+	Owner map[string]string
+	// HeaderBlock 全部 TU 的接口段（类型 prelude + 函数/变量/泛型原型），
+	// 由探测顺带收集。每个 TU 生成时前置同一份，长度受 header guard 约束
+	// （重复包含无副作用）。
+	HeaderBlock string
+}
+
+// Lookup 实现 ownerLookup：无归属信息时一律放行（等价单 TU 语义）。
+func (idx *genericOwnerIndex) Lookup(inst, tuPath string) bool {
+	if idx == nil || len(idx.Owner) == 0 {
+		return true
+	}
+	owner, ok := idx.Owner[inst]
+	if !ok {
+		return true
+	}
+	return owner == tuPath
+}
+
+// instNameToFuncNames 把 MangleGenericName 产出的 C 名还原成候选函数名。
+//
+// 修饰规则是 kaula_<fn>_<args...>，且函数名与类型参数里都可能出现下划线，
+// 无法唯一切分。这里不追求唯一：给出所有"前缀是某个已知泛型函数名"的候选，
+// 并用**最长匹配优先**排序 —— identity 与 identity_pair 同时存在时，
+// kaula_identity_pair_i32 属于后者（更长的匹配才解释了整段前缀）。
+func instNameToFuncNames(instName string, defined map[string]string) []string {
+	const prefix = "kaula_"
+	if !strings.HasPrefix(instName, prefix) {
+		return nil
+	}
+	body := instName[len(prefix):]
+	var out []string
+	for fn := range defined {
+		if strings.HasPrefix(body, fn+"_") {
+			out = append(out, fn)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if len(out[i]) != len(out[j]) {
+			return len(out[i]) > len(out[j])
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
 // precompileLocalImports 预解析本地 .kl 文件 import
 // 返回: (pub 函数名集合, export 函数名集合, 合并后的 C 函数定义代码, 被导入文件内容哈希表)
 // 哈希表覆盖传递闭包内所有实际读取的 .kl 文件（绝对路径 -> SHA256），
 // 供增量缓存键校验使用
 func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, map[string]bool, string, []string, []string, map[string]string) {
-	state := &localCompileState{
-		pubFuncs:       make(map[string]bool),
-		exportFuncs:    make(map[string]bool),
-		compiled:       make(map[string]bool),
-		fileHashes:     make(map[string]string),
-		localHeaderSet: make(map[string]bool),
-		usedModuleSet:  make(map[string]bool),
-		stdlibConfig:   stdlibConfig,
-		cfg:            cfg,
-		errorCollector: errorCollector,
+	pubFuncs, exportFuncs, headers, usedModules, fileHashes, split := precompileLocalImportsSplit(program, inputDir, stdlibConfig, cfg, errorCollector, false)
+	if split == nil {
+		return pubFuncs, exportFuncs, "", headers, usedModules, fileHashes
 	}
+	var allCode strings.Builder
+	for _, tu := range split.TUs {
+		allCode.WriteString(tu.Source)
+		allCode.WriteByte('\n')
+	}
+	return pubFuncs, exportFuncs, allCode.String(), headers, usedModules, fileHashes
+}
+
+// precompileLocalImportsSplit 统一实现（单 TU / 多 TU 两种模式共用一次遍历）。
+//
+// split=false：保持历史行为，产出合并后的 C 代码（调用方注入主 TU）。
+// split=true ：每个文件产出独立 C 源，且：
+//   - prelude 汇总所有跨文件类型定义；
+//   - headers 汇总所有接口头；
+//   - owners  给出每个泛型实例的归属（第一个实例化它的定义文件，
+//     若定义文件本身没实例化则归第一个实例化它的调用方）。
+func precompileLocalImportsSplit(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector, split bool) (pubFuncs map[string]bool, exportFuncs map[string]bool, headers []string, usedModules []string, fileHashes map[string]string, result *tuSplitResult) {
+	idx := buildGenericOwnerIndex(program, inputDir, stdlibConfig, cfg, errorCollector)
+	return precompileLocalImportsWithOwners(program, inputDir, stdlibConfig, cfg, errorCollector, split, idx.Lookup)
+}
+
+// precompileLocalImportsWithOwners 按给定的归属索引产出 TU。
+// ownerFn 为 nil 表示"不限制归属"（每个实例化者都定义，单 TU 语义）。
+func precompileLocalImportsWithOwners(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector, split bool, owner ownerLookup) (pubFuncs map[string]bool, exportFuncs map[string]bool, headers []string, usedModules []string, fileHashes map[string]string, result *tuSplitResult) {
+	return precompileLocalImportsWithHeader(program, inputDir, stdlibConfig, cfg, errorCollector, split, owner, "")
+}
+
+// precompileLocalImportsWithHeader 同 precompileLocalImportsWithOwners，额外接受
+// 全局接口段（probe 阶段所得）。接口段在每个定义 TU 生成时前置到其 C 源，
+// 使库与库之间、库与入口之间的调用都能看到原型。
+func precompileLocalImportsWithHeader(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector, split bool, owner ownerLookup, headerBlock string) (pubFuncs map[string]bool, exportFuncs map[string]bool, headers []string, usedModules []string, fileHashes map[string]string, result *tuSplitResult) {
+	state := newLocalCompileState(cfg, stdlibConfig, errorCollector)
+	state.tuSplit = split
+	state.tuOwner = owner
+	state.tuHeaderBlock = headerBlock
 
 	var localFiles []string
 	for _, stmt := range program.Statements {
@@ -74,7 +210,31 @@ func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig 
 		state.compileFile(localPath, inputDir)
 	}
 
-	return state.pubFuncs, state.exportFuncs, state.allCode, state.localHeaders, state.usedModules, state.fileHashes
+	return state.pubFuncs, state.exportFuncs, state.localHeaders, state.usedModules, state.fileHashes, state.tuResult()
+}
+
+// newLocalCompileState 构造一个字段齐备的编译状态。
+//
+// compileFile 会写 pubFuncs / exportFuncs / compiled / fileHashes /
+// localHeaderSet / usedModuleSet 等多个 map，漏初始化任何一个都是运行时
+// "assignment to entry in nil map"——而且只在特定输入下才炸（比如库文件里
+// 没有 pub 函数时就不会走到那一行）。集中在一处构造，新增字段只改这里。
+func newLocalCompileState(cfg *config.Config, stdlibConfig *stdlib.StdlibConfig, ec *errors.ErrorCollector) *localCompileState {
+	return &localCompileState{
+		pubFuncs:            make(map[string]bool),
+		exportFuncs:         make(map[string]bool),
+		compiled:            make(map[string]bool),
+		fileHashes:          make(map[string]string),
+		localHeaderSet:      make(map[string]bool),
+		usedModuleSet:       make(map[string]bool),
+		definedGenerics:     make(map[string]bool),
+		tuGenerics:          make(map[string]bool),
+		tuProbeByPath:       make(map[string][]string),
+		probeGenericsByPath: make(map[string]string),
+		cfg:                 cfg,
+		stdlibConfig:        stdlibConfig,
+		errorCollector:      ec,
+	}
 }
 
 // localCompileState 共享本地 import 编译状态（去重 + 依序输出）
@@ -91,11 +251,301 @@ type localCompileState struct {
 	stdlibConfig   *stdlib.StdlibConfig
 	cfg            *config.Config
 	errorCollector *errors.ErrorCollector
+
+	// TU 拆分（tuSplit=true 时有效）
+	tuSplit bool
+	tus     []*localImportTU
+	// tuOwner 泛型实例归属判定（nil = 每个实例化者都定义，单 TU 语义）
+	tuOwner ownerLookup
+	// tuProbe 探测模式：只收集泛型实例清单，不产出 C 源（归属计算的第一遍）
+	tuProbe bool
+	// tuProbeByPath 探测结果：绝对路径 -> 该文件实例化出的泛型实例 C 名
+	tuProbeByPath map[string][]string
+	// probeGenericsByPath 探测结果：泛型函数名 -> 定义它的文件绝对路径
+	probeGenericsByPath map[string]string
+	// tuGenerics 本文件实例化过的泛型函数名（用于归属第 1 优先规则）
+	tuGenerics map[string]bool
+	// definedGenerics 本文件定义了哪些泛型函数（fn f<T>），供实例名反解
+	definedGenerics map[string]bool
+	// tuHeaderBlock 全局接口段（全部 TU 的 prelude + header）。
+	//
+	// 每个 TU 都要看到所有 TU 的接口，但它必须在**生成时**就注入到正确位置
+	// （类型前置段之后、前置声明之前）。而 header 只有在全部文件生成一遍之后
+	// 才齐全——第一遍（probe）顺带收集，正式生成时再统一注入。
+	tuHeaderBlock string
+	// tuPreludeParts probe 阶段收集到的 prelude/header 片段（按文件去重后汇总）
+	tuPreludeParts []string
 }
 
-// compileFile 编译单个本地 .kl 文件
-// 先编译该文件自身的导入依赖（保证被调用函数先定义），再编译文件本身；
-// 这样跨文件调用（A 导入 B）时 B 的 C 定义始终先于 A 输出。
+// tuResult 汇总 TU 拆分结果；未开启拆分时返回 nil。
+func (s *localCompileState) tuResult() *tuSplitResult {
+	if !s.tuSplit {
+		return nil
+	}
+	res := &tuSplitResult{Owners: make(map[string]string)}
+	var prelude, headers strings.Builder
+	seenGeneric := make(map[string]string)
+	for _, tu := range s.tus {
+		res.TUs = append(res.TUs, tu)
+		if tu.Prelude != "" {
+			prelude.WriteString(tu.Prelude)
+			prelude.WriteByte('\n')
+		}
+		if tu.Header != "" {
+			guard := codegen.TUHeaderGuard(tu.Path)
+			headers.WriteString("#ifndef " + guard + "\n#define " + guard + "\n")
+			headers.WriteString(tu.Header)
+			headers.WriteString("#endif\n")
+		}
+		for _, g := range tu.GenericDefs {
+			// 归属唯一性：同一个实例只允许一个定义者。若两个定义文件都实例化了
+			// 同一个实例（A 与 B 互调泛型），归属第一个处理的文件，另一个文件
+			// 在生成时已经按"空归属"只出原型 —— 这里的 map 只用于诊断。
+			if _, ok := seenGeneric[g]; !ok {
+				seenGeneric[g] = tu.Path
+			}
+		}
+	}
+	res.Prelude = prelude.String()
+	res.Headers = headers.String()
+	res.Owners = seenGeneric
+	return res
+}
+
+// genericFuncNameOf 从实例 C 名反解出模板函数名；无反解可能时返回空串。
+func genericFuncNameOf(instName string, defined map[string]bool) string {
+	if len(defined) == 0 {
+		return ""
+	}
+	dm := make(map[string]string, len(defined))
+	for fn := range defined {
+		dm[fn] = fn
+	}
+	if cands := instNameToFuncNames(instName, dm); len(cands) > 0 {
+		return cands[0]
+	}
+	return ""
+}
+
+// buildGenericOwnerIndex 两遍走：先探测每个文件的实例清单，再算归属。
+// 结果同时服务于入口 TU 与各定义 TU 的 codegen（经 codegen.Config.TUGenericOwner）。
+func buildGenericOwnerIndex(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) *genericOwnerIndex {
+	idx := &genericOwnerIndex{
+		Defined:    make(map[string]string),
+		Requesters: make(map[string][]string),
+		Owner:      make(map[string]string),
+	}
+
+	var localFiles []string
+	for _, stmt := range program.Statements {
+		if importStmt, ok := stmt.(*ast.ImportStatement); ok && importStmt.IsLocal {
+			localFiles = append(localFiles, localImportFiles(importStmt)...)
+		}
+	}
+	if len(localFiles) == 0 {
+		return idx
+	}
+
+	// 第 1 遍：探测（只解析 + 生成，不出 C 源，不落盘）
+	//
+	// 用**一个**共享 state 递归：每个 .kl 只处理一遍。
+	// 之前每个顶层文件各建一个 state、各递归整条依赖链 —— 12 个库串成一条链时
+	// 同一批文件要被跑 12 遍（O(N²)），代码生成阶段从 18ms 涨到 110ms。
+	// 共享 state 后每个文件只处理一次；每个文件的实例清单由 compileFile 在它
+	// 自己返回时按绝对路径就地登记（见 tuProbe 分支）。
+	pr := newLocalCompileState(cfg, stdlibConfig, errorCollector)
+	pr.tuSplit = true
+	pr.tuProbe = true
+	for _, p := range localFiles {
+		abs := p
+		if !filepath.IsAbs(abs) {
+			if candidate := filepath.Join(inputDir, abs); fileExists(candidate) {
+				abs = candidate
+			}
+		}
+		if a, err := filepath.Abs(abs); err == nil {
+			abs = a
+		}
+		pr.compileFile(abs, filepath.Dir(abs))
+	}
+
+	// 泛型函数名 -> 定义它的文件
+	for fn, path := range pr.probeGenericsByPath {
+		if prev, ok := idx.Defined[fn]; !ok || path < prev {
+			idx.Defined[fn] = path
+		}
+	}
+
+	// 实例 C 名 -> 实例化它的文件集合
+	reqSet := make(map[string]map[string]bool)
+	for path, insts := range pr.tuProbeByPath {
+		for _, inst := range insts {
+			if reqSet[inst] == nil {
+				reqSet[inst] = make(map[string]bool)
+			}
+			reqSet[inst][path] = true
+		}
+	}
+
+	// 全局接口段：prelude 与 header 都按内容去重后汇总。
+	//
+	// prelude 是跨文件类型定义，同一份 typedef 在多处 prelude 里重复出现会被
+	// 各自的 include guard 挡住；这里再去一次重，减少 TUPrelude 的体量。
+	seenPrelude := make(map[string]bool)
+	for _, part := range pr.tuPreludeParts {
+		if seenPrelude[part] {
+			continue
+		}
+		seenPrelude[part] = true
+		idx.HeaderBlock += part
+		if !strings.HasSuffix(idx.HeaderBlock, "\n") {
+			idx.HeaderBlock += "\n"
+		}
+	}
+
+	for inst, set := range reqSet {
+		var paths []string
+		for p := range set {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		idx.Requesters[inst] = paths
+		// 第 1 优先：模板定义文件本身实例化了该实例 → 归它
+		owner := ""
+		for _, fn := range instNameToFuncNames(inst, idx.Defined) {
+			def := idx.Defined[fn]
+			if def != "" && set[def] {
+				if owner == "" || def < owner {
+					owner = def
+				}
+			}
+		}
+		// 第 2 优先：全体实例化者里路径最小的那个（确定性）
+		if owner == "" && len(paths) > 0 {
+			owner = paths[0]
+		}
+		if owner != "" {
+			idx.Owner[inst] = owner
+		}
+	}
+	return idx
+}
+
+// entryTUPath 入口 TU 的伪路径：空串表示"主程序"，任何 .kl 文件的绝对路径都不会等于它。
+const entryTUPath = ""
+
+// multiTUBuild 多 TU 构建的全部输入/产物。
+type multiTUBuild struct {
+	// Sources 文件名（稳定） -> C 源
+	Sources map[string]string
+	// DefModules 定义 TU 依赖的 std 模块
+	DefModules []string
+	// Prelude 跨 TU 前置段（供诊断）
+	Prelude string
+}
+
+// assembleMultiTU 把 TU 拆分结果组装成完整的多 TU 构建（不落盘、不编译）。
+//
+// 入口 TU 的 C 源由 genEntry 回调生成：主流程持有已配置好的 CodeGenerator
+// （escape/SOR/局部类型/返回类型注入都在里面），本函数只负责把 TUMode/
+// prelude/泛型归属这些"多 TU 专属"配置套上去再调一次 Generate。
+//
+// 返回 nil 表示没有可用的拆分结果，调用方回退单 TU —— 单 TU 路径的语义是
+// 被验证过的基线，回退永远安全。
+func assembleMultiTU(split *tuSplitResult, idx *genericOwnerIndex, cfg *config.Config, genEntry func(*codegen.CodeGenerator) string) *multiTUBuild {
+	if split == nil || len(split.TUs) == 0 {
+		return nil
+	}
+	b := &multiTUBuild{Sources: make(map[string]string), DefModules: nil, Prelude: split.Prelude}
+
+	// 定义 TU：文件名取"原名 + 路径哈希"，避免不同目录下的同名 .kl 互相覆盖。
+	//
+	// 每个定义 TU 都要看到**全部** TU 的 header，不只是自己的：库文件之间可以
+	// 互相调用（lib_a 调 libsub 的 sub_value），而 TUPrelude 只在生成时注入
+	// 一次。把全量 header 前置到每一份 C 源，等价于"所有接口都在每个 TU 的
+	// 顶部可见"。header 自带内容哈希 guard，重复包含无副作用；代价只是编译期
+	// 多解析几百行声明。
+	//
+	// 每个定义 TU 都要看到**所有** TU 的接口（库之间可互相调用；lib_a 调
+	// libsub 的 sub_value 就是真实用例），而不只是自己的。接口段在探测阶段
+	// 已汇总进 idx.HeaderBlock 并由 compileFile 注入 Prelude —— 这里不再
+	// 二次拼接：拼接会绕过 include 顺序（header 用到 int32_t / KAULA_EXPORT，
+	// 必须排在 #include 之后）。
+	used := make(map[string]bool)
+	for _, tu := range split.TUs {
+		b.Sources[tuObjectName(tu.Path, used)] = tu.Source
+		for _, m := range tu.UsedModules {
+			b.DefModules = append(b.DefModules, m)
+		}
+	}
+
+	// 入口 TU：类型 prelude 与各定义 TU 的接口 header 前置到主 C 的 include 之后，
+	// 使主程序能看到跨文件的类型、extern 变量与泛型实例原型。
+	entryCfg := *cfg
+	entryCfg.TUMode = "entry"
+	entryCfg.TUPrelude = split.Prelude + "\n" + split.Headers
+	if idx != nil {
+		owner := idx.Lookup
+		entryCfg.TUGenericOwner = func(inst string) bool { return owner(inst, entryTUPath) }
+	}
+	entryCG := codegen.NewCodeGenerator(&entryCfg)
+	b.Sources[entryTUBasename+".c"] = genEntry(entryCG)
+
+	// 入口 TU 依赖的 std 模块也要链接（否则只有库 TU 用到的模块被带上）
+	b.DefModules = append(b.DefModules, entryCG.GetUsedModules()...)
+	return b
+}
+
+// hasLocalImports 报告主程序是否 import 了本地 .kl 文件。
+// 多 TU 与单 TU 的预编译必须由同一判定驱动，否则两条路径的符号表会不一致。
+func hasLocalImports(program *ast.Program) bool {
+	if program == nil {
+		return false
+	}
+	for _, stmt := range program.Statements {
+		if imp, ok := stmt.(*ast.ImportStatement); ok && imp.IsLocal {
+			return true
+		}
+	}
+	return false
+}
+
+// tuOwnerIndex 本次构建的泛型实例归属索引。
+// 探测（buildGenericOwnerIndex）只跑一次：它要解析并 codegen 所有被 import
+// 的文件两遍，成本不低，重复跑纯属浪费。
+var tuOwnerIndex *genericOwnerIndex
+
+// tuObjectName 每个 .kl TU 的稳定文件名：<原名>.<短哈希>.c
+// 短哈希让不同目录的同名文件互不冲突，同时保留原名的可读性。
+func tuObjectName(absPath string, used map[string]bool) string {
+	base := sanitizeTUName(filepath.Base(absPath))
+	sum := sha256.Sum256([]byte(absPath))
+	name := base + "." + hex.EncodeToString(sum[:4]) + ".tu.c"
+	if used[name] {
+		// 理论上不可能（哈希碰撞到 32 位），留一个确定性的兜底
+		name = base + "." + hex.EncodeToString(sum[:]) + ".tu.c"
+	}
+	used[name] = true
+	return name
+}
+
+// sanitizeTUName 把任意文件名收敛到 C 标识符友好的字符集（只用于文件名，不影响语义）。
+func sanitizeTUName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "tu"
+	}
+	return b.String()
+}
+
 func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	if s.compiled[localPath] {
 		return
@@ -159,6 +609,10 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsPublic {
 			s.pubFuncs[fnStmt.Name] = true
 		}
+		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && s.definedGenerics != nil &&
+			(fnStmt.Generic || len(fnStmt.TypeParams) > 0) {
+			s.definedGenerics[fnStmt.Name] = true
+		}
 		// 收集 export 函数名：export 含 pub 语义（跨文件可见 + C 级导出），
 		// 调用端必须保持原名（不加 K_ 前缀），与定义端命名一致。
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok && fnStmt.IsExported {
@@ -185,6 +639,21 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	// 代码生成（本地文件使用 freestanding 模板，避免注入用户态/宿主入口）
 	localCfg := *s.cfg
 	localCfg.Boot = "none"
+	if s.tuSplit {
+		/*
+		 * 每个被 import 的文件是一份独立的 C 翻译单元：
+		 *   - 入口归属 = definition（不生成 main / _kaula_entry）；
+		 *   - 泛型实例归属：由本文件实例化的实例归本文件定义（唯一性由调用方
+		 *     通过 tuOwner 复核，见 buildMultiTU）；跨文件调用方 TU 只出原型。
+		 */
+		localCfg.TUMode = "definition"
+		localCfg.TUPrelude = s.tuHeaderBlock
+		if s.tuOwner != nil {
+			// 归属决策：只有归属本文件的实例才生成函数体，其余只出原型。
+			path := absPath
+			localCfg.TUGenericOwner = func(inst string) bool { return s.tuOwner(inst, path) }
+		}
+	}
 	localCG := codegen.NewCodeGenerator(&localCfg)
 	if s.stdlibConfig != nil {
 		localCG.SetStdlibConfig(s.stdlibConfig)
@@ -224,6 +693,46 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 			s.usedModuleSet[m] = true
 			s.usedModules = append(s.usedModules, m)
 		}
+	}
+
+	if s.tuSplit {
+		art := localCG.TUArtifacts()
+		if s.tuProbe {
+			/*
+			 * 探测模式：登记"本文件"的实例清单 / 泛型定义 / 接口段，不产出 C 源。
+			 *
+			 * 必须在这里（compileFile 返回前、按 absPath）登记，而不是在
+			 * buildGenericOwnerIndex 里事后按"顶层文件"归属：一个库被多个文件
+			 * import 时只会编译一次，把它算到哪个调用者头上都会冤枉另一个。
+			 * 每个文件自己在返回时落盘，天然一一对应。
+			 */
+			s.tuProbeByPath[absPath] = append(s.tuProbeByPath[absPath], art.GenericDefs...)
+			for fn := range s.definedGenerics {
+				if prev, ok := s.probeGenericsByPath[fn]; !ok || absPath < prev {
+					s.probeGenericsByPath[fn] = absPath
+				}
+			}
+			if art.Prelude != "" {
+				s.tuPreludeParts = append(s.tuPreludeParts, art.Prelude)
+			}
+			if art.Header != "" {
+				guard := codegen.TUHeaderGuard(absPath)
+				s.tuPreludeParts = append(s.tuPreludeParts, "#ifndef "+guard+"\n#define "+guard+"\n"+art.Header+"#endif\n")
+			}
+			return
+		}
+		s.tus = append(s.tus, &localImportTU{
+			Path:        absPath,
+			Source:      art.Source,
+			Prelude:     art.Prelude,
+			Header:      art.Header,
+			GenericDefs: art.GenericDefs,
+			UsedModules: art.UsedModules,
+		})
+		if verboseMode {
+			fmt.Printf("[Multi-file] TU: %s (%d bytes)\n", absPath, len(art.Source))
+		}
+		return
 	}
 
 	// 提取函数定义（去掉 includes 和 main）
@@ -468,30 +977,30 @@ var compilerValueFlags = map[string]bool{
 }
 
 func main() {
- // Test subcommands own their flags and must bypass compiler flag pre-scanning.
- if len(os.Args) > 1 && os.Args[1] == "test" {
-  os.Exit(runTestsCLI(os.Args[2:], false))
- }
- if len(os.Args) > 2 && os.Args[1] == "workspace" && os.Args[2] == "test" {
-  os.Exit(runTestsCLI(os.Args[3:], true))
- }
- // kaulac unittest：单元测试（#[test] runner）。
- // 目标是单个已存在的 .kl 文件时走常规编译流程（下方预扫描会置 testMode）；
- // 无参、传目录或路径不存在时进入批量模式，逐个文件以子进程复用该流程。
- if len(os.Args) > 1 && os.Args[1] == "unittest" {
-  // 先把旗标（含取值旗标的值）和位置参数分开再判断：否则
-  // `unittest x.kl --verbose` 因参数数 != 1 被当成批量模式，子进程收到同样的
-  // 参数又进批量模式，无限自我调用；`--stdlib <path>` 的值也会被当成目标路径。
-  positional, flags := splitUnittestArgs(os.Args[2:])
-  if !isSingleFileTarget(positional) {
-   root := "."
-   if len(positional) > 0 {
-    root = positional[len(positional)-1]
-   }
-   os.Exit(runUnittestBatch(root, flags))
-  }
- }
- totalStart := time.Now()
+	// Test subcommands own their flags and must bypass compiler flag pre-scanning.
+	if len(os.Args) > 1 && os.Args[1] == "test" {
+		os.Exit(runTestsCLI(os.Args[2:], false))
+	}
+	if len(os.Args) > 2 && os.Args[1] == "workspace" && os.Args[2] == "test" {
+		os.Exit(runTestsCLI(os.Args[3:], true))
+	}
+	// kaulac unittest：单元测试（#[test] runner）。
+	// 目标是单个已存在的 .kl 文件时走常规编译流程（下方预扫描会置 testMode）；
+	// 无参、传目录或路径不存在时进入批量模式，逐个文件以子进程复用该流程。
+	if len(os.Args) > 1 && os.Args[1] == "unittest" {
+		// 先把旗标（含取值旗标的值）和位置参数分开再判断：否则
+		// `unittest x.kl --verbose` 因参数数 != 1 被当成批量模式，子进程收到同样的
+		// 参数又进批量模式，无限自我调用；`--stdlib <path>` 的值也会被当成目标路径。
+		positional, flags := splitUnittestArgs(os.Args[2:])
+		if !isSingleFileTarget(positional) {
+			root := "."
+			if len(positional) > 0 {
+				root = positional[len(positional)-1]
+			}
+			os.Exit(runUnittestBatch(root, flags))
+		}
+	}
+	totalStart := time.Now()
 
 	// 初始化本地化系统，检测系统语言
 	i18n.Init()
@@ -506,13 +1015,13 @@ func main() {
 	showCacheStats := false
 	initConfig := false
 	showVersion := false
-	workspaceCmd := ""  // workspace 子命令: init, build, list
+	workspaceCmd := ""          // workspace 子命令: init, build, list
 	workspaceArgs := []string{} // workspace 子命令参数
-	pkgCmd := ""        // pkg 子命令: add, build, list, remove, analyze
-	pkgArgs := []string{} // pkg 子命令参数
-	fmtCmd := ""        // fmt 子命令: file, stdin, check
-	fmtArgs := []string{} // fmt 子命令参数
-	testMode := false   // 测试模式：生成 #[test] 测试 runner
+	pkgCmd := ""                // pkg 子命令: add, build, list, remove, analyze
+	pkgArgs := []string{}       // pkg 子命令参数
+	fmtCmd := ""                // fmt 子命令: file, stdin, check
+	fmtArgs := []string{}       // fmt 子命令参数
+	testMode := false           // 测试模式：生成 #[test] 测试 runner
 
 	// 预扫描 os.Args，提取非 flag 参数和自定义 flag
 	// 修复：-o/--output 的值不应被误认为输入文件；子命令（compile/run 等）也不是输入文件
@@ -1308,7 +1817,9 @@ func main() {
 
 	program := p.Parse()
 	stage1Time := time.Since(stage1Start)
-	if verbose { fmt.Printf(i18n.T(i18n.MsgStage1Completed)+"\n", stage1Time) }
+	if verbose {
+		fmt.Printf(i18n.T(i18n.MsgStage1Completed)+"\n", stage1Time)
+	}
 
 	// 单元测试模式必须真的存在 #[test] 函数：否则 runner 不会生成，
 	// 程序会退化成普通 main 并以 0 退出，把「没跑任何测试」伪装成「全部通过」。
@@ -1324,10 +1835,14 @@ func main() {
 	// 等待 stdlib 配置加载完成
 	parallelWg.Wait()
 	parallelTime := time.Since(parallelStart)
-	if verboseMode { fmt.Printf("[Parallel] stdlib config loaded in %v\n", parallelTime) }
+	if verboseMode {
+		fmt.Printf("[Parallel] stdlib config loaded in %v\n", parallelTime)
+	}
 
 	// Stage 2: Semantic Analysis (concurrent)
-	if verbose { fmt.Println(i18n.T(i18n.MsgStage2)) }
+	if verbose {
+		fmt.Println(i18n.T(i18n.MsgStage2))
+	}
 	stage2Start := time.Now()
 
 	localPubFuncs := collectLocalPubFuncs(program, inputDir)
@@ -1348,13 +1863,15 @@ func main() {
 
 	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes)
 	stage2Time := time.Since(stage2Start)
-	if verbose { fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time) }
+	if verbose {
+		fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time)
+	}
 
 	// Stage 2.5: SOR Ownership Analysis (--sor)
 	var sorErrors []sor.SORError
 	var sorResult map[string]interface{}
 	var escapeResult map[string]interface{} // 默认流程的轻量逃逸分析（--sor 时包含在 sorResult 内）
-	poolCapacity := 0                         // KMM V4 池容量（0=使用默认值）
+	poolCapacity := 0                       // KMM V4 池容量（0=使用默认值）
 	if cfg.SOR {
 		fmt.Println(i18n.T(i18n.MsgStage25))
 		sorStart := time.Now()
@@ -1366,7 +1883,9 @@ func main() {
 		// 提取静态分析估算的池容量
 		poolCapacity = fullResult.PoolCapacity
 		sorTime := time.Since(sorStart)
-		if verbose { fmt.Printf(i18n.T(i18n.MsgStage25Completed)+"\n", sorTime) }
+		if verbose {
+			fmt.Printf(i18n.T(i18n.MsgStage25Completed)+"\n", sorTime)
+		}
 		if os.Getenv("KAULA_SOR_DUMP") != "" {
 			fmt.Println(sor.FormatDecisionsSummary(fullResult.Decisions))
 			fmt.Println(sor.FormatEscapeSummary(fullResult.Escape))
@@ -1419,7 +1938,9 @@ func main() {
 	}
 
 	// Stage 3: Code Gen + C Compile (concurrent)
-	if verbose { fmt.Println(i18n.T(i18n.MsgStage3)) }
+	if verbose {
+		fmt.Println(i18n.T(i18n.MsgStage3))
+	}
 	stage3Start := time.Now()
 
 	codegenStart := time.Now()
@@ -1437,8 +1958,30 @@ func main() {
 	}
 	cg.SetSourceFile(inputFile)
 
-	// 多文件编译：预解析本地 .kl 文件 import，收集 pub/export 函数名与被导入文件内容哈希
-	localImportFuncs, localImportExportFuncs, localImportCode, localHeaders, localUsedModules, importFileHashes := precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
+	// 本地 import 预编译：收集 pub/export 函数名、被导入文件内容哈希，
+	// 并按需产出 TU 拆分（每个 .kl 一份完整 C 源）。
+	//
+	// 顺序很关键：codegen 靠这些符号表决定跨文件调用的 C 名，所以预编译必须
+	// 早于入口 TU 生成；而 TU 拆分本身又要用同一份泛型归属探测结果。因此这里
+	// 一次跑完，再分发给后续两步。
+	var localImportFuncs, localImportExportFuncs map[string]bool
+	var localImportCode string
+	var localHeaders, localUsedModules []string
+	var importFileHashes map[string]string
+	var split *tuSplitResult
+	wantMultiTU := hasLocalImports(program)
+	if wantMultiTU {
+		// 两遍：probe 只算泛型归属并收集接口段，第二遍才真正产出 C 源。
+		// 接口段必须先在 probe 里齐备——每个 TU 生成时都要看到全部 TU 的
+		// 接口（库之间可互相调用），而它只能在"全部文件都跑过一遍"之后完整。
+		tuOwnerIndex = buildGenericOwnerIndex(program, inputDir, stdlibConfig, cfg, errorCollector)
+		localImportFuncs, localImportExportFuncs, localHeaders, localUsedModules, importFileHashes, split =
+			precompileLocalImportsWithHeader(program, inputDir, stdlibConfig, cfg, errorCollector, true, tuOwnerIndex.Lookup, tuOwnerIndex.HeaderBlock)
+	} else {
+		localImportFuncs, localImportExportFuncs, localImportCode, localHeaders, localUsedModules, importFileHashes =
+			precompileLocalImports(program, inputDir, stdlibConfig, cfg, errorCollector)
+	}
+
 	if len(localImportFuncs) > 0 {
 		cg.SetLocalImportFuncs(localImportFuncs)
 	}
@@ -1452,6 +1995,7 @@ func main() {
 
 	// 前端 AST 优化：语义分析与 SOR/逃逸分析都已完成，此处改写 AST 是安全的。
 	// pass 只产出 codegen 已支持的节点（如 SwitchStatement），因此 codegen 无需感知优化。
+	// 必须早于入口 TU 生成：优化改写的是 AST，两条路径（多 TU / 单 TU）都要看到它。
 	if opt.Enabled(optLevel) {
 		optRes := opt.OptimizeProgram(program, opt.DefaultOptions())
 		if optRes.JumpTables > 0 && os.Getenv("KAULAC_VERBOSE") != "" {
@@ -1459,17 +2003,66 @@ func main() {
 		}
 	}
 
-	output := cg.Generate(program)
+	// 多 TU：把拆分结果组装成完整构建（入口 TU + 各定义 TU），落盘备编。
+	multiTUEnabled := false
+	var tuBuild *multiTUBuild
+	var tuDir string
+	if wantMultiTU && split != nil && len(split.TUs) > 0 {
+		tuBuild = assembleMultiTU(split, tuOwnerIndex, cfg, func(c *codegen.CodeGenerator) string {
+			// c 是刻意新建的实例：cg 的 TU 状态字段在 Generate 时复位，
+			// 复用会让单 TU 回退路径读到多 TU 残留。注入项这里逐项补齐 ——
+			// 漏一项都是静默的语义漂移（escape/SOR 直接影响分配路径）。
+			if stdlibConfig != nil {
+				c.SetStdlibConfig(stdlibConfig)
+			}
+			if sorResult != nil {
+				c.SetSORResult(sorResult)
+			}
+			if escapeResult != nil {
+				c.SetEscapeAnalysis(escapeResult)
+			}
+			c.SetSourceFile(inputFile)
+			c.SetLocalImportFuncs(localImportFuncs)
+			c.SetLocalImportExportFuncs(localImportExportFuncs)
+			c.SetLocalPubTypes(localPubTypes)
+			c.SetLocalImportReturnTypes(localImportReturns)
+			c.TestMode = testMode
+			return c.Generate(program)
+		})
+		if tuBuild != nil {
+			dir, err := materializeMultiTU(tuBuild)
+			if err != nil {
+				// 落盘失败不是语义错误：单 TU 路径仍能产出正确结果，如实告知即可
+				fmt.Printf("[Multi-TU] 落盘失败，回退单 TU: %v\n", err)
+				tuBuild = nil
+			} else {
+				tuDir = dir
+				localUsedModules = tuBuild.DefModules
+				multiTUEnabled = true
+			}
+		}
+	}
+
+	// 生成 C 源。多 TU 下"入口 TU"就是主 C：定义代码各自独立，不再注入。
+	var output string
+	if multiTUEnabled {
+		output = tuBuild.Sources[entryTUBasename+".c"]
+	} else {
+		output = cg.Generate(program)
+	}
 	usedModules := cg.GetUsedModules()
 
 	// 将本地导入的函数定义注入到主输出中（在 main 函数之前）。
 	// 本地文件依赖的 std 模块头文件（库内部 import std.xxx）随函数一起注入，
 	// 保证声明先于函数体可见，且与主程序自身 include 去重（头文件均有守卫）。
-	if len(localHeaders) > 0 {
-		localImportCode = strings.Join(localHeaders, "\n") + "\n" + localImportCode
-	}
-	if localImportCode != "" {
-		output = injectLocalCode(output, localImportCode)
+	// 多 TU 下每个定义 TU 自带 include，不存在"注入"这一步。
+	if !multiTUEnabled {
+		if len(localHeaders) > 0 {
+			localImportCode = strings.Join(localHeaders, "\n") + "\n" + localImportCode
+		}
+		if localImportCode != "" {
+			output = injectLocalCode(output, localImportCode)
+		}
 	}
 	if os.Getenv("KAULAC_DUMP") != "" {
 		os.WriteFile(filepath.Join(os.TempDir(), "klc_final.c"), []byte(output), 0644)
@@ -1489,7 +2082,9 @@ func main() {
 	}
 
 	codegenTime := time.Since(codegenStart)
-	if verbose { fmt.Printf(i18n.T(i18n.MsgStage3aCompleted)+"\n", codegenTime) }
+	if verbose {
+		fmt.Printf(i18n.T(i18n.MsgStage3aCompleted)+"\n", codegenTime)
+	}
 
 	// 检查所有阶段的诊断信息（错误与警告分开统计）
 	// 统计在此计算, 输出统一放到 Generated Code 之后、Compilation Results 之前
@@ -1500,10 +2095,10 @@ func main() {
 	// KMM_V4_MAX_SCOPE_DEPTH 约束，超出即运行期 FATAL abort）
 	for _, fn := range cg.RecursionScopeNotes() {
 		frontendWarnings = append(frontendWarnings, &errors.Error{
-			Type:     errors.ErrorWarning,
-			Code:     "recursion_scope_depth",
-			File:     inputFile,
-			Message:  fmt.Sprintf("函数 '%s' 递归且每层使用 KMM 作用域：嵌套深度上限 %d 层，超出即运行期 FATAL abort", fn, kmmMaxScopeDepth),
+			Type:    errors.ErrorWarning,
+			Code:    "recursion_scope_depth",
+			File:    inputFile,
+			Message: fmt.Sprintf("函数 '%s' 递归且每层使用 KMM 作用域：嵌套深度上限 %d 层，超出即运行期 FATAL abort", fn, kmmMaxScopeDepth),
 			Suggestion: "改用循环/尾调用改写；或给该函数加 #[no_kmm]（放弃作用域托管，" +
 				"改用显式释放）；或用 -DKMM_V4_MAX_SCOPE_DEPTH=N 放宽",
 		})
@@ -1541,7 +2136,9 @@ func main() {
 			// 缓存命中: 跳过编译, 不显示任何消息
 		} else {
 			// 缓存未命中, 需要编译
-			if verbose { fmt.Printf("[Cache] 编译中: %s\n", inputBase) }
+			if verbose {
+				fmt.Printf("[Cache] 编译中: %s\n", inputBase)
+			}
 			// 存储新生成的代码
 			if err := cacheManager.Store(inputFile, data, output, usedModules, importFileHashes, linkFp); err != nil {
 				fmt.Printf("[Cache] Warning: Failed to store cache: %v\n", err)
@@ -1585,10 +2182,12 @@ func main() {
 			Error: fmt.Errorf(i18n.T(i18n.MsgFrontendErrorsSkipped), errorCount),
 		}
 	} else {
-		compileResult = concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity, cfg)
+		compileResult = concurrentCompile(cacheFile, output, inputDir, inputName, cwd, usedModules, cacheHit, stdlibConfig, optLevel, poolCapacity, cfg, tuDir)
 	}
 	stage3Time := time.Since(stage3Start)
-	if verbose { fmt.Printf(i18n.T(i18n.MsgStage3Completed)+"\n", stage3Time) }
+	if verbose {
+		fmt.Printf(i18n.T(i18n.MsgStage3Completed)+"\n", stage3Time)
+	}
 
 	totalTime := time.Since(totalStart)
 
@@ -1716,23 +2315,32 @@ func main() {
 }
 
 func runTestsCLI(args []string, workspaceMode bool) int {
- opts, paths, err := testrunner.Parse(args, os.Stdout)
- if err == flag.ErrHelp { return 0 }
- if err == nil && workspaceMode {
-  if len(paths) > 0 { err = fmt.Errorf("workspace test does not accept a path") } else {
-   var cwd string
-   cwd, err = os.Getwd()
-   if err == nil {
-    var ws *workspace.Workspace
-    ws, err = workspace.LoadWorkspace(cwd)
-    if err == nil { err = ws.TestAll(opts) }
-   }
-  }
- } else if err == nil {
-  _, err = testrunner.Run(paths, opts)
- }
- if err != nil { fmt.Fprintf(os.Stderr, "Error: %v\n", err); return 1 }
- return 0
+	opts, paths, err := testrunner.Parse(args, os.Stdout)
+	if err == flag.ErrHelp {
+		return 0
+	}
+	if err == nil && workspaceMode {
+		if len(paths) > 0 {
+			err = fmt.Errorf("workspace test does not accept a path")
+		} else {
+			var cwd string
+			cwd, err = os.Getwd()
+			if err == nil {
+				var ws *workspace.Workspace
+				ws, err = workspace.LoadWorkspace(cwd)
+				if err == nil {
+					err = ws.TestAll(opts)
+				}
+			}
+		}
+	} else if err == nil {
+		_, err = testrunner.Run(paths, opts)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // printSummary 输出编译汇总行
@@ -2350,7 +2958,7 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			fmt.Printf("[Boot] Compiling freestanding runtime -> %s\n", runtimeObj)
 			rtCmd := compilerCommand(clangPath, runtimeArgs...)
-	if out, err := rtCmd.CombinedOutput(); err != nil {
+			if out, err := rtCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[Boot] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(runtimeObj); err == nil {
 				linkObjs = append(linkObjs, runtimeObj)
@@ -2381,7 +2989,7 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
 			fmt.Printf("[Boot] Compiling KMM allocator -> %s\n", allocObj)
 			allocCmd := compilerCommand(clangPath, allocArgs...)
-	if out, err := allocCmd.CombinedOutput(); err != nil {
+			if out, err := allocCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[Boot] Warning: allocator compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(allocObj); err == nil {
 				linkObjs = append(linkObjs, allocObj)
@@ -2407,7 +3015,7 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 // compileUserProgram 用户态程序构建流水线：
 //  1. clang -c 生成 C 代码 -> prog.o（与 boot 内核同参，含 KMM 静态池）
 //  2. ld.lld -T user.ld 链接（入口 user_start，加载地址 0x40000000）
-//  输出可在内核 ELF 加载器下运行的用户程序 ELF
+//     输出可在内核 ELF 加载器下运行的用户程序 ELF
 func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, cfg *config.Config) error {
 	clangPath, err := exec.LookPath("clang")
 	if err != nil {
@@ -2506,7 +3114,7 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 			}
 			runtimeArgs = append(runtimeArgs, runtimeSrc, "-o", runtimeObj)
 			rtCmd := compilerCommand(clangPath, runtimeArgs...)
-	if out, err := rtCmd.CombinedOutput(); err != nil {
+			if out, err := rtCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[User] Warning: runtime compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(runtimeObj); err == nil {
 				linkObjs = append(linkObjs, runtimeObj)
@@ -2532,7 +3140,7 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 			}
 			allocArgs = append(allocArgs, allocSrc, "-o", allocObj)
 			allocCmd := compilerCommand(clangPath, allocArgs...)
-	if out, err := allocCmd.CombinedOutput(); err != nil {
+			if out, err := allocCmd.CombinedOutput(); err != nil {
 				fmt.Printf("[User] Warning: allocator compilation failed: %v\n%s\n", err, string(out))
 			} else if _, err := os.Stat(allocObj); err == nil {
 				linkObjs = append(linkObjs, allocObj)
@@ -2556,7 +3164,7 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 }
 
 // concurrentCompile 并发保存缓存并编译 C 代码
-func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) *compileResult_t {
+func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, usedModules []string, cacheHit bool, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config, tuDir string) *compileResult_t {
 	result := &compileResult_t{}
 	startTime := time.Now()
 
@@ -2619,6 +3227,11 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 		err = compileUserProgram(cacheFile, outputExe, workDir, optLevel, cfg)
 	} else if isBootMode(cfg) {
 		err = compileBootKernel(cacheFile, outputExe, workDir, optLevel, cfg)
+	} else if tuDir != "" && !cfg.Freestanding {
+		// 多 TU 拆分路径：每个 .kl 一份 C，各自 -c 成 .o，最后一次性链接。
+		// 裸机（Freestanding）暂不覆盖——它的链接由 ld.lld 直连，输入组织
+		// 完全不同（见 linkFreestandingDirectly），拆 TU 需要先统一那套链路。
+		err = compileMultiTU(cacheFile, outputExe, workDir, tuDir, cCode, usedModules, stdlibConfig, optLevel, poolCapacity, cfg)
 	} else {
 		err = compileCCode(cacheFile, outputExe, workDir, usedModules, cCode, stdlibConfig, optLevel, poolCapacity, cfg)
 	}
@@ -2633,7 +3246,9 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 		if cacheHit {
 			// 缓存命中: 跳过编译, 静默 (不显示 cache 消息)
 		} else {
-			if verboseMode { fmt.Printf("[Compile] Completed in %v\n", time.Since(startTime)) }
+			if verboseMode {
+				fmt.Printf("[Compile] Completed in %v\n", time.Since(startTime))
+			}
 		}
 	}
 
@@ -2655,7 +3270,7 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 
 // concurrentSemanticAnalysisWithConfig 执行语义分析（使用已加载的配置）
 // 注：原实现为假并发（单 goroutine + 立即 Wait），已改为直接同步调用。
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, 	sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
 	sa := sema.NewSemanticAnalyzerWithConfig("kaula/stdlib.json", errorCollector)
@@ -2681,7 +3296,26 @@ func fileExists(path string) bool {
 // collectLocalPubFuncs 扫描本地 import 的 .kl 文件，收集 pub/export 函数名
 // （在语义分析之前解析，使跨文件调用不被判为未定义）
 func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool {
-	pubFuncs := make(map[string]bool)
+	pubFuncs, _ := collectLocalImportSymbols(program, inputDir)
+	return pubFuncs
+}
+
+// collectLocalExportFuncs 只收集被导入文件中标记 export 的函数名。
+// 与 pubFuncs 分开：codegen 对两者的处理不同（export 保持原名、pub 加 K_ 前缀）。
+func collectLocalExportFuncs(program *ast.Program, inputDir string) map[string]bool {
+	_, exportSet := collectLocalImportSymbols(program, inputDir)
+	return exportSet
+}
+
+// collectLocalImportSymbols 一次扫描同时得到 pubFuncs 与 exportSet。
+//
+// 两个集合在语义上不同（export 含 pub 语义但 C 侧命名保持原名），历史上
+// 只扫了 pubFuncs 而从 compileFile 里单独填 exportFuncs，导致"多 TU 下不跑
+// compileFile"的路径拿不到 export 集合——这会让跨文件 export 函数被加上
+// K_ 前缀，链接期表现为 undefined reference。合并到一处扫描避免再犯。
+func collectLocalImportSymbols(program *ast.Program, inputDir string) (pubFuncs, exportSet map[string]bool) {
+	pubFuncs = make(map[string]bool)
+	exportSet = make(map[string]bool)
 
 	var visit func(p *ast.Program, dir string)
 	visit = func(p *ast.Program, dir string) {
@@ -2713,6 +3347,9 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 				for _, s := range localProgram.Statements {
 					if fn, ok := s.(*ast.FunctionStatement); ok && (fn.IsPublic || fn.IsExported) {
 						pubFuncs[fn.Name] = true
+						if fn.IsExported {
+							exportSet[fn.Name] = true
+						}
 					}
 					// export <name> 裸名导出：转发导出本文件 import 的符号（重导出）
 					if exp, ok := s.(*ast.ExportStatement); ok && exp.Name != "" {
@@ -2725,7 +3362,7 @@ func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool
 	}
 
 	visit(program, inputDir)
-	return pubFuncs
+	return pubFuncs, exportSet
 }
 
 // collectLocalPubFuncReturns 扫描本地 import 的 .kl 文件，收集 pub/export
@@ -2829,8 +3466,6 @@ func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool
 	visit(program, inputDir)
 	return allFuncs
 }
-
-
 
 // collectLocalPubVars 扫描本地 import 的 .kl 文件，收集 pub/export 变量名
 // （跨文件变量引用不被判为未定义）
@@ -3132,9 +3767,9 @@ func resolveTemplatePath(configured string) string {
 	if exePath, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(filepath.Clean(exePath))
 		candidates = append(candidates,
-			filepath.Join(exeDir, "templates"),                        // compiler/ 布局
-			filepath.Join(exeDir, "compiler", "templates"),            // kaula 根布局
-			filepath.Join(exeDir, "..", "compiler", "templates"),      // build/bin 布局
+			filepath.Join(exeDir, "templates"),                   // compiler/ 布局
+			filepath.Join(exeDir, "compiler", "templates"),       // kaula 根布局
+			filepath.Join(exeDir, "..", "compiler", "templates"), // build/bin 布局
 			filepath.Join(exeDir, "..", "templates"))
 	}
 	candidates = append(candidates,
@@ -3260,7 +3895,35 @@ func resolveModuleDependencies(usedModules []string, validStdPaths []string, val
 	return resolved
 }
 
+// compileMultiTU 多 TU 构建：每个 .kl 一份 C，各自编译成 .o 后统一链接。
+//
+// 参数拼装复用 compileCCode 的 dry-run：-I/-D/-O/-target/库列表与单 TU 路径
+// 逐字相同，杜绝"两份配置各自漂移"（KMM 池大小不一致会在链接期以莫名其妙的
+// 符号尺寸报错出现）。
+func compileMultiTU(cacheFile, outputFile, workDir, tuDir, entrySrc string, usedModules []string, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) error {
+	var plan clangPlan
+	if err := compileCCodePlan(cacheFile, outputFile, workDir, usedModules, entrySrc, stdlibConfig, optLevel, poolCapacity, cfg, &plan); err != nil {
+		return err
+	}
+	return runMultiTU(plan.Args, plan.Cmd, plan.Prefix, cacheFile, outputFile, workDir, tuDir)
+}
+
 func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCodeInMemory string, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) error {
+	return compileCCodePlan(cFile, outputFile, workDir, usedModules, cCodeInMemory, stdlibConfig, optLevel, poolCapacity, cfg, nil)
+}
+
+// clangPlan 单 TU 路径最终要执行的 clang 参数（供多 TU 复用）。
+type clangPlan struct {
+	// Args 完整参数（不含命令名本身）
+	Args []string
+	// Cmd 命令名（可能是 ccache）
+	Cmd string
+	// Prefix ccache 之类的前缀参数（真实编译器是前缀之后的第一项）
+	Prefix []string
+}
+
+// compileCCodePlan 编译主 C 源；sink 非 nil 时只做参数拼装（dry-run）。
+func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, cCodeInMemory string, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config, sink *clangPlan) error {
 	// 选择 C 编译器：优先使用 -cc 显式指定的编译器（可为 clang2gcc 翻译器、gcc 等），
 	// 否则按名查找 clang（原有行为）。
 	var clangPath string
@@ -3467,15 +4130,30 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	// 预编译头文件 (PCH)：将 kaula.h 预编译为 .gch，加速 clang 头文件解析
-	// .gch 文件有缓存机制：仅在 kaula.h 变化时重新生成
-	pchPath := filepath.Join(objectCacheDir, "kaula.h.gch")
+	//
+	// 缓存键必须包含"影响 PCH 内容的全部输入"，不能只看 kaula.h 的 mtime：
+	// gch 里存的是**预处理之后**的状态（宏值、-fwrapv 这类语义开关都在里面），
+	// 只改 -DKMM_V4_POOL_SIZE 或加个 -fwrapv 而 kaula.h 没动，旧 gch 的 mtime
+	// 仍比 .h 新，会被误判为"可用"，随后每个 TU 都报
+	// "signed integer overflow handling differs in PCH file vs. current file"。
+	// 把模板命令（编译器路径 + 优化级 + 宏 + 目录）算进文件名，键变了就是新文件。
+	pchSig := strings.Join(append([]string{clangPath, optLevel,
+		fmt.Sprintf("pool=%d", poolCapacity), fmt.Sprintf("dbg=%v", cfg != nil && cfg.Debug)},
+		append(append(append([]string{}, validSrcPaths...), validStdPaths...), validFreePaths...)...), "\x00")
+	pchSum := sha256.Sum256([]byte(pchSig))
+	pchPath := filepath.Join(objectCacheDir, "kaula-"+hex.EncodeToString(pchSum[:6])+".h.gch")
 	pchNeedsRebuild := true
+	// pchUsable 决定是否把 -include-pch 交给 clang：只有 gch 确实存在且
+	// 不比 kaula.h 旧时才用。否则宁可多花解析时间，也不能拿一份过期 PCH
+	// 去编译——那会以"宏/类型对不上"的诡异形式报错，且报错点远离根因。
+	pchUsable := false
 	if kaulaSrcPath != "" {
 		hInfo, hErr := os.Stat(filepath.Join(kaulaSrcPath, "kaula.h"))
 		gchInfo, gchErr := os.Stat(pchPath)
 		if hErr == nil && gchErr == nil {
-			if gchInfo.ModTime().After(hInfo.ModTime()) || gchInfo.ModTime().Equal(hInfo.ModTime()) {
+			if !hInfo.ModTime().After(gchInfo.ModTime()) {
 				pchNeedsRebuild = false
+				pchUsable = true
 			}
 		}
 	}
@@ -3490,18 +4168,50 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		for _, p := range validFreePaths {
 			pchCmd.Args = append(pchCmd.Args, "-I", p)
 		}
+		/*
+		 * 语义相关选项必须与真正编译 TU 时**完全一致**，否则 clang 会拒绝
+		 * 复用 PCH（报 "signed integer overflow handling differs in PCH
+		 * file vs. current file"，或各种宏/语言模式不一致）。
+		 * 这正是 PCH 长期被注释掉的真因：这里原先漏了 -fwrapv /
+		 * -fno-strict-aliasing，只要有人把 -include-pch 打开就全量报错。
+		 */
+		pchCmd.Args = append(pchCmd.Args, "-fwrapv", "-fno-strict-aliasing")
+		if cfg != nil && cfg.Debug {
+			pchCmd.Args = append(pchCmd.Args, "-g")
+			if cfg.DebugLevel == "full" {
+				pchCmd.Args = append(pchCmd.Args, "-gdwarf-4")
+			}
+		}
 		pchCmd.Args = append(pchCmd.Args, "-DKMM_THREAD_SAFETY_LEVEL=1")
 		if poolCapacity > 0 {
 			pchCmd.Args = append(pchCmd.Args, fmt.Sprintf("-DKMM_V4_POOL_SIZE=%d", poolCapacity))
 		}
 		if err := pchCmd.Run(); err == nil {
-			if verboseMode { fmt.Printf("[Compile] PCH generated: %s\n", pchPath) }
+			pchUsable = true
+			if verboseMode {
+				fmt.Printf("[Compile] PCH generated: %s\n", pchPath)
+			}
+		} else if verboseMode {
+			// 生成失败不是致命错误：退回逐 TU 解析头文件，仅慢一些。
+			fmt.Printf("[Compile] PCH 生成失败，回退头文件解析: %v\n", err)
 		}
 	} else if kaulaSrcPath != "" {
-		if verboseMode { fmt.Printf("[Compile] PCH cache hit: %s\n", pchPath) }
+		if verboseMode {
+			fmt.Printf("[Compile] PCH cache hit: %s\n", pchPath)
+		}
 	}
 
-	clangArgs := []string{"-x", "c", "-", "-o", outputFile, optLevel}
+	/*
+	 * 输入描述必须放在参数最前面：clang 的 `-x c` 是**位置敏感**的，它只对
+	 * 紧随其后的输入生效。历史上这里写 `-x c - -o <out> -O3 ...`，`-` 紧跟
+	 * `-x c` 正好成立，于是整条命令能跑；但多 TU 拆分要把 `-` 换成真实文件
+	 * 路径，替换点一旦落到别处（比如路径插在 `-o` 后面）就变成
+	 * `clang: error: no such file or directory: '<整段源码>'`。
+	 * 把"输入 + 语言 + 输出"打包成一个不可拆的前缀，后续任何 flags 追加都
+	 * 不会插进这四者之间。
+	 */
+	clangArgs := []string{"-x", "c", "-", "-o", outputFile}
+	clangArgs = append(clangArgs, optLevel)
 	// 编译速度优化：使用管道而非临时文件，减少 I/O 开销
 	clangArgs = append(clangArgs, "-pipe")
 	// 调试符号：--debug 启用 DWARF 生成
@@ -3563,11 +4273,44 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	for _, p := range validFreePaths {
 		clangArgs = append(clangArgs, "-I", p)
 	}
-	// 启用 PCH：让 clang 自动查找 kaula.h.gch 并使用
-	// 暂时禁用 PCH 以调试崩溃问题
-	// if kaulaSrcPath != "" {
-	// 	clangArgs = append(clangArgs, "-I", objectCacheDir)
-	// }
+	/*
+	 * 多 TU 并行编译（.kl import 拆分）。
+	 *
+	 * 触发条件由调用方（concurrentCompile）决定：tuDir 非空即本次构建已按
+	 * 多 TU 落盘，且非裸机/非用户态（这两条路径的入口与链接方式完全不同，
+	 * 见 compileBootKernel / compileUserProgram，多 TU 暂不覆盖）。
+	 *
+	 * 失败策略：任何一步失败都直接返回错误，不静默回退 —— 回退到单 TU
+	 * 意味着用户以为走的是新路径、实际跑的是旧路径，这种"看起来成功"
+	 * 比报错更难排查。
+	 */
+
+	/*
+	 * PCH：显式 -include-pch 复用上面生成的 kaula.h.gch。
+	 *
+	 * 原先这里是注释掉的（"暂时禁用 PCH 以调试崩溃问题"），只留一个 -I
+	 * objectCacheDir 试图让 clang 自动命中——这不成立：gch 自动查找要求
+	 * 文件名与 #include 的字面量严格对应（"kaula.h.gch" 对应 #include
+	 * "kaula.h"），而源码里写的是 "kaula.h"，include 路径里却只有
+	 * std-objects 目录下的 gch，clang 根本不会去那里找。
+	 *
+	 * 单 TU 下这点开销只是十几毫秒；多 TU 要乘 TU 数：40 个 TU 各解析一遍
+	 * kaula.h，实测每个 TU 因此多花 ~40ms，并行也压不下去。
+	 *
+	 * 安全性：pchUsable 只在 gch 确实比 .h 新（或同时）时才为真；否则退回
+	 * 正常头文件解析。-include-pch 与源码里的 #include "kaula.h" 并存是
+	 * clang 支持的用法（对应头文件已在 PCH 里，后续 #include 会被跳过）。
+	 */
+	if pchUsable {
+		/*
+		 * 必须插在输入（"-"）**之前**：-include-pch 与 -include 一样是驱动层
+		 * 选项，一旦出现在输入之后，clang 会把它当成追加的输入参数处理并报
+		 * "fatal error: '-pch <path>' file not found"（把选项名当文件名）。
+		 * clangArgs 的第 0..4 项是 "-x c - -o <out>"，不能把 PCH 塞进去，
+		 * 只能在这里重建前缀。
+		 */
+		clangArgs = append([]string{"-x", "c", "-include-pch", pchPath, "-", "-o", outputFile}, clangArgs[5:]...)
+	}
 
 	// 自动解析模块传递依赖（读取 dependencies.json 递归展开）
 	usedModules = resolveModuleDependencies(usedModules, validStdPaths, validFreePaths)
@@ -3607,7 +4350,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		// freestanding 库本身由 runtime unity TU 一次编译全部 5 个模块（见下），
 		// 这里跳过 std 模块不会削弱对 freestanding 库的编译校验。
 		if isFreestanding && !isFreeModule {
-			if verboseMode { fmt.Printf("[Compile] freestanding: skipping hosted std module %s\n", moduleName) }
+			if verboseMode {
+				fmt.Printf("[Compile] freestanding: skipping hosted std module %s\n", moduleName)
+			}
 			continue
 		}
 
@@ -3671,7 +4416,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	if rebuildCount > 0 {
-		if verboseMode { fmt.Printf("[Compile] Pre-compiling %d std module(s)...\n", rebuildCount) }
+		if verboseMode {
+			fmt.Printf("[Compile] Pre-compiling %d std module(s)...\n", rebuildCount)
+		}
 		// 并行预编译
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, runtime.NumCPU()) // 限制并发数
@@ -3761,9 +4508,13 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		if len(rebuildErrors) > 0 {
 			return fmt.Errorf("std module pre-compilation failed:\n%s", strings.Join(rebuildErrors, "\n"))
 		}
-		if verboseMode { fmt.Printf("[Compile] Std modules pre-compiled (%d updated, %d cached)\n", rebuildCount, len(moduleSources)-rebuildCount) }
+		if verboseMode {
+			fmt.Printf("[Compile] Std modules pre-compiled (%d updated, %d cached)\n", rebuildCount, len(moduleSources)-rebuildCount)
+		}
 	} else {
-		if verboseMode { fmt.Printf("[Compile] All %d std modules cached, skipping pre-compilation\n", len(moduleSources)) }
+		if verboseMode {
+			fmt.Printf("[Compile] All %d std modules cached, skipping pre-compilation\n", len(moduleSources))
+		}
 	}
 
 	// 裸机模式：预先单独编译 freestanding runtime（5 模块 unity build）成 .o。
@@ -3819,7 +4570,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			}
 			fsRuntimeObj = rtObj
 			fsRuntimeCoversLib = true
-			if verboseMode { fmt.Printf("[Compile] Freestanding runtime -> %s\n", rtObj) }
+			if verboseMode {
+				fmt.Printf("[Compile] Freestanding runtime -> %s\n", rtObj)
+			}
 		} else {
 			return fmt.Errorf("freestanding runtime not found: %s\n"+
 				"裸机模式需要 Kaula 源码布局（含 src/ 的完整安装），当前只找到头文件布局。\n"+
@@ -3992,7 +4745,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 				filepath.Join(installedRoot, "lib", stdLibraryName),
 				filepath.Join(installedRoot, "lib", runtimeLibraryName),
 			)
-			if verboseMode { fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName) }
+			if verboseMode {
+				fmt.Printf("[Compile] Using installed static libraries: %s, %s\n", stdLibraryName, runtimeLibraryName)
+			}
 			// 使用 freestanding 模块时链接 libkaula_freestanding.a（安装模式下）
 			for _, mod := range usedModules {
 				if strings.HasPrefix(mod, "freestanding.") {
@@ -4002,7 +4757,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 					}
 					if _, err := os.Stat(freeLibPath); err == nil {
 						clangArgs = append(clangArgs, "-x", "none", freeLibPath)
-						if verboseMode { fmt.Printf("[Compile] Linked installed freestanding library: %s\n", freeLibPath) }
+						if verboseMode {
+							fmt.Printf("[Compile] Linked installed freestanding library: %s\n", freeLibPath)
+						}
 					}
 					break
 				}
@@ -4011,7 +4768,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 			// Windows 下直接链接所有 .o 文件，避免 llvm-lib 问题
 			// 同样需要 -x none 重置语言：本分支可能在无 std 模块源（如仅用
 			// 第三方库）时执行，此时前面的 -x c 会把 .o 当作 C 源码编译失败
-			if verboseMode { fmt.Printf("[Compile] Linking %d .o files directly\n", len(moduleSources)+len(runtimeObjs)) }
+			if verboseMode {
+				fmt.Printf("[Compile] Linking %d .o files directly\n", len(moduleSources)+len(runtimeObjs))
+			}
 			clangArgs = append(clangArgs, "-x", "none")
 			for _, ms := range moduleSources {
 				clangArgs = append(clangArgs, ms.objPath)
@@ -4219,6 +4978,19 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	mainArgs := append(compilerPrefix, clangArgs...)
 	cmd := compilerCommand(compilerCmd, mainArgs...)
 
+	// dry-run：调用方（多 TU 构建）只要这份参数拼装结果，不要真的编译。
+	// 放在这里而不是另写一份拼装函数，是为了让多 TU 与单 TU 的 -I/-D/-O/
+	// -target/库列表逐字相同——两份实现迟早会漂移，而漂移的后果（宏不一致
+	// 导致链接期符号尺寸不匹配）离真正原因太远。
+	if sink != nil {
+		*sink = clangPlan{
+			Args:   append(append([]string(nil), compilerPrefix...), clangArgs...),
+			Cmd:    compilerCmd,
+			Prefix: append([]string(nil), compilerPrefix...),
+		}
+		return nil
+	}
+
 	// 通过 stdin pipe 将 C 代码传递给 clang（内存编译，避免磁盘 I/O）
 	cSource := cCodeInMemory
 	if cSource == "" {
@@ -4251,8 +5023,12 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 	}
 
 	cmd.Stdin = strings.NewReader(cSource)
-	if verboseMode { fmt.Printf("[Compile] Clang: memory mode (stdin), %d bytes C code\n", len(cSource)) }
-	if verboseMode { fmt.Printf("[Compile] Used modules: %v\n", usedModules) }
+	if verboseMode {
+		fmt.Printf("[Compile] Clang: memory mode (stdin), %d bytes C code\n", len(cSource))
+	}
+	if verboseMode {
+		fmt.Printf("[Compile] Used modules: %v\n", usedModules)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// 失败 C 源码落到已解析的可写目录（%TEMP% 不可写时 os.TempDir() 也会失败）
@@ -4266,7 +5042,9 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 		// 这类无定位信息的报错再次出现
 		return fmt.Errorf("%s\n  C source: %s", formatCommandFailure("clang compilation failed", cmd, err, output), failPath)
 	}
-	if verboseMode { fmt.Printf("[Compile] Successfully compiled: %s\n", outputFile) }
+	if verboseMode {
+		fmt.Printf("[Compile] Successfully compiled: %s\n", outputFile)
+	}
 	return nil
 }
 
@@ -4338,11 +5116,15 @@ func linkFreestandingDirectly(cfg *config.Config, clangArgs []string, outputFile
 		linkArgs = append(linkArgs, "-l"+extra)
 	}
 	ldCmd := compilerCommand(ldPath, linkArgs...)
-	if verboseMode { fmt.Printf("[Compile] ld.lld: %s\n", outputFile) }
+	if verboseMode {
+		fmt.Printf("[Compile] ld.lld: %s\n", outputFile)
+	}
 	if out, err := ldCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s", formatCommandFailure("freestanding linking failed", ldCmd, err, out))
 	}
-	if verboseMode { fmt.Printf("[Compile] Successfully linked: %s\n", outputFile) }
+	if verboseMode {
+		fmt.Printf("[Compile] Successfully linked: %s\n", outputFile)
+	}
 	return nil
 }
 

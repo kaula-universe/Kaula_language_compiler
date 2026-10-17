@@ -42,8 +42,38 @@
 - **跨运行时基准框架**：CONC vs Go GMP vs Rust Tokio（含 F1–F13 实测发现）。
 - **公开 ABI 预留字段**：`Spendable`、`FastAllocator`、`KaulaRuntimeConfig`、`KaulaMetrics`、
   `KaulaResumeResult`、`KaulaHandle`、`KaulaTask` 末尾新增 `uint64_t reserved[4]`，后续加字段不破坏栈分配尺寸。
+- **C 目标按 `.kl` import 拆分为独立翻译单元（多 TU）并并行编译**：
+  每个被 `import` 的本地 `.kl` 现在生成**一份完整合法的 C 源**（自带
+  include / 类型 / 原型 / 函数体），由 clang 各自 `-c` 成 `.o` 后统一链接，
+  不再走"抠函数塞进单一大 C 文件"的老路。
+  - **跨 TU 可见性三支柱**：`prelude`（跨文件类型定义前置到每个 TU，
+    按内容哈希加 include guard，避免两个库各自的同名 `struct A` 被错误合并）、
+    `header`（extern 变量 / 泛型实例原型 / static 函数原型 / pub+export 函数原型 /
+    类构造函数原型）、**泛型实例归属**（同一实例只允许一个 TU 出定义）。
+  - **泛型归属规则**：第 1 优先 = 定义泛型模板的文件；第 2 优先 = 实例化者中
+    绝对路径最小者；入口 TU 不定义库实例。非归属方只输出原型。
+  - **两遍编译**：probe 复用同一条 codegen 流水线收集实例清单与全局接口段，
+    第二遍才正式产出 C 源。probe 用**一个共享 state** 递归全部顶层文件
+    （每个 `.kl` 只解析+生成一次），避免 O(N²)。
+  - **并行度**：默认 `min(CPU, 16)`，可用 `KAULAC_TU_JOBS` 覆盖；
+    产物目录按源内容哈希寻址（`<cache>/tmp/kaula-tu/<hash>`），
+    内容未变的 TU 源不重写。
+  - **失败策略**：任何一个 TU 编译失败都汇总全部失败信息后报错，
+    **不静默回退**到单 TU。
+  - **验证**：全量 `test/**/*.kl`（116 用例）与改动前基线逐项比对 ——
+    编译退出码差异 **0**、运行退出码差异 **0**、16 处 stdout 文本差异
+    全部是耗时/线程 ID 等测量值（数值归一后逐字一致）。
 
 ### Performance
+- **多 TU 并行编译实测**（40 个库串联、42 个 TU、`-O2`）：
+  TU 编译阶段 **2.77s → 0.72s（jobs=4 起持平，约 3.8x）**；
+  冷启动整链路 1.41s（单 TU）→ 1.80s，热启动 0.42s → 0.63s。
+  多出的时间是 probe 那一遍 codegen（≈200ms，与库数量线性）。
+  当前沙箱 CPU 配额有限（32 核可见但并行度到 4 后收益饱和），
+  真实多核机器上差距会更小。**未做任何"看起来更快"的数字修饰**：
+  小规模项目（1–3 个 import）多 TU 比单 TU 慢，这是两遍编译的固定成本。
+- **PCH 真正启用（此前只是注释）**：`kaula.h` 的 `.gch` 现在以
+  `-include-pch` 显式交给 clang，单 TU 编译 108ms → 73ms。
 - **P0**：per-worker Task 复用池 + ws_deque 弱内存变体 + 协作等待自适应退避；
   owner 独占后 12 条原子 store 改普通读写。
 - **P1**：spawn 移除冗余清零、首跑直通 enter 省 switch+守卫、Frame 按需瘦身（160B→48B）、
@@ -62,6 +92,19 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **PCH 长期未生效，且一开就全量报错（两处叠加）**：
+  - **`-I` 猜测 clang 自动命中 `.gch` 不成立**：gch 自动查找要求文件名与
+    `#include` 字面量严格对应，而 `kaula.h.gch` 在 `std-objects/` 下、源码写的是
+    `#include "kaula.h"`，clang 根本不去那里找。改为显式 `-include-pch`，
+    且必须插在输入 `-` **之前**（放在输入之后会被当成追加输入，
+    报 `fatal error: '-pch <path>' file not found`）。
+  - **PCH 模板与编译命令的语义选项不一致**：生成 gch 时漏了
+    `-fwrapv` / `-fno-strict-aliasing`，一旦真的启用，每个 TU 都报
+    `signed integer overflow handling differs in PCH file vs. current file`。
+    补齐后仍不够——缓存失效只看 `kaula.h` 的 mtime，改 `-D`/加 `-fwrapv`
+    而 `.h` 没动时旧 gch 仍被判定可用。现把编译器路径、优化级、
+    `poolCapacity`、debug、全部 `-I` 目录算进 gch 文件名（sha256 前 6 字节），
+    键变了就是新文件。生成失败或 gch 过旧时静默回退正常头文件解析。
 - **CONC 长时压测下的两处内存泄漏（`service3` 基准定位，合计 ≈240 B/请求）**：
   - **IoDriver `io_take_fd` 命中节点不释放**（`src/concurrency/kaula_conc_iodriver.c`）：
     命中分支从桶链表摘下节点后只取走 `p->task`，节点内存既不 `free`

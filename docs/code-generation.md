@@ -313,6 +313,72 @@ type GenericInstanceCache struct {
 }
 ```
 
+## 多翻译单元（Multi-TU）拆分
+
+被 `import` 的本地 `.kl` 各自生成**一份独立的 C 翻译单元**，由 C 编译器
+并行编译成 `.o` 后再链接。开关由 `config.Config.TUMode` 控制（编译器内部推导，
+不暴露给用户）：
+
+| TUMode 取值 | 含义 |
+| --- | --- |
+| `""` | 单 TU（默认，也是被验证过的基线） |
+| `"entry"` | 入口 TU：生成 `main` 与顶层语句 |
+| `"definition"` | 被 import 的文件：只生成自己的部分，不含 `main` |
+
+### 跨 TU 可见性
+
+一个 TU 看不到另一个 TU 里的任何东西，因此需要三段"公共接口"：
+
+1. **prelude**（`Config.TUPrelude`）— 跨文件类型定义，前置到每个 TU 的
+   `#include` 之后、前置声明之前。用**内容哈希**做 include guard
+   （不是类型名：两个库各自的 `struct A` 内容不同、必须都保留）。
+2. **header**（`TUArtifacts().Header`）— extern 变量（保留 `const` 限定符）、
+   泛型实例原型、文件作用域 `static` 函数原型、`pub`/`export` 函数原型、
+   类构造函数原型。同样带内容哈希 guard。
+3. **泛型实例归属** — `MangleGenericName` 产出的实例名全局唯一，
+   同一个实例只能有一个 TU 出函数体，其余 TU 只出原型
+   （`deferredGeneric`）。
+
+归属规则（`buildGenericOwnerIndex`）：
+
+- 第 1 优先：**定义泛型模板**的文件本身也实例化了该实例 → 归它；
+- 第 2 优先：全体实例化者中绝对路径最小者（保证确定性）；
+- 入口 TU 永远不定义库实例（`entryTUPath = ""`）。
+
+### 两遍编译
+
+| 遍次 | 目的 | 是否产出 C 源 |
+| --- | --- | --- |
+| probe | 收集每个文件的实例清单、泛型定义、接口段 | 否 |
+| 正式 | 带完整 `TUPrelude` + `TUGenericOwner` 生成各 TU | 是 |
+
+probe 用**一个共享 state** 递归全部顶层文件：每个 `.kl` 只解析 + codegen 一次。
+早期实现是"每个顶层文件各建一个 state、各递归整条链"，12 个库串成链时
+同一批文件被跑 12 遍（O(N²)），codegen 从 18ms 涨到 110ms。
+
+### 参数拆分（`multi_tu.go`）
+
+单 TU 的 clang 命令行里混着"编译期标志"和"链接期输入"，多 TU 必须切开：
+
+```text
+-x c <入口源> ...flags... [-x none <链接输入...>]
+```
+
+`splitLinkInputs` 以 `-x none` 为界切成 `compileFlags` / `entryInput` /
+`linkInputs` 三段，`linkFlagsForLink` 再剔除 `-x c <输入>` 与 `-include-pch`。
+**注意 `-` 本身以 `-` 开头却是输入**（stdin 占位符），不能用"是否以 `-`
+开头"判断选项；漏掉它会得到
+`clang: error: -E or -x required when input is from standard input`。
+
+### 落盘与并行
+
+- 目录：`<cache>/tmp/kaula-tu/<sha256(编译器指纹 + 全部源内容)[:16]>`；
+- 每个 TU 文件名 = `原基名 + 路径哈希`，避免不同目录下的同名 `.kl` 互相覆盖；
+- 内容未变的 TU 源跳过重写（避免 mtime 抖动引发下游误判）；
+- 并行度 `tuWorkers()`：默认 `min(NumCPU, 16)`，`KAULAC_TU_JOBS` 可覆盖；
+- 失败**不静默回退单 TU**，全部 TU 都尝试后汇总报错（按文件名排序，
+  与 goroutine 完成顺序无关）。
+
 ## KMM V4 内存管理
 
 KMM V4 是 Kaula 的默认内存分配器，代码生成器负责将 Kaula 层的内存操作转换为高效的 C 代码。

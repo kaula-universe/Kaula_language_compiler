@@ -63,6 +63,35 @@ type Config struct {
 	// ====== 源码映射 ======
 	SourceMap bool `json:"sourcemap,omitempty"`
 
+	// ====== C 目标翻译单元（TU）拆分 ======
+	//
+	// 每个被本地 .kl import 的文件产出**独立**的 C 翻译单元，由 C 编译器
+	// 并行编译成 .o，再与主 TU 一起链接，而不是把各文件的函数定义以文本方式
+	// 注入同一个 .c。仅在 buildTarget/tuMode 非空时生效（由编译器内部
+	// 自动推导，不对用户暴露配置项）。
+	//
+	// 拆分后 C 的链接语义（每个声明必须可见于使用它的 TU）必须与单 TU 的
+	// 文本拼接结果保持一致，具体表现为三条约束：
+	//   1. 跨文件类型：定义者 TU 的 type_code 同时写入一个 "prelude" 段，
+	//      前置到所有 TU 的 includes 之后（名字带 include guard）；
+	//   2. 跨文件常量：const 在编译期被折叠为字面量，单 TU 下不可见但能够
+	//      工作；拆 TU 后若调用方 TU 未折叠（如顶层 auto 常量），
+	//      必须由 prelude 提供 extern 声明 + 定义者 TU 提供真实定义；
+	//   3. 泛型实例：实例函数体只能有一个定义（否则重复定义），而调用方
+	//      又必须看到原型 —— 由归属规则决定唯一的定义者，其余 TU 只放原型。
+	//
+	// TUMode 取值：
+	//   ""              单 TU（默认，兼容所有既有路径）
+	//   "entry"         根 TU：生成 main 入口 + 顶层语句，不含任何本地 import 的定义
+	//   "definition"    被 import 的文件：只生成自己那句，不含 main 入口
+	TUMode string `json:"tu_mode,omitempty"`
+	// TUPrelude 跨 TU 共享的类型/常量前置段，由入口在生成根 TU 前统一注入。
+	TUPrelude string `json:"tu_prelude,omitempty"`
+	// TUGenericOwner 判定某个泛型实例（MangleGenericName 产出的 C 名）
+	// 是否由**本** TU 负责定义。nil 表示"凡实例化过的都由本 TU 定义"
+	// （单 TU 语义）。非本 TU 负责的实例只输出原型，函数体由归属 TU 提供。
+	TUGenericOwner func(instName string) bool `json:"-"`
+
 	// ====== 输出模式 ======
 	// verbose: 详细输出（ninja 风格默认安静：成功只显示状态与产物，出错才打详情）。
 	Verbose bool `json:"verbose,omitempty"`

@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"kaula/internal/ast"
 	"kaula/internal/astutil"
@@ -446,6 +448,161 @@ type CodeGenerator struct {
 	TestMode         bool // 测试模式：生成测试 runner 而非普通 main
 	testRunnerActive bool // 测试模式且确有 #[test] 函数（runner 已生成）
 	attributeFeat    *AttributeFeatures
+
+	// TU 拆分模式（见 config.Config.TUMode）。空串 = 单 TU，行为与历史完全一致。
+	//
+	// 本文件是"本 TU 自己那句"的生成器；跨 TU 可见性（前置段、泛型实例归属）
+	// 由入口侧统一决策后经 config 注入，codegen 只负责按决策输出。
+	tuMode string
+	// tuPreludeOrigin 本 TU 贡献给前置段的 type_code（仅定义者 TU 非空）
+	tuPreludeOrigin string
+	// tuGenericsDeferred 本 TU 实例化、但归属别的 TU 的泛型实例（只出原型，由归属者出定义）
+	tuGenericsDeferred []deferredGeneric
+	// tuGenericsLocalDefined 本 TU 实例化且由本 TU 定义的泛型实例名（供入口侧汇总归属）
+	tuGenericsLocalDefined []string
+	// tuClassStatics 本 TU 输出过的文件作用域 static 函数名（.h 中据此补原型）
+	tuClassStatics []string
+	tuSeenStatics  map[string]bool
+	// tuExportVars export 全局变量的 C 声明文本（.h 中供其它 TU extern 引用）
+	tuExportVars []string
+	// tuExportFuncProtos 对外可见函数（pub / export）的 C 原型，进 header
+	// 供其它 TU 调用。
+	//
+	// 单 TU 时代这份原型就在主 C 的前置声明段里，跨文件调用天然可见；
+	// 拆 TU 后调用方看不到定义方的前置声明，C99 起又不允许隐式声明，
+	// 所以必须经由 header 传出去。裸本地函数（非 pub/export）不放进来：
+	// 它们跨文件本就不可调用，多放只会让 header 越来越像第二个全局命名空间。
+	tuExportFuncProtos []string
+}
+
+// deferredGeneric 一个"在别处定义"的泛型实例：只需要原型。
+type deferredGeneric struct {
+	CName string // C 函数名（MangleGenericName 结果）
+	Prot  string // 原型文本（含换行）
+}
+
+// TUArtifacts 单个 TU 的产物：C 源码 + 供其它 TU 共享的接口信息。
+//
+// TL 拆分后，定义者 TU 需要把"别的 TU 可能引用的东西"暴露出去：
+//   - Prelude：跨文件类型定义（typedef/struct/enum），必须对所有 TU 可见；
+//   - Header：非 static 函数原型、class 构造函数/方法原型、deferred 泛型原型，
+//     以名字集合的 include guard 包裹，供调用方 TU 显式包含；
+//   - GenericDefs：本 TU 实际定义的泛型实例名（入口据此做唯一归属）。
+type TUArtifacts struct {
+	Source      string
+	Prelude     string
+	Header      string
+	GenericDefs []string
+	UsedModules []string
+}
+
+// TUArtifacts 返回本次生成在 TU 拆分模式下需要共享出去的接口信息。
+func (cg *CodeGenerator) TUArtifacts() TUArtifacts {
+	return TUArtifacts{
+		Source:      cg.output,
+		Prelude:     cg.tuPreludeOrigin,
+		Header:      cg.buildTUHeader(),
+		GenericDefs: append([]string(nil), cg.tuGenericsLocalDefined...),
+		UsedModules: append([]string(nil), cg.usedModules...),
+	}
+}
+
+// TUHeaderGuard 生成确定性的 include guard（同名 .h 只被包含一次），
+// 同一组名字在任意进程/任意顺序下都必须得到同一个 guard。
+func TUHeaderGuard(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return "KAULA_TU_" + hex.EncodeToString(h[:8])
+}
+
+// registerTUStatic 登记本 TU 输出的文件作用域 static 函数的签名（不含右括号与函数体），
+// 由 buildTUHeader 补成完整原型，供其它 TU 在**自己的 TU 内**补一份声明。
+//
+// 为什么需要它：类方法/构造器是 `static inline`（内部链接），符号不会出现在
+// 定义者 .o 的外部符号表里。调用方 TU 若用到了某个库类的方法，就必须在
+// 自己的 TU 内看到该 static 函数的原型（C99 起没有隐式声明），而单 TU 时代
+// 这是天然成立的（同一个文件里定义在前、调用在后）。
+func (cg *CodeGenerator) registerTUStatic(sig string) {
+	if cg.tuMode == "" || sig == "" {
+		return
+	}
+	if cg.tuSeenStatics == nil {
+		cg.tuSeenStatics = make(map[string]bool)
+	}
+	if cg.tuSeenStatics[sig] {
+		return
+	}
+	cg.tuSeenStatics[sig] = true
+	cg.tuClassStatics = append(cg.tuClassStatics, sig+");")
+}
+
+// collectTUPrelude 把本 TU 的类型定义登记为"跨 TU 前置段"。
+//
+// 单 TU 时代所有类型定义在同一份 C 里，顺序是"类型 → 原型 → 函数体"；
+// 拆成多 TU 后，主 TU 可能引用库 TU 里定义的 class/struct（跨文件 pub 类型），
+// 此时主 TU 自己也要看到该类型定义。做法：定义者把这些定义同时输出一份到
+// prelude，入口把所有 prelude 前置到每个 TU 的 includes 之后。
+//
+// 幂等性由每段代码自己的 include guard 保证：同一个类型的定义会在多处出现
+// （定义者 TU 自己的 typeCode、所有 TU 共享的 prelude），C 不允许 typedef
+// 重定义 —— 哪怕两份内容逐字相同。这里给每段加一个按内容哈希命名的 guard，
+// 使"包含两次"退化为空操作。
+//
+// 注意 guard 必须基于**内容**而不是类型名：同名类型在两个 TU 里可能是两个
+// 不同的类型（两个库各自定义 struct A），按名字去重会把它们错误地合并。
+func (cg *CodeGenerator) collectTUPrelude(code string) {
+	if cg.tuMode == "" || code == "" {
+		return
+	}
+	cg.tuPreludeOrigin += cg.guardTUType(code)
+}
+
+// guardTUType 给一段类型定义套上按内容哈希命名的 include guard（单 TU 模式下原样返回）。
+//
+// 同一个类型会同时出现在两处：定义者 TU 的 typeCode，以及所有 TU 共享的
+// prelude。C 不允许 typedef 重定义（即使内容逐字相同），而 prelude 是前置给
+// **每个** TU 的 —— 包括定义者自己。所以定义者的 typeCode 也必须带同一个
+// guard，两者才能在同一次预处理里只留一份。
+func (cg *CodeGenerator) guardTUType(code string) string {
+	if cg.tuMode == "" || code == "" {
+		return code
+	}
+	g := TUHeaderGuard(code)
+	return "#ifndef " + g + "\n#define " + g + "\n" + code + "#endif\n"
+}
+
+// buildTUHeader 生成供其它 TU 包含的接口头：
+//
+//	fn 原型 + class 构造/方法原型 + 变量 extern 声明 + 泛型实例原型
+//
+// 为什么需要原型而不是"包含整个 C 文件"：C99 起不再允许隐式函数声明，
+// 调用出现在定义之前的 TU 必须能看到原型；而类方法/构造器是 static inline，
+// 原型与定义同 TU 即可（定义者 TU 已经在 classImplCode 之前输出原型），
+// 这里只为"外部调用"的场景补上。
+func (cg *CodeGenerator) buildTUHeader() string {
+	var b strings.Builder
+	seen := make(map[string]bool)
+	write := func(line string) {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] {
+			return
+		}
+		seen[line] = true
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	for _, f := range cg.tuExportFuncProtos {
+		write(f)
+	}
+	for _, v := range cg.tuExportVars {
+		write(v)
+	}
+	for _, g := range cg.tuGenericsDeferred {
+		write(g.Prot)
+	}
+	for _, s := range cg.tuClassStatics {
+		write(s)
+	}
+	return b.String()
 }
 
 // EnsureDeepPromoteCB 为给定 kaula class/struct 类型合成类型化深提升回调。
@@ -1568,6 +1725,20 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	 */
 	codeUsesConcurrency = false
 
+	// TU 拆分模式：每次 Generate 都从 config 重新读取（同一个 CodeGenerator
+	// 不会跨文件复用，但显式复位可以避免上一次生成的残留状态影响归属决策）。
+	cg.tuMode = ""
+	cg.tuPreludeOrigin = ""
+	cg.tuGenericsDeferred = nil
+	cg.tuGenericsLocalDefined = nil
+	cg.tuClassStatics = nil
+	cg.tuExportVars = nil
+	cg.tuExportFuncProtos = nil
+	if cg.config != nil {
+		cg.tuMode = cg.config.TUMode
+		cg.tuSeenStatics = make(map[string]bool)
+	}
+
 	// 嵌套 conc fn 调用：AST 层内联展开（Future 扁平化，见 conc_inline.go）。
 	// 必须在 FlattenDeclarations 之前：内联产生的新声明需要统一展平。
 	cg.inlineConcFns(program)
@@ -1699,7 +1870,20 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			continue
 		}
 		if importStmt, ok := stmt.(*ast.ImportStatement); ok {
-			importedModules[importStmt.Module] = true
+			/*
+			 * TU 拆分下的两种 import 处理：
+			 *
+			 *   - 本地 .kl import（路径/库）：它对应的 C 代码在**另一个 TU** 里。
+			 *     单 TU 时代这些 import 只为"语义上可见性"存在，生成侧本来也不
+			 *     产出任何代码（对照下面的 default 分支），这里显式跳过即可；
+			 *     但**不能**把它的 Module 计进 importedModules —— 那会输出
+			 *     `#include "<路径>.kl"` 或把本地库名当成 std 模块处理。
+			 *   - std / freestanding / pkglib 模块：每个 TU 都要自己的头，
+			 *     照旧计入。
+			 */
+			if !importStmt.IsLocal {
+				importedModules[importStmt.Module] = true
+			}
 			continue
 		}
 		if _, ok := stmt.(*ast.PackageStatement); ok {
@@ -1725,17 +1909,20 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			code := cg.generateStatement(stmt) + "\n"
 			lines := strings.Count(code, "\n")
 			addEntry("type", classStmt.Pos.Line, classStmt.Pos.Column, "class", classStmt.Name, lines)
-			typeCode.WriteString(code)
+			typeCode.WriteString(cg.guardTUType(code))
+			cg.collectTUPrelude(code)
 		} else if ifaceStmt, ok := stmt.(*ast.InterfaceStatement); ok {
 			code := cg.generateStatement(stmt) + "\n"
 			lines := strings.Count(code, "\n")
 			addEntry("type", ifaceStmt.Pos.Line, ifaceStmt.Pos.Column, "interface", ifaceStmt.Name, lines)
-			typeCode.WriteString(code)
+			typeCode.WriteString(cg.guardTUType(code))
+			cg.collectTUPrelude(code)
 		} else if structStmt, ok := stmt.(*ast.StructStatement); ok {
 			code := cg.generateStatement(stmt) + "\n"
 			lines := strings.Count(code, "\n")
 			addEntry("type", structStmt.Pos.Line, structStmt.Pos.Column, "struct", structStmt.Name, lines)
-			typeCode.WriteString(code)
+			typeCode.WriteString(cg.guardTUType(code))
+			cg.collectTUPrelude(code)
 		} else if enumStmt, ok := stmt.(*ast.EnumStatement); ok {
 			// 注册枚举变体到符号表
 			for _, variant := range enumStmt.Variants {
@@ -1744,12 +1931,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			code := cg.generateStatement(stmt) + "\n"
 			lines := strings.Count(code, "\n")
 			addEntry("type", enumStmt.Pos.Line, enumStmt.Pos.Column, "enum", enumStmt.Name, lines)
-			typeCode.WriteString(code)
+			typeCode.WriteString(cg.guardTUType(code))
+			cg.collectTUPrelude(code)
 		} else if typeStmt, ok := stmt.(*ast.TypeAliasStatement); ok {
 			code := cg.generateStatement(stmt) + "\n"
 			lines := strings.Count(code, "\n")
 			addEntry("type", typeStmt.Pos.Line, typeStmt.Pos.Column, "type", typeStmt.Name, lines)
-			typeCode.WriteString(code)
+			typeCode.WriteString(cg.guardTUType(code))
+			cg.collectTUPrelude(code)
 		} else if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
 			if varDecl == nil {
 				continue
@@ -1826,6 +2015,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			if isStruct && varDecl.Value == nil {
 				initValue = "{0}"
 			}
+			var classGlobalAbsent bool
 			if prefix != "" {
 				code := fmt.Sprintf("%s%s = %s;\n", prefix, decl, initValue)
 				lines := strings.Count(code, "\n")
@@ -1834,6 +2024,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 					// class 全局变量: 声明为 NULL, main 开头用赋值初始化 (避免局部遮蔽)
 					classGlobalVars.WriteString(fmt.Sprintf("%s%s = NULL;\n", prefix, decl))
 					classInitCode.WriteString(varDecl.Name + " = " + initValue + ";\n")
+					classGlobalAbsent = true
 				} else {
 					globalVars.WriteString(code)
 				}
@@ -1845,9 +2036,28 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 					// class 全局变量: 声明为 NULL, main 开头用赋值初始化 (避免局部遮蔽)
 					classGlobalVars.WriteString(decl + " = NULL;\n")
 					classInitCode.WriteString(varDecl.Name + " = " + initValue + ";\n")
+					classGlobalAbsent = true
 				} else {
 					globalVars.WriteString(code)
 				}
+			}
+			/*
+			 * TU 拆分：export 全局变量在定义者 TU 里是普通定义，调用方 TU 必须能
+			 * `extern` 引用。单 TU 时代所有 TU 本就是一份，无须声明；拆开后
+			 * 接口头需要给出 extern 形态。
+			 *
+			 * 必须复用同一条 decl（含 const 等限定符）：`export const x = 1`
+			 * 定义处是 `const uint8_t x`，若 header 只写 `extern uint8_t x`，
+			 * clang 会判 "redefinition of 'x' with a different type"。
+			 * 前缀只保留类型限定符，丢弃 KAULA_EXPORT / static —— 前者已在
+			 * 定义处，后者语义上不该跨 TU。
+			 */
+			if cg.tuMode != "" && varDecl.IsExported && !classGlobalAbsent {
+				var qual strings.Builder
+				if varDecl.IsConst {
+					qual.WriteString("const ")
+				}
+				cg.tuExportVars = append(cg.tuExportVars, "extern "+qual.String()+decl+";")
 			}
 		} else if externStmt, ok := stmt.(*ast.ExternStatement); ok {
 			if externStmt == nil {
@@ -2146,6 +2356,37 @@ static inline String string_concat_float(String s, double v) {
 #endif
 `)
 
+	/*
+	 * TU 拆分：把"别的 TU 需要看见的东西"插到模板的固定占位点上。
+	 *
+	 * 位置很关键 —— 必须在 {{includes}} 之后、{{type_code}}/{{function_code}} 之前：
+	 *   - 前置段（跨文件类型）在最前：本 TU 的原型和函数体都可能引用它；
+	 *   - 本 TU 的接口头（extern 变量 / 泛型实例原型 / static 函数原型）紧随其后。
+	 *
+	 * 只对本 TU 已经 include 过的头文件补原型：头文件是纯声明，不引入任何
+	 * 符号依赖，因此对所有模板（main/freestanding/user）都成立。
+	 */
+	if cg.tuMode != "" && cg.config != nil {
+		var tuBlock strings.Builder
+		if cg.config.TUPrelude != "" {
+			tuBlock.WriteString("/* --- kaula TU prelude: cross-TU type definitions --- */\n")
+			tuBlock.WriteString(cg.config.TUPrelude)
+			tuBlock.WriteString("/* --- end kaula TU prelude --- */\n")
+		}
+		if hdr := cg.buildTUHeader(); hdr != "" {
+			// guard 按**内容**计算而不是按 TU 名：内容相同的头天然等价，
+			// 用内容哈希也顺带避免"同名 TU 不同内容"被错误去重。
+			guard := TUHeaderGuard(hdr)
+			tuBlock.WriteString("#ifndef " + guard + "\n#define " + guard + "\n")
+			tuBlock.WriteString(hdr)
+			tuBlock.WriteString("#endif\n")
+		}
+		if tuBlock.Len() > 0 {
+			allIncludes.WriteString("\n")
+			allIncludes.WriteString(tuBlock.String())
+		}
+	}
+
 	var forwardDecls strings.Builder
 	forwardDecls.Grow(1024)
 
@@ -2263,6 +2504,40 @@ static inline String string_concat_float(String s, double v) {
 				forwardDecls.WriteString(formatCVarDecl(cType, fnStmt.Params[i]))
 			}
 			forwardDecls.WriteString(");\n")
+			// TU 拆分：export 函数要被别的 TU 调用，原型必须进 header。
+			//
+			// 这里刻意复述上面那个"类型未定义则跳过"的判断：命中该分支时
+			// forwardDecls 里没有这条原型，header 也不能凭空造一个——真正需要
+			// 跨 TU 可见时，类型定义已经在 prelude 里（见 collectTUPrelude），
+			// 那时 needsTypeBeforeDecl 为 false，原型会正常生成。
+			if cg.tuMode != "" && (fnStmt.IsExported || fnStmt.IsPublic) && !needsTypeBeforeDecl {
+				var proto strings.Builder
+				if fnStmt.IsExported {
+					// export 与 pub 的 C 名相同，但 export 的定义带 KAULA_EXPORT，
+					// 原型不带就会被 clang 判为"重声明不能添加 dllexport"。
+					proto.WriteString("KAULA_EXPORT ")
+				}
+				proto.WriteString(returnType)
+				proto.WriteByte(' ')
+				proto.WriteString(cg.UserFuncCName(fnStmt.Name))
+				proto.WriteByte('(')
+				for i, pType := range fnStmt.ParamTypes {
+					if i > 0 {
+						proto.WriteString(", ")
+					}
+					isNullable := false
+					if i < len(fnStmt.ParamNullables) {
+						isNullable = fnStmt.ParamNullables[i]
+					}
+					cType := cg.typeGenerator.convertType(pType, isNullable)
+					if cType == "" {
+						cType = "void*"
+					}
+					proto.WriteString(formatCVarDecl(cType, fnStmt.Params[i]))
+				}
+				proto.WriteString(");")
+				cg.tuExportFuncProtos = append(cg.tuExportFuncProtos, proto.String())
+			}
 		}
 	}
 
@@ -2303,6 +2578,54 @@ static inline String string_concat_float(String s, double v) {
 
 	// --boot user：用户态程序入口模板（user_start → kaula_main → sys_exit）
 	isUserMode := cg.config != nil && cg.config.Boot == "user"
+
+	/*
+	 * TU 拆分：入口归属。
+	 *
+	 * 被 import 的文件只有函数定义，没有 main —— 若不干预，它们会走下面的
+	 * `!hasMain` 模板分支，被套上 `int main() { ... }` 壳（那个壳里的 mainCode
+	 * 是空的，会得到一个"空 main"）。拆开后每个定义 TU 都有自己的 main 符号，
+	 * 链接期直接撞车；更糟的是 freestanding 模板会生成 _kaula_entry。
+	 *
+	 * 定义 TU 选择"无入口"：让生成结果停留在 includes + 类型 + 原型 + 函数体。
+	 * 入口 TU 则按正常规则（有 main 走模板、无 main 走 main 壳）。
+	 */
+	emitEntry := !(cg.tuMode == "definition" && cg.config != nil && !cg.config.Freestanding)
+
+	if !emitEntry {
+		// 定义 TU：不输出任何入口壳，但保留完整声明/定义节。
+		var rb strings.Builder
+		rb.WriteString(allIncludes.String())
+		rb.WriteString("\n\n")
+		rb.WriteString(cg.genericTypeCode.String())
+		rb.WriteString(typeCode.String())
+		rb.WriteByte('\n')
+		rb.WriteString(forwardDecls.String())
+		rb.WriteByte('\n')
+		rb.WriteString(globalVars.String())
+		rb.WriteByte('\n')
+		rb.WriteString(classGlobalVars.String())
+		rb.WriteByte('\n')
+		if cg.deepPromoteCBBlock != "" {
+			rb.WriteString(cg.deepPromoteCBBlock)
+			rb.WriteByte('\n')
+		}
+		rb.WriteString(cg.classImplCode.String())
+		rb.WriteByte('\n')
+		rb.WriteString(functionCode.String())
+		if len(deriveTypes) > 0 {
+			rb.WriteString(cg.attributeFeat.GenerateDeriveImpls(deriveTypes, program))
+		}
+		if len(commands) > 0 {
+			rb.WriteString(cg.attributeFeat.GenerateCommandParser(commands))
+		}
+		// 顶层语句（函数外的调用等）：单 TU 时代它们会被注入 main 开头，
+		// 定义 TU 没有 main，无法承载 —— 语义阶段本就不允许被 import 的文件
+		// 含可执行顶层语句之外的副作用，这里保持"不输出"与旧行为一致
+		// （旧行为里 extractFunctionDefs 同样丢弃了这些语句）。
+		cg.output = rb.String()
+		return cg.output
+	}
 
 	if useFreestanding || !hasMain {
 		templateName := "main"
@@ -3074,7 +3397,28 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 
 	oldTypeMap := cg.typeGenerator.PushActiveTypeMap(typeMap)
 	cg.genericInstDepth++
-	code := cg.functionGenerator.GenerateFunctionStatement(instFunc)
+
+	/*
+	 * TU 拆分：泛型实例只能有一个定义。
+	 *
+	 * 同一实例可能被多个 TU 同时实例化（A 的 fn 调 identity<i32>、main 也调），
+	 * 每个 TU 各写一份函数体 → 重复定义；只让"用到它的那个 TU"定义，
+	 * 又会让别的 TU 缺原型。归属由入口侧统一决策（TUGenericOwner），
+	 * 非归属方只输出原型、不生成函数体。
+	 *
+	 * 这里**仍然**做一次 GenerateFunctionStatement 来拿到原型之外的类型推导
+	 * 副作用是多余的，所以归属判定放在生成之前；非归属方走原型分支时
+	 * 必须保持 genericCache/genericInstantiated 的语义（后续调用直接命中缓存）。
+	 */
+	ownsInstance := cg.tuMode == "" || cg.config == nil || cg.config.TUGenericOwner == nil ||
+		cg.config.TUGenericOwner(instName)
+
+	var code string
+	if ownsInstance {
+		code = cg.functionGenerator.GenerateFunctionStatement(instFunc)
+	} else {
+		code = ""
+	}
 	cg.genericInstDepth--
 	cg.typeGenerator.PopActiveTypeMap(oldTypeMap)
 
@@ -3087,6 +3431,19 @@ func (cg *CodeGenerator) InstantiateGeneric(funcName string, typeArgs []string, 
 	if code != "" {
 		cg.genericFuncCode.WriteString(code)
 		cg.genericFuncCode.WriteByte('\n')
+	}
+	// 归属记录：定义者登记到"本 TU 定义的实例"，非归属方登记为 deferred 原型。
+	// 非归属方仍保留 cache（避免重复实例化），但 GeneratedCode 为空 ——
+	// 调用方 TU 的原型由入口写入的 prelude/header 提供。
+	if cg.tuMode != "" {
+		if ownsInstance {
+			cg.tuGenericsLocalDefined = append(cg.tuGenericsLocalDefined, instName)
+		} else {
+			cg.tuGenericsDeferred = append(cg.tuGenericsDeferred, deferredGeneric{
+				CName: instName,
+				Prot:  genericPrototype(instName, instFunc, cg.typeGenerator),
+			})
+		}
 	}
 
 	// 添加到缓存

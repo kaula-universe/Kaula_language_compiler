@@ -504,6 +504,23 @@ func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string
 func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className string, interfaces []string, methods []*ast.MethodStatement, constructor *ast.ConstructorStatement) string {
 	var code strings.Builder
 	cName := kaulaStructTag(className)
+	// TU 拆分：构造函数是非 static 的外部符号，别的 TU 调用 `Point(3,4)` 时
+	// 只会生成 `Point_new(3,4)`，必须能在自己的 TU 里看到原型（C99 无隐式声明）。
+	if constructor != nil {
+		var proto strings.Builder
+		fmt.Fprintf(&proto, "%s* %s_new(", cName, className)
+		for i, param := range constructor.Params {
+			if i > 0 {
+				proto.WriteString(", ")
+			}
+			proto.WriteString(fmt.Sprintf("%s %s", tg.convertType(param.Type, param.Nullable), param.Name))
+		}
+		if len(constructor.Params) == 0 {
+			proto.WriteString("void")
+		}
+		// registerTUStatic 会自行补足 ");"，这里只给到左括号为止的签名
+		tg.codegen.registerTUStatic(proto.String())
+	}
 	code.WriteString(fmt.Sprintf("%s* %s_new(", cName, className))
 	for i, param := range constructor.Params {
 		paramType := tg.convertType(param.Type, param.Nullable)
@@ -909,6 +926,10 @@ func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.M
 		code.WriteString(tg.codegen.indentString() + "return NULL;\n")
 	}
 	code.WriteString("}\n\n")
+
+	// TU 拆分：本 TU 输出的文件作用域 static 函数原型登记到接口头，
+	// 供被 import 的调用方 TU 在自己的 TU 内补一份原型（static 不能跨 TU 引用）。
+	tg.codegen.registerTUStatic(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, selfStructType))
 
 	// 清理作用�?
 	tg.codegen.indent--
