@@ -281,6 +281,15 @@
 - 公开 `--version` 不再输出 codename 后缀（codename 固定为 `kaula`，不进入版本串）。
 - CI：Linux job 由 advisory 转 blocking，接入 `go test ./...`、C 内核 27 用例、
   freestanding L1–L6；拆分重复 `--target`；修复 `--install-dir` 漏更新 `hash_dir`。
+- **CI：tag 与 Release 展示的版本号改为取自构建脚本生成的版本文件
+  `compiler/version.json`**（`scripts/version.py --from-file`）。
+  此前 `actions/checkout` 默认浅克隆（`fetch-depth: 1`）使提交数恒为 1，
+  `PATCH = 1 − 440` 被钳位为 0，版本号静默退化成 `v1.1.0`，Release 标题甚至出现
+  版本号为空的「Kaula」。修复：三个工作流全部改为 `fetch-depth: 0`；
+  tag / Release 一律用 `--from-file` 读版本文件；`release.yml` 新增
+  「tag 名 ≠ 版本文件版本即报错终止」的一致性校验；`version.py` 在浅克隆下告警，
+  且 `--from-file` 在版本文件缺失/损坏/缺字段时硬失败退出 1。
+  打 tag 改为附注 tag，并做幂等保护（同提交跳过、异提交拒绝移动）。
 
 ### Deprecated
 - `fast_free`：`fast_allocator` 为 bump 分配器不支持逐个释放，`fast_free` 当前为 no-op，

@@ -2,8 +2,19 @@ name: Manual Tag (was Auto Tag on Push)
 
 # v1.1 发布准备期间停用“push master 自动打 tag”：当前只推进到可发布状态，
 # 不自动产生 tag、不发 Release。需要打 tag 时在 GitHub Actions 手动触发本工作流。
+#
+# tag 名一律取自构建脚本生成的版本文件 compiler/version.json（--from-file），
+# 而不是在 CI 里重新用 git 计算——浅克隆会让减法基准失真。
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Ref to tag / 要打 tag 的 ref'
+        required: false
+        default: 'master'
+
+permissions:
+  contents: write
 
 jobs:
   create-tag:
@@ -11,21 +22,63 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # 完整历史：git 减法基准需要真实的 git rev-list --count HEAD
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.ref || 'master' }}
 
-      - name: Get version
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate version file
+        run: python scripts/version.py --update
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Get version from generated file
         id: version
         run: |
-          VERSION=$(python scripts/version.py --get-version)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          VERSION="$(python scripts/version.py --release --from-file)"
+          SNAPSHOT="$(python scripts/version.py --snapshot --from-file)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "snapshot=$SNAPSHOT" >> "$GITHUB_OUTPUT"
+          # 版本文件里的 release 已带 v 前缀，直接就是 tag 名
+          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+        env:
+          PYTHONIOENCODING: utf-8
 
       - name: Create tag
         run: |
-          TAG="v${{ steps.version.outputs.version }}"
+          set -euo pipefail
+          # --from-file 已经带 v 前缀，这里做一次幂等归一化，避免出现 vv1.1.302
+          TAG="${{ steps.version.outputs.tag }}"
+          TAG="${TAG#v}"
+          TAG="v${TAG}"
+          SHA="$(git rev-parse HEAD)"
+
+          echo "tag:      $TAG"
+          echo "commit:   $SHA"
+          echo "snapshot: ${{ steps.version.outputs.snapshot }}"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            EXISTING="$(git rev-list -n 1 "$TAG")"
+            if [ "$EXISTING" = "$SHA" ]; then
+              echo "tag $TAG 已存在且指向同一提交 $SHA，跳过（幂等）"
+              exit 0
+            fi
+            echo "::error::tag $TAG 已存在但指向不同提交（现有 $EXISTING，当前 $SHA），拒绝移动 tag"
+            exit 1
+          fi
+
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git tag "$TAG"
+          git tag -a "$TAG" -m "Kaula $TAG (${{ steps.version.outputs.snapshot }})"
           git push origin "$TAG"
+          echo "已推送 tag $TAG"
         env:
+          PYTHONIOENCODING: utf-8
           GIT_AUTHOR_NAME: github-actions
           GIT_AUTHOR_EMAIL: github-actions@github.com
           GIT_COMMITTER_NAME: github-actions
