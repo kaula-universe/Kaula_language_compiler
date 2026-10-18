@@ -55,6 +55,12 @@
 - [AST 转储 (dumpast)](tools/dumpast.md) - 调试解析器的 AST 树输出
 - [语义负载测试 (loadtest)](tools/loadtest.md) - 语义分析验证
 
+## 仓库同步与镜像
+
+GitHub（主仓）与 Gitee（国内镜像）之间的自动化同步机制：
+
+- [仓库同步与镜像体系](gitee-sync.md) - 主仓切换、Release/Tag 快照同步（sync-gitee.yml）、组织仓库双向互同步（org-sync.yml + org_sync.py）、运维手册
+
 ## 语法教程文档
 
 见 [tutorials/README.md](tutorials/README.md)，共 16 篇，建议按顺序阅读：
