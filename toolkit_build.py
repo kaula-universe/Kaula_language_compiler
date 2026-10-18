@@ -113,6 +113,12 @@ class BuildConfig:
         if not sys.platform.startswith("win"):
             self.common_flags.append("-fPIC")
             self.common_flags.append("-D_POSIX_C_SOURCE=200809L")
+            # macOS：_POSIX_C_SOURCE 会把 Darwin 的 BSD 扩展整片藏起来
+            # （sys/ucred.h 的 u_int 是最典型的受害者，并发内核要用的头文件
+            #  一拉就报 "unknown type name 'u_int'"）。_DARWIN_C_SOURCE 在
+            # _POSIX_C_SOURCE 之上重新打开完整 Darwin C 层级。
+            if sys.platform == "darwin":
+                self.common_flags.append("-D_DARWIN_C_SOURCE")
         else:
             self.common_flags.append("-D_CRT_SECURE_NO_WARNINGS")
 
