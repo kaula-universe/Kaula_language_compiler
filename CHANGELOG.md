@@ -290,6 +290,9 @@
   「tag 名 ≠ 版本文件版本即报错终止」的一致性校验；`version.py` 在浅克隆下告警，
   且 `--from-file` 在版本文件缺失/损坏/缺字段时硬失败退出 1。
   打 tag 改为附注 tag，并做幂等保护（同提交跳过、异提交拒绝移动）。
+- **CI：auto-tag 打完 tag 后显式触发 `release.yml`**。用 `GITHUB_TOKEN` 推送的 tag
+  不会触发 push 事件工作流（GitHub 防递归机制），此前打完 tag 不会自动出 Release；
+  现增加 `Trigger release workflow` 步骤（可选 `skip_release` 只打 tag）。
 
 ### Deprecated
 - `fast_free`：`fast_allocator` 为 bump 分配器不支持逐个释放，`fast_free` 当前为 no-op，
