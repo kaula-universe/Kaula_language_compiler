@@ -9,10 +9,22 @@
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
 
 ; Version from build
-!define PRODUCT_VERSION "${KAULA_VERSION}"
-!define PRODUCT_VERSION_MAJOR "${KAULA_VERSION_MAJOR}"
-!define PRODUCT_VERSION_MINOR "${KAULA_VERSION_MINOR}"
-!define PRODUCT_VERSION_PATCH "${KAULA_VERSION_PATCH}"
+;
+; 版本号由命令行传入（release.yml: makensis /DPRODUCT_VERSION=... /D..._MAJOR=...）。
+; 这里必须用 !ifndef 兜底 —— 不加保护时「命令行已定义 + 脚本内再 !define」会让
+; makensis 直接报 `!define: "PRODUCT_VERSION" already defined!` 并中止打包。
+!ifndef PRODUCT_VERSION
+    !define PRODUCT_VERSION "0.0.0"
+!endif
+!ifndef PRODUCT_VERSION_MAJOR
+    !define PRODUCT_VERSION_MAJOR "0"
+!endif
+!ifndef PRODUCT_VERSION_MINOR
+    !define PRODUCT_VERSION_MINOR "0"
+!endif
+!ifndef PRODUCT_VERSION_PATCH
+    !define PRODUCT_VERSION_PATCH "0"
+!endif
 
 SetCompressor /SOLID lzma
 

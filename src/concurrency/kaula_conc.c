@@ -37,6 +37,9 @@
 #if !KAULA_PLATFORM_WINDOWS
     #include <unistd.h>
 #endif
+#if defined(__APPLE__) && defined(__MACH__)
+    #include <sys/sysctl.h>
+#endif
 
 static int g_conc_initialized = 0;
 static _Atomic(int) g_conc_initing = 0;
@@ -411,8 +414,19 @@ uint32_t kaula_conc_cpu_count(void) {
     GetSystemInfo(&si);
     return si.dwNumberOfProcessors > 0 ? si.dwNumberOfProcessors : 2;
 #else
+#if defined(__APPLE__) && defined(__MACH__)
+    /*
+     * macOS 双保险：即使构建用的是严格 ANSI 方言（-std=c11 会让 Darwin 头文件
+     * 把 _SC_NPROCESSORS_ONLN 藏起来），sysctl 的 hw.ncpu 始终可用。
+     */
+    int ncpu = 0;
+    size_t len = sizeof(ncpu);
+    if (sysctlbyname("hw.ncpu", &ncpu, &len, NULL, 0) != 0 || ncpu <= 0) return 2;
+    return (uint32_t)ncpu;
+#else
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (uint32_t)n : 2;
+#endif
 #endif
 }
 

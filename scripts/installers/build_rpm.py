@@ -64,7 +64,7 @@ runtime overhead.
 This package includes the Kaula compiler, standard library, runtime,
 and development tools.
 
-# 无源码包：这是"CI 已构建产物"的二进制 RPM，文件已由本脚本放进 %{_topdir}/BUILD。
+# 无源码包：这是"CI 已构建产物"的二进制 RPM，文件已由本脚本放进 %{{_topdir}}/BUILD。
 # 早先这里写了 Source0 + %setup -q，但从未生成过那个 tar.gz，
 # rpmbuild 必然报 "No such file or directory ... (%prep)"。
 

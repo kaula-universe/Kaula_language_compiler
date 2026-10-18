@@ -81,7 +81,9 @@ jobs:
               if (Test-Path $p) { $makensis = $p; break }
             }
           }
-          & $makensis /DPRODUCT_VERSION=$versionNoV scripts/installers/kaula.nsi
+          & $makensis /DPRODUCT_VERSION=$versionNoV /DPRODUCT_VERSION_MAJOR=$major `
+                      /DPRODUCT_VERSION_MINOR=$minor /DPRODUCT_VERSION_PATCH=$patch `
+                      scripts/installers/kaula.nsi
         env:
           PYTHONIOENCODING: utf-8
 
