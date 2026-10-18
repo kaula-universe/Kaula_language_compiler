@@ -22,6 +22,7 @@ Usage:
 
 import os
 import sys
+import platform
 import subprocess
 import argparse
 import hashlib
@@ -89,6 +90,12 @@ class BuildConfig:
         ]
 
         self.c_standard = "c11"
+        # macOS（Darwin）的头文件在严格 ANSI 方言下会把 POSIX/BSD 声明整片藏起来：
+        # -std=c11 会让 clang 定义 __STRICT_ANSI__，Darwin 的 <unistd.h> 随即以
+        # _ANSI_SOURCE 保护掉 _SC_NPROCESSORS_ONLN 等符号（Linux 头文件不这么干，
+        # 所以三平台里只有 macOS 编译不过）。改用 GNU 方言即可正常可见。
+        if platform.system() == "Darwin":
+            self.c_standard = "gnu11"
 
         self.debug_flags = ["-g", "-O0", "-DKMM_V4_DEBUG"]
         self.release_flags = ["-O2", "-DNDEBUG"]

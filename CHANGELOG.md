@@ -147,6 +147,15 @@
 - **Windows 打不出 NSIS 安装包**：`choco install nsis` 只写机器级 PATH，
   后续步骤不继承，`makensis` 报 "The term 'makensis' is not recognized"。
   现在把 NSIS 目录追加进 `GITHUB_PATH`，并在调用处加 PATH 兜底。
+- **NSIS 脚本 `PRODUCT_VERSION already defined`**：脚本内 `!define PRODUCT_VERSION`
+  与命令行 `/DPRODUCT_VERSION=` 冲突，makensis 直接中止。脚本改为 `!ifndef` 兜底，
+  并由 CI 传齐四个版本宏（MAJOR/MINOR/PATCH 之前根本没传，
+  `VIProductVersion` 会填成未展开的占位串）。
+- **macOS `toolkit_build.py` 用 `-std=c11` 编译运行时失败**：严格 ANSI 方言下
+  clang 定义 `__STRICT_ANSI__`，Darwin 头文件随即用 `_ANSI_SOURCE` 把
+  `_SC_NPROCESSORS_ONLN` 等 POSIX 符号藏起来（Linux 头文件不这样，所以只有
+  macOS 挂）。Darwin 改用 `gnu11`；`kaula_conc.c` 另加 `sysctlbyname("hw.ncpu")`
+  兜底，并补上缺失的 `<unistd.h>` / `<sys/sysctl.h>`。
 - **PCH 长期未生效，且一开就全量报错（两处叠加）**：
   - **`-I` 猜测 clang 自动命中 `.gch` 不成立**：gch 自动查找要求文件名与
     `#include` 字面量严格对应，而 `kaula.h.gch` 在 `std-objects/` 下、源码写的是
