@@ -1,0 +1,69 @@
+name: Diag Concurrency
+
+# 临时诊断工作流：只在诊断分支上跑，用来把 Linux 并发用例的真实失败输出
+# 以 check-run 注解（::error::）的形式暴露出来 —— 仓库的 job 原始日志
+# 需要管理员权限才能下载，但注解是公开可读的。
+#
+# 诊断结束后本文件与 diag/* 分支一并删除。
+
+on:
+  push:
+    branches: [ diag/conc ]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: diag (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Env info
+        run: |
+          clang --version
+          python3 --version
+          ulimit -n
+          nproc
+
+      - name: Build toolchain
+        run: |
+          python toolkit_build.py --release --target runtime
+          python toolkit_build.py --release --target compiler
+          python toolkit_build.py --release --target freestanding
+          python toolkit_build.py --release --target std
+          python toolkit_build.py --release --target headers
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Concurrency tests (capture)
+        run: |
+          set +e
+          python3 test/concurrency/run_tests.py > conc.log 2>&1
+          rc=$?
+          echo "----- exit=$rc -----"
+          tail -c 12000 conc.log
+          python3 - "$rc" <<'PY'
+          import sys
+          rc = sys.argv[1]
+          try:
+              data = open('conc.log', encoding='utf-8', errors='replace').read()
+          except OSError as exc:
+              data = f'<no log: {exc}>'
+          tail = data[-9000:]
+          tail = tail.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+          print(f'::error title=conc-exit-{rc}::{tail}')
+          PY
+          exit $rc
