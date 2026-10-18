@@ -92,7 +92,10 @@ python scripts/version.py --snapshot --from-file  # 从版本文件读取 → 26
 2. 工作流用完整历史生成版本文件，读取版本号，创建**附注 tag** 并推送。
    - tag 已存在且指向同一提交 → 跳过（幂等）；
    - tag 已存在但指向不同提交 → 报错，**绝不移动已有 tag**。
-3. tag push 触发 **Build and Release**，三平台构建 → 校验 tag 名与版本文件一致
+3. 打完 tag 后，工作流**显式触发 `release.yml`**（ref = 该 tag）。
+   原因：用 `GITHUB_TOKEN` 推送的 tag 不会触发 push 事件工作流（GitHub 的防递归机制），
+   不显式触发就永远出不来 Release。勾选 `skip_release` 可只打 tag 不触发 Release。
+4. **Build and Release** 三平台构建 → 校验 tag 名与版本文件一致
    → 创建 Release，标题为 `Kaula <版本文件中的版本号>`。
 
 ### 版本文件缺失时的行为
