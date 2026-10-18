@@ -1,0 +1,80 @@
+name: Sync release snapshot to Gitee
+
+# 目标：GitHub 发布 release / 新打 tag 时，自动把该 tag 的仓库快照 + release 产物同步到 Gitee。
+# 提交路径：把本文件放到 GitHub 主仓 .github/workflows/sync-gitee.yml
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ['v*']
+
+# 同一 tag 并发去重：release 和 push 事件可能同时触发
+concurrency:
+  group: gitee-sync-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Gitee 侧：组织 / 仓库名（按实际改）
+  GITEE_OWNER: kaula-universe
+  GITEE_REPO: kaula
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then TAG="${{ github.ref_name }}"; fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Syncing tag: $TAG"
+
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 1
+
+      - name: Build snapshot commit (no parent, full source tree)
+        run: |
+          git checkout --orphan kaula-snapshot
+          git add -A
+          git config user.name "kaula-sync-bot"
+          git config user.email "bot@kaula.local"
+          git commit -m "release $TAG (snapshot)"
+          git tag -f "$TAG"
+
+      - name: Push tag + snapshot to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          git push "https://x-access-token:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" \
+            "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      - name: Sync GitHub release assets to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 纯打 tag（非 release）时无产物，跳过
+          RELEASE=$(curl -sf -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" || true)
+          if [ -z "$RELEASE" ]; then
+            echo "No GitHub release for $TAG, skip assets"; exit 0
+          fi
+
+          # 在 Gitee 创建/更新 release（tag 已推送，必须先有 tag）
+          GITEE_RELEASE=$(curl -s -X POST "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Released from ${GITHUB_REPOSITORY}\",\"access_token\":\"${GITEE_TOKEN}\"}")
+          REL_ID=$(echo "$GITEE_RELEASE" | jq -r '.id')
+
+          # 逐个下载 GitHub 附件并上传到 Gitee
+          echo "$RELEASE" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"' | while IFS=$'\t' read -r name url; do
+            curl -sL -o "/tmp/$name" "$url"
+            curl -s -X POST "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${REL_ID}/attach_files" \
+              -F "access_token=${GITEE_TOKEN}" -F "file=@/tmp/$name" \
+              && echo "uploaded: $name"
+          done
