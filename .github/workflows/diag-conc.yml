@@ -33,10 +33,9 @@ jobs:
 
       - name: Env info
         run: |
-          clang --version
+          clang --version | head -1
           python3 --version
-          ulimit -n
-          nproc
+          echo "nofile=$(ulimit -n) ncpu=$(nproc)"
 
       - name: Build toolchain
         run: |
@@ -53,17 +52,42 @@ jobs:
           set +e
           python3 test/concurrency/run_tests.py > conc.log 2>&1
           rc=$?
-          echo "----- exit=$rc -----"
-          tail -c 12000 conc.log
+          echo "===== exit=$rc ====="
+          # 只抽取高信号行：失败汇总、编译/链接失败、断言失败、超时
           python3 - "$rc" <<'PY'
+          import re
           import sys
+
           rc = sys.argv[1]
           try:
-              data = open('conc.log', encoding='utf-8', errors='replace').read()
+              raw = open('conc.log', encoding='utf-8', errors='replace').read()
           except OSError as exc:
-              data = f'<no log: {exc}>'
-          tail = data[-9000:]
-          tail = tail.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
-          print(f'::error title=conc-exit-{rc}::{tail}')
+              raw = f'<no log: {exc}>'
+
+          lines = raw.splitlines()
+          keep = []
+          in_summary = False
+          for ln in lines:
+              if ln.startswith('失败：') or ln.startswith('全部通过'):
+                  in_summary = True
+              if in_summary:
+                  keep.append(ln)
+                  continue
+              if ('编译/链接失败' in ln or 'kl 编译失败' in ln
+                      or '[FAIL]' in ln or 'FAILED' in ln
+                      or '[TIMEOUT]' in ln or 'error:' in ln
+                      or 'multiple definition' in ln or 'undefined reference' in ln
+                      or 'ASSERT' in ln or 'Segmentation' in ln):
+                  keep.append(ln)
+
+          body = '\n'.join(keep) if keep else '(no high-signal lines)'
+          if len(body) > 55000:
+              body = body[:55000] + '\n...[truncated]'
+
+          def esc(s: str) -> str:
+              return s.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+
+          print(body)
+          print(f'::error title=conc-exit-{rc}::{esc(body)}')
           PY
           exit $rc
