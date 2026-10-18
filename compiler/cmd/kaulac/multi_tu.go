@@ -364,7 +364,12 @@ func loadTUUnits(tuDir, entryCFile string) ([]tuUnit, error) {
 //   - `-x none` 之后：链接输入（std/.o/库），链接时追加；
 //   - 其中的 `-o <exe>` 在多 TU 下只对链接有意义，编译期被丢弃。
 //
-// cmdPrefix 是 ccache 之类的前缀（命令名必须在最前），cc 是前缀之后的真实编译器。
+// cc 是**命令名本身**（可能是 ccache 之类的包装器，也可能就是 clang）；
+// cmdPrefix 是紧跟命令名之后的参数（包装器场景下就是真实编译器路径）。
+// 因此完整的命令行前段恒为 [cc, cmdPrefix...]，与单 TU 路径
+// `compilerCommand(compilerCmd, compilerPrefix..., clangArgs...)` 完全一致——
+// 顺序写反会让 clang 把 ccache.exe / clang.exe 当成输入文件，
+// lld-link 报 "unknown file type"。
 func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, outputFile, workDir, tuDir string) error {
 	linkInputs, _, compileFlags := splitLinkInputs(entryArgs)
 
@@ -399,8 +404,8 @@ func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, ou
 		return err
 	}
 
-	prefix := append([]string(nil), cmdPrefix...)
-	prefix = append(prefix, cc)
+	// 命令名必须在最前：cc（可能是 ccache 包装器）→ cmdPrefix（真实编译器）→ flags。
+	prefix := append([]string{cc}, cmdPrefix...)
 	if verboseMode {
 		fmt.Printf("[Multi-TU] %d 个 TU，并行度 %d\n", len(units), tuWorkers(len(units)))
 	}

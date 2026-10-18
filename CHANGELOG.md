@@ -112,6 +112,31 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **多 TU 构建在 Windows 上 100% 链接失败（multi-TU  regressions，三处叠加）**：
+  - **`_fltused` 重复定义**：codegen 给每个生成的 C 都注入 `int _fltused = 0;`
+    （单 TU 时代只有一个定义所以没事）。拆成多 TU 后每个 TU 都带一份强定义，
+    `lld-link: error: duplicate symbol: _fltused`。改为
+    `__declspec(selectany)`（GCC 分支用 `__attribute__((selectany))`）的
+    COMDAT 弱定义，链接器任选一份、其余丢弃。
+  - **ccache 包装器参数顺序颠倒**：`runMultiTU` 把命令名拼成了
+    `[clang, ccache]`（正确应为 `[ccache, clang]`），clang 于是把
+    `ccache.exe` 当成输入文件，报 `lld-link: error: ccache.exe: unknown file type`。
+    仅在使用 ccache 的环境（如 CI 的 windows runner，Strawberry Perl 提供了
+    `ccache.exe`）触发。
+  - **`clangPlan.Args` 多带了一份编译器路径**：dry-run 输出里混进了
+    `compilerPrefix`，多 TU 侧又拼一次，导致链接命令行里出现
+    `clang.exe: unknown file type`。Args 现在只带 `clangArgs`。
+  本地验证（Windows + clang）：修复前 `--filter mem` 0/2，修复后
+  **20/20**；`run_tests.py --quick` **100/100**。
+- **macOS 构建失败：`pthread_condattr_setclock` 未声明**（Darwin 未实现这个
+  POSIX 可选接口）。条件变量在 macOS 上改用默认的 `CLOCK_REALTIME`，等待侧新增
+  `kaula_p_cond_deadline()` 按 condattr 实际时钟计算绝对截止时间
+  （Linux=MONOTONIC / macOS=REALTIME），入参仍是相对 `timeout_ns`，语义不变。
+- **`.rpm` 打包脚本 `NameError: name 'datetime' is not defined`**：
+  `build_rpm.py` 用了 `datetime.now()` 但没 import。
+- **打包脚本版本号来源统一**：`build_deb` / `build_dmg` / `build_rpm` /
+  `package_release` 一律改用 `version.py --release --from-file`，且拿不到版本时
+  **硬失败**，不再静默退化成 `1.0.0` / `v1.0.0` / `unknown`。
 - **PCH 长期未生效，且一开就全量报错（两处叠加）**：
   - **`-I` 猜测 clang 自动命中 `.gch` 不成立**：gch 自动查找要求文件名与
     `#include` 字面量严格对应，而 `kaula.h.gch` 在 `std-objects/` 下、源码写的是

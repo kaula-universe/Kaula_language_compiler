@@ -15,12 +15,17 @@ def get_version(project_root: Path) -> str:
     version_script = project_root / "scripts" / "version.py"
     if version_script.exists():
         result = subprocess.run(
-            [sys.executable, str(version_script), "--release"],
+            [sys.executable, str(version_script), "--release", "--from-file"],
             capture_output=True, text=True, cwd=str(project_root)
         )
         if result.returncode == 0:
             return result.stdout.strip().lstrip("v")
-    return "1.0.0"
+        # 版本文件是唯一权威来源：拿不到就硬失败，绝不退化成 1.0.0 这种错版本号
+        raise SystemExit(
+            "获取版本号失败（构建生成的 compiler/version.json 不可用）：\n"
+            + (result.stderr or result.stdout).strip()
+        )
+    raise SystemExit("找不到 scripts/version.py，无法获取版本号")
 
 
 def build_dmg(project_root: Path, build_dir: Path, release_dir: Path):

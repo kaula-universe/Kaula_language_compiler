@@ -4163,11 +4163,11 @@ func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCode
 
 // clangPlan 单 TU 路径最终要执行的 clang 参数（供多 TU 复用）。
 type clangPlan struct {
-	// Args 完整参数（不含命令名本身）
+	// Args 完整参数（不含命令名本身，也不含 Prefix——Prefix 由调用方紧跟命令名拼回）
 	Args []string
 	// Cmd 命令名（可能是 ccache）
 	Cmd string
-	// Prefix ccache 之类的前缀参数（真实编译器是前缀之后的第一项）
+	// Prefix 紧跟命令名之后的参数（ccache 场景下是真实编译器路径）
 	Prefix []string
 }
 
@@ -5303,7 +5303,9 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 	// 导致链接期符号尺寸不匹配）离真正原因太远。
 	if sink != nil {
 		*sink = clangPlan{
-			Args:   append(append([]string(nil), compilerPrefix...), clangArgs...),
+			// 只带 clangArgs：命令名（Cmd）与紧跟其后的 Prefix 由 runMultiTU 拼回，
+			// 这里再塞一份 compilerPrefix 会让编译器路径变成链接/编译的输入文件。
+			Args:   append([]string(nil), clangArgs...),
 			Cmd:    compilerCmd,
 			Prefix: append([]string(nil), compilerPrefix...),
 		}
