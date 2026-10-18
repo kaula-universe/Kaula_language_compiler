@@ -1000,6 +1000,12 @@ func main() {
 	if len(os.Args) > 2 && os.Args[1] == "workspace" && os.Args[2] == "test" {
 		os.Exit(runTestsCLI(os.Args[3:], true))
 	}
+	// kaulac pkg publish：发布库到注册源（gitee/github 组织）。
+	// 必须在预扫描前拦截：pkg 子命令收集参数到第一个 '-' 旗标即截断，
+	// `publish` 的 --target/--org/--tag 等旗标会走丢。
+	if len(os.Args) > 2 && os.Args[1] == "pkg" && os.Args[2] == "publish" {
+		os.Exit(runPkgPublish(os.Args[3:]))
+	}
 	// kaulac unittest：单元测试（#[test] runner）。
 	// 目标是单个已存在的 .kl 文件时走常规编译流程（下方预扫描会置 testMode）；
 	// 无参、传目录或路径不存在时进入批量模式，逐个文件以子进程复用该流程。

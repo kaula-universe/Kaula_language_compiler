@@ -244,7 +244,38 @@ kaulac pkg list                                                  # 列出包
 kaulac pkg fetch                                                 # 拉取依赖
 kaulac pkg update [name]                                         # 更新依赖
 kaulac pkg lock                                                  # 查看锁状态
+kaulac pkg publish [<dir>] [选项]                                 # 一键发布库到注册源
 ```
+
+### 发布库 `kaulac pkg publish`
+
+把本地库一键上传到 kaula-universe 双注册源（Gitee / GitHub 组织仓库），
+自动建仓 → 推送代码 → 打版本 tag → 远端复核。
+
+```bash
+kaulac pkg publish                          # 发布 ./ 到 gitee + github（默认）
+kaulac pkg publish ../mylib --tag 0.2.0     # 发布指定库与版本
+kaulac pkg publish --target github          # 只发 github
+kaulac pkg publish --org zhe116             # 发到指定命名空间（个人账号/组织）
+kaulac pkg publish --dry-run                # 只打印计划，零写入
+kaulac pkg publish --force                  # 覆盖已存在但指向别处的同版本 tag
+```
+
+发布流程与约定：
+
+1. 读取包目录 `kaula.json` 的 `name` / `version` / `description`；
+2. 版本确定顺序：`--tag` > `kaula.json "version"` > 仓库最近一次 `git describe --tags`；
+3. 对每个目标源：探测仓库 → 不存在则经平台 API 建仓（组织或个人命名空间）→
+   `git push` 代码与 `v<version>` tag → `git ls-remote` 复核；
+4. 幂等：远端已有同版本 tag 且指向当前 HEAD → 跳过该源（`up-to-date`）；
+5. 冲突：同版本 tag 已指向别的 commit → 报错，须 `--force` 覆盖；
+6. 鉴权：`--gitee-token` / `--github-token` > 环境变量
+   `KAULA_GITEE_TOKEN` / `KAULA_GITHUB_TOKEN` > `~/.kaula/config.json` 的
+   `gitee_token` / `github_token`；
+7. token 在日志/输出中一律打码（`***`），不落盘到远端 URL。
+
+curl 版本约定：库通过 git tag `v<major.minor.patch>` 发布版本，消费者用
+`kaulac pkg add` 或 `kaula.json dependencies` 按 semver 约束拉取。
 
 ## 十五、工作空间 (workspace)
 
