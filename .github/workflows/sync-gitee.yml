@@ -2,6 +2,8 @@ name: Sync release snapshot to Gitee
 
 # 目标：GitHub 发布 release / 新打 tag 时，自动把该 tag 的仓库快照 + release 产物同步到 Gitee。
 # 提交路径：把本文件放到 GitHub 主仓 .github/workflows/sync-gitee.yml
+# 说明：GitHub 的 release.yml 用 GITHUB_TOKEN 创建 release 不会触发本工作流的 release:published 事件，
+#       因此本工作流以 push:tags 为主要触发器，并轮询等待 GitHub release（含产物）就绪后再同步。
 
 on:
   release:
@@ -46,26 +48,37 @@ jobs:
           git commit -m "release $TAG (snapshot)"
           git tag -f "$TAG"
 
-      - name: Push tag + snapshot to Gitee
+      - name: Push tag + snapshot to Gitee (force to drop full history)
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          git push "https://x-access-token:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" \
+          git push --force "https://x-access-token:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" \
             "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      - name: Wait for GitHub release to be published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # release.yml 仍在构建产物时 release 尚未发布；最多等待 40 分钟
+          for i in $(seq 1 80); do
+            RELEASE=$(curl -sf -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" || true)
+            if [ -n "$RELEASE" ]; then
+              echo "$RELEASE" > /tmp/github_release.json
+              echo "GitHub release ready for $TAG"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Timeout waiting for GitHub release $TAG" >&2
+          exit 1
 
       - name: Sync GitHub release assets to Gitee
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          GH_TOKEN: ${{ github.token }}
         run: |
-          # 纯打 tag（非 release）时无产物，跳过
-          RELEASE=$(curl -sf -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" || true)
-          if [ -z "$RELEASE" ]; then
-            echo "No GitHub release for $TAG, skip assets"; exit 0
-          fi
-
-          # 在 Gitee 创建/更新 release（tag 已推送，必须先有 tag）
+          RELEASE=$(cat /tmp/github_release.json)
+          # 在 Gitee 创建 release（tag 已强制推送，tag 必须先存在）
           GITEE_RELEASE=$(curl -s -X POST "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
             -H "Content-Type: application/json" \
             -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Released from ${GITHUB_REPOSITORY}\",\"access_token\":\"${GITEE_TOKEN}\"}")
