@@ -40,24 +40,32 @@ class ReleasePackager:
         version_script = self.project_root / "scripts" / "version.py"
         if version_script.exists():
             result = subprocess.run(
-                [sys.executable, str(version_script), "--release"],
+                [sys.executable, str(version_script), "--release", "--from-file"],
                 capture_output=True, text=True, cwd=str(self.project_root)
             )
             if result.returncode == 0:
                 return result.stdout.strip()
-        return "v1.0.0"
+            raise SystemExit(
+                "获取版本号失败（构建生成的 compiler/version.json 不可用）：\n"
+                + (result.stderr or result.stdout).strip()
+            )
+        raise SystemExit("找不到 scripts/version.py，无法获取版本号")
 
     def get_snapshot(self) -> str:
         """获取快照版本号"""
         version_script = self.project_root / "scripts" / "version.py"
         if version_script.exists():
             result = subprocess.run(
-                [sys.executable, str(version_script), "--snapshot"],
+                [sys.executable, str(version_script), "--snapshot", "--from-file"],
                 capture_output=True, text=True, cwd=str(self.project_root)
             )
             if result.returncode == 0:
                 return result.stdout.strip()
-        return "unknown"
+            raise SystemExit(
+                "获取快照版本号失败（构建生成的 compiler/version.json 不可用）：\n"
+                + (result.stderr or result.stdout).strip()
+            )
+        raise SystemExit("找不到 scripts/version.py，无法获取快照版本号")
 
     def get_platform_info(self) -> tuple:
         """获取平台信息: (name, arch, ext)"""

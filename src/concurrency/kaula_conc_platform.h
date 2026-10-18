@@ -422,7 +422,16 @@ static inline int kaula_p_event_create(kaula_p_event* out) {
      */
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
+#if defined(__APPLE__) && defined(__MACH__)
+    /*
+     * macOS 没有 pthread_condattr_setclock（POSIX 可选接口，Darwin 未实现），
+     * 条件变量只能用默认的 CLOCK_REALTIME。等待侧因此改用 REALTIME 计算
+     * 绝对截止时间（见 kaula_p_cond_deadline），语义仍是「相对 timeout_ns」：
+     * NTP/手动改时间只会影响这一次等待的长度，不会让条件变量永久不醒。
+     */
+#else
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+#endif
     int rc = pthread_cond_init(&out->c, &attr);
     pthread_condattr_destroy(&attr);
     if (rc != 0) {
@@ -455,13 +464,33 @@ static inline void kaula_p_event_reset(kaula_p_event* e) {
     pthread_mutex_unlock(&e->m);
 }
 
+/*
+ * 由「相对超时」算出条件变量等待用的「绝对截止时间」。
+ *
+ * 关键：绝对时间必须与上面 condattr 选择的时钟一致，否则
+ * pthread_cond_timedwait 会把截止时间解释到另一个时基上 ——
+ * 要么立刻超时（永远等不到唤醒），要么睡过头（调度器看起来"挂死"）。
+ *
+ *   Linux  : condattr 挂在 CLOCK_MONOTONIC，与 kaula_p_now_ns() 同基准
+ *   macOS  : 没有 pthread_condattr_setclock，只能用默认的 CLOCK_REALTIME
+ *
+ * 两条路的入参都是相对的 timeout_ns，因此语义完全一致。
+ */
+static inline void kaula_p_cond_deadline(uint64_t timeout_ns, struct timespec* ts) {
+#if defined(__APPLE__) && defined(__MACH__)
+    clock_gettime(CLOCK_REALTIME, ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, ts);   /* 与 condattr 及 kaula_p_now_ns 一致 */
+#endif
+    ts->tv_sec  += (time_t)(timeout_ns / 1000000000ULL);
+    ts->tv_nsec += (long)(timeout_ns % 1000000000ULL);
+    if (ts->tv_nsec >= 1000000000L) { ts->tv_sec++; ts->tv_nsec -= 1000000000L; }
+}
+
 /* 返回 1 = 被唤醒，0 = 超时 */
 static inline int kaula_p_event_wait(kaula_p_event* e, uint64_t timeout_ns) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);  /* 与 condattr 及 kaula_p_now_ns 一致 */
-    ts.tv_sec  += (time_t)(timeout_ns / 1000000000ULL);
-    ts.tv_nsec += (long)(timeout_ns % 1000000000ULL);
-    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    kaula_p_cond_deadline(timeout_ns, &ts);
 
     int rc;
     pthread_mutex_lock(&e->m);

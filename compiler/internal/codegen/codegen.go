@@ -2223,7 +2223,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		allIncludes.WriteString("#if defined(_WIN32) || defined(_WIN64)\n")
 		allIncludes.WriteString("#ifndef _KAULA_FLTUSED\n")
 		allIncludes.WriteString("#define _KAULA_FLTUSED\n")
-		allIncludes.WriteString("int _fltused = 0;\n")
+		// selectany（COMDAT 弱定义）：多 TU 构建下每个 TU 都带这一段，
+		// 普通强定义会让 lld-link 报 "duplicate symbol: _fltused"；selectany 让
+		// 链接器任选一份、其余丢弃，语义与 MSVC 头文件一致。
+		allIncludes.WriteString("#if defined(__GNUC__) && !defined(__clang__)\n")
+		allIncludes.WriteString("__attribute__((selectany)) int _fltused = 0;\n")
+		allIncludes.WriteString("#else\n")
+		allIncludes.WriteString("__declspec(selectany) int _fltused = 0;\n")
+		allIncludes.WriteString("#endif\n")
 		allIncludes.WriteString("#endif\n")
 		allIncludes.WriteString("#endif\n")
 	} else {
@@ -2242,7 +2249,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			allIncludes.WriteString("#define itoa K_itoa\n")
 			allIncludes.WriteString("#ifndef _KAULA_FLTUSED\n")
 			allIncludes.WriteString("#define _KAULA_FLTUSED\n")
-			allIncludes.WriteString("int _fltused = 0;\n")
+			// selectany（COMDAT 弱定义）：多 TU 构建下每个 TU 都带这一段，
+			// 普通强定义会让 lld-link 报 "duplicate symbol: _fltused"；selectany 让
+			// 链接器任选一份、其余丢弃，语义与 MSVC 头文件一致。
+			allIncludes.WriteString("#if defined(__GNUC__) && !defined(__clang__)\n")
+			allIncludes.WriteString("__attribute__((selectany)) int _fltused = 0;\n")
+			allIncludes.WriteString("#else\n")
+			allIncludes.WriteString("__declspec(selectany) int _fltused = 0;\n")
+			allIncludes.WriteString("#endif\n")
 			allIncludes.WriteString("#endif\n")
 			allIncludes.WriteString("#endif\n")
 		}
