@@ -137,12 +137,20 @@ python scripts/version.py --release
 # 从 Git 仓库添加
 kaulac pkg add https://github.com/nicbarker/clay.git
 
+# 从 HTTP(S) 归档添加（多线程并发下载 + 自动解压）
+kaulac pkg add https://example.com/releases/mylib-1.2.3.tar.gz
+
 # 从本地路径添加
 kaulac pkg add ../my-kaula-lib --name mylib
 
 # 列出已安装的包
 kaulac pkg list
 ```
+
+`pkg add` 自动识别 HTTP(S) 归档（`.tar.gz` / `.tgz` / `.tar` / `.zip`），底层走 **Range 分片并发下载**
+（worker 池，默认 `min(16, CPU 核数)`，可用 `-j <n>` 或环境变量 `KAULAC_DL_CONCURRENCY` 调整），
+再安全解压、自动分析与构建。服务器不支持 Range 时自动退化为单连接流式下载；分片逐段重试、
+失败清理临时文件，保证数据收敛、不留半成品，并做 sha256/大小双重校验。
 
 ### 项目依赖
 
@@ -167,7 +175,7 @@ kaulac pkg list
 - **Git 仓库**：对象格式，指定 git URL、标签、分支或 commit
 
 ```bash
-# 拉取依赖
+# 拉取依赖（多依赖并行，默认并发 8）
 kaulac pkg fetch
 
 # 更新依赖
@@ -176,6 +184,9 @@ kaulac pkg update
 # 查看锁状态
 kaulac pkg lock
 ```
+
+`pkg fetch` / `pkg update` 用 worker 池**并发拉取多个依赖**（默认 8，环境变量
+`KAULAC_FETCH_CONCURRENCY` 调整，上限 32），结果仍按声明顺序输出，保证确定性。
 
 ### 本地路径覆盖
 

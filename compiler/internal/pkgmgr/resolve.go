@@ -6,18 +6,73 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"sync"
 
 	"kaula/internal/config"
 )
 
 // ResolveResult 单个依赖的解析结果
 type ResolveResult struct {
-	Name     string
-	Version  string
-	Dir      string // 缓存中的包目录（含 src/<version> 子结构，供 pkglib 加载）
-	FromLock bool   // 是否直接命中项目锁（未联网）
-	FromPatch bool  // 是否来自本地路径覆盖（patches）
-	Source   LockSource // 解析来源
+	Name      string
+	Version   string
+	Dir       string     // 缓存中的包目录（含 src/<version> 子结构，供 pkglib 加载）
+	FromLock  bool       // 是否直接命中项目锁（未联网）
+	FromPatch bool       // 是否来自本地路径覆盖（patches）
+	Source    LockSource // 解析来源
+}
+
+// pkgFetchConcurrency 多依赖并发拉取的 worker 并发度。
+func pkgFetchConcurrency() int {
+	if v := os.Getenv("KAULAC_FETCH_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 32 {
+			return n
+		}
+	}
+	return 8
+}
+
+// fetchResult 单依赖拉取的结果槽。
+type fetchResult struct {
+	name string
+	fr   *FetchResult
+	err  error
+}
+
+// fetchAllConcurrent 用 worker 池并发执行 fetchFn，返回与 names 同序的结果槽。
+// 并发度受 pkgFetchConcurrency 限制；不提前取消（保证已开始的任务收敛），
+// 但第一个错误会在全部任务完成后统一返回。
+func fetchAllConcurrent(names []string, fetchFn func(name string) (*FetchResult, error)) []fetchResult {
+	slots := make([]fetchResult, len(names))
+	if len(names) == 0 {
+		return slots
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, pkgFetchConcurrency())
+	for i, name := range names {
+		slots[i].name = name
+		wg.Add(1)
+		go func(idx int, name string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			fr, err := fetchFn(name)
+			slots[idx].fr = fr
+			slots[idx].err = err
+		}(i, name)
+	}
+	wg.Wait()
+	return slots
+}
+
+// firstError 返回结果槽中第一个非 nil 错误。
+func firstError(slots []fetchResult) error {
+	for _, s := range slots {
+		if s.err != nil {
+			return s.err
+		}
+	}
+	return nil
 }
 
 // PatchConfig 本地路径覆盖配置（与 config.PatchConfig 对应）
@@ -134,6 +189,7 @@ func ResolveDependencies(registry string, deps map[string]config.Dependency, pat
 
 // FetchDependencies 强制联网解析所有依赖（忽略锁缓存）。
 // 用于 `kaulac pkg fetch` 命令：显式联网拉取最新版本。
+// 多依赖并发拉取（worker 池，默认 8 并发），输出按键排序保持确定性。
 func FetchDependencies(registry string, deps map[string]config.Dependency, projectDir string) ([]ResolveResult, *ProjectLock, error) {
 	results := []ResolveResult{}
 	lock, err := LoadProjectLock(projectDir)
@@ -150,43 +206,40 @@ func FetchDependencies(registry string, deps map[string]config.Dependency, proje
 	}
 	sort.Strings(names)
 
-	for _, name := range names {
+	// 多依赖并发拉取：worker 池 + 有序结果槽
+	slots := fetchAllConcurrent(names, func(name string) (*FetchResult, error) {
 		dep := deps[name]
-
-		var fr *FetchResult
-		var err error
-
-		// 根据依赖类型选择不同的获取方式
 		if dep.IsGitDependency() {
-			// git 依赖：从指定仓库获取
-			fr, err = FetchGitDependency(name, dep)
-		} else {
-			// 版本依赖：从注册表获取
-			constraint := dep.GetVersion()
-			fr, err = Fetch(registry, name, constraint)
+			return FetchGitDependency(name, dep)
 		}
+		return Fetch(registry, name, dep.GetVersion())
+	})
+	if err := firstError(slots); err != nil {
+		return nil, nil, err
+	}
 
-		if err != nil {
-			return nil, nil, fmt.Errorf("fetch dependency %s: %w", name, err)
+	for i, name := range names {
+		fr := slots[i].fr
+		if fr == nil {
+			return nil, nil, fmt.Errorf("fetch dependency %s: no result recorded", name)
 		}
-		lock.SetPackage(name, fr.Version, LockSourceFetch, registry)
-		src := "fetched"
-		if fr.Source == "cache" {
-			src = "cached"
-		}
-		fmt.Printf("[pkg] %s %s (%s)\n", fr.Name, fr.Version, src)
-		results = append(results, ResolveResult{
+		r := ResolveResult{
 			Name:    fr.Name,
 			Version: fr.Version,
 			Dir:     fr.Dir,
 			Source:  LockSourceFetch,
-		})
+		}
+		results = append(results, r)
+		lock.SetPackage(name, r.Version, LockSourceFetch, registry)
+		src := "fetched"
+		fmt.Printf("[pkg] %s %s (%s)\n", r.Name, r.Version, src)
 	}
 	return results, lock, nil
 }
 
 // UpdateDependencies 联网更新依赖到满足约束的最新版本。
 // 与 FetchDependencies 的区别：Update 会删除旧版本缓存，强制拉取最新匹配版本。
+// 多依赖并发拉取（worker 池），输出按键排序保持确定性。
 func UpdateDependencies(registry string, deps map[string]config.Dependency, projectDir string) ([]ResolveResult, *ProjectLock, error) {
 	results := []ResolveResult{}
 	lock, err := LoadProjectLock(projectDir)
@@ -208,36 +261,35 @@ func UpdateDependencies(registry string, deps map[string]config.Dependency, proj
 	}
 	sort.Strings(names)
 
+	// 先清空旧缓存（不并发：目录删除与克隆互斥）
 	for _, name := range names {
-		dep := deps[name]
-		oldVer := lock.GetVersion(name)
-
-		// 清除旧版本缓存，强制拉取最新
 		dst := pkgDir(root, name)
 		if locked, _ := LoadResolved(root, name); locked != nil {
-			// 删除旧的 resolved 锁，让 Fetch 重新拉取
 			_ = os.Remove(lockFile(root, name))
-			// 如果有缓存目录，也删除以强制重新克隆
 			_ = os.RemoveAll(dst)
 		}
+	}
 
-		var fr *FetchResult
-		var err error
-
-		// 根据依赖类型选择不同的获取方式
+	// 多依赖并发拉取：worker 池 + 有序结果槽
+	slots := fetchAllConcurrent(names, func(name string) (*FetchResult, error) {
+		dep := deps[name]
 		if dep.IsGitDependency() {
-			// git 依赖：从指定仓库获取
-			fr, err = FetchGitDependency(name, dep)
-		} else {
-			// 版本依赖：从注册表获取
-			constraint := dep.GetVersion()
-			fr, err = Fetch(registry, name, constraint)
+			return FetchGitDependency(name, dep)
 		}
+		return Fetch(registry, name, dep.GetVersion())
+	})
 
+	for i, name := range names {
+		fr := slots[i].fr
+		err := slots[i].err
 		if err != nil {
 			return nil, nil, fmt.Errorf("update dependency %s: %w", name, err)
 		}
+		if fr == nil {
+			return nil, nil, fmt.Errorf("update dependency %s: no result", name)
+		}
 
+		oldVer := lock.GetVersion(name)
 		source := LockSourceUpdate
 		if oldVer == fr.Version {
 			source = LockSourceFetch // 版本没变，不算真正更新

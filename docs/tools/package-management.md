@@ -1,12 +1,15 @@
 # 包管理
 
-Kaula 编译器内置包管理工具，支持从 Git 仓库或本地路径添加第三方库，自动分析 C/C++ 头文件并构建静态库。
+Kaula 编译器内置包管理工具，支持从 Git 仓库、HTTP(S) 归档或本地路径添加第三方库，自动分析 C/C++ 头文件并构建静态库。下载通过**多线程并发**完成，大归档与多依赖场景下显著提速。
 
 ## 快速开始
 
 ```bash
 # 从 Git 仓库添加 C 库
 kaulac pkg add https://github.com/nicbarker/clay.git
+
+# 从 HTTP(S) 归档添加（多线程并发下载 + 自动解压）
+kaulac pkg add https://example.com/releases/mylib-1.2.3.tar.gz
 
 # 从本地路径添加 Kaula 包
 kaulac pkg add ../my-kaula-lib --name mylib
@@ -19,13 +22,13 @@ kaulac pkg list
 
 | 命令 | 说明 |
 |------|------|
-| `kaulac pkg add <url-or-path>` | 添加包到 pkglib（Git 仓库或本地路径） |
+| `kaulac pkg add <url-or-path> [-j <n>]` | 添加包到 pkglib（Git 仓库、HTTP(S) 归档或本地路径） |
 | `kaulac pkg build <name> [--force]` | 构建指定包（C/C++ 库） |
 | `kaulac pkg analyze <name>` | 重新分析包并生成 JSON 配置 |
 | `kaulac pkg remove <name>` | 从 pkglib 移除包 |
 | `kaulac pkg list` | 列出已安装的包 |
-| `kaulac pkg fetch` | 强制联网拉取所有项目依赖 |
-| `kaulac pkg update [name]` | 更新依赖到最新版本 |
+| `kaulac pkg fetch` | 强制联网拉取所有项目依赖（多依赖并发） |
+| `kaulac pkg update [name]` | 更新依赖到最新版本（多依赖并发） |
 | `kaulac pkg lock` | 显示 kaula.lock 锁状态 |
 
 ## 添加包
@@ -49,6 +52,33 @@ kaulac pkg add https://github.com/user/lib.git --ref v1.2.3
    - **C/C++ 源码** → 分析头文件生成 JSON 配置 → 编译静态库
    - **Kaula 源码** → 标记为 kaula 包（编译时由主程序 import）
    - **纯头文件** → 仅生成配置
+
+### 从 HTTP(S) 归档
+
+`pkg add` 自动识别指向**已知归档**的 HTTP(S) URL（`.tar.gz` / `.tgz` / `.tar` / `.zip`），
+走**多线程并发下载**，不再依赖 git 环境：
+
+```bash
+# 下载 + 解压 + 自动分析/构建静态库（包名从 URL 推断）
+kaulac pkg add https://example.com/releases/mylib-1.2.3.tar.gz
+
+# 显式指定包名
+kaulac pkg add https://example.com/releases/mylib-1.2.3.tar.gz --name mylib
+
+# 指定分片并发数（默认 min(16, CPU 核数)，上限 64）
+kaulac pkg add https://example.com/releases/big-1.0.0.zip -j 8
+```
+
+加包流程：
+1. **探测**：HEAD 请求解析 `Content-Length` 与 `Accept-Ranges`（拒绝 HEAD 的服务器自动回退 `Range: bytes=0-0` GET 探测）
+2. **分片并发下载**：服务器支持 Range 时按并发度切分文件（分片对齐 64KB），worker 池分别下载到临时文件后按序合并
+3. **退化**：服务器不支持 Range 或长度未知 → 自动单连接流式下载（功能等价，仅无并发加速）
+4. **校验**：分片大小逐段核对 + 全文件 sha256 计算结果一致才落盘
+5. **安全解压**：`tar.gz` / `tar` / `zip` 解压到 pkglib，拒绝 `../` 路径穿越、绝对路径与符号链接逃逸
+6. **收尾**：归档被单一目录包裹时（如 `mylib-1.2.3/`）自动上移内容到包根；随后按普通包流程自动分析/构建
+
+> 判定规则：URL 以 `http(s)://` 开头**且**路径带已知归档扩展名 → HTTP 归档下载；
+> 其他 URL（`.git` 结尾或无归档扩展名）仍走 git clone 路径。归档下载完即删除临时文件，不占用缓存空间。
 
 ### 从本地路径
 
@@ -149,6 +179,8 @@ kaulac --online main.kl
 kaulac pkg fetch
 ```
 
+多个依赖之间也并行拉取（worker 池，默认并发 8），输出仍按声明顺序排列，保证确定性。
+
 ### 更新依赖
 
 ```bash
@@ -157,6 +189,20 @@ kaulac pkg update
 
 # 更新单个依赖
 kaulac pkg update webview
+```
+
+同样并发拉取；任一依赖失败会在全部任务收敛后统一报错，不会留下部分更新。
+
+### 并发度环境变量
+
+| 环境变量 | 控制对象 | 默认值 | 说明 |
+|----------|----------|--------|------|
+| `KAULAC_DL_CONCURRENCY` | 单文件分片下载并发 | `min(16, CPU 核数)` | 上限 64；`pkg add -j <n>` 优先级更高 |
+| `KAULAC_FETCH_CONCURRENCY` | 多依赖 fetch/update 并发 | `8` | 上限 32 |
+
+```bash
+# 16 线程下载、16 路并发拉依赖
+KAULAC_DL_CONCURRENCY=16 KAULAC_FETCH_CONCURRENCY=16 kaulac pkg fetch
 ```
 
 ### 查看锁状态
