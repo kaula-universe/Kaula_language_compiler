@@ -271,3 +271,53 @@ pkglib 目录按以下优先级搜索：
 4. `<exeDir>/../pkglib/`
 5. `./pkglib/`（当前目录）
 6. `~/.kaula/pkglib/`（用户主目录）
+
+## 发布库 (publish)
+
+`kaulac pkg publish` 把本地库一键上传到 kaula-universe 双注册源
+（Gitee / GitHub 组织仓库），自动完成建仓 → 推送代码 → 打版本 tag → 远端复核。
+
+```bash
+kaulac pkg publish                          # 发布 ./ 到 gitee + github（默认）
+kaulac pkg publish ../mylib --tag 0.2.0     # 发布指定库与版本
+kaulac pkg publish --target github          # 只发 github
+kaulac pkg publish --org zhe116             # 发到个人命名空间
+kaulac pkg publish --dry-run                # 只打印计划，零写入
+kaulac pkg publish --force                  # 覆盖已存在但指向别处的同版本 tag
+```
+
+### 鉴权
+
+token 优先级：`--gitee-token` / `--github-token` 旗标 > 环境变量
+`KAULA_GITEE_TOKEN` / `KAULA_GITHUB_TOKEN` > 全局配置 `~/.kaula/config.json`：
+
+```json
+{
+  "gitee_token": "...",
+  "github_token": "..."
+}
+```
+
+- Gitee：私人令牌（access_token），在 gitee.com → 设置 → 私人令牌生成；
+- GitHub：Personal Access Token（PAT），需 `repo` 范围（发组织仓库还需
+  `read:org` / `write:org` 或相应 Organization 权限）。
+
+### 版本与 tag 约定
+
+- 版本确定顺序：`--tag` > `kaula.json "version"` > 仓库最近一次
+  `git describe --tags`；
+- 发布时自动打 `v<version>` tag（如 `v0.2.0`）并推送到远端；
+- 幂等：远端已有同版本 tag 且指向当前 HEAD → 跳过；
+- 冲突：同版本 tag 指向别的 commit → 报错，须 `--force`；
+- 消费者用 `kaulac pkg add <url>` 或 `kaula.json dependencies` 按
+  semver 约束拉取已发布的版本。
+
+### 建仓与命名空间
+
+目标仓库不存在时经平台 API 自动创建：
+
+- 默认组织 `kaula-universe`（与拉取侧 `DefaultRegistry` 对齐）；
+- `--org` 可覆盖；指向个人命名空间时自动走个人建仓接口
+  （Gitee `/user/repos`、GitHub `/user/repos`），否则走组织接口；
+- 仓库名取包名（`kaula.json "name"`，缺省为目录名）；
+- 默认分支：Gitee `master` / GitHub `main`（与平台默认一致）。
