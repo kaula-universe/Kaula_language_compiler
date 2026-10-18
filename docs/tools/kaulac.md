@@ -236,7 +236,7 @@ kaulac --online main.kl
 详见 [package-management.md](package-management.md)。
 
 ```bash
-kaulac pkg add <url-or-path> [--name <name>] [--ref <branch>]  # 添加包
+kaulac pkg add <url-or-path> [--name <name>] [--ref <branch>] [-j <n>]  # 添加包
 kaulac pkg build <name> [--force]                                # 构建包
 kaulac pkg analyze <name>                                        # 分析包
 kaulac pkg remove <name>                                         # 移除包
@@ -274,8 +274,29 @@ kaulac pkg publish --force                  # 覆盖已存在但指向别处的�
    `gitee_token` / `github_token`；
 7. token 在日志/输出中一律打码（`***`），不落盘到远端 URL。
 
-curl 版本约定：库通过 git tag `v<major.minor.patch>` 发布版本，消费者用
+发包版本约定：库通过 git tag `v<major.minor.patch>` 发布版本，消费者用
 `kaulac pkg add` 或 `kaula.json dependencies` 按 semver 约束拉取。
+
+### 添加归档 `kaulac pkg add <url>`
+
+`pkg add` 的 `<url-or-path>` 支持三种来源：
+
+| 来源 | 判定规则 | 行为 |
+|------|----------|------|
+| Git 仓库 | `.git` 结尾或非归档 URL | `git clone --depth 1`（双源测速择优） |
+| **HTTP(S) 归档** | `http(s)://` + `.tar.gz`/`.tgz`/`.tar`/`.zip` 扩展名 | **多线程分片并发下载** + 安全解压 + 自动分析/构建 |
+| 本地路径 | 其他 | 引用本地目录（符号链接/直接引用） |
+
+`-j <n>` 指定 HTTP 归档的分片下载并发数（默认 `min(16, CPU 核数)`，上限 64；
+也可用环境变量 `KAULAC_DL_CONCURRENCY` 覆盖）。`pkg fetch` / `pkg update`
+的多依赖拉取并发默认 8（上限 32），可用 `KAULAC_FETCH_CONCURRENCY` 调整。
+
+HTTP 归档下载特性：
+- **Range 分片**：探测服务器能力后按并发度切分，worker 池并发下载后按序合并
+- **自动降级**：服务器不支持 Range/长度未知 → 单连接流式下载
+- **数据收敛**：分片独立重试（指数退避），失败清理临时文件，绝不留半成品
+- **内容校验**：期望大小 + sha256 双重校验，不匹配即失败
+- **安全解压**：拒绝 `../` 穿越、绝对路径与符号链接逃逸；单一目录包裹自动上移
 
 ## 十五、工作空间 (workspace)
 

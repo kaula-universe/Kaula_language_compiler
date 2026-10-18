@@ -63,6 +63,26 @@
   - **验证**：全量 `test/**/*.kl`（116 用例）与改动前基线逐项比对 ——
     编译退出码差异 **0**、运行退出码差异 **0**、16 处 stdout 文本差异
     全部是耗时/线程 ID 等测量值（数值归一后逐字一致）。
+- **`pkg add` HTTP(S) 归档多线程并发下载**：新增一条不依赖 git 环境、直接通过
+  `pkg add <url>` 加包的路由，底层实现 `pkgmgr` 的 Range 分片并发下载 + 安全解压：
+  - **Range 分片**：HEAD 探测 `Content-Length`/`Accept-Ranges`（被拒时回退
+    `Range: bytes=0-0` GET 探测），服务器支持 Range 时按并发度切分文件
+    （分片对齐 64KB，最大 64 并发），worker 池分别下载到临时文件后按序合并
+  - **自动降级**：服务器不支持 Range、长度未知或文件小于 64KB → 自动退化为
+    单连接流式下载（功能等价，仅无并发加速）
+  - **数据收敛**：每分片独立重试（指数退避），分片大小逐段核对；任一失败
+    清理全部临时文件，绝不留半成品
+  - **内容校验**：下载完对整文件做 sha256（`ExpectedSHA256`）与文件大小
+    （`ExpectedSize`）双重校验，不匹配即失败；先探测再比对，长度不符尽早报错
+  - **归档格式**：`tar.gz` / `tgz` / `tar` / `zip`，按内容 magic 优先、扩展名回退识别；
+    解压防路径穿越（拒绝 `../`、绝对路径、符号链接逃逸）；单一目录包裹自动上移内容
+  - **并发度可配**：`pkg add -j <n>` 或环境变量 `KAULAC_DL_CONCURRENCY`
+    （默认 `min(16, GOMAXPROCS)`，上限 64）；`pkgmgr` 新增 `DownloadHTTP` /
+    `DownloadArchive` / `MaxHTTPConcurrency` 等公开入口
+- **`pkg fetch` / `pkg update` 多依赖并发拉取**：`FetchDependencies`/`UpdateDependencies`
+  改用 worker 池并发拉取，结果按声明顺序写入槽位保证确定性；
+  并发度默认 8（环境变量 `KAULAC_FETCH_CONCURRENCY`，上限 32），
+  任一依赖失败在全部任务收敛后统一报错（`fetchAllConcurrent` / `firstError`）。
 
 ### Performance
 - **多 TU 并行编译实测**（40 个库串联、42 个 TU、`-O2`）：

@@ -1,8 +1,9 @@
-﻿package pkgcmd
+package pkgcmd
 
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +113,169 @@ func (t *PkgTarget) AddGitRepo(repoURL, name, ref string) (*PackageInfo, error) 
 	}
 
 	return info, nil
+}
+
+// AddHTTPArchive 多线程并发下载 HTTP(s) 归档包到 pkglib 并自动分析/构建。
+//
+// 与 AddGitRepo 的区别：不依赖本地 git 环境，直接对归档 URL 做多线程分片
+// 并发下载（Range 并发，见 pkgmgr.DownloadArchive），支持 .tar.gz/.tar/.zip。
+// 支持两种归档布局：
+//   - 归档内容被单一目录包裹（mylib/）：解压到 <pkglib>/<name>/.src/ 后使用；
+//   - 归档内容是散落文件：直接解压到 <pkglib>/<name>/。
+//
+// name 为空时从归档文件名推断包名（去掉扩展名与版本号）。
+func (t *PkgTarget) AddHTTPArchive(archiveURL, name string, concurrency int) (*PackageInfo, error) {
+	u, err := url.Parse(archiveURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid archive URL %q: %w", archiveURL, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported scheme %q: only http/https archives are supported", u.Scheme)
+	}
+
+	if name == "" {
+		name = inferNameFromArchiveURL(archiveURL, u)
+	}
+	if name == "" {
+		return nil, fmt.Errorf("cannot infer package name from URL %q; use --name <name>", archiveURL)
+	}
+	dst := filepath.Join(t.Root, name)
+
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return nil, fmt.Errorf("create pkg dir: %w", err)
+	}
+
+	// 从 URL path 提取归档文件名（mylib-1.2.3.tar.gz）；无有效文件名时兜底
+	fileName := ""
+	if p := strings.Trim(u.Path, "/"); p != "" && !strings.Contains(p, ":") {
+		fileName = filepath.Base(p)
+	}
+	if fileName == "" || fileName == "." || fileName == "/" {
+		// URL 无路径（如裸域名）或文件名被误判为主机端口
+		fileName = name + ".tar.gz"
+	}
+	archiveDest := filepath.Join(dst, fileName)
+	fmt.Printf("[pkg] downloading %s (concurrency=%d)...\n", archiveURL, concurrency)
+
+	top, err := pkgmgr.DownloadArchive(pkgmgr.HTTPDownloadRequest{
+		URL:         archiveURL,
+		Dest:        archiveDest,
+		Concurrency: concurrency,
+	}, dst)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", archiveURL, err)
+	}
+
+	// 归档被单一目录包裹时，把内容上移到包根（与 git clone 布局一致）。
+	// 判断标准：top 为解压后在包根下的真实目录。散落文件布局下 top 是
+	// 文件名（如 kaula.json），os.Stat 的 IsDir 检查会挡住，不会误上移。
+	if top != "" && top != "." && top != fileName {
+		wrapped := filepath.Join(dst, top)
+		if fi, err := os.Stat(wrapped); err == nil && fi.IsDir() {
+			if merged, mErr := mergeDirUp(wrapped, dst); mErr == nil && merged {
+				fmt.Printf("[pkg] archive wrapped in %s/, content moved to package root\n", top)
+			}
+		}
+	}
+
+	fmt.Printf("[pkg] %s extracted to %s\n", name, dst)
+
+	info := t.inspectPackage(dst)
+	info.GitURL = archiveURL
+
+	// 自动构建和分析
+	if err := t.autoBuildAndAnalyze(dst, info); err != nil {
+		fmt.Printf("[pkg] warning: auto-build/analyze: %v\n", err)
+	}
+
+	return info, nil
+}
+
+// mergeDirUp 把 srcDir 的全部内容移动到 dst 顶层（相同文件名不覆盖）。
+// 返回是否发生了合并。
+func mergeDirUp(srcDir, dst string) (bool, error) {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return false, err
+	}
+	moved := false
+	for _, e := range entries {
+		srcPath := filepath.Join(srcDir, e.Name())
+		dstPath := filepath.Join(dst, e.Name())
+		if _, serr := os.Lstat(dstPath); serr == nil {
+			// 目标已存在同名条目：跳过（保留现有），避免破坏
+			continue
+		}
+		if err := os.Rename(srcPath, dstPath); err != nil {
+			return moved, err
+		}
+		moved = true
+	}
+	if moved {
+		_ = os.RemoveAll(srcDir)
+	}
+	return moved, nil
+}
+
+// inferNameFromArchiveURL 从归档 URL 推断包名。
+//
+//   - https://x.com/pkg/mylib-1.2.3.tar.gz  -> "mylib"
+//   - 多个路径段取最后一个文件名的包名部分
+//   - 主机:端口形态（裸 URL）返回空串，由调用方要求 --name
+func inferNameFromArchiveURL(archiveURL string, u *url.URL) string {
+	p := strings.Trim(u.Path, "/")
+	if p == "" || strings.Contains(p, ":") {
+		return ""
+	}
+	base := filepath.Base(p)
+	// 剥掉扩展名（.tar.gz 两个段）
+	lower := strings.ToLower(base)
+	for _, ext := range []string{".tar.gz", ".tgz", ".tar", ".zip"} {
+		if strings.HasSuffix(lower, ext) {
+			base = base[:len(base)-len(ext)]
+			break
+		}
+	}
+	// 去掉版本后缀：mylib-1.2.3 -> mylib
+	for _, cand := range []string{base} {
+		if s := stripVersionSuffix(cand); s != cand {
+			return s
+		}
+	}
+	return base
+}
+
+// stripVersionSuffix 去掉包名中的版本后缀：
+func stripVersionSuffix(name string) string {
+	parts := strings.Split(name, "-")
+	if len(parts) < 2 {
+		return name
+	}
+	last := parts[len(parts)-1]
+	if last == "" {
+		return name
+	}
+	if last[0] == 'v' || last[0] == 'V' {
+		last = last[1:]
+	}
+	if last == "" {
+		return name
+	}
+	dots := 0
+	for _, c := range last {
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if c == '.' {
+			dots++
+			continue
+		}
+		return name // 结尾段非版本，不动
+	}
+	if dots > 4 {
+		return name // "1.2.3.4.5" 不视为版本
+	}
+	return strings.Join(parts[:len(parts)-1], "-")
 }
 
 // AddLocalPath 将本地目录链接/复制到 pkglib 并自动分析/构建

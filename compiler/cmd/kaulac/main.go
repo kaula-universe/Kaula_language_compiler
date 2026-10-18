@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,28 @@ func localImportFiles(imp *ast.ImportStatement) []string {
 		return []string{imp.LocalPath}
 	}
 	return nil
+}
+
+// isHTTPArchiveURL 判断 URL 是否指向一个 HTTP(S) 归档（而非 git 仓库）。
+// 判定规则：http(s) 协议 + 已知归档扩展名（.tar.gz/.tgz/.tar/.zip）。
+// git 仓库 URL（.git 结尾或者没有归档扩展名）仍走 git clone 路径。
+func isHTTPArchiveURL(s string) bool {
+	lower := strings.ToLower(s)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return false
+	}
+	// 去掉 query/fragment 再看扩展名
+	pathPart := s
+	if i := strings.IndexAny(pathPart, "?#"); i >= 0 {
+		pathPart = pathPart[:i]
+	}
+	lowerPath := strings.ToLower(pathPart)
+	for _, ext := range []string{".tar.gz", ".tgz", ".tar", ".zip"} {
+		if strings.HasSuffix(lowerPath, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // localImportTU 一个被 import 的 .kl 文件产出的独立 C 翻译单元。
@@ -1083,9 +1106,25 @@ func main() {
 			if i+1 < len(args) {
 				pkgCmd = args[i+1]
 				i++
-				// 收集 pkg 子命令的其余参数
-				for i+1 < len(args) && len(args[i+1]) > 0 && args[i+1][0] != '-' {
-					pkgArgs = append(pkgArgs, args[i+1])
+				// 收集 pkg 子命令的其余参数。
+				// 既收集位置参数（包名/路径/URL），也收集带值旗标
+				// （--name <v>、--ref <v>、-j <n>）；-j 自身是带值的
+				// 但以 '-' 开头，不能用「非 - 开头」一刀切。
+				for i+1 < len(args) {
+					next := args[i+1]
+					if next == "--name" || next == "--ref" || next == "-j" {
+						pkgArgs = append(pkgArgs, next)
+						i++
+						if i+1 < len(args) {
+							pkgArgs = append(pkgArgs, args[i+1])
+							i++
+						}
+						continue
+					}
+					if len(next) > 0 && next[0] == '-' {
+						break
+					}
+					pkgArgs = append(pkgArgs, next)
 					i++
 				}
 			}
@@ -1205,13 +1244,15 @@ func main() {
 	if pkgCmd != "" {
 		switch pkgCmd {
 		case "add":
-			// kaulac pkg add <git-url> [--name <name>] [--ref <branch>]
+			// kaulac pkg add <git-url-or-http-archive> [--name <name>] [--ref <branch>] [-j <n>]
 			if len(pkgArgs) == 0 {
-				fmt.Println("Usage: kaulac pkg add <git-url-or-path> [--name <name>] [--ref <branch>]")
-				fmt.Println("  Add a package to pkglib from a Git repository or local path.")
+				fmt.Println("Usage: kaulac pkg add <git-url | http(s)-archive-url | local-path> [--name <name>] [--ref <branch>] [-j <n>]")
+				fmt.Println("  Add a package to pkglib from a Git repository, HTTP(S) archive, or local path.")
 				fmt.Println("  Examples:")
 				fmt.Println("    kaulac pkg add https://github.com/user/lib.git")
 				fmt.Println("    kaulac pkg add https://github.com/user/lib.git --name mylib --ref main")
+				fmt.Println("    kaulac pkg add https://example.com/pkg/mylib-1.2.3.tar.gz")
+				fmt.Println("    kaulac pkg add https://example.com/project.zip --name mylib -j 8")
 				fmt.Println("    kaulac pkg add ../local-lib --name mylib")
 				os.Exit(1)
 			}
@@ -1223,6 +1264,7 @@ func main() {
 			source := pkgArgs[0]
 			name := ""
 			ref := ""
+			concurrency := 0 // 0 = 默认
 			for i := 1; i < len(pkgArgs); i++ {
 				if pkgArgs[i] == "--name" && i+1 < len(pkgArgs) {
 					name = pkgArgs[i+1]
@@ -1230,14 +1272,23 @@ func main() {
 				} else if pkgArgs[i] == "--ref" && i+1 < len(pkgArgs) {
 					ref = pkgArgs[i+1]
 					i++
+				} else if pkgArgs[i] == "-j" && i+1 < len(pkgArgs) {
+					if n, perr := strconv.Atoi(pkgArgs[i+1]); perr == nil && n > 0 {
+						concurrency = n
+					}
+					i++
 				}
 			}
 
 			var info *pkgcmd.PackageInfo
-			if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") ||
-				strings.HasPrefix(source, "git://") || strings.HasSuffix(source, ".git") {
+			switch {
+			case isHTTPArchiveURL(source):
+				// HTTP(S) 归档：多线程并发下载 + 解压
+				info, err = target.AddHTTPArchive(source, name, concurrency)
+			case strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") ||
+				strings.HasPrefix(source, "git://") || strings.HasSuffix(source, ".git"):
 				info, err = target.AddGitRepo(source, name, ref)
-			} else {
+			default:
 				info, err = target.AddLocalPath(source, name)
 			}
 			if err != nil {
