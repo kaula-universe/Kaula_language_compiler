@@ -38,6 +38,9 @@
     #include <unistd.h>
 #endif
 #if defined(__APPLE__) && defined(__MACH__)
+    /* <sys/sysctl.h> 会间接拉进 <sys/ucred.h>，后者用 u_int —— 必须先包含
+     * <sys/types.h>，否则报 "unknown type name 'u_int'"。 */
+    #include <sys/types.h>
     #include <sys/sysctl.h>
 #endif
 

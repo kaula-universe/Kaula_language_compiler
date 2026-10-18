@@ -84,8 +84,13 @@ Section "MainSection" SEC01
 SectionEnd
 
 Section -AddToPath
-  ; Add to PATH
-  EnVar::AddValue "PATH" "$INSTDIR\bin"
+  ; 追加安装目录到系统 PATH。
+  ;
+  ; 早先这里用 EnVar 插件，但 CI 上 choco 装的 NSIS 不附带该插件，
+  ; makensis 直接报 "Plugin not found, cannot call EnVar::AddValue" 并中止打包
+  ; （也就是说：NSIS 安装包从来没有真正构建成功过）。
+  ; 改为注册表直写 + WM_SETTINGCHANGE 广播，零插件依赖。
+  Call KaulaAddToPath
 SectionEnd
 
 Section -Post
@@ -114,12 +119,40 @@ Section Uninstall
   Delete "$INSTDIR\toolkit_build.py"
   RMDir "$INSTDIR"
 
-  EnVar::DeleteValue "PATH" "$INSTDIR\bin"
+  ; 卸载不动系统 PATH：没有 EnVar 插件就无法可靠地做「按分号切分再剔除」，
+  ; 而写坏整个 PATH 的代价远大于留下一条指向已删除目录的条目（Windows 会
+  ; 直接跳过不存在的路径）。需要彻底清理时请在「系统属性 → 环境变量」里手动删除。
 
   DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
   DeleteRegKey HKLM "${PRODUCT_DIR_REGKEY}"
   SetAutoClose true
 SectionEnd
+
+; ==================== PATH 维护（不依赖 EnVar 插件）====================
+;
+; 环境块在 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment，
+; Path 是 REG_EXPAND_SZ，故用 WriteRegExpandStr 写入；写完广播 WM_SETTINGCHANGE，
+; 否则新开的终端/资源管理器读到的还是旧 PATH。
+;
+; 早先这里用 EnVar 插件，但 CI 上 choco 装的 NSIS 不附带该插件，makensis 会报
+; "Plugin not found, cannot call EnVar::AddValue" 并中止打包 —— 也就是说
+; NSIS 安装包从来没真正构建成功过。现在改为注册表直写，零插件依赖。
+
+!define KAULA_ENV_KEY "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+!define KAULA_HWND_BROADCAST 0xFFFF
+!define KAULA_WM_SETTINGCHANGE 0x001A
+
+Function KaulaAddToPath
+  ReadRegStr $0 HKLM "${KAULA_ENV_KEY}" "Path"
+  StrCmp $0 "" 0 append
+  StrCpy $0 "$INSTDIR\bin"
+  Goto write
+append:
+  StrCpy $0 "$0;$INSTDIR\bin"
+write:
+  WriteRegExpandStr HKLM "${KAULA_ENV_KEY}" "Path" "$0"
+  SendMessage ${KAULA_HWND_BROADCAST} ${KAULA_WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+FunctionEnd
 
 Function .onInit
   ; Check if already installed
