@@ -147,8 +147,26 @@ type FetchResult struct {
 	Source  string // "cache" | "fetched"
 }
 
+// printProbeSummary 打印多源测速汇总，并提示最终选中的最快源。
+// probes 必须已按延迟升序排序（probeBestSource 的返回约定）。
+func printProbeSummary(probes []sourceProbe) {
+	fmt.Printf("[pkg] probing %d registries for %s...\n", len(probes), filepath.Base(probes[0].repoURL))
+	for i, p := range probes {
+		if p.err != nil {
+			fmt.Printf("  [%d] %s  FAIL: %v\n", i+1, p.repoURL, p.err)
+		} else {
+			fmt.Printf("  [%d] %s  %s  (%d tags)\n", i+1, p.repoURL, describeLatency(p.latency), len(p.tags))
+		}
+	}
+	if best := pickBestSource(probes); best.err == nil {
+		fmt.Printf("[pkg] fastest source: %s (%s)\n", best.repoURL, describeLatency(best.latency))
+	}
+}
+
 // Fetch 解析并拉取一个包依赖。
-// 流程: 已解析锁满足约束 -> 复用; 否则列出远端 tags -> semver 选最高 -> 浅克隆 -> 写锁。
+// 流程: 已解析锁满足约束 -> 复用; 否则并发测速候选注册源（gitee/github 镜像），
+// 选最快源列出 tags -> semver 选最高 -> 浅克隆 -> 写锁。
+// 选中源克隆失败时自动降级到下一个候选源，全部失败才报错。
 // 返回包所在目录（供 pkglib 加载）与解析结果。
 func Fetch(registry, name, constraintStr string) (*FetchResult, error) {
 	root, err := CacheRoot()
@@ -170,44 +188,66 @@ func Fetch(registry, name, constraintStr string) (*FetchResult, error) {
 		}
 	}
 
-	// 2. 列远端 tags 并匹配
-	repoURL := RegistryURL(registry, name)
-	tags, err := ListTags(repoURL)
-	if err != nil {
-		return nil, fmt.Errorf("dependency %s: %w", name, err)
+	// 2. 并发测速候选源，按延迟排序选择最快源
+	candidates := RegistryCandidates(registry)
+	repoURLs := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		repoURLs = append(repoURLs, RegistryURL(c, name))
 	}
-	if len(tags) == 0 {
-		return nil, fmt.Errorf("dependency %s: no version tags in %s (tag versions as v1.2.3)", name, repoURL)
+	probes, perr := probeBestSource(gitProbe, repoURLs)
+	if perr != nil {
+		return nil, fmt.Errorf("dependency %s: %w", name, perr)
 	}
-	best := semver.BestMatch(constraint, tags)
-	if best == "" {
-		return nil, fmt.Errorf("dependency %s: no tag in %s satisfies constraint %q (available: %s)",
-			name, repoURL, constraintStr, strings.Join(tags, ", "))
+	if len(candidates) > 1 {
+		printProbeSummary(probes)
 	}
-	norm := strings.TrimPrefix(best, "v")
-	norm = strings.TrimPrefix(norm, "V")
 
-	// 3. 拉取到缓存（单版本布局: 目录已存在且版本不同 -> 删旧重克隆）
+	// 3. 按测速顺序（最快优先）尝试: semver 匹配 -> 浅克隆，失败降级下一源
 	dst := pkgDir(root, name)
-	fmt.Printf("[pkg] fetching %s@%s from %s\n", name, norm, repoURL)
-	if locked, _ := LoadResolved(root, name); locked != nil && locked.Version != norm {
-		_ = os.RemoveAll(dst)
-	}
-	if err := CloneTag(repoURL, best, dst); err != nil {
-		return nil, fmt.Errorf("dependency %s: %w", name, err)
-	}
+	var lastErr error
+	for _, p := range probes {
+		if p.err != nil {
+			lastErr = p.err
+			continue
+		}
+		if len(p.tags) == 0 {
+			lastErr = fmt.Errorf("no version tags in %s (tag versions as v1.2.3)", p.repoURL)
+			continue
+		}
+		best := semver.BestMatch(constraint, p.tags)
+		if best == "" {
+			lastErr = fmt.Errorf("no tag in %s satisfies constraint %q (available: %s)",
+				p.repoURL, constraintStr, strings.Join(p.tags, ", "))
+			continue
+		}
+		norm := strings.TrimPrefix(best, "v")
+		norm = strings.TrimPrefix(norm, "V")
 
-	// 4. 写解析锁
-	commit := ""
-	if out, cerr := exec.Command("git", "-C", dst, "rev-parse", "HEAD").CombinedOutput(); cerr == nil {
-		commit = strings.TrimSpace(string(out))
-	}
-	lock := &ResolvedLock{Name: name, Version: norm, Tag: best, Commit: commit}
-	if err := SaveResolved(root, name, lock); err != nil {
-		fmt.Printf("[pkg] warning: failed to write resolved lock: %v\n", err)
-	}
+		fmt.Printf("[pkg] fetching %s@%s from %s (probe: %s)\n", name, norm, p.repoURL, describeLatency(p.latency))
+		if locked, _ := LoadResolved(root, name); locked != nil && locked.Version != norm {
+			_ = os.RemoveAll(dst)
+		}
+		if cerr := CloneTag(p.repoURL, best, dst); cerr != nil {
+			lastErr = cerr
+			// 清掉残留目录，避免污染降级源的克隆
+			_ = os.RemoveAll(dst)
+			fmt.Printf("[pkg] warning: clone from %s failed: %v (falling back to next source)\n", p.repoURL, cerr)
+			continue
+		}
 
-	return &FetchResult{Name: name, Version: norm, Tag: best, Dir: dst, Source: "fetched"}, nil
+		// 4. 写解析锁
+		commit := ""
+		if out, cErr := exec.Command("git", "-C", dst, "rev-parse", "HEAD").CombinedOutput(); cErr == nil {
+			commit = strings.TrimSpace(string(out))
+		}
+		lock := &ResolvedLock{Name: name, Version: norm, Tag: best, Commit: commit}
+		if err := SaveResolved(root, name, lock); err != nil {
+			fmt.Printf("[pkg] warning: failed to write resolved lock: %v\n", err)
+		}
+
+		return &FetchResult{Name: name, Version: norm, Tag: best, Dir: dst, Source: "fetched"}, nil
+	}
+	return nil, fmt.Errorf("dependency %s: all sources failed: %w", name, lastErr)
 }
 
 // FetchGitDependency 从指定的 git 仓库获取包
