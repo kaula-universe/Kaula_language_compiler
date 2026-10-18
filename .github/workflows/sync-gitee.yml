@@ -10,6 +10,13 @@ on:
     types: [published]
   push:
     tags: ['v*']
+  # 手动补同步：填 tag 名称，用于回填历史版本
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to sync (e.g. v1.0.195)'
+        required: false
+        default: ''
 
 # 同一 tag 并发去重：release 和 push 事件可能同时触发
 concurrency:
@@ -29,7 +36,9 @@ jobs:
         id: tag
         run: |
           TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then TAG="${{ inputs.tag }}"; fi
           if [ -z "$TAG" ]; then TAG="${{ github.ref_name }}"; fi
+          if [ -z "$TAG" ]; then echo "No tag resolved"; exit 1; fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "Syncing tag: $TAG"
 
