@@ -305,7 +305,11 @@ def sync_repo(meta, exclude, apply=True):
         if apply:
             rc, _, err = run_git(["push"] + args, cwd=tmp)
             if rc != 0:
-                log(f"[PUSH FAIL] {name}: {label}: {err[:200]}")
+                # tag 已存在同类推送是无害幂等，视为成功
+                if "already exists" in err:
+                    log(f"  (noop) {label}: 目标已存在，跳过")
+                    return True
+                log(f"[PUSH FAIL] {name}: {label}: {err[:300]}")
                 return False
         else:
             log(f"  (dry-run) push {label}")
@@ -355,6 +359,9 @@ def sync_repo(meta, exclude, apply=True):
                 changed = True
         else:
             # 分叉：在临时 worktree 中尝试自动合并（--allow-unrelated-histories）
+            # 先确保 runner 有提交身份（merge 需要创建 merge commit）
+            run_git(["config", "user.name", "kaula-sync-bot"], cwd=tmp)
+            run_git(["config", "user.email", "bot@kaula.local"], cwd=tmp)
             mb = f"merge-{gb}-{now_ts()}"
             wt = os.path.join(WORKDIR, f"wt-{name}-{mb}")
             # 先解析出目标 commit SHA，避免用 remote-tracking ref 造成 tracking 歧义
@@ -362,7 +369,7 @@ def sync_repo(meta, exclude, apply=True):
             target = sha if (rc == 0 and sha) else gh_b
             rc, _, err = run_git(["worktree", "add", "-b", mb, wt, target], cwd=tmp)
             if rc != 0:
-                log(f"[MERGE CONFLICT] {name}: 分支 {gb} worktree 创建失败: {err[:300]}")
+                log(f"[MERGE SKIP] {name}: 分支 {gb} worktree 创建失败: {err[:300]}")
                 continue
             rc, _, err = run_git(["merge", gb, "--allow-unrelated-histories", "--no-edit"], cwd=wt)
             if rc == 0:
@@ -374,7 +381,13 @@ def sync_repo(meta, exclude, apply=True):
                     log(f"[MERGE OK] {name}: 分支 {gb} 两端分叉已自动合并并推送")
                     changed = True
             else:
-                log(f"[MERGE CONFLICT] {name}: 分支 {gb} 存在冲突，跳过(不覆盖): {err[:300]}")
+                # 需要人工解决的才是 CONFLICT；环境性失败（如需身份）单独报告
+                low = err.lower()
+                if "committer identity unknown" in low or "please tell me who you are" in low \
+                        or "user.name" in low or "user.email" in low:
+                    log(f"[MERGE ENV] {name}: 分支 {gb} 缺少提交身份，跳过: {err[:300]}")
+                else:
+                    log(f"[MERGE CONFLICT] {name}: 分支 {gb} 存在冲突，跳过(不覆盖): {err[:300]}")
             run_git(["worktree", "remove", "--force", wt], cwd=tmp)
 
     # ---- 仅 GitHub 有分支 -> 补到 Gitee ----
