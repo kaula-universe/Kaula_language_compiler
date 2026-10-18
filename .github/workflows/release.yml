@@ -31,7 +31,12 @@ jobs:
         run: choco install llvm -y
 
       - name: Install NSIS
-        run: choco install nsis -y
+        run: |
+          choco install nsis -y
+          # choco 只写机器级 PATH，当前进程与其后的步骤不会自动继承，
+          # 不显式追加的话下一步 makensis 报 "term is not recognized"。
+          echo "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\Program Files\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Update version
         run: python scripts/version.py --update
@@ -69,7 +74,14 @@ jobs:
           $env:KAULA_VERSION_MAJOR = $major
           $env:KAULA_VERSION_MINOR = $minor
           $env:KAULA_VERSION_PATCH = $patch
-          makensis /DPRODUCT_VERSION=$versionNoV scripts/installers/kaula.nsi
+          # PATH 兜底：choco 装完不一定进当前进程 PATH
+          $makensis = "makensis"
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            foreach ($p in @("C:\Program Files (x86)\NSIS\makensis.exe", "C:\Program Files\NSIS\makensis.exe")) {
+              if (Test-Path $p) { $makensis = $p; break }
+            }
+          }
+          & $makensis /DPRODUCT_VERSION=$versionNoV scripts/installers/kaula.nsi
         env:
           PYTHONIOENCODING: utf-8
 

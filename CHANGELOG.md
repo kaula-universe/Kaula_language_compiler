@@ -137,6 +137,16 @@
 - **打包脚本版本号来源统一**：`build_deb` / `build_dmg` / `build_rpm` /
   `package_release` 一律改用 `version.py --release --from-file`，且拿不到版本时
   **硬失败**，不再静默退化成 `1.0.0` / `v1.0.0` / `unknown`。
+- **`.rpm` 打包必然失败（spec 与脚本不一致）**：spec 声明
+  `Source0: kaula-<ver>.tar.gz` 并跑 `%setup -q`，但脚本从未生成该源码包，
+  `rpmbuild` 报 `No such file or directory ... (%prep)`。本包是"CI 已构建产物"
+  的二进制包，故移除 Source0/`%prep`/`%setup`，并把 `-ba` 改 `-bb`（不再打 SRPM）。
+  另修 `%files` 里 `/usr/local/bin/kaula` 与实际创建的符号链接名 `kaulac` 不符。
+- **macOS 构建失败：`_SC_NPROCESSORS_ONLN` 未声明**（`kaula_conc.c` 用了
+  `sysconf` 但没包含 `<unistd.h>`；Linux 由 pthread.h 间接带入，macOS 不会）。
+- **Windows 打不出 NSIS 安装包**：`choco install nsis` 只写机器级 PATH，
+  后续步骤不继承，`makensis` 报 "The term 'makensis' is not recognized"。
+  现在把 NSIS 目录追加进 `GITHUB_PATH`，并在调用处加 PATH 兜底。
 - **PCH 长期未生效，且一开就全量报错（两处叠加）**：
   - **`-I` 猜测 clang 自动命中 `.gch` 不成立**：gch 自动查找要求文件名与
     `#include` 字面量严格对应，而 `kaula.h.gch` 在 `std-objects/` 下、源码写的是

@@ -52,7 +52,6 @@ Release:        1
 Summary:        Kaula Programming Language
 License:        Apache-2.0
 URL:            https://gitee.com/zhe116/kaula
-Source0:        kaula-{version}.tar.gz
 BuildArch:      x86_64
 
 Requires:       clang >= 10.0, python3 >= 3.8
@@ -65,8 +64,9 @@ runtime overhead.
 This package includes the Kaula compiler, standard library, runtime,
 and development tools.
 
-%prep
-%setup -q
+# 无源码包：这是"CI 已构建产物"的二进制 RPM，文件已由本脚本放进 %{_topdir}/BUILD。
+# 早先这里写了 Source0 + %setup -q，但从未生成过那个 tar.gz，
+# rpmbuild 必然报 "No such file or directory ... (%prep)"。
 
 %build
 # Build is done in CI
@@ -116,7 +116,7 @@ EOF
 %files
 %defattr(-,root,root,-)
 /usr/local/kaula/*
-/usr/local/bin/kaula
+/usr/local/bin/kaulac
 /usr/share/doc/kaula/*
 /usr/share/applications/kaula.desktop
 
@@ -150,7 +150,7 @@ EOF
 
     result = subprocess.run(
         ["rpmbuild", "--define", f"_topdir {pkg_root}",
-         "-ba", str(pkg_root / "SPECS" / "kaula.spec")],
+         "-bb", str(pkg_root / "SPECS" / "kaula.spec")],
         capture_output=True, text=True
     )
 

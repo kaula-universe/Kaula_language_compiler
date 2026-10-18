@@ -29,6 +29,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * sysconf / _SC_NPROCESSORS_ONLN 在 <unistd.h> 里。
+ * Linux 上 pthread.h 会顺带把它拉进来，macOS 不会 —— 不显式包含的话
+ * macOS 构建直接报 "use of undeclared identifier '_SC_NPROCESSORS_ONLN'"。
+ */
+#if !KAULA_PLATFORM_WINDOWS
+    #include <unistd.h>
+#endif
+
 static int g_conc_initialized = 0;
 static _Atomic(int) g_conc_initing = 0;
 
