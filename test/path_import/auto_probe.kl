@@ -1,0 +1,7 @@
+import std.io
+
+auto y = 3
+
+fn main() {
+    std.io.println(y)
+}

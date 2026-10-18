@@ -1,0 +1,3 @@
+pub fn lib_b_value() i32 {
+    return 42
+}

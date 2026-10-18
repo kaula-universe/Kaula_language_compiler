@@ -1,0 +1,47 @@
+import std.io
+
+fn main() {
+    std.io.println("=== if/else ===")
+    int score = 85
+    if (score >= 90) {
+        std.io.println("Grade: A")
+    } else if (score >= 80) {
+        std.io.println("Grade: B")
+    } else {
+        std.io.println("Grade: C")
+    }
+
+    std.io.println("=== while ===")
+    int i = 0
+    while (i < 5) {
+        std.io.println("i = ", i)
+        i = i + 1
+    }
+
+    // range-based for: 替代 C 风格 for(init; cond; update)
+    std.io.println("=== for in range(N) ===")
+    for j in range(3) {
+        std.io.println("j = ", j)
+    }
+
+    std.io.println("=== for in range(start, end) ===")
+    for j in range(2, 6) {
+        std.io.println("j = ", j)
+    }
+
+    std.io.println("=== for in range(start, end, step) ===")
+    for j in range(0, 10, 2) {
+        std.io.println("j = ", j)
+    }
+
+    std.io.println("=== for with break/continue ===")
+    for k in range(10) {
+        if (k == 2) {
+            continue
+        }
+        if (k > 5) {
+            break
+        }
+        std.io.println("k = ", k)
+    }
+}
