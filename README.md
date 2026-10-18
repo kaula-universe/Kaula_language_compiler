@@ -467,6 +467,7 @@ kaula/
 | [docs/tools/formatter.md](docs/tools/formatter.md) | 代码格式化文档 |
 | [docs/tools/versioning.md](docs/tools/versioning.md) | 版本号管理文档 |
 | [docs/build-config.md](docs/build-config.md) | 配置文件参考 |
+| [docs/gitee-sync.md](docs/gitee-sync.md) | GitHub/Gitee 仓库同步与镜像体系 |
 | [docs/tools/translate.py](docs/tools/translate.py) | 多语言翻译脚本 |
 
 ### 多语言文档
