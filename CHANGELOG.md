@@ -151,6 +151,12 @@
   与命令行 `/DPRODUCT_VERSION=` 冲突，makensis 直接中止。脚本改为 `!ifndef` 兜底，
   并由 CI 传齐四个版本宏（MAJOR/MINOR/PATCH 之前根本没传，
   `VIProductVersion` 会填成未展开的占位串）。
+- **NSIS 脚本依赖不存在的 EnVar 插件**：`EnVar::AddValue` 在 choco 装的 NSIS 里
+  没有，makensis 报 "Plugin not found" 并中止。改为注册表直写 PATH
+  （`WriteRegExpandStr` + `WM_SETTINGCHANGE` 广播），零插件依赖；卸载侧不再改 PATH，
+  留一条指向已删目录的条目（Windows 会跳过），风险远低于写坏整个 PATH。
+- **`.rpm` 的 `%install` 路径写错**：`std/src/scripts/docs/tools/README/LICENSE`
+  都写成 `%{_topdir}/X`，实际文件在 `%{_topdir}/BUILD/X`，`cp: cannot stat` 失败。
 - **macOS `toolkit_build.py` 用 `-std=c11` 编译运行时失败**：严格 ANSI 方言下
   clang 定义 `__STRICT_ANSI__`，Darwin 头文件随即用 `_ANSI_SOURCE` 把
   `_SC_NPROCESSORS_ONLN` 等 POSIX 符号藏起来（Linux 头文件不这样，所以只有
