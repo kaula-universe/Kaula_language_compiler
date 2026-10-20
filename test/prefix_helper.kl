@@ -1,0 +1,26 @@
+// 跨文件前缀定义的模块（被 prefix_xfile.kl import）
+//
+// 这里刻意**不写** `import std.io`：`println` 是内置函数，编译器的
+// 全局预置能力，不需要模块导入即可用。这个文件同时是"被导入文件自己
+// 的翻译单元（TU）也拿得到 println 声明"的回归探针——多 TU 模式下
+// 定义 TU 缺少 std 头会在链接期变成 undefined symbol: println_multi。
+
+// 形态一：prefix 语句（模板体用 $param 引用参数）
+prefix Trace {
+    $msg
+    println("[TRACE] ", $msg)
+}
+
+// 形态二：带默认值的 prefix 语句
+prefix Retry {
+    $times = 3
+    $body
+    println("[RETRY] budget=", $times)
+    $body
+}
+
+// 无副作用地被 main 调用的普通函数：验证同一个定义 TU 内
+// 前缀展开与普通函数共存
+pub fn util_version() -> i64 {
+    return 7
+}

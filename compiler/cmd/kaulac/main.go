@@ -193,7 +193,7 @@ func instNameToFuncNames(instName string, defined map[string]string) []string {
 // 托管路径因为走真正的多 TU 编译，不会命中这条分支，所以这个坑只在裸机暴露。
 func precompileLocalImports(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector) (map[string]bool, map[string]bool, string, []string, []string, map[string]string) {
 	pubFuncs, exportFuncs, headers, usedModules, fileHashes, split := precompileLocalImportsWithHeader(
-		program, inputDir, stdlibConfig, cfg, errorCollector, true, nil, "")
+		program, inputDir, stdlibConfig, cfg, errorCollector, true, nil, "", true)
 	if split == nil {
 		return pubFuncs, exportFuncs, "", headers, usedModules, fileHashes
 	}
@@ -227,17 +227,22 @@ func precompileLocalImportsSplit(program *ast.Program, inputDir string, stdlibCo
 // precompileLocalImportsWithOwners 按给定的归属索引产出 TU。
 // ownerFn 为 nil 表示"不限制归属"（每个实例化者都定义，单 TU 语义）。
 func precompileLocalImportsWithOwners(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector, split bool, owner ownerLookup) (pubFuncs map[string]bool, exportFuncs map[string]bool, headers []string, usedModules []string, fileHashes map[string]string, result *tuSplitResult) {
-	return precompileLocalImportsWithHeader(program, inputDir, stdlibConfig, cfg, errorCollector, split, owner, "")
+	return precompileLocalImportsWithHeader(program, inputDir, stdlibConfig, cfg, errorCollector, split, owner, "", split)
 }
 
 // precompileLocalImportsWithHeader 同 precompileLocalImportsWithOwners，额外接受
 // 全局接口段（probe 阶段所得）。接口段在每个定义 TU 生成时前置到其 C 源，
 // 使库与库之间、库与入口之间的调用都能看到原型。
-func precompileLocalImportsWithHeader(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector, split bool, owner ownerLookup, headerBlock string) (pubFuncs map[string]bool, exportFuncs map[string]bool, headers []string, usedModules []string, fileHashes map[string]string, result *tuSplitResult) {
+func precompileLocalImportsWithHeader(program *ast.Program, inputDir string, stdlibConfig *stdlib.StdlibConfig, cfg *config.Config, errorCollector *errors.ErrorCollector, split bool, owner ownerLookup, headerBlock string, collectHeaders bool) (pubFuncs map[string]bool, exportFuncs map[string]bool, headers []string, usedModules []string, fileHashes map[string]string, result *tuSplitResult) {
 	state := newLocalCompileState(cfg, stdlibConfig, errorCollector)
 	state.tuSplit = split
 	state.tuOwner = owner
 	state.tuHeaderBlock = headerBlock
+
+	// 多 TU 探针/正式构建都要收集被导入文件依赖的 std 头文件（println_multi 等）：
+	// 入口 TU 靠 localImportCode 前置，定义 TU 靠 TUHeaderStubs 前置。
+	// 探针不收集时，正式构建拿到的 headers 仍是空，库 TU 编译通过、链接期 undefined。
+	state.collectHeaders = collectHeaders
 
 	var localFiles []string
 	for _, stmt := range program.Statements {
@@ -286,6 +291,11 @@ type localCompileState struct {
 	usedModules    []string        // 本地文件依赖的 std 模块（链接时合并到主 usedModules）
 	usedModuleSet  map[string]bool
 	compiled       map[string]bool
+	// collectHeaders：多 TU 探针阶段同样收集被导入文件依赖的 std 头文件。
+	// 探针只登记泛型归属、不落盘 C 源，早期实现因此不带头文件——多 TU 正式
+	// 构建时被导入 TU 缺少 println_multi 等声明，链接期 undefined reference。
+	// 头文件集合由主 TU 统一前置，探针多收一遍的成本可忽略（字符串去重）。
+	collectHeaders bool
 	fileHashes     map[string]string // 已读 .kl 文件内容哈希（绝对路径 -> SHA256）
 	stdlibConfig   *stdlib.StdlibConfig
 	cfg            *config.Config
@@ -395,6 +405,8 @@ func buildGenericOwnerIndex(program *ast.Program, inputDir string, stdlibConfig 
 	pr := newLocalCompileState(cfg, stdlibConfig, errorCollector)
 	pr.tuSplit = true
 	pr.tuProbe = true
+	// 被导入文件的 std 头文件在这里收集（第 1 遍），传给第 2 次 precompile
+	pr.collectHeaders = true
 	for _, p := range localFiles {
 		abs := p
 		if !filepath.IsAbs(abs) {
@@ -491,7 +503,7 @@ type multiTUBuild struct {
 //
 // 返回 nil 表示没有可用的拆分结果，调用方回退单 TU —— 单 TU 路径的语义是
 // 被验证过的基线，回退永远安全。
-func assembleMultiTU(split *tuSplitResult, idx *genericOwnerIndex, cfg *config.Config, genEntry func(*codegen.CodeGenerator) string) *multiTUBuild {
+func assembleMultiTU(split *tuSplitResult, idx *genericOwnerIndex, cfg *config.Config, genEntry func(*codegen.CodeGenerator) string, headerStubs string) *multiTUBuild {
 	if split == nil || len(split.TUs) == 0 {
 		return nil
 	}
@@ -523,6 +535,9 @@ func assembleMultiTU(split *tuSplitResult, idx *genericOwnerIndex, cfg *config.C
 	entryCfg := *cfg
 	entryCfg.TUMode = "entry"
 	entryCfg.TUPrelude = split.Prelude + "\n" + split.Headers
+	// 被导入文件依赖的 std 头文件：入口 TU 由 localImportCode 前置，
+	// 各定义 TU 靠这一项补齐（否则 println_multi 等声明缺失 → 链接失败）。
+	entryCfg.TUHeaderStubs = headerStubs
 	if idx != nil {
 		owner := idx.Lookup
 		entryCfg.TUGenericOwner = func(inst string) bool { return owner(inst, entryTUPath) }
@@ -671,6 +686,10 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	localAnalyzer.SetLocalModuleFuncs(collectLocalAllFuncs(localProgram, depDir))
 	localAnalyzer.SetLocalPubVars(collectLocalPubVars(localProgram, depDir))
 	localAnalyzer.SetLocalPubTypes(localPubTypes)
+	prefixStmts, prefixFuncs := collectLocalPrefixDefs(localProgram, depDir)
+	if len(prefixStmts) > 0 || len(prefixFuncs) > 0 {
+		localAnalyzer.SetLocalExternalPrefixes(prefixStmts, prefixFuncs)
+	}
 	localAnalyzer.SetLibraryMode(true) // 库文件: 跳过 unused-function 检查(函数可能被外部调用)
 	localAnalyzer.SetSOREnabled(s.cfg.SOR)
 	localAnalyzer.Analyze(localProgram)
@@ -702,6 +721,9 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	//    （typedef 在被导入文件的段中，本文件内不可见）
 	// 2) 变量声明/字面量的 convertType 需要映射 K_ 前缀 C 名
 	localCG.SetLocalPubTypes(localPubTypes)
+	if len(prefixStmts) > 0 || len(prefixFuncs) > 0 {
+		localCG.SetLocalExternalPrefixes(prefixStmts, prefixFuncs)
+	}
 	localCG.SetLocalImportReturnTypes(collectLocalPubFuncReturns(localProgram, depDir))
 	// 前端 AST 优化（if 链转跳转表）：被导入文件同样要走一遍，
 	// 否则本地库与主程序会拿到不同形态的代码。
@@ -712,12 +734,16 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 
 	// 收集本地文件依赖的 std 模块头文件（如 math/math.h、memory/memory.h），
 	// 注入到主 TU 中，使库内部 import std.xxx 的声明对调用方可见。
+	// 探针模式（多 TU 第 1 遍）同样收集，见 collectHeaders 字段说明。
 	for _, line := range strings.Split(localOutput, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "#include") {
 			continue
 		}
 		if strings.Contains(trimmed, "<") {
+			continue
+		}
+		if s.tuProbe && !s.collectHeaders {
 			continue
 		}
 		if !s.localHeaderSet[trimmed] {
@@ -1934,7 +1960,9 @@ func main() {
 		}
 	}
 
-	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes)
+	localPrefixStmts, localPrefixFuncs := collectLocalPrefixDefs(program, inputDir)
+
+	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes, localPrefixStmts, localPrefixFuncs)
 	stage2Time := time.Since(stage2Start)
 	if verbose {
 		fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time)
@@ -2064,7 +2092,7 @@ func main() {
 		// 接口（库之间可互相调用），而它只能在"全部文件都跑过一遍"之后完整。
 		tuOwnerIndex = buildGenericOwnerIndex(program, inputDir, stdlibConfig, cfg, errorCollector)
 		localImportFuncs, localImportExportFuncs, localHeaders, localUsedModules, importFileHashes, split =
-			precompileLocalImportsWithHeader(program, inputDir, stdlibConfig, cfg, errorCollector, true, tuOwnerIndex.Lookup, tuOwnerIndex.HeaderBlock)
+			precompileLocalImportsWithHeader(program, inputDir, stdlibConfig, cfg, errorCollector, true, tuOwnerIndex.Lookup, tuOwnerIndex.HeaderBlock, false)
 	} else if wantMultiTU {
 		/*
 		 * 裸机：不支持多 TU 拆分，走"单 TU + 注入"。
@@ -2089,6 +2117,10 @@ func main() {
 	}
 	if len(localPubTypes) > 0 {
 		cg.SetLocalPubTypes(localPubTypes)
+	}
+	// 跨文件可见的前缀模板：缺失时 @Name(...) 会被静默展开为空（无错误、无代码）
+	if len(localPrefixStmts) > 0 || len(localPrefixFuncs) > 0 {
+		cg.SetLocalExternalPrefixes(localPrefixStmts, localPrefixFuncs)
 	}
 	cg.SetLocalImportReturnTypes(localImportReturns)
 
@@ -2138,9 +2170,12 @@ func main() {
 			c.SetLocalImportExportFuncs(localImportExportFuncs)
 			c.SetLocalPubTypes(localPubTypes)
 			c.SetLocalImportReturnTypes(localImportReturns)
+			// 跨文件前缀模板：入口 TU 是新建的 codegen 实例，
+			// 漏这一项的话 @trace(...) 会静默展开为空（无错误、无代码）
+			c.SetLocalExternalPrefixes(localPrefixStmts, localPrefixFuncs)
 			c.TestMode = testMode
 			return c.Generate(program)
-		})
+		}, strings.Join(localHeaders, "\n"))
 		if tuBuild != nil {
 			dir, err := materializeMultiTU(tuBuild)
 			if err != nil {
@@ -3519,7 +3554,7 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 
 // concurrentSemanticAnalysisWithConfig 执行语义分析（使用已加载的配置）
 // 注：原实现为假并发（单 goroutine + 立即 Wait），已改为直接同步调用。
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo, localPrefixStmts map[string]*ast.PrefixStatement, localPrefixFuncs map[string]*ast.FunctionStatement) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
 	sa := sema.NewSemanticAnalyzerWithConfig("kaula/stdlib.json", errorCollector)
@@ -3530,6 +3565,7 @@ func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *st
 	sa.SetLocalModuleFuncs(localAllFuncs)
 	sa.SetLocalPubVars(localPubVars)
 	sa.SetLocalPubTypes(localPubTypes)
+	sa.SetLocalExternalPrefixes(localPrefixStmts, localPrefixFuncs)
 	sa.SetSOREnabled(sorEnabled)
 	sa.Analyze(program)
 
@@ -3665,6 +3701,80 @@ func collectLocalPubFuncReturns(program *ast.Program, inputDir string) map[strin
 
 	visit(program, inputDir)
 	return returns
+}
+
+// collectLocalPrefixDefs 扫描本地 import 的 .kl 文件，收集可跨文件引用的前缀定义：
+//   - 顶层 prefix 语句（前缀模板）；
+//   - 标注 #[prefix] / #[prefix,tree] 的函数（前缀函数模板）。
+//
+// 为什么需要它：主程序与被导入文件是两份独立的 AST。sema 与 codegen 都只在
+// 「本文件 AST」里找前缀定义，找不到时 @Name(...) 会被静默当成空展开——既不报
+// 错也不产生代码（实测 `import "util.kl"` + `@trace(msg=...)` → main 直接
+// return 0）。这里按「最近优先」的覆盖顺序收集，由 CLI 注入两侧。
+//
+// 同名冲突按广度优先决定：先被遍历到的层级（离调用方更近）先写入，深层不覆盖。
+func collectLocalPrefixDefs(program *ast.Program, inputDir string) (map[string]*ast.PrefixStatement, map[string]*ast.FunctionStatement) {
+	stmts := make(map[string]*ast.PrefixStatement)
+	funcs := make(map[string]*ast.FunctionStatement)
+	seen := make(map[string]bool)
+
+	var visit func(p *ast.Program, dir string)
+	visit = func(p *ast.Program, dir string) {
+		for _, stmt := range p.Statements {
+			imp, ok := stmt.(*ast.ImportStatement)
+			if !ok || !imp.IsLocal {
+				continue
+			}
+			for _, localPath := range localImportFiles(imp) {
+				absPath := localPath
+				if !filepath.IsAbs(absPath) {
+					if candidate := filepath.Join(dir, absPath); fileExists(candidate) {
+						absPath = candidate
+					}
+				}
+				absPath = filepath.Clean(absPath)
+				if seen[absPath] {
+					continue
+				}
+				seen[absPath] = true
+
+				data, err := os.ReadFile(absPath)
+				if err != nil {
+					continue
+				}
+				localLex := lexer.NewLexer(string(data))
+				localParser := parser.NewParser(localLex)
+				localParser.SetFile(absPath)
+				localParser.SetSkipMainCheck(true)
+				localParser.EnableLogging(false)
+				localProgram := localParser.Parse()
+				if localParser.HasErrors() {
+					continue
+				}
+				for _, s := range localProgram.Statements {
+					switch def := s.(type) {
+					case *ast.PrefixStatement:
+						if def.Name != "" {
+							if _, exists := stmts[def.Name]; !exists {
+								stmts[def.Name] = def
+							}
+						}
+					case *ast.FunctionStatement:
+						ann := def.GetAnnotation()
+						if (ann == ast.TreeAnnotationPrefix || ann == ast.TreeAnnotationPrefixTree) && def.Name != "" {
+							if _, exists := funcs[def.Name]; !exists {
+								funcs[def.Name] = def
+							}
+						}
+					}
+				}
+				visit(localProgram, filepath.Dir(absPath))
+			}
+		}
+	}
+
+	visit(program, inputDir)
+	return stmts, funcs
 }
 
 // collectLocalAllFuncs 扫描本地 import 的 .kl 文件, 收集全部函数名(含非 pub)

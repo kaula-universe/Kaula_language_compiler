@@ -75,6 +75,11 @@ type CodeGenerator struct {
 	localImportReturns map[string]string
 	// 本地 import 的类型定义（跨文件 class/struct 等），用于 C 类型映射与成员访问解析
 	localPubTypes map[string]*sema.LocalPubTypeInfo
+	// 本地 import 文件里的前缀定义（prefix 语句 / #[prefix] 函数）。
+	// 主程序的 AST 不含被导入文件的语句，查不到前缀就会静默展开为空
+	// （语义阶段一致，因此连错误都没有）。由 CLI 收集后注入。
+	localPrefixStmts map[string]*ast.PrefixStatement
+	localPrefixFuncs map[string]*ast.FunctionStatement
 
 	genericCache        map[string]*GenericInstanceCache
 	genericInstantiated map[string]bool
@@ -2416,6 +2421,26 @@ static inline String string_concat_float(String s, double v) {
 	 */
 	if cg.tuMode != "" && cg.config != nil {
 		var tuBlock strings.Builder
+		/*
+		 * 被导入文件依赖的 std 头文件（println_multi / string_* 等）由主 TU 的
+		 * 扫描统一收集后，通过 TUPrelude 带到每个定义 TU。头文件是纯声明，
+		 * 不引入符号依赖；不补这一步，库 TU 会编译通过、链接期 undefined。
+		 */
+		if cg.config.TUHeaderStubs != "" {
+			for _, ln := range strings.Split(cg.config.TUHeaderStubs, "\n") {
+				ln = strings.TrimSpace(ln)
+				// 只保留 std 模块头（带引号的 "std/xxx.h"）：模板已包含的基础
+				// 头文件与 kaula.h 重复包含无害，但会让每个 TU 顶部噪声变多。
+				if !strings.HasPrefix(ln, "#include") || !strings.Contains(ln, "\"") {
+					continue
+				}
+				if strings.Contains(ln, "kaula.h") || strings.Contains(ln, "kaula_runtime.h") {
+					continue
+				}
+				tuBlock.WriteString(ln)
+				tuBlock.WriteString("\n")
+			}
+		}
 		if cg.config.TUPrelude != "" {
 			tuBlock.WriteString("/* --- kaula TU prelude: cross-TU type definitions --- */\n")
 			tuBlock.WriteString(cg.config.TUPrelude)
@@ -3773,26 +3798,48 @@ func (cg *CodeGenerator) InstantiateGenericType(typeName string, typeArgs []stri
 }
 
 // findFunctionByName 在程序中查找函数声明
+// 本地找不到时回落到 import 文件里同名函数（仅用于前缀模板查找，调用点解析
+// 仍由 localImportFuncs 负责）。
 func (cg *CodeGenerator) findFunctionByName(name string) *ast.FunctionStatement {
-	if cg.program == nil {
-		return nil
-	}
-	for _, stmt := range cg.program.Statements {
-		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
-			if fnStmt.Name == name {
-				return fnStmt
+	if cg.program != nil {
+		for _, stmt := range cg.program.Statements {
+			if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
+				if fnStmt.Name == name {
+					return fnStmt
+				}
 			}
+		}
+	}
+	if cg.localPrefixFuncs != nil {
+		if fn, ok := cg.localPrefixFuncs[name]; ok {
+			return fn
 		}
 	}
 	return nil
 }
 
-// findPrefixStatement 在程序中查找 prefix 语句（递归搜索）
+// SetLocalExternalPrefixes 注册本地 import 文件中的前缀定义（跨文件可见）。
+// stmts: prefix 语句；funcs: #[prefix]/#[prefix,tree] 函数。
+// 本文件同名的定义优先，注入的定义只作兜底。
+func (cg *CodeGenerator) SetLocalExternalPrefixes(stmts map[string]*ast.PrefixStatement, funcs map[string]*ast.FunctionStatement) {
+	cg.localPrefixStmts = stmts
+	cg.localPrefixFuncs = funcs
+}
+
+// findPrefixStatement 在程序中查找 prefix 语句（递归搜索）。
+// 本地找不到时回落到 import 文件里的定义（跨文件可见）。
 func (cg *CodeGenerator) findPrefixStatement(name string) *ast.PrefixStatement {
-	if cg.program == nil {
-		return nil
+	if cg.program != nil {
+		if stmt := cg.findPrefixInStatements(cg.program.Statements, name); stmt != nil {
+			return stmt
+		}
 	}
-	return cg.findPrefixInStatements(cg.program.Statements, name)
+	if cg.localPrefixStmts != nil {
+		if stmt, ok := cg.localPrefixStmts[name]; ok {
+			return stmt
+		}
+	}
+	return nil
 }
 
 // PrefixParamBinding 前缀参数的一次绑定：实参生成的 C 表达式及其类型提示

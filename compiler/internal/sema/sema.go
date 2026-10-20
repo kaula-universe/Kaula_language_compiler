@@ -53,6 +53,12 @@ type SemanticAnalyzer struct {
 	adoptTypes               map[string]bool                // 套用类型名集合（adopt 声明的类型）
 	transparentAdopt         map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
 	adoptUnderlying          map[string]string              // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
+
+	// 本地 import 文件里的前缀定义（跨文件可见）。
+	// 主程序的 AST 不含被导入文件的语句，查不到就是"静默丢掉整段 @展开"，
+	// 因此由 CLI（collectLocalPrefixDefs）收集后注入。
+	localPrefixStmts map[string]*ast.PrefixStatement   // prefix Name { ... } 语句
+	localPrefixFuncs map[string]*ast.FunctionStatement // #[prefix] / #[prefix,tree] 函数
 }
 
 // SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
@@ -979,6 +985,39 @@ func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpr
 	}
 	foundDef := funcDecl != nil || prefixStmt != nil
 
+	/*
+	 * 找不到前缀定义：必须报错。
+	 *
+	 * 前缀是**纯编译期展开**——codegen 遇不到模板时只能整条丢弃
+	 * （generatePrefixCallBody 返回空串）。不在这里报错，用户看到的就是
+	 * "编译成功、程序少了半截逻辑"，报错位置离根因隔着运行时行为，极难定位。
+	 *
+	 * 跨文件场景曾经正是如此：sema 只查本文件 AST，被导入文件里的 prefix
+	 * 定义查不到 → 这里静默通过 → codegen 也查不到 → `@Trace(...)` 无声消失。
+	 * 现在两侧都注入了被导入文件的定义（SetLocalExternalPrefixes），
+	 * 查不到就是真的没定义。
+	 */
+	if !foundDef {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("未定义的前缀: '%s'", expr.Name),
+			expr.Pos.Line,
+			expr.Pos.Column,
+			"undefined_prefix",
+			"前缀必须先用 `prefix Name { ... }` 或 `#[prefix] fn Name(...)` 定义；跨文件使用时确认已 import 定义所在文件，且定义带 pub",
+		)
+		// 实参与调用体仍继续分析：它们自身可能还有类型错误，
+		// 一并报出比"只报未定义前缀"更有用。
+		for _, paramValue := range expr.Params {
+			if paramValue != nil {
+				sa.analyzeExpression(paramValue)
+			}
+		}
+		for _, bodyStmt := range expr.Body {
+			sa.analyzeStatement(bodyStmt)
+		}
+		return
+	}
+
 	// 已声明参数：前缀函数形参 + 模板体内全部 $参数（声明与引用）
 	declared := make(map[string]bool)
 	if funcDecl != nil {
@@ -1078,10 +1117,17 @@ func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpr
 // findPrefixStatement 递归查找 prefix 语句（与 codegen 的查找方式一致，
 // 覆盖定义在函数体等嵌套位置的情况）
 func (sa *SemanticAnalyzer) findPrefixStatement(name string) *ast.PrefixStatement {
-	if sa.program == nil {
-		return nil
+	if sa.program != nil {
+		if stmt := findPrefixInStmts(sa.program.Statements, name); stmt != nil {
+			return stmt
+		}
 	}
-	return findPrefixInStmts(sa.program.Statements, name)
+	if sa.localPrefixStmts != nil {
+		if stmt, ok := sa.localPrefixStmts[name]; ok {
+			return stmt
+		}
+	}
+	return nil
 }
 
 func findPrefixInStmts(stmts []ast.Statement, name string) *ast.PrefixStatement {
@@ -1172,16 +1218,29 @@ func (sa *SemanticAnalyzer) checkExpressionForShadowing(expr ast.Expression, pre
 	}
 }
 
-// findFunctionDeclaration 查找函数声明
+// SetLocalExternalPrefixes 注册本地 import 文件中的前缀定义（跨文件可见）。
+// stmts: prefix 语句；funcs: #[prefix]/#[prefix,tree] 函数。
+// 本文件同名的定义优先，注入的定义只作兜底（与 codegen 的查找顺序一致）。
+func (sa *SemanticAnalyzer) SetLocalExternalPrefixes(stmts map[string]*ast.PrefixStatement, funcs map[string]*ast.FunctionStatement) {
+	sa.localPrefixStmts = stmts
+	sa.localPrefixFuncs = funcs
+}
+
+// findFunctionDeclaration 查找函数声明。本地查不到时回落到 import 文件里的
+// 同名函数（仅供前缀模板查找；普通调用点的解析仍由 localImportFuncs 负责）。
 func (sa *SemanticAnalyzer) findFunctionDeclaration(name string) *ast.FunctionStatement {
-	if sa.program == nil {
-		return nil
-	}
-	for _, stmt := range sa.program.Statements {
-		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
-			if fnStmt.Name == name {
-				return fnStmt
+	if sa.program != nil {
+		for _, stmt := range sa.program.Statements {
+			if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
+				if fnStmt.Name == name {
+					return fnStmt
+				}
 			}
+		}
+	}
+	if sa.localPrefixFuncs != nil {
+		if fn, ok := sa.localPrefixFuncs[name]; ok {
+			return fn
 		}
 	}
 	return nil

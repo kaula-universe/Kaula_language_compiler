@@ -1,0 +1,22 @@
+// 回归：跨文件前缀定义的可见性
+//
+// 历史缺陷：sema 与 codegen 只在**本文件 AST** 里查找 prefix 定义，
+// `import "prefix_helper.kl"` 之后 `@Trace(...)` 既不报错也不展开——
+// 编译状态 Success，main 里却只剩 `return 0`。改动见
+// SetLocalExternalPrefixes（sema / codegen）+ collectLocalPrefixDefs（CLI）。
+import "prefix_helper.kl"
+
+fn main() {
+    // 形态一：跨文件的 prefix 语句
+    @Trace(msg = "cross-file prefix works")
+
+    // 形态二：跨文件的带默认值 prefix，调用体在占位符处拼接
+    i64 hits = 0
+    @Retry {
+        hits += 1
+    }
+    println("[CHECK] retry expansions = ", hits)
+
+    // 同一个定义 TU 里的普通函数照常可见、可调用
+    println("[CHECK] util_version = ", util_version())
+}

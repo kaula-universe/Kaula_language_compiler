@@ -122,8 +122,17 @@ class BuildConfig:
         else:
             self.common_flags.append("-D_CRT_SECURE_NO_WARNINGS")
 
-        # v4 旧全局定义 TU kmm_scoped_allocator.c 已删除；v4.h 自供全部全局。
-        self.skip_files = set()
+        # v4 旧全局定义 TU kmm_scoped_allocator.c 已被 kmm_scoped_allocator_v4.c
+        # 取代（后者才是当前的实现 TU）；两者都以 KMM_V4_DEFINE_GLOBALS 展开
+        # g_kmm_v4_pool / g_kmm_v4_offset / g_kmm_v4_survivor 等全局定义，
+        # 同时参与链接就是 duplicate symbol。
+        #
+        # 历史上这里写的是"已删除 + 不排除"，但仓库里的旧文件一直还在：
+        # 于是 libkaula_runtime.a 同时含有 src_kmm_scoped_allocator.c.o 与
+        # src_kmm_scoped_allocator_v4.c.o，链接期 ld.lld 报
+        #   duplicate symbol: g_kmm_v4_*
+        # 显式排除比"删文件"更稳妥——旧 TU 可能被某些历史脚本单独引用。
+        self.skip_files = {"kmm_scoped_allocator.c"}
 
         self.is_windows = sys.platform.startswith("win")
         self.is_macos = sys.platform == "darwin"
