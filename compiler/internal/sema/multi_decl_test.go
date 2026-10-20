@@ -86,7 +86,8 @@ func TestMultiVarDeclInFunction(t *testing.T) {
 		}
 		types[vd.Name] = vd.Type
 	}
-	want := map[string]string{"a": "i64", "b": "i64", "p": "u8", "q": "string"}
+	// p 的整数字面量默认 int（int64_t），q 推导为 string —— 两个 auto 各自独立推导
+	want := map[string]string{"a": "i64", "b": "i64", "p": "int", "q": "string"}
 	for name, expect := range want {
 		if got := types[name]; got != expect {
 			t.Errorf("%s 的类型 = %q，期望 %q", name, got, expect)

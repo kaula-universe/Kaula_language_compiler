@@ -1007,23 +1007,15 @@ func (p *Parser) parseAutoDeclarationIterative() *ast.VariableDeclaration {
 }
 
 // inferLiteralType 根据字面量推断 Kaula 类型（顶层 var 用）
-// 与 sema.inferExpressionType 的整数字面量规则保持一致：按数值大小选 u8/u16/u32/u64
+// 与 sema.inferExpressionType 的整数字面量规则保持一致：整数字面量默认 int（int64_t），
+// 不按数值大小收窄 —— 收窄会让 `auto acc = 0` 变成 uint8_t 并静默回绕。
 func inferLiteralType(value ast.Expression) string {
 	switch v := value.(type) {
 	case *ast.IntegerLiteral:
 		if v == nil {
 			return ""
 		}
-		if v.Value <= 255 {
-			return "u8"
-		}
-		if v.Value <= 65535 {
-			return "u16"
-		}
-		if v.Value <= 4294967295 {
-			return "u32"
-		}
-		return "u64"
+		return "int"
 	case *ast.FloatLiteral:
 		return "f64"
 	case *ast.StringLiteral:

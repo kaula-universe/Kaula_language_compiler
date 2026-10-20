@@ -73,11 +73,45 @@ func TestMultiVarDeclAutoCodegen(t *testing.T) {
 	src := "fn main() {\n    auto a = 1, b = 2\n    a = b\n}\n"
 	cCode := generateForTest(t, src)
 
-	// 字面量 1/2 <= 255 → u8
-	for _, want := range []string{"uint8_t a = 1;", "uint8_t b = 2;"} {
+	// 整数字面量默认 int（int64_t）：不再按数值大小收窄成 uint8_t，
+	// 否则 `auto acc = 0` 累加时会静默回绕。
+	for _, want := range []string{"int64_t a = 1;", "int64_t b = 2;"} {
 		if !strings.Contains(cCode, want) {
 			t.Errorf("生成的 C 代码缺少 %q", want)
 			t.Logf("generated C:\n%s", cCode)
+		}
+	}
+}
+
+// TestAutoIntegerLiteralIsInt 回归：整数字面量的 auto 推导默认 int（int64_t）。
+//
+// 此前按数值大小收窄（0~255 → uint8_t），导致
+//
+//	auto acc = 0
+//	acc = acc + 1000     // 258 % 256 = 2，实测输出 232
+//
+// 静默给出错误结果，且负数累加直接下溢。语言文档
+// （docs/tutorials/variables-and-types.md）明确 int = int64_t，
+// 需要窄类型应显式标注 u8/i32。
+func TestAutoIntegerLiteralIsInt(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{"fn main() {\n    auto a = 0\n}\n", "int64_t a = 0;"},
+		{"fn main() {\n    auto b = 300\n}\n", "int64_t b = 300;"},
+		{"fn main() {\n    auto c = 100000\n}\n", "int64_t c = 100000;"},
+		{"fn main() {\n    auto d = -1\n}\n", "int64_t d = -1;"},
+	}
+	for _, tc := range cases {
+		cCode := generateForTest(t, tc.src)
+		if !strings.Contains(cCode, tc.want) {
+			t.Errorf("缺少 %q，生成:\n%s", tc.want, cCode)
+		}
+		for _, narrow := range []string{"uint8_t", "uint16_t", "uint32_t", "int8_t", "int16_t"} {
+			if strings.Contains(cCode, narrow) {
+				t.Errorf("整数字面量不应被收窄为 %s，生成:\n%s", narrow, cCode)
+			}
 		}
 	}
 }
