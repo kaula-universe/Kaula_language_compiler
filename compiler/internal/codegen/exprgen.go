@@ -1874,6 +1874,11 @@ func (eg *ExpressionGenerator) generatePrintlnCall(args []ast.Expression) string
 		if formatSpec == "cstr" {
 			formatSpec = "s"
 		}
+		// u64 型内建（sizeof/alignof/offsetof/field_count）：显式转 int64_t 后按 %d 打印，
+		// 避免 printf("%lu") 等与实参宽度/平台相关的歧义。
+		if argType == "u" {
+			return printFn + "(\"%d\\n\", (int64_t)(" + argCode + "))"
+		}
 		return printFn + "(\"%" + formatSpec + "\\n\", " + eg.maybeUnwrapString(argCode, argType) + ")"
 	} else {
 		return eg.generatePrintlnMulti(args)
@@ -1984,6 +1989,10 @@ func (eg *ExpressionGenerator) generatePrintCall(args []ast.Expression) string {
 			b.WriteString(" ")
 		}
 		argType := eg.inferType(arg)
+		if argType == "u" {
+			// 见 inferType：u64 型内建按 %d + int64_t 打印
+			argType = "d"
+		}
 		b.WriteString("%" + argType)
 	}
 	b.WriteString("\"")
@@ -2303,6 +2312,14 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 		return operandType
 	case *ast.TypeNameExpression, *ast.FieldNameExpression, *ast.FieldTypeExpression:
 		return "s"
+	case *ast.TypeKindExpression:
+		// type_kind(T) 返回 String（kinds: int/float/bool/char/string/void/struct/unknown）
+		return "s"
+	case *ast.FieldCountExpression, *ast.SizeOfExpression, *ast.AlignOfExpression, *ast.OffsetOfExpression:
+		// 编译期反射的数值内建统一产出 u64；此前落到默认 "d"，生成
+		// printf("%d\n", sizeof(T)) 对 uint64_t 类型不匹配（-Wformat）。
+		// 专用 "u" 类型码在 println/print 处显式转 int64_t 再按 %d 打印。
+		return "u"
 	case *ast.CallExpression:
 		// 模块限定调用 std.<mod>.f(...)：e.Function 是 MemberAccess 链，
 		// 此前只处理 Identifier，整类限定调用（含注册的 String 返回函数）
@@ -3261,8 +3278,26 @@ func (eg *ExpressionGenerator) comptimeValueToC(val *comptime.Value) string {
 	}
 }
 
+// kaulaStringLiteralC 把一段文本渲染成 Kaula `string` 的 C 表达式。
+//
+// Kaula 的 String 是 SSO 结构体（std/base/types.h），不是裸 char*。此前反射
+// 内建（type_name / field_name / field_type / type_kind）直接返回 `"..."`，
+// 于是任何 `auto s = type_name(T)` 都生成 `String s = "T";` —— clang 报
+// "initializing 'String' with an expression of incompatible type 'char[6]'"，
+// `println(type_name(T))` 更是把 char* 按 %s 直传 string_cdata() 而报
+// "member reference base type 'char[4]' is not a structure or union"。
+// 这里与 StringLiteral 的生成规则保持一致：<=15 字节走 SSO 内嵌缓冲区。
+func kaulaStringLiteralC(text string) string {
+	escaped := escapeCString(text)
+	n := decodedCStringLen(escaped)
+	if n <= 15 {
+		return fmt.Sprintf("((String){.len=%d, .sso=\"%s\"})", n, escaped)
+	}
+	return fmt.Sprintf("((String){.len=%d, .ptr=\"%s\"})", n, escaped)
+}
+
 func (eg *ExpressionGenerator) generateTypeNameExpression(e *ast.TypeNameExpression) string {
-	return "\"" + escapeCString(e.TargetType) + "\""
+	return kaulaStringLiteralC(e.TargetType)
 }
 
 func (eg *ExpressionGenerator) generateFieldCountExpression(e *ast.FieldCountExpression) string {
@@ -3276,7 +3311,7 @@ func (eg *ExpressionGenerator) generateFieldNameExpression(e *ast.FieldNameExpre
 		return "\"\""
 	}
 	name := eg.getStructFieldName(e.TargetType, idx)
-	return "\"" + escapeCString(name) + "\""
+	return kaulaStringLiteralC(name)
 }
 
 func (eg *ExpressionGenerator) generateFieldTypeExpression(e *ast.FieldTypeExpression) string {
@@ -3285,12 +3320,12 @@ func (eg *ExpressionGenerator) generateFieldTypeExpression(e *ast.FieldTypeExpre
 		return "\"\""
 	}
 	typ := eg.getStructFieldType(e.TargetType, idx)
-	return "\"" + escapeCString(typ) + "\""
+	return kaulaStringLiteralC(typ)
 }
 
 func (eg *ExpressionGenerator) generateTypeKindExpression(e *ast.TypeKindExpression) string {
 	kind := eg.getTypeKind(e.TargetType)
-	return "\"" + escapeCString(kind) + "\""
+	return kaulaStringLiteralC(kind)
 }
 
 func (eg *ExpressionGenerator) getStructFieldCount(typeName string) int {
