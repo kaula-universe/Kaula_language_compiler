@@ -72,7 +72,7 @@
 | `while` / `break` / `continue` / `if / else` | — | ✅ |
 
 > `std.io.println` **不做 `%` 格式化替换**，要用 `std.io.print().int(x)`。
-> `println` 可直接打印多个参数（`println("x = ", x)`）。
+> `println` 可直接打印多个参数（`println("x = ", x)`），参数之间自动加一个空格。
 
 ### 1.3 并发（本基准的核心）
 

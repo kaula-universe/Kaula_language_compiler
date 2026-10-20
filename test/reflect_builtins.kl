@@ -1,0 +1,82 @@
+# reflect_builtins.kl — 编译期反射内建回归
+#
+# 覆盖：type_name / type_kind / field_count / field_name / field_type
+#       sizeof / alignof / offsetof / comptime(expr)
+#
+# 回归背景：反射内建此前直接返回裸 C 字符串 "..."，与 Kaula 的 String（SSO 结构体）
+# 不兼容，生成的 C 无法编译：
+#   - `String s = type_name(T)` → initializing 'String' with 'char[6]'
+#   - `println(type_name(T))`   → string_cdata("...") 报 member reference base type
+# 同时 sizeof/alignof/offsetof/field_count 的 u64 结果被按 %d 打印（-Wformat）。
+#
+# 本文件刻意**不** import std.string / std.io：
+# 反射结果必须能在零显式导入下独立工作（隐式链接依赖由代码生成器补挂）。
+
+struct Point {
+    x: i64
+    y: i64
+    tag: string
+}
+
+struct Empty {
+}
+
+fn check(bool cond, string label) {
+    if cond {
+        println("PASS ", label)
+    } else {
+        println("FAIL ", label)
+    }
+}
+
+# 字段名/类型与期望值比较（避免依赖 string_equals，保持零导入）
+fn main() {
+    # ---------- type_name ----------
+    check(type_name(Point) == "Point", "type_name struct")
+    check(type_name(i32) == "i32", "type_name i32")
+    check(type_name(f64) == "f64", "type_name f64")
+
+    # ---------- type_kind ----------
+    check(type_kind(Point) == "struct", "type_kind struct")
+    check(type_kind(i64) == "int", "type_kind int")
+    check(type_kind(f32) == "float", "type_kind float")
+    check(type_kind(bool) == "bool", "type_kind bool")
+    check(type_kind(char) == "char", "type_kind char")
+    check(type_kind(string) == "string", "type_kind string")
+
+    # ---------- field_count ----------
+    check(field_count(Point) == 3, "field_count Point")
+    check(field_count(Empty) == 0, "field_count Empty")
+    check(field_count(i32) == 0, "field_count non-struct")
+
+    # ---------- field_name / field_type ----------
+    check(field_name(Point, 0) == "x", "field_name[0]")
+    check(field_name(Point, 2) == "tag", "field_name[2]")
+    check(field_type(Point, 0) == "i64", "field_type[0]")
+    check(field_type(Point, 2) == "string", "field_type[2]")
+
+    # 越界：返回空串，不 panic
+    check(field_name(Point, 3) == "", "field_name out of range")
+    check(field_type(Point, 99) == "", "field_type out of range")
+
+    # ---------- sizeof / alignof / offsetof ----------
+    check(sizeof(Point) == 40, "sizeof Point")
+    check(alignof(Point) == 8, "alignof Point")
+    check(offsetof(Point, x) == 0, "offsetof x")
+    check(offsetof(Point, y) == 8, "offsetof y")
+    check(offsetof(Point, tag) == 16, "offsetof tag")
+
+    # ---------- comptime(expr) ----------
+    check(comptime(1 + 2 * 3) == 7, "comptime arithmetic")
+    check(comptime(type_name(i32)) == "i32", "comptime wraps reflection")
+
+    # ---------- 反射结果可直接打印（String 类型贯通） ----------
+    println(type_name(Point))
+    println(type_kind(Point))
+    println(field_count(Point))
+    println(field_name(Point, 1))
+    println(field_type(Point, 1))
+    println(sizeof(Point), alignof(Point), offsetof(Point, tag))
+
+    println("DONE reflect_builtins")
+}

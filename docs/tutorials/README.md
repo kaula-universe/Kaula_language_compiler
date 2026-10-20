@@ -24,6 +24,7 @@
 | 14 | [Extern 声明与 FFI](extern-and-ffi.md) | 外部 C/C++ 互操作 |
 | 15 | [std 错误处理与可捕获 Panic](error-and-panic.md) | Result/Option、Error 链、panic 捕获恢复 |
 | 16 | [标准库使用](stdlib-usage.md) | 常用 std 模块用法 |
+| 17 | [强制消费流（spend / call）](spend-and-call.md) | 编译期强制全消费：语法、错误码、运行时 API |
 
 ## 快速导航
 
@@ -35,6 +36,7 @@
 - **要调用 C 库** → [Extern 声明与 FFI](extern-and-ffi.md)
 - **要处理错误** → [std 错误处理与可捕获 Panic](error-and-panic.md)
 - **要写测试/命令行工具** → [属性注解与编译期反射](attributes-and-compiletime.md)（`#[test]`、`#[command]`）
+- **要保证资源/分支"一个都不漏"** → [强制消费流](spend-and-call.md)
 
 ## 相关文档
 

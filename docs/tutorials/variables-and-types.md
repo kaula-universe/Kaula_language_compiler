@@ -57,11 +57,23 @@ bool flag = true
 **类型推导使用 `auto`：**
 
 ```kaula
-auto z = 42        # z 类型推导为 int
-auto pi = 3.14     # pi 类型推导为 float
+auto z = 42        # z 类型推导为 int（= int64_t）
+auto n = -1        # n 类型推导为 int，负数同样是 int
+auto pi = 3.14     # pi 类型推导为 f64
+auto s = "Kaula"   # s 类型推导为 string
 ```
 
 > 注意：`auto` 的右侧表达式必须能明确推导类型。
+
+整数字面量**一律**推导为 `int`（64 位有符号），不会按数值大小收窄：
+
+```kaula
+auto acc = 0
+acc = acc + 1000   # 1000，而不是 232
+```
+
+需要 8/16/32 位整型时显式标注类型（`u8 x = 0`），不要指望 `auto` 帮你挑宽度。
+窄类型累加会回绕，这类错误在 `auto` 下应该是**不可能发生**的。
 
 **编译期常量使用 `const`：**
 

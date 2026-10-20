@@ -1,0 +1,148 @@
+# spend_and_call.kl — spend / call 强制消费流回归
+#
+# 覆盖：数组模式（含 call(default) 兜底）、枚举模式穷尽消费、
+#       消费子句体内对共享状态的副作用顺序、块内 return 之后的清理。
+#
+# 回归背景：spend 的运行时 API 曾在文档里写成 `Spendable _sp = spend_lock(arr, N)` /
+# `spend_destroy`，与实际实现（`spendable_create` + `spend_lock` + `spendable_destroy`，
+# 见 src/spend_call.c）完全不符。本用例以**实际行为**为断言基准，
+# 防止生成器与运行时再次漂移。
+
+fn check(bool cond, string label) {
+    if cond {
+        println("PASS ", label)
+    } else {
+        println("FAIL ", label)
+    }
+}
+
+enum Color {
+    Red
+    Green
+    Blue
+
+}
+
+# 数组模式：逐个消费 + default 兜底
+fn array_with_default() -> i64 {
+    auto items = [10, 20, 30]
+    auto sum = 0
+    spend(items) {
+        call(1) {
+            sum = sum + 10
+        }
+        call(2) {
+            sum = sum + 20
+        }
+        call(default) {
+            sum = sum + 100
+        }
+    }
+    return sum
+}
+
+# 数组模式：全部显式消费，不用 default
+fn array_explicit() -> i64 {
+    auto items = [1, 2, 3, 4]
+    auto sum = 0
+    spend(items) {
+        call(1) {
+            sum = sum + 1
+        }
+        call(2) {
+            sum = sum + 2
+        }
+        call(3) {
+            sum = sum + 3
+        }
+        call(4) {
+            sum = sum + 4
+        }
+    }
+    return sum
+}
+
+# 数组模式：数组字面量直接作目标
+fn array_literal() -> i64 {
+    auto sum = 0
+    spend([5, 6, 7]) {
+        call(1) {
+            sum = sum + 5
+        }
+        call(2) {
+            sum = sum + 6
+        }
+        call(3) {
+            sum = sum + 7
+        }
+    }
+    return sum
+}
+
+# 枚举模式：穷尽三个变体，等价于强制 match
+fn enum_exhaustive(Color c) -> i64 {
+    auto tag = 0
+    spend(c) {
+        call(Red) {
+            tag = 1
+        }
+        call(Green) {
+            tag = 2
+        }
+        call(Blue) {
+            tag = 3
+        }
+    }
+    return tag
+}
+
+# 块内 return：只允许出现在最后一个 call 子句（sema 强制 spend_early_return），
+# 此时全部元素都已消费，unlock 校验仍会通过
+fn early_return() -> i64 {
+    auto items = [1, 2]
+    spend(items) {
+        call(1) {
+        }
+        call(2) {
+            return 111
+        }
+    }
+    return 0
+}
+
+fn main() {
+    # 数组模式
+    check(array_with_default() == 130, "array call + default")
+    check(array_explicit() == 10, "array fully explicit")
+    check(array_literal() == 18, "array literal target")
+
+    # 枚举模式
+    check(enum_exhaustive(Color.Red) == 1, "enum Red")
+    check(enum_exhaustive(Color.Green) == 2, "enum Green")
+    check(enum_exhaustive(Color.Blue) == 3, "enum Blue")
+
+    # 块内提前返回
+    check(early_return() == 111, "early return inside spend")
+
+    # 连续多次 spend 不互相污染（Spendable 每次新建）
+    auto a = 0
+    spend([1, 1]) {
+        call(1) {
+            a = a + 1
+        }
+        call(2) {
+            a = a + 1
+        }
+    }
+    spend([1, 1, 1]) {
+        call(1) {
+            a = a + 10
+        }
+        call(default) {
+            a = a + 20
+        }
+    }
+    check(a == 32, "two sequential spend blocks")
+
+    println("DONE spend_and_call")
+}
