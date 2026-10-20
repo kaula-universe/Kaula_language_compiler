@@ -176,20 +176,24 @@ spend 语句生成强制消费流代码，支持数组模式和枚举模式：
 
 ```c
 // Kaula: spend(arr) { call(1) { ... } call(2) { ... } }
-// 生成的 C 代码
-Spendable _sp_0 = spend_lock(arr, 2);
-// 若 arr 为数组字面量，spend_lock 的 count 参数为编译期确定值
-{
-    spend_call(&_sp_0, 1);
-    // ... 元素 1 的消费逻辑 ...
-}
-{
-    spend_call(&_sp_0, 2);
-    // ... 元素 2 的消费逻辑 ...
-}
-spend_unlock(&_sp_0);
-spend_destroy(&_sp_0);
+// 生成的 C 代码（arr 为长度 2 的数组）
+Spendable* _spd_1 = spendable_create(2);
+spendable_add(_spd_1, &(arr)[0]);
+spendable_add(_spd_1, &(arr)[1]);
+spend_lock(_spd_1);
+
+spend_call(_spd_1, 1);
+{ /* 元素 1 的消费逻辑 */ }
+
+spend_call(_spd_1, 2);
+{ /* 元素 2 的消费逻辑 */ }
+
+spend_unlock(_spd_1);        // 校验 remaining == 0，否则按资源泄漏终止
+spendable_destroy(_spd_1);
 ```
+
+有 `call(default)` 时，对应位置生成 `spend_consume_all(_spd_1);` 而非 `spend_call`。
+运行时实现在 `src/spend_call.c`，语义与错误码见[强制消费流教程](tutorials/spend-and-call.md)。
 
 **枚举模式**：生成 `switch` 穷尽分发，`default` 分支为运行时安全网
 

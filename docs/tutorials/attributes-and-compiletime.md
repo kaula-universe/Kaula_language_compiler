@@ -73,26 +73,83 @@ auto cr3 = #[asm("mov %cr3, %rax")]     # 内联汇编
 
 ## 编译期反射
 
-使用 `comptime` 关键字在编译期获取类型信息：
+反射内建全部在**编译期**求值，结果直接固化成常量写进生成的 C 代码，运行时零开销。
+它们都是**表达式**，可以直接用在赋值、`println`、数组下标等任何表达式位置。
+
+### 类型度量：`sizeof` / `alignof` / `offsetof`
 
 ```kaula
-# 类型大小与对齐
-auto sz = sizeof(PacketHeader)       # 类型大小
-auto al = alignof(PacketHeader)      # 类型对齐
-auto off = offsetof(Packet, length)  # 字段偏移
+struct Packet {
+    header: i64
+    length: i64
+    payload: i64
+}
 
-# 类型信息
-comptime auto name = type_name(i32)        # "i32"
-comptime auto kind = type_kind(Packet)     # "struct"
-comptime auto count = field_count(Point)   # 字段数量
-comptime auto fname = field_name(Point, 0) # 第 0 个字段名
-comptime auto ftype = field_type(Point, 1) # 第 1 个字段类型
-
-# 编译期表达式计算
-comptime auto val = 1 + 2 * 3
+fn main() {
+    auto sz = sizeof(Packet)             # 类型大小
+    auto al = alignof(Packet)            # 类型对齐
+    auto off = offsetof(Packet, length)  # 字段偏移（字节）
+    println(sz, al, off)                 # 24 8 8（多参数以空格分隔）
+}
 ```
 
-`comptime` 确保表达式在编译期求值，可用于数组大小等场景。
+三者返回 64 位无符号值，分别映射到 C 的 `sizeof` / `_Alignof` / `offsetof`。
+
+### 反射五件套
+
+| 内建 | 参数 | 返回 | 说明 |
+|------|------|------|------|
+| `type_name(T)` | 类型名 | `string` | 类型的源码名称，如 `"Point"`、`"i32"` |
+| `type_kind(T)` | 类型名 | `string` | 类型类别：`int` / `float` / `bool` / `char` / `string` / `void` / `struct`，无法归类时为 `"unknown"` |
+| `field_count(T)` | 结构体名 | `u64` | 字段数量；非结构体返回 `0` |
+| `field_name(T, i)` | 结构体名 + 索引 | `string` | 第 `i` 个字段名（**从 0 开始**）；越界返回空串 |
+| `field_type(T, i)` | 结构体名 + 索引 | `string` | 第 `i` 个字段类型名；越界返回空串 |
+
+```kaula
+struct Point {
+    x: i64
+    y: i64
+    tag: string
+}
+
+fn main() {
+    println(type_name(Point))        # Point
+    println(type_kind(Point))        # struct
+    println(field_count(Point))      # 3
+    println(field_name(Point, 0))    # x
+    println(field_type(Point, 2))    # string
+
+    # 内建类型同样适用
+    println(type_name(i32))          # i32
+    println(type_kind(i32))          # int
+    println(type_kind(string))       # string
+}
+```
+
+需要注意的边界行为：
+
+- `field_*` 的索引从 **0** 开始，和 `spend` 的 `call(i)`（从 1 开始）不是一回事；
+- 对未知类型调用 `type_kind` 返回 `"unknown"`，不会报错；
+- 越界的 `field_name` / `field_type` 返回空字符串 `""`（运行时是 SSO 空 `String`），不触发 panic。
+
+### 编译期表达式：`comptime(...)`
+
+`comptime` 是一个**表达式包装**，语义是"在编译期把里面的常量表达式算出来"：
+
+```kaula
+fn main() {
+    auto n = comptime(1 + 2 * 3)        # 编译期算出 7
+    auto s = comptime(type_name(i32))   # 与 type_name(i32) 等价
+    println(n, s)                       # 7 i32
+}
+```
+
+> 注意写法：`comptime` 后面跟括号表达式，不是语句前缀。
+> `comptime auto x = ...` **不是合法语法**，会报 `comptime 后应该跟表达式`。
+
+> 多参数 `println(a, b, ...)` 在参数之间自动插入一个空格后输出，
+> 例如 `println(7, "i32")` 输出 `7 i32`。它**不做** `%` 格式化替换，
+> 需要格式化请用 `std.io.print()`。
 
 ## 高级属性扩展
 

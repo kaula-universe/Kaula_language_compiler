@@ -10,6 +10,17 @@
 ## [Unreleased]
 
 ### Added
+- **文档**：新增《强制消费流（spend / call）》(`docs/tutorials/spend-and-call.md`)，
+  覆盖数组/枚举两种模式、全部编译期错误码、生成的 C 代码形态、运行时 API 与数据结构；
+  修正 `docs/code-generation.md` 中与实现不符的 spend 示例
+  （`spend_lock(arr, N)` / `spend_destroy` 实为 `spendable_create` + `spend_lock` +
+  `spendable_destroy`）。
+- **文档**：重写《编译期反射》章节，补全五件套参数/返回值/边界行为（索引从 0 起、
+  越界返回空串、未知类型返回 `"unknown"`），并纠正错误的 `comptime auto x = ...`
+  写法（正确形式是表达式 `comptime(expr)`）。
+- **回归用例**：`test/reflect_builtins.kl`（25 项断言）、`test/spend_and_call.kl`（8 项断言）、
+  Go 单测 `TestImplicitStdModuleDeps` / `TestImplicitStdModuleNoDuplicate` /
+  `TestAutoIntegerLiteralIsInt`。
 - **`std.regex` 正则引擎重写**：自带引擎（递归下降解析 + 迭代式回溯匹配），
   不再依赖 libc `<regex.h>`，三平台与 freestanding 行为一致。
   - 语法：贪婪/惰性量词、`{n}` `{n,}` `{n,m}`、非捕获组、具名组
@@ -112,6 +123,31 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **反射五件套此前不可用（生成代码无法编译）**：`type_name` / `type_kind` /
+  `field_count` / `field_name` / `field_type` 的代码生成直接返回裸 C 字符串
+  `"..."`，与 Kaula 的 `String`（SSO 结构体）不兼容：
+  - `String s = type_name(T)` → `initializing 'String' with 'char[6]'`
+  - `println(type_name(T))` → `string_cdata("...")` 报
+    `member reference base type 'char[4]' is not a structure or union`
+  现统一走 `((String){.len=N, .sso="..."})` 复合字面量（与字符串字面量生成同规则）。
+  同时补齐数值内建的类型码：`field_count` / `sizeof` / `alignof` / `offsetof`
+  返回 `u64`，此前按 `%d` 打印（`-Wformat`），现显式转 `int64_t`。
+- **隐式 std 依赖未进链接清单，导致普通程序链接失败**：`usedModules` 只来自
+  直接 `import`，但代码生成器无条件产出 `string_survivor_free(...)`（std.string）
+  与 `println_multi(...)`（std.io）：
+  - `fn main() { auto a = "hello"  println(a) }` → `undefined symbol: string_survivor_free`
+  - `fn main() { println(1, 2) }` → `undefined symbol: println_multi`
+
+  既有用例恰好都显式 import 了对应模块，缺陷被掩盖。现按「生成代码里确实出现该符号」
+  自动补挂模块，显式 import 时不重复登记。
+- **整数字面量 `auto` 推导被收窄为 `uint8_t`，累加静默回绕**：`inferExpressionType` /
+  `inferLiteralType` 按数值大小选 `u8/u16/u32/u64`，与文档「`int` = `int64_t`」冲突。
+  `auto acc = 0; acc = acc + 1000` 得到 **232**，负数累加直接下溢。现整数字面量
+  一律推导为 `int`（64 位有符号），需要窄类型请显式标注。
+- **多参数 `println` 相邻值粘连**：`println_multi` 首尾相接输出，`println(n, s)`
+  得到 `7i32`、`println(1, 2)` 得到 `12`，两个值都读错。现参数之间插入一个空格
+  （仍不做 `%` 格式化替换）。
+
 - **多 TU 构建在 Windows 上 100% 链接失败（multi-TU  regressions，三处叠加）**：
   - **`_fltused` 重复定义**：codegen 给每个生成的 C 都注入 `int _fltused = 0;`
     （单 TU 时代只有一个定义所以没事）。拆成多 TU 后每个 TU 都带一份强定义，
