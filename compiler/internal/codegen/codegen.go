@@ -2124,9 +2124,43 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	// 注意：preludeInitCode 已在 generateMainFunction 中注入到 main 函数体中
 	// （不再在此处重复注入，以免重复代码）
 
-	cg.usedModules = make([]string, 0, len(importedModules)+1)
+	cg.usedModules = make([]string, 0, len(importedModules)+2)
 	for moduleName := range importedModules {
 		cg.usedModules = append(cg.usedModules, moduleName)
+	}
+	/*
+	 * 标准库模块的隐式链接依赖。
+	 *
+	 * 链接清单 usedModules 只来自直接 import，但代码生成器会**无条件**产出
+	 * 一些 std 符号：
+	 *
+	 *   - 作用域出口对任何 String 变量生成 `string_survivor_free(v)`
+	 *     → 定义在 std/string/string.c；
+	 *   - 多参数 `println(a, b, ...)` 生成 `println_multi(...)`
+	 *     → 定义在 std/io/io.c。
+	 *
+	 * 于是
+	 *     fn main() { auto a = "hello"  println(a) }
+	 *     fn main() { println(1, 2) }
+	 * 这两类最普通的程序，只要没写对应 import 就会链接失败
+	 * （undefined symbol: string_survivor_free / println_multi）。
+	 * 此前字符串与多参打印的用例都恰好 import 了对应模块，缺陷被用例布局掩盖。
+	 *
+	 * 这里按“生成代码里真的出现了该符号”补挂模块；显式 import 时
+	 * moduleInList 保证不重复添加，也不会改变 import 顺序以外的任何行为。
+	 */
+	implicitDeps := []struct {
+		symbol string
+		module string
+	}{
+		{"string_survivor_free(", "std.string"},
+		{"println_multi(", "std.io"},
+	}
+	emitted := functionCode.String() + mainCode.String()
+	for _, dep := range implicitDeps {
+		if strings.Contains(emitted, dep.symbol) && !moduleInList(cg.usedModules, dep.module) {
+			cg.usedModules = append(cg.usedModules, dep.module)
+		}
 	}
 	// 将 class 全局变量的初始化注入 main 开头 (运行时构造)
 	if classInitCode.Len() > 0 {
@@ -4154,4 +4188,14 @@ func inferExportedType(value ast.Expression) string {
 		return "bool"
 	}
 	return ""
+}
+
+// moduleInList 判断模块名是否已在链接模块清单中
+func moduleInList(mods []string, name string) bool {
+	for _, m := range mods {
+		if m == name {
+			return true
+		}
+	}
+	return false
 }
