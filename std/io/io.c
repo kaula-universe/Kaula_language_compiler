@@ -58,7 +58,18 @@ void println_multi(int arg_count, ...) {
     va_list args;
     va_start(args, arg_count);
     
+    /*
+     * 相邻参数之间补一个空格。
+     *
+     * 此前直接首尾相接输出，`println("x = ", 42)` 得到 "x = 42" 纯属侥幸
+     * （字符串自己带了尾部空格），而 `println(n, s)`、`println(1, 2)` 会粘成
+     * "7i32"、"12"，两个值都读错。分隔符不是格式化（仍不做 % 替换），
+     * 只是保证多参数输出可读、可断言。
+     */
     for (int i = 0; i < arg_count; i++) {
+        if (i > 0) {
+            printf(" ");
+        }
         int type = va_arg(args, int);
         switch (type) {
             case 0: // int
