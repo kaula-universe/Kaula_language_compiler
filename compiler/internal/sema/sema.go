@@ -4398,16 +4398,20 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	case *ast.ParenExpression:
 		return sa.inferExpressionType(e.Inner)
 	case *ast.IntegerLiteral:
-		if e.Value <= 255 {
-			return "u8"
-		}
-		if e.Value <= 65535 {
-			return "u16"
-		}
-		if e.Value <= 4294967295 {
-			return "u32"
-		}
-		return "u64"
+		/*
+		 * 整数字面量的默认类型是 int（= int64_t），与文档
+		 * docs/tutorials/variables-and-types.md 的约定一致：
+		 *     auto z = 42    # z 类型推导为 int
+		 *
+		 * 此前按数值大小选 u8/u16/u32/u64，导致最普通的
+		 *     auto acc = 0
+		 *     acc = acc + 1000
+		 * 生成 uint8_t acc，结果回绕成 232 —— 静默给出错误答案，且
+		 * `acc = acc - 1` 这类负数累加直接下溢。字面量的“最小位宽”
+		 * 不是语言语义，只是编码细节；需要窄类型请显式写 u8/i32。
+		 * 负数字面量同样归一到 int，避免 -1 被推断成 i8。
+		 */
+		return "int"
 	case *ast.FloatLiteral:
 		return "f64"
 	case *ast.StringLiteral:
@@ -4593,24 +4597,8 @@ func (sa *SemanticAnalyzer) inferLiteralType(expr *ast.LiteralExpression) string
 	}
 	switch expr.Kind {
 	case "int":
-		if val, ok := expr.Value.(int64); ok {
-			if val >= 0 && val <= 255 {
-				return "u8"
-			}
-			if val >= -128 && val <= 127 {
-				return "i8"
-			}
-			if val >= 0 && val <= 65535 {
-				return "u16"
-			}
-			if val >= -32768 && val <= 32767 {
-				return "i16"
-			}
-			if val >= 0 && val <= 2147483647 {
-				return "i32"
-			}
-			return "i64"
-		}
+		// 与 inferExpressionType 同口径：整数字面量默认 int（int64_t），
+		// 不按数值大小收窄（见 inferExpressionType 中 *ast.IntegerLiteral 分支）。
 		return "int"
 	case "float":
 		return "f64"
