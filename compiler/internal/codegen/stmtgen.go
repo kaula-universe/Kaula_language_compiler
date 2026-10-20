@@ -1287,7 +1287,16 @@ func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression
 		foundTemplate = true
 	}
 	if !foundTemplate {
-		// 如果找不到前缀定义，跳过
+		/*
+		 * 找不到模板：静默跳过。
+		 *
+		 * 这里**不能**只靠 codegen 报错——语义阶段已经对未知前缀名报过
+		 * undefined_prefix，codegen 再报一次就是双报。真正危险的是
+		 * "语义阶段没报、codegen 也查不到"的组合（跨文件前缀曾经就是如此：
+		 * 编译 Success，@trace(...) 却被整个丢弃）。那种缺口现在由
+		 * sema/codegen 两侧的本地 import 前缀注入（SetLocalExternalPrefixes）
+		 * 堵住，见 cmd/kaulac 的 collectLocalPrefixDefs。
+		 */
 		return ""
 	}
 

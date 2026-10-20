@@ -87,6 +87,9 @@ type Config struct {
 	TUMode string `json:"tu_mode,omitempty"`
 	// TUPrelude 跨 TU 共享的类型/常量前置段，由入口在生成根 TU 前统一注入。
 	TUPrelude string `json:"tu_prelude,omitempty"`
+	// TUHeaderStubs 被导入文件依赖的 std 头文件声明段（每个定义 TU 都要前置）。
+	// 与 TUPrelude 分开：后者是类型定义，前者是纯声明头文件，重复包含无副作用。
+	TUHeaderStubs string `json:"tu_header_stubs,omitempty"`
 	// TUGenericOwner 判定某个泛型实例（MangleGenericName 产出的 C 名）
 	// 是否由**本** TU 负责定义。nil 表示"凡实例化过的都由本 TU 定义"
 	// （单 TU 语义）。非本 TU 负责的实例只输出原型，函数体由归属 TU 提供。

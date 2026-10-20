@@ -140,10 +140,28 @@ def compile_one(kaulac: Path, src: Path, mode: str, outdir: Path, timeout: int) 
     if mode == "sor":
         cmd.append("--sor")
     cmd.append(str(src))
+    # 源码树模式：kaulac 从 KAULA_HOME 下的 src/ std/ 增量编译运行时对象再链接。
+    # 未设置时默认指向仓库根，否则只带 bin/ 的工具链会因为找不到源码而全线失败。
+    # 运行期链接模式：
+    #   - 本地编译器的安装布局（<prefix>/bin + lib）可以走安装模式（直接链静态库）；
+    #   - 其他情况（源码树、只带 bin/ 的占位目录）走源码树模式：kaulac 从
+    #     KAULA_HOME 下的 src/ std/ 增量编译运行时对象再链接。KAULA_HOME 未设时
+    #     指向仓库根，否则只带 bin/ 的工具链会因为找不到源码而全线链接失败。
+    env = dict(os.environ)
+    if not env.get("KAULA_SOURCE_MODE"):
+        src_root = env.get("KAULA_HOME") or str(PROJECT_ROOT)
+        if (Path(src_root) / "src" / "kaula.h").is_file():
+            env["KAULA_HOME"] = src_root
+            env["KAULA_SOURCE_MODE"] = "1"
+            # KAULA_HOME 会抢在 exe 目录之前解析 stdlib.json；源码树根下没有
+            # stdlib.json 时显式带上仓库里的那一份，避免静默退化为"无签名"。
+            std_json = Path(src_root) / "compiler" / "stdlib.json"
+            if std_json.is_file():
+                cmd.extend(["-stdlib", str(std_json)])
     try:
         r = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, cwd=str(PROJECT_ROOT),
+            errors="replace", timeout=timeout, cwd=str(PROJECT_ROOT), env=env,
         )
     except subprocess.TimeoutExpired:
         return False, f"compile timed out after {timeout}s"
