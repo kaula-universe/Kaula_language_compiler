@@ -754,12 +754,29 @@ func (fg *FunctionGenerator) generatePrefixFunction(stmt *ast.FunctionStatement)
 		fmt.Fprintf(&code, "prefix_enter(\"%s\");\n", stmt.PrefixName)
 	}
 
-	for _, bodyStmt := range stmt.Body {
-		if bodyStmt == nil {
-			continue
+	/* 无返回值的前缀函数不会被当成普通函数调用，这里生成的 C 函数体只是为了
+	 * 让"前缀也能被同名调用"这条老写法继续可链接。
+	 *
+	 * 直译的条件很窄：体内只用到形参。此时 `$x` 换成形参 x 即可，空模板体
+	 * （只有裸 `$p` 占位）也能编过。
+	 *
+	 * 一旦模板体自声明了 `$p`（`$limit = 10`）或用了其他宏专用形态，就没有
+	 * 对应的 C 变量可以指代——此时**不生成这个函数体**，只留一个声明。编造
+	 * 一个未声明的标识符会让整个程序在 clang 阶段失败，报错与真实原因毫无
+	 * 关系；而模板本来就不会被当成普通函数调用，缺实现不影响任何合法调用。 */
+	bodyParams := fg.codegen.prefixBodyParamNames(stmt)
+	if bodyParams != nil {
+		for _, bodyStmt := range stmt.Body {
+			if bodyStmt == nil {
+				continue
+			}
+			if _, ok := ast.BarePrefixParamName(bodyStmt); ok {
+				continue // 裸 `$p` 是参数占位，不生成代码
+			}
+			bodyStmt = fg.codegen.rewritePrefixBodyStatement(bodyStmt, bodyParams)
+			code.WriteString(fg.codegen.indentString())
+			code.WriteString(fg.codegen.generateStatement(bodyStmt))
 		}
-		code.WriteString(fg.codegen.indentString())
-		code.WriteString(fg.codegen.generateStatement(bodyStmt))
 	}
 
 	if stmt.PrefixName != "" {

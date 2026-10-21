@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -99,7 +100,97 @@ type TreeConstraint struct {
 	NodeType TreeNodeType
 	Children []*TreeConstraint
 	Pattern  string
+	// Type 可选的类型约束：参数声明的 Kaula 类型名（如 "i64"、"Point"）。
+	// 由结构签名的形参类型解析填入，留空表示不限制类型。
+	Type string
+	// Name 可选的绑定名约束：约束作用于哪个节点（tree 注解里的 `$p`）。
+	Name string
 }
+
+// ---- TreeConstraint ↔ 结构宏桥接 ----
+//
+// tree 注解（结构签名）是**声明在哪一层嵌套**的约束：形如
+//
+//	tree(Vec<i64>, i64)
+//
+// 的第一个实参描述实参 `$body` 那个"结构组"的内部嵌套要求，第二个实参
+// 描述 `$body` 本身。core 包不依赖 ast 包（避免 ast→core 的反向依赖），
+// 这里只提供纯数据层的归一化与字符串格式化；「约束 ↔ AST 节点类型」的
+// 映射在 codegen 侧（macro_tree.go），因为只有那里同时掌握两种类型体系。
+
+// NewStructuralConstraint 构造一条结构约束。pattern 为空表示不限制类型形状。
+func NewStructuralConstraint(nodeType TreeNodeType, pattern string) *TreeConstraint {
+	return &TreeConstraint{Required: true, NodeType: nodeType, Pattern: pattern}
+}
+
+// String 以紧凑形式描述约束链（诊断信息用）：
+// "expression"，或 "expression<statement, expression>" 这样的树形。
+func (c *TreeConstraint) String() string {
+	if c == nil {
+		return "generic"
+	}
+	base := c.NodeType.String()
+	if c.Pattern != "" {
+		base = c.Pattern
+	}
+	if c.Type != "" {
+		base += ":" + c.Type
+	}
+	if len(c.Children) == 0 {
+		return base
+	}
+	parts := make([]string, 0, len(c.Children))
+	for _, ch := range c.Children {
+		parts = append(parts, ch.String())
+	}
+	return base + "<" + strings.Join(parts, ", ") + ">"
+}
+
+// MatchesShape 判断约束链的**形状**是否覆盖 target 的形状：
+// 逐个 Child 与 target.Children 对齐比较，多余的 target 子节点不被覆盖即失败。
+// 类型名（Type）与绑定名（Name）不参与形状匹配，见 codegen 侧的值校验。
+func (c *TreeConstraint) MatchesShape(target *TreeConstraint) bool {
+	if c == nil {
+		return true
+	}
+	if target == nil {
+		return false
+	}
+	if !matchesTypeCompatible(c.NodeType, c.Pattern, target.NodeType, target.Pattern) {
+		return false
+	}
+	if len(c.Children) > 0 {
+		if len(target.Children) < len(c.Children) {
+			return false
+		}
+		for i, ch := range c.Children {
+			if !ch.MatchesShape(target.Children[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// matchesTypeCompatible 节点类型兼容：generic 通配；否则类型必须相同；
+// 双方都带 Pattern 时字符串必须相等（另一方无 Pattern 视为只约束类型）。
+func matchesTypeCompatible(wantType TreeNodeType, wantPattern string, gotType TreeNodeType, gotPattern string) bool {
+	if wantType == NodeTypeGeneric {
+		return true
+	}
+	if gotType == NodeTypeGeneric {
+		// 声明了不全是 generic 的类型时，未解析的结构参数不能被当作满足
+		return false
+	}
+	if wantType != gotType {
+		return false
+	}
+	if wantPattern != "" && gotPattern != "" && wantPattern != gotPattern {
+		return false
+	}
+	return true
+}
+
 
 type TreeNode struct {
 	Name       string

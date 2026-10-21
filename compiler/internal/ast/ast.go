@@ -556,7 +556,8 @@ func ParseTreeAnnotation(s string) TreeAnnotationType {
 // TreeStatement 表示tree语句
 type TreeStatement struct {
 	Annotation TreeAnnotationType
-	Root       Expression
+	Name       string     // `tree Name { ... }` 的树名（与前缀同名时充当结构签名）
+	Root       Expression // 树根（可选，`tree (root) { ... }`）
 	Body       []Statement
 	Pos        Position
 }
@@ -1708,20 +1709,29 @@ func PrefixParamDefaultDecl(stmt Statement) (string, Expression, bool) {
 
 // CollectPrefixParamRefs 遍历前缀模板体，按出现顺序收集全部 $参数 出现。
 // 只按可识别的节点类型下钻：遍历不到的节点按漏报处理（不误报）。
+//
+// 「声明」与「赋值」的区分：`$name = value` 只有在模板体里**从未出现过同名
+// `$name`** 时才算参数声明（带默认值）；若名字已经出现过，这条就是普通的
+// 赋值语句（`$target = $target + 1`，宏改写调用点的变量），必须原样保留。
+// 判据取「出现顺序上第一次」，因为声明总是写在引用之前。
 func CollectPrefixParamRefs(body []Statement) []PrefixParamRef {
 	var refs []PrefixParamRef
+	seen := make(map[string]bool, len(body))
 	collect := func(node Node) {
 		if id, ok := node.(*Identifier); ok && id.IsPrefixVar {
 			refs = append(refs, PrefixParamRef{Name: id.Name, Kind: PrefixParamExprRef, Pos: id.Pos})
+			seen[id.Name] = true
 		}
 	}
 	for _, stmt := range body {
 		handled := false
 		if name, ok := BarePrefixParamName(stmt); ok {
 			refs = append(refs, PrefixParamRef{Name: name, Kind: PrefixParamBare, Pos: stmt.GetPosition()})
+			seen[name] = true
 			handled = true
-		} else if name, value, ok := PrefixParamDefaultDecl(stmt); ok {
+		} else if name, value, ok := PrefixParamDefaultDecl(stmt); ok && !seen[name] {
 			refs = append(refs, PrefixParamRef{Name: name, Kind: PrefixParamDefault, Value: value, Pos: stmt.GetPosition()})
+			seen[name] = true
 			traverseNode(value, collect)
 			handled = true
 		}
@@ -1777,6 +1787,10 @@ func RequiredPrefixParams(body []Statement) []string {
 // CollectBodyParams 把调用体中 `name = expr` 形式的参数赋值（name 已声明为
 // 前缀参数的普通标识符）从 Body 移入 Params；其余语句保留在 Body。
 // 幂等：已移入 Params 的语句不会被重复处理。
+//
+// 只接收**具名的普通参数**：`$body = ...`、`$x = ...` 这类左值是前缀变量时
+// 不动。前者是调用体拼接点，后者是模板体内的普通赋值（`$target = $a + $b`），
+// 把它当参数绑定会让整条语句从展开结果里消失 —— 宏"少了一句"。
 func (p *PrefixCallExpression) CollectBodyParams(declared map[string]bool) {
 	if len(declared) == 0 || len(p.Body) == 0 {
 		return
