@@ -66,6 +66,10 @@ type Parser struct {
 	skipImportCheck   bool
 	pendingAttributes []*ast.Attribute // 已解析但尚未应用的属性（#[attr] pub 场景）
 	memberParseFailed bool             // 标记当前类/结构体是否有成员解析失败（用于错误恢复）
+	// blockDepth > 0 表示当前正在解析控制流条件/迭代目标，
+	// 此时标识符后的 `{` 是块的左花括号，不能吞成结构体字面量。
+	// 用深度而非布尔值，支持 `if a > F(b) { ... }` 里嵌套调用的条件。
+	blockDepth int
 }
 
 // NewParser 创建一个新的语法分析器
@@ -1910,7 +1914,12 @@ func (p *Parser) parseIfStatementIterative() *ast.IfStatement {
 	// 解析 if 条件表达式
 	// 直接交给表达式解析器：开头的 '(' 由分组表达式处理，
 	// 支持 (a) == (b) 这种首项是括号表达式的比较链
+	//
+	// blockDepth++ 期间标识符后的 `{` 不会被吞成结构体字面量，
+	// 确保 `if a > Limit { ... }` 的 `{` 留给 if 自己的块解析。
+	p.blockDepth++
 	stmt.Condition = p.parseExpressionIterative()
+	p.blockDepth--
 
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
@@ -1965,7 +1974,9 @@ func (p *Parser) parseWhileStatementIterative() *ast.WhileStatement {
 	}
 	p.nextToken()
 	// 解析 while 条件表达式：同 if，开头的 '(' 由分组表达式处理
+	p.blockDepth++
 	stmt.Condition = p.parseExpressionIterative()
+	p.blockDepth--
 	if p.curTok.Type == lexer.TOKEN_LBRACE {
 		p.nextToken()
 		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
@@ -1993,7 +2004,9 @@ func (p *Parser) parseForInStatement(varName string) *ast.ForInStatement {
 	}
 	p.nextToken() // consume TOKEN_IN
 
+	p.blockDepth++
 	iterExpr := p.parseExpressionIterative()
+	p.blockDepth--
 
 	stmt := &ast.ForInStatement{
 		Variable: &ast.Identifier{Name: varName, Pos: pos},
@@ -4474,6 +4487,176 @@ func (p *Parser) parsePostfixChain(expr ast.Expression) ast.Expression {
 	return expr
 }
 
+// looksLikeStructLiteralBody 判断当前 { 是否开启一个结构体字面量体。
+//
+// 调用时 curTok 必须是 '{'。只读前瞻，不改 token 位置。
+//
+// 问题本质：`TypeName { ... }` 与控制流块共享左花括号，而花括号内的
+// **首个 token 形态**不足以区分二者：
+//
+//	{ .x = 1, .y = 2 }     → 点号字段（无歧义）
+//	{ x = 10, y = 20 }     → 无点字段  ≡  块内赋值语句 `x = 10`
+//	{ x: 1 }               → 冒号字段（无歧义）
+//	{ }                    → 空字面量（无歧义）
+//
+// 只做"首 token 形态"前瞻会把 `if Count > Limit { Count = 0 }` 里的
+// `Count = 0`（赋值语句）误判成无点字段，于是 `Limit` 被吃成结构体字面量，
+// 条件退化为 `Count > Limit{...}`，语义层报 i64 与 struct 不可比较，
+// 生成层则输出 `Count > (Limit){0}` 这种非法 C。踩坑的全是大写开头的
+// 常量/变量名（MAX、LIMIT、Count），和宏毫无关系。
+//
+// 现在用**完整体推测解析**：临时把整段 `{ ... }` 当结构体字面量解析一遍，
+// 只有**所有**元素都是 `field = expr` / `field: expr` / `.field = expr`
+// 形态才认定；出现语句级 token（`i64` 声明关键字、`return`/`if`/`while`
+// 等关键字）或**未以逗号分隔**的连续元素（赋值语句序列 `x = 1 y = 2`
+// 中间没有逗号）就判为控制流块。解析结果整体回滚，不影响真正的解析。
+//
+// 无点字段 `TypeName { field = value }` 仍然支持——只是不再靠"首个 token
+// 是 ident ="就下结论，而是要求整段都合乎字段列表语法。
+func (p *Parser) looksLikeStructLiteralBody() bool {
+	if p.curTok.Type != lexer.TOKEN_LBRACE {
+		return false
+	}
+	// 空体：Type{}
+	if p.peekTok.Type == lexer.TOKEN_RBRACE {
+		return true
+	}
+	// 点号字段：{ .x = 1 } —— peek 是 '.'，下一项必然是标识符。
+	// 点号形态在语句层没有对应写法（语句不以 '.' 开头），无歧义。
+	if p.peekTok.Type == lexer.TOKEN_DOT {
+		return true
+	}
+	// 冒号字段：{ x: 1 } —— 语句层没有 `ident : expr` 形态，无歧义。
+	if p.peekTok.Type == lexer.TOKEN_IDENT && p.looksLikeColonFieldStart() {
+		return true
+	}
+	// 无点字段 vs 赋值语句序列：只能整段推测。
+	return p.speculativeStructFieldList()
+}
+
+// looksLikeColonFieldStart 判断当前 token 是否是 `ident :` 形态（冒号字段开头）。
+// 调用时 curTok 是 '{'、peekTok 是标识符。只读前瞻，不改 token 位置。
+func (p *Parser) looksLikeColonFieldStart() bool {
+	saveTok := p.curTok
+	savePeek := p.peekTok
+	saveLine := p.lastTokLine
+	saveLex := p.lexer.SaveState()
+	defer func() {
+		p.curTok = saveTok
+		p.peekTok = savePeek
+		p.lastTokLine = saveLine
+		p.lexer.RestoreState(saveLex)
+	}()
+	p.nextToken() // cur = ident
+	p.nextToken() // cur = ':' 或其它
+	return p.curTok.Type == lexer.TOKEN_COLON
+}
+
+// speculativeStructFieldList 整段推测当前 `{ ... }` 是否是无点字段列表。
+//
+// 调用时 curTok 是 '{'、peekTok 是标识符。无条件回滚解析进度，
+// 不改变 curTok/peekTok，可安全地被调用方当作纯查询。
+//
+// 认定条件（对花括号内**每一个**元素）：
+//
+//	ident = expr   |   ident : expr   |   .ident = expr
+//
+// 元素之间必须用逗号分隔。命中以下任一情形即返回 false（控制流块）：
+//   - 元素前缀不是 ident/点号（如 `println(...)`、字面量、`return` 等）
+//   - 出现语句级关键字 token（i64/fn/if/while/for/return/...）
+//   - 元素之间缺少逗号（赋值语句序列 `x = 1 y = 2` 的特征）
+//   - 表达式解析失败 / 花括号提前闭合不上
+//
+// 走到这里之前，调用方已经排除了 `{ }`、`{ .x = ...}`、`{ x: ...}` 三种
+// 无歧义形态；本函数只处理剩下的 `TypeName { field = value, ... }`。
+func (p *Parser) speculativeStructFieldList() bool {
+	saveTok := p.curTok
+	savePeek := p.peekTok
+	saveLine := p.lastTokLine
+	saveLex := p.lexer.SaveState()
+	defer func() {
+		p.curTok = saveTok
+		p.peekTok = savePeek
+		p.lastTokLine = saveLine
+		p.lexer.RestoreState(saveLex)
+	}()
+
+	p.nextToken() // 跳过 '{'
+	sawAny := false
+	for {
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			return sawAny
+		}
+		if p.curTok.Type == lexer.TOKEN_EOF {
+			return false
+		}
+		// 语句级关键字 / 类型关键字：控制流块特征
+		if p.isStatementKeyword(p.curTok.Type) || p.isTypeToken(p.curTok.Type) {
+			return false
+		}
+		if p.curTok.Type == lexer.TOKEN_DOT {
+			p.nextToken()
+			if p.curTok.Type != lexer.TOKEN_IDENT {
+				return false
+			}
+			p.nextToken()
+			if p.curTok.Type != lexer.TOKEN_ASSIGN {
+				return false
+			}
+			p.nextToken()
+		} else if p.curTok.Type == lexer.TOKEN_IDENT {
+			p.nextToken()
+			if p.curTok.Type != lexer.TOKEN_ASSIGN && p.curTok.Type != lexer.TOKEN_COLON {
+				return false
+			}
+			p.nextToken()
+		} else {
+			return false
+		}
+		// 字段值：完整表达式（吃掉括号/下标/调用/算术等），失败即回滚
+		if p.parseExpressionIterative() == nil {
+			return false
+		}
+		sawAny = true
+
+		// 字段之后必须是 ','（还有下一个字段）或 '}'（结束）。
+		// 否则就是 `x = 1 y = 2` 这种赋值语句序列（中间没有逗号），
+		// 判为控制流块。
+		if p.curTok.Type == lexer.TOKEN_COMMA {
+			p.nextToken()
+			// 逗号后不能直接跟 '}'（`{ x = 1, }` 尾逗号），
+			// 若紧跟 '}' 也接受，直接由下一轮 RBRACE 返回。
+			continue
+		}
+		if p.curTok.Type != lexer.TOKEN_RBRACE {
+			return false
+		}
+	}
+}
+
+// isStatementKeyword 判断 token 是否是语句级关键字（控制流块/声明的开头）。
+// 与 isTypeToken 互补：类型关键字单独走 isTypeToken 判定。
+//
+// 这里只需覆盖"能作为块内语句开头"的 token：值表达式永远以
+// IDENT/字面量/括号开头，不会以关键字开头。宁可多列不可漏列——
+// 漏列的后果是 `{ return 0 }` 被误判成字段列表（此时 x=return 不成立，
+// 走 else 分支返回 false，实际是安全的）；多列的后果仅是空跑一次回滚。
+func (p *Parser) isStatementKeyword(t lexer.TokenType) bool {
+	switch t {
+	case lexer.TOKEN_IF, lexer.TOKEN_WHILE, lexer.TOKEN_FOR, lexer.TOKEN_RETURN,
+		lexer.TOKEN_AUTO, lexer.TOKEN_CONST, lexer.TOKEN_STATIC, lexer.TOKEN_CLASS,
+		lexer.TOKEN_MATCH, lexer.TOKEN_SPAWN, lexer.TOKEN_AWAIT,
+		lexer.TOKEN_IMPORT, lexer.TOKEN_PACKAGE, lexer.TOKEN_PUB, lexer.TOKEN_EXPORT,
+		lexer.TOKEN_CONC, lexer.TOKEN_BREAK, lexer.TOKEN_CONTINUE, lexer.TOKEN_YIELD,
+		lexer.TOKEN_RELEASE, lexer.TOKEN_EXTRACT, lexer.TOKEN_SPEND, lexer.TOKEN_SPEND_CALL,
+		lexer.TOKEN_TREE, lexer.TOKEN_OBJECT, lexer.TOKEN_TYPE, lexer.TOKEN_STRUCT,
+		lexer.TOKEN_ENUM, lexer.TOKEN_NONLOCAL, lexer.TOKEN_EXTERN, lexer.TOKEN_CALL,
+		lexer.TOKEN_ADOPT, lexer.TOKEN_PREFIX, lexer.TOKEN_PRINTLN, lexer.TOKEN_SELF:
+		return true
+	}
+	return false
+}
+
 // parseIdentifierIterative 迭代解析标识符（支持多级成员访问和索引访问）
 func (p *Parser) parseIdentifierIterative() ast.Expression {
 	pos := ast.Position{
@@ -4490,9 +4673,24 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 	p.nextToken()
 
 	// struct 字面量：TypeName{ .field = value, ... } 或 TypeName{ field: value, ... }
-	// 只有当标识符首字母大写（类型名）且后面跟 { 时才解析成 struct 字面量
-	// 这样不会影响 match 模式解析（match 模式不经过 parseIdentifierIterative）
-	if p.curTok.Type == lexer.TOKEN_LBRACE && len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
+	//
+	// 判定必须看 { 里面的内容，不能只看"首字母大写 + {"。后缀 { 在这里
+	// 有两个来源：结构体字面量，以及控制流块的左花括号。后者极其常见：
+	//
+	//     if Count > Limit { ... }      // Limit 是变量，{ 属于 if 块
+	//     while n < Max { ... }         // Max 同上
+	//
+	// 早先只按首字母大写判定，于是 `Limit { ... }` 被吃成结构体字面量，
+	// 条件表达式变成 `Count > Limit{...}`，语义层报 i64 与 struct 不可比较，
+	// 生成层则输出 `Count > (Limit){0}` 这种非法 C。踩坑的全是大写开头的
+	// 常量/变量名（MAX、LIMIT、Count），和宏毫无关系——只是宏里更容易撞上。
+	//
+	// 现在有两层防线：
+	//   1. blockDepth > 0（正在解析 if/while/for/match 的条件或迭代目标）时，
+	//      直接跳过字面量判定——{ 是块的左花括号，不是字面量的开始。
+	//   2. 其余场景下，用 looksLikeStructLiteralBody() 做整段推测，
+	//      只有 { 内部确实是字段列表形态才算结构体字面量。
+	if p.curTok.Type == lexer.TOKEN_LBRACE && len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' && p.blockDepth == 0 && p.looksLikeStructLiteralBody() {
 		return p.parseStructLiteralWithType(name, pos)
 	}
 
@@ -6244,13 +6442,17 @@ func (p *Parser) parseMatchExpressionIterative() ast.Expression {
 	// 解析 ( 目标表达式 ) 或无括号目标: match expr { ... }
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
+		p.blockDepth++
 		expr.Target = p.parseExpressionIterative()
+		p.blockDepth--
 		if p.curTok.Type == lexer.TOKEN_RPAREN {
 			p.nextToken()
 		}
 	} else if p.curTok.Type != lexer.TOKEN_LBRACE && p.curTok.Type != lexer.TOKEN_EOF {
 		// 无括号形式: match x { ... }，直接解析目标表达式
+		p.blockDepth++
 		expr.Target = p.parseExpressionIterative()
+		p.blockDepth--
 	}
 
 	// 解析 { 匹配分支列表 }
