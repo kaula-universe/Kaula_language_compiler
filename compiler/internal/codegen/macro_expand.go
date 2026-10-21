@@ -120,6 +120,12 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 	if !found {
 		return nil, false
 	}
+	if err := sg.enterMacroExpansion(e.Name); err != nil {
+		exp := &macroExpansion{Name: e.Name, Renames: map[string]string{}, Params: map[string]ast.Expression{}}
+		exp.addError(err.Error())
+		return exp, true
+	}
+	defer sg.leaveMacroExpansion()
 
 	// 结构签名：`tree(...)` / `struct(...)` 注解参数或同名 `tree Name { ... }`
 	sig = sg.macroSignatureFor(e.Name, funcDecl, nil)
@@ -306,6 +312,27 @@ func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression
 		return code
 	}
 
+	/* 生成期递归闸门。
+	 *
+	 * 展开器本身只展开一层，返回的语句里可能仍含宏调用（模板体里的
+	 * `@Loop(...)`）。这些语句随后由 generateBlockStatement 生成，又回到
+	 * 本函数——于是形成 generatePrefixCallBody → generateBlockStatement →
+	 * generatePrefixCallBody 的递归，且每一层的 exp.Stmts 都正常非空。
+	 * expandStructureMacro 内部的计数器在这种"每层返回后复位"的链路上
+	 * 看不到嵌套，只能在这里按实际生成嵌套计。 */
+	if sg.codegen.macroGenerateDepth >= macroMaxDepth {
+		chain := strings.Join(sg.codegen.macroExpansionStack, " → ")
+		if chain == "" {
+			chain = e.Name
+		}
+		sg.codegen.error(fmt.Sprintf(
+			"前缀 '%s' 展开层数超过上限 %d（展开链：%s）；前缀模板里是否出现了自我调用或互相调用？",
+			e.Name, macroMaxDepth, chain))
+		return ""
+	}
+	sg.codegen.macroGenerateDepth++
+	defer func() { sg.codegen.macroGenerateDepth-- }()
+
 	exp, ok := sg.expandStructureMacro(e)
 	if !ok {
 		/*
@@ -449,9 +476,24 @@ func (r *macroRewriter) expandParamStatement(id *ast.Identifier, pos ast.Positio
 	if !ok || bound == nil {
 		return nil
 	}
-	if _, isPrefix := bound.(*ast.PrefixCallExpression); isPrefix {
-		// 参数本身是宏调用：递归展开为语句
-		if exp, ok := r.sg.expandStructureMacro(bound.(*ast.PrefixCallExpression)); ok {
+	if call, isPrefix := bound.(*ast.PrefixCallExpression); isPrefix {
+		/* 参数本身是宏调用：递归展开为语句。
+		 *
+		 * 这里的递归同样需要闸门。expandStructureMacro 内部的深度计数在它
+		 * 返回时就复位了，而展开结果里的宏调用是在**本函数**里、且是在
+		 * 外层返回之后才被处理的——即 `prefix Loop { $v  @Loop($v) }` 会
+		 * 形成"展开→返回→再展开"的循环，深度始终是 0，永远不会触发上限。
+		 * 用 r.depth 记录改写阶段自身的嵌套层数才行。 */
+		if r.sg.codegen.macroRewriteDepth >= macroMaxDepth {
+			return []ast.Statement{&ast.ExpressionStatement{
+				Expression: call,
+				Pos:        pos,
+			}}
+		}
+		r.sg.codegen.macroRewriteDepth++
+		exp, ok := r.sg.expandStructureMacro(call)
+		r.sg.codegen.macroRewriteDepth--
+		if ok {
 			return exp.Stmts
 		}
 	}
@@ -687,4 +729,35 @@ func (cg *CodeGenerator) rewritePrefixBodyExpression(e ast.Expression, params ma
 		}
 		return nil
 	})
+}
+
+// macroMaxDepth 宏展开的嵌套深度上限。
+//
+// 展开是递归的：模板体里可以再调用另一个前缀，而被调用的前缀又可以反过来
+// 调用外层的那个。合法的嵌套很少超过 3~4 层；给到 32 是为了不误伤"宏生成
+// 宏"的写法，同时远小于 Go 栈的承受上限。
+const macroMaxDepth = 32
+
+// enterMacroExpansion 进入一层展开，超深或直接自引用时报错。
+//
+// 不做这道闸门的话，`prefix Loop { $v  @Loop(v = $v) }` 会在展开阶段无限
+// 递归，用户看到的是 `fatal error: stack overflow` 加一段 Go runtime 转储，
+// 既看不出是哪个宏，也不知道该怎么改。
+func (sg *StatementGenerator) enterMacroExpansion(name string) error {
+	if sg.codegen.macroDepth >= macroMaxDepth {
+		return fmt.Errorf("宏展开层数超过上限 %d（展开链：%s）；前缀模板里是否出现了自我调用？",
+			macroMaxDepth, strings.Join(append(append([]string{}, sg.codegen.macroExpansionStack...), name), " → "))
+	}
+	sg.codegen.macroDepth++
+	sg.codegen.macroExpansionStack = append(sg.codegen.macroExpansionStack, name)
+	return nil
+}
+
+func (sg *StatementGenerator) leaveMacroExpansion() {
+	if sg.codegen.macroDepth > 0 {
+		sg.codegen.macroDepth--
+	}
+	if n := len(sg.codegen.macroExpansionStack); n > 0 {
+		sg.codegen.macroExpansionStack = sg.codegen.macroExpansionStack[:n-1]
+	}
 }

@@ -35,6 +35,8 @@ type SemanticAnalyzer struct {
 	rootTreeFound            bool
 	source                   string                         // 源码用于错误上下文
 	prefixSymbolTables       map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
+	// analyzingPrefixes 正在分析中的 prefix 语句（指针识别，防止自我调用时无限递归）
+	analyzingPrefixes map[*ast.PrefixStatement]bool
 	currentPrefixTable       *symbol.SymbolTable            // 当前 @前缀块 的符号表
 	comptime                 *comptime.Evaluator            // 编译期表达式评估器
 	importedModules          map[string]bool                // 记录实际导入的模块
@@ -248,6 +250,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		prefixManager:      core.NewPrefixManager(),
 		rootTreeFound:      false,
 		prefixSymbolTables: make(map[string]*symbol.SymbolTable),
+		analyzingPrefixes:  make(map[*ast.PrefixStatement]bool),
 		comptime:           nil,
 		importedModules:    make(map[string]bool),
 		arrayLens:          make(map[string]int),
@@ -1033,6 +1036,21 @@ func (sa *SemanticAnalyzer) checkSpendBodyExit(clauseIdx, totalClauses int, call
 // 并在定义体分析期间把 currentPrefixTable 指向本前缀符号表，
 // 使定义体内的 $msg 引用可解析（而不是报"只能在 @前缀块 中使用"）。
 func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
+	/*
+	 * 重入保护：`prefix Loop { $v  @Loop(v = $v) }` 这类自我调用会让
+	 * analyzePrefixCallExpression 发现"表还没登记"而回头再调本函数，
+	 * 于是无限递归，最终以 Go 的 `fatal error: stack overflow` 收场——
+	 * 用户既看不到是哪个宏、也不知道问题出在自我调用上。
+	 *
+	 * 判据用语句指针而不是名字：同名模板在嵌套位置可以重名，但一条
+	 * prefix 语句正在被分析这件事是明确的。
+	 */
+	if sa.analyzingPrefixes[stmt] {
+		return
+	}
+	sa.analyzingPrefixes[stmt] = true
+	defer delete(sa.analyzingPrefixes, stmt)
+
 	oldSymbolTable := sa.symbolTable
 	sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "prefix_"+stmt.Name)
 	sa.scope++
@@ -1041,15 +1059,17 @@ func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
 		sa.symbolTable.AddSymbol(ref.Name, "", false, "prefix_"+stmt.Name, ref.Pos.Line, ref.Pos.Column)
 	}
 
+	/* 符号表先登记再分析体内语句：模板体里可能调用自己（或互相调用），
+	 * 调用点会来查这张表。提前登记让那种调用直接拿到参数表，不再回头
+	 * 触发一次重复分析。 */
+	sa.prefixSymbolTables[stmt.Name] = sa.symbolTable
+
 	oldPrefixTable := sa.currentPrefixTable
 	sa.currentPrefixTable = sa.symbolTable
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
 	sa.currentPrefixTable = oldPrefixTable
-
-	// 保存前缀的符号表，以便 @前缀块 中引用 $变量
-	sa.prefixSymbolTables[stmt.Name] = sa.symbolTable
 
 	sa.symbolTable = oldSymbolTable
 	sa.scope--

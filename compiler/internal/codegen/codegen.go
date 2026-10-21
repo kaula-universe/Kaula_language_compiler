@@ -64,6 +64,24 @@ type CodeGenerator struct {
 	// 保证不同调用点、嵌套展开之间的临时变量互不撞名。
 	macroRenameSeq int
 
+	// macroDepth 当前宏展开的嵌套深度，用于阻断自引用/互相引用的无限展开。
+	// 展开是递归的（模板体里可以调用另一个前缀），而递归没有任何天然的终止
+	// 条件：`prefix Loop { $v  @Loop(v = $v) }` 会让编译器在展开阶段栈溢出，
+	// 用户看到的是 Go runtime 的堆栈转储。超过上限时停止展开并报错。
+	macroDepth int
+	// macroExpansionStack 正在展开的宏名栈（自内向外），诊断用
+	macroExpansionStack []string
+
+	// macroRewriteDepth 改写阶段的递归层数。展开结果里如果又是宏调用
+	// （`prefix Loop { $v  @Loop($v) }`），会开一次新的展开；这条链跨越了
+	// 多次 expandStructureMacro 调用，那个函数内的计数器在返回时就复位了，
+	// 只能在 codegen 上累计。
+	macroRewriteDepth int
+
+	// macroGenerateDepth 展开结果被生成代码时的嵌套层数。展开一层的产物里
+	// 仍可能含宏调用，生成它又会进入展开，这条链只能在实际生成时计数。
+	macroGenerateDepth int
+
 	typeGenerator       *TypeGenerator
 	functionGenerator   *FunctionGenerator
 	expressionGenerator *ExpressionGenerator

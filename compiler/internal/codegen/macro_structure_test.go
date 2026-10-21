@@ -9,6 +9,7 @@ package codegen
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"kaula/internal/ast"
 	"kaula/internal/config"
@@ -540,5 +541,66 @@ fn main() {
 	_, errs := compileMacro(t, src)
 	if len(errs) > 0 {
 		t.Fatalf("编译报错: %v", errs)
+	}
+}
+
+// TestMacroSelfRecursionIsBounded：自我调用的前缀必须报错，而不是让编译器
+// 栈溢出或挂死。
+//
+// 两道闸门：语义阶段 analyzePrefixStatement 的重入保护（否则 sema 先栈溢出），
+// 以及生成阶段的展开层数上限（展开一层的产物里仍含宏调用，会一路递归下去）。
+func TestMacroSelfRecursionIsBounded(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			// 模板体只有一条 @Self：sema 的补分析路径最容易在这里无限递归
+			name: "只为参数的自引用",
+			src: `
+prefix Loop {
+    $v
+    @Loop(v = $v)
+}
+fn main() {
+    i64 x = 1
+    @Loop(v = x)
+}`,
+		},
+		{
+			// 带宽高语句：展开结果的生成阶段会再进展开，形成另一条递归链
+			name: "带实语句的自引用",
+			src: `
+prefix Loop2 {
+    $v
+    println($v)
+    @Loop2(v = $v)
+}
+fn main() {
+    i64 x = 1
+    @Loop2(v = x)
+}`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			done := make(chan []string, 1)
+			go func() {
+				_, errs := compileMacro(t, c.src)
+				done <- errs
+			}()
+			select {
+			case errs := <-done:
+				if len(errs) == 0 {
+					t.Fatal("自引用前缀应报错")
+				}
+				joined := strings.Join(errs, "\n")
+				if !strings.Contains(joined, "展开层数超过上限") {
+					t.Fatalf("应报展开层数超限，实际: %v", errs)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("自引用前缀导致编译挂起（既没报错也没退出）")
+			}
+		})
 	}
 }
