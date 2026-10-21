@@ -604,3 +604,192 @@ fn main() {
 		})
 	}
 }
+
+/* ── 「实参只求值一次」（let 绑定，Task #4）── */
+
+// TestMacroLetBindingBindsRepeatedRValueParam：模板骨架里右值引用 ≥2 次的
+// $参数，实参求值一次绑到 __auto_type 临时变量，骨架引用改指临时变量。
+// 这是 Task #4 的核心语义：带副作用的实参（IO、计数器、写变量）不再因为
+// 内联两次而执行两遍。
+func TestMacroLetBindingBindsRepeatedRValueParam(t *testing.T) {
+	src := `
+i64 g_count = 0
+fn bump() -> i64 {
+    g_count = g_count + 1
+    return g_count
+}
+prefix Twice {
+    $x
+    println("sum=", $x + $x, " count=", g_count)
+}
+fn main() {
+    @Twice(x = bump())
+}`
+	call, cg := macroCallIn(t, src, 0)
+	exp := expand(t, call, cg)
+	if len(exp.Errors) != 0 {
+		t.Fatalf("展开报错: %v", exp.Errors)
+	}
+	temp, ok := exp.Lets["x"]
+	if !ok {
+		t.Fatalf("x 引用两次应触发绑定，实际 Lets=%v", exp.Lets)
+	}
+	if !strings.HasPrefix(temp, "__kaula_b") {
+		t.Fatalf("绑定临时变量应使用 __kaula_b 前缀，实际 %q", temp)
+	}
+	// 第一条语句是绑定声明：__auto_type <temp> = <实参>
+	if len(exp.Stmts) == 0 {
+		t.Fatal("展开结果为空")
+	}
+	decl, ok := exp.Stmts[0].(*ast.VariableDeclaration)
+	if !ok || !decl.IsAuto || decl.Name != temp {
+		t.Fatalf("第一条语句应是绑定声明 %s，实际 %T %v", temp, exp.Stmts[0], exp.Stmts[0])
+	}
+	if decl.Type != "__auto_type" {
+		t.Fatalf("绑定声明类型应为 __auto_type，实际 %q", decl.Type)
+	}
+	code := cg.statementGenerator.generateBlockStatement(&ast.BlockStatement{Statements: exp.Stmts})
+	if strings.Count(code, "bump()") != 1 {
+		t.Fatalf("实参 bump() 应只求值一次（绑定声明里），实际出现 %d 次:\n%s",
+			strings.Count(code, "bump()"), code)
+	}
+	// 骨架引用应改指临时变量（不是原样内联实参）
+	if !strings.Contains(code, temp) || !strings.Contains(code, temp+"), (int64_t)("+temp+")") {
+		t.Fatalf("骨架引用应改指临时变量 %s:\n%s", temp, code)
+	}
+}
+
+// TestMacroLetBindingKeepsStringKind：绑定临时变量以 __auto_type 登记，
+// isStringTyped/isPointerTyped 均判 false（作用域出口不生成 free，规避
+// String 浅拷贝双释放），其真实类型由 prefixLetKinds 提示表补上——
+// `$s` 绑定后 `$s + "!"` 仍走字符串拼接，而不是被判成数字加法。
+func TestMacroLetBindingKeepsStringKind(t *testing.T) {
+	src := `
+fn greet() -> string {
+    return "hi"
+}
+prefix Loud {
+    $s
+    println($s + "!")
+    println($s + "!!")
+}
+fn main() {
+    @Loud(s = greet())
+}`
+	call, cg := macroCallIn(t, src, 0)
+	exp := expand(t, call, cg)
+	if len(exp.Errors) != 0 {
+		t.Fatalf("展开报错: %v", exp.Errors)
+	}
+	temp, ok := exp.Lets["s"]
+	if !ok {
+		t.Fatalf("s 引用两次应触发绑定，实际 Lets=%v", exp.Lets)
+	}
+	if kind := cg.prefixLetKinds[temp]; kind != "s" {
+		t.Fatalf("绑定临时变量 %s 的类型提示应为 s，实际 %q（prefixLetKinds=%v）",
+			temp, kind, cg.prefixLetKinds)
+	}
+	code := cg.statementGenerator.generateBlockStatement(&ast.BlockStatement{Statements: exp.Stmts})
+	if !strings.Contains(code, "string_concat("+temp) {
+		t.Fatalf("`$s + \"!\"` 应走字符串拼接（string_concat），实际:\n%s", code)
+	}
+	if strings.Contains(code, "survivor_free("+temp) {
+		t.Fatalf("绑定临时变量不应在作用域出口被 free（规避浅拷贝双释放），实际:\n%s", code)
+	}
+}
+
+// TestMacroLetBindingSkipsLValueParams：左值参数（`$target = $target + $value`）
+// 绝不绑定——绑定会把赋值目标悄悄改到临时变量上，宏改写调用点变量的语义
+// 完全错误。
+func TestMacroLetBindingSkipsLValueParams(t *testing.T) {
+	src := `
+#[prefix]
+fn AddTo(target: i64, value: i64) {
+    $target = $target + $value
+    println($target)
+    println($target)
+}
+fn main() {
+    i64 acc = 100
+    @AddTo(target = acc, value = 42)
+}`
+	call, cg := macroCallIn(t, src, 1)
+	exp := expand(t, call, cg)
+	if len(exp.Errors) != 0 {
+		t.Fatalf("展开报错: %v", exp.Errors)
+	}
+	if _, ok := exp.Lets["target"]; ok {
+		t.Fatalf("左值参数 target 不应被绑定，实际 Lets=%v", exp.Lets)
+	}
+	if _, ok := exp.Lets["value"]; ok {
+		t.Fatalf("value 不应被绑定（引用次数不足），实际 Lets=%v", exp.Lets)
+	}
+	code := cg.statementGenerator.generateBlockStatement(&ast.BlockStatement{Statements: exp.Stmts})
+	// 赋值必须仍作用于实参 acc
+	if !strings.Contains(code, "acc") {
+		t.Fatalf("赋值应作用于实参 acc，实际:\n%s", code)
+	}
+	if strings.Contains(code, "__kaula_b") {
+		t.Fatalf("左值参数不应产生绑定临时变量，实际:\n%s", code)
+	}
+}
+
+// TestMacroLetBindingSkipsSingleRefAndNonBindable：单次引用、字面量实参、
+// void 调用实参、宏调用实参一律不绑定（无副作用无需绑定；无值可绑）。
+func TestMacroLetBindingSkipsSingleRefAndNonBindable(t *testing.T) {
+	src := `
+fn bump() -> i64 {
+    return 1
+}
+prefix Mix {
+    $a
+    $b
+    $c
+    $d
+    println($a, $b, $c)
+    println($b)
+    println($c)
+}
+fn main() {
+    @Mix(a = bump(), b = 42, c = println("void"), d = bump())
+}`
+	call, cg := macroCallIn(t, src, 0)
+	exp := expand(t, call, cg)
+	if len(exp.Errors) != 0 {
+		t.Fatalf("展开报错: %v", exp.Errors)
+	}
+	if len(exp.Lets) != 0 {
+		t.Fatalf("单次引用/字面量/void 调用实参均不应绑定，实际 Lets=%v", exp.Lets)
+	}
+}
+
+// TestMacroLetBindingSameCallTwiceGetsDistinctTemps：同一前缀在同一程序里
+// 展开两次，绑定临时变量互不撞名（与 alpha 重命名同一套保证）。
+func TestMacroLetBindingSameCallTwiceGetsDistinctTemps(t *testing.T) {
+	src := `
+i64 g_count = 0
+fn bump() -> i64 {
+    g_count = g_count + 1
+    return g_count
+}
+prefix Twice {
+    $x
+    println($x + $x)
+}
+fn main() {
+    @Twice(x = bump())
+    @Twice(x = bump())
+}`
+	call1, cg := macroCallIn(t, src, 0)
+	call2, _ := macroCallIn(t, src, 1)
+	exp1 := expand(t, call1, cg)
+	exp2 := expand(t, call2, cg)
+	temp1 := exp1.Lets["x"]
+	temp2 := exp2.Lets["x"]
+	if temp1 == "" || temp2 == "" {
+		t.Fatalf("两次展开都应有绑定: %q %q", temp1, temp2)
+	}
+	if temp1 == temp2 {
+		t.Fatalf("两次展开得到同一个绑定临时变量 %q：嵌套展开时会互相覆盖", temp1)
+	}
+}

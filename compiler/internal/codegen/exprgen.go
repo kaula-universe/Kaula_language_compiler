@@ -2192,6 +2192,13 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.ObjectLiteral:
 		return "obj"
 	case *ast.Identifier:
+		// 结构宏「实参只求值一次」的绑定临时变量：符号类型是 __auto_type，
+		// 具体 kind 由提示表给出（填充见 macro_expand.go 第 5.5 步）。
+		// 不接这一支，`$s` 绑定后 `__kaula_b0_s + "!"` 会被判成数字加法，
+		// println 按 %d 打印 String 结构体垃圾。
+		if hint, ok := eg.codegen.prefixLetKinds[e.Name]; ok {
+			return hint
+		}
 		// 前缀 $param：类型取绑定实参在调用点的类型提示，
 		// 否则会落到下方默认 "d"，让 `$s + "x"` 被判成数字拼接
 		if e.IsPrefixVar || strings.HasPrefix(e.Name, "$") {
