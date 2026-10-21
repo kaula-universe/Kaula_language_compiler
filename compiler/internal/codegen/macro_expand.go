@@ -60,6 +60,10 @@ type macroExpansion struct {
 	AllParams []string
 	// Errors 展开期发现的调用点/结构错误（由调用方上报，避免重复报错）
 	Errors []string
+	// Lets 「实参只求值一次」的绑定计划：$参数名 → 临时变量名。
+	// 模板骨架里右值引用 ≥2 次、且从未作为赋值左值的参数，实参求值一次
+	// 绑到 __auto_type 临时变量，骨架里的引用改指临时变量（见第 5.5 步）。
+	Lets map[string]string
 }
 
 // macroBodyInfo 描述一段内联进展开结果的调用体
@@ -268,6 +272,41 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 	exp.Frees = frees
 	sg.codegen.pushMacroFreeBindings(frees)
 
+	/* 第 5.5 步：实参只求值一次（let 绑定）。
+	 *
+	 * 模板骨架里**右值表达式引用 ≥2 次**、且**从未作为赋值左值**出现的
+	 * $参数，先在展开块开头把实参求值一次绑到 `__auto_type` 临时变量，
+	 * 再把骨架里的引用改写为临时变量名。语义：实参表达式只执行一次，
+	 * 副作用（IO、计数器、写变量）不再因为内联两次而翻倍。
+	 *
+	 * 绑定声明必须插在直引重写（第 5 步）**之后**：早于第 5 步，绑定声明
+	 * 里调用点的实参标识符会被直引重写误当成模板直引，改成外层变量的
+	 * 唯一名。绑定临时变量以 __auto_type 登记符号：isStringTyped /
+	 * isPointerTyped 均判 false，作用域出口不生成任何 free，天然规避
+	 * String 浅拷贝的双释放；其真实类型由 prefixLetKinds 提示表补上
+	 * （第 8 步登记）。 */
+	exp.Lets = sg.planPrefixLetBindings(renamed, paramTable)
+	if len(exp.Lets) > 0 {
+		prelude := make([]ast.Statement, 0, len(exp.Lets))
+		for _, param := range sortedPrefixLetParams(exp.Lets) {
+			temp := exp.Lets[param]
+			prelude = append(prelude, &ast.VariableDeclaration{
+				Name:   temp,
+				Type:   "__auto_type",
+				IsAuto: true,
+				Value:  astutil.CloneExpression(paramTable[param]),
+				Pos:    e.Pos,
+			})
+		}
+		// 绑定声明插在展开块开头：实参在宏体任何语句执行之前求值一次
+		renamed = append(prelude, renamed...)
+		// 骨架与绑定声明里的 $参数 引用统一改指临时变量（转发引用
+		// `$a = $b` 的绑定值里若有其他绑定参数，同样指向其临时变量）
+		for _, param := range sortedPrefixLetParams(exp.Lets) {
+			renamed = bindPrefixParamRefs(renamed, param, exp.Lets[param])
+		}
+	}
+
 	// 第 6 步：结构约束校验（tree 注解 / tree 模板），在生成代码之前发现问题
 	if errs := sg.validateMacroArguments(exp, len(e.Body)); len(errs) > 0 {
 		sg.codegen.popMacroFreeBindings()
@@ -291,6 +330,21 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 	rewriter := &macroRewriter{sg: sg, exp: exp}
 
 	expanded := rewriter.rewriteStmts(renamed)
+
+	// 第 8 步：登记「实参只求值一次」绑定临时变量的类型提示。
+	// 绑定声明与骨架同批改写，Value 此时已完全物化（转发 $q 也已替换），
+	// 用它推断的 kind 最准确。不登记的话 __auto_type 符号在 inferType 的
+	// Identifier 分支兜底成 "d"：`$s` 绑定后 `__kaula_b0_s + "!"` 会被判成
+	// 数字加法，println 按 %d 打印 String 结构体垃圾。
+	if len(exp.Lets) > 0 {
+		for _, s := range expanded {
+			if vd, ok := s.(*ast.VariableDeclaration); ok && vd.IsAuto && strings.HasPrefix(vd.Name, prefixLetTempPrefix) {
+				if vd.Value != nil {
+					sg.codegen.prefixLetKinds[vd.Name] = sg.codegen.expressionGenerator.inferType(vd.Value)
+				}
+			}
+		}
+	}
 
 	sg.codegen.popMacroFreeBindings()
 	sg.codegen.popMacroFreeBindings()
@@ -623,6 +677,232 @@ func (r *macroRewriter) rewriteExpr(e ast.Expression) ast.Expression {
 		}
 		return nil
 	})
+}
+
+/* ── 「实参只求值一次」（let 绑定）── */
+
+// prefixLetTempPrefix 「实参只求值一次」绑定临时变量的名字前缀。
+// 独立分族（__kaula_b*），不与 alpha 重命名的 __kaula_m* 碰撞。
+const prefixLetTempPrefix = "__kaula_b"
+
+// prefixAssignOps 赋值类二元运算符（= 及复合赋值）。这些运算符的 Left 子树
+// 是左值位置：`$target = $target + $value` 中 $target 既是左值又被引用，
+// 若绑定，赋值目标会悄悄改到临时变量上，语义完全错误——左值出现即不绑定。
+var prefixAssignOps = map[string]bool{
+	"=": true, "+=": true, "-=": true, "*=": true, "/=": true, "%=": true,
+	"&=": true, "|=": true, "^=": true, "<<=": true, ">>=": true,
+}
+
+// sortedPrefixLetParams 返回绑定计划 map 的 key 排序列表
+// （确定性遍历：临时变量编号稳定）
+func sortedPrefixLetParams(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// prefixLetPlanner 「实参只求值一次」的分析器：按模板骨架统计每个 $参数 的
+// 右值引用次数与左值出现。
+type prefixLetPlanner struct {
+	counts map[string]int  // 右值引用次数
+	lhs    map[string]bool // 是否在赋值左值位置出现
+	order  []string        // 首次出现顺序（绑定顺序与编号稳定）
+}
+
+func newPrefixLetPlanner() *prefixLetPlanner {
+	return &prefixLetPlanner{counts: map[string]int{}, lhs: map[string]bool{}}
+}
+
+// analyze 遍历语句序列，按左值/右值位置统计 $参数 引用。
+//
+// 判据刻意**不用** CollectPrefixParamRefs 的「首次出现=声明」：那套判据
+// 会把 `$target = $target + $value` 的左值误判成 Default 声明。这里自建
+// 遍历器（与 macroRewriter.rewriteExpr 的 RewriteExpressionChildren 递归
+// 同构），赋值二元表达式的左子树按左值模式走（子树里的 $参数 记为左值
+// 出现，不计数右值）；其余槽位一律右值计数。
+func (p *prefixLetPlanner) analyze(stmts []ast.Statement) {
+	var visitStmt func(s ast.Statement)
+	var visitExpr func(e ast.Expression, lhsMode bool)
+	visitExpr = func(e ast.Expression, lhsMode bool) {
+		if e == nil {
+			return
+		}
+		if id, ok := e.(*ast.Identifier); ok {
+			if id.IsPrefixVar {
+				if lhsMode {
+					p.lhs[id.Name] = true
+				} else if _, seen := p.counts[id.Name]; !seen {
+					p.order = append(p.order, id.Name)
+					p.counts[id.Name] = 1
+				} else {
+					p.counts[id.Name]++
+				}
+			}
+			return
+		}
+		if be, ok := e.(*ast.BinaryExpression); ok && prefixAssignOps[be.Operator] {
+			visitExpr(be.Left, true)
+			visitExpr(be.Right, false)
+			return
+		}
+		astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				visitExpr(v, lhsMode)
+			case ast.Statement:
+				visitStmt(v)
+			}
+			return nil
+		})
+	}
+	visitStmt = func(s ast.Statement) {
+		if s == nil {
+			return
+		}
+		astutil.RewriteStatementChildren(s, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				visitExpr(v, false)
+			case ast.Statement:
+				visitStmt(v)
+			}
+			return nil
+		})
+	}
+	for _, s := range stmts {
+		visitStmt(s)
+	}
+}
+
+// planPrefixLetBindings 决定哪些 $参数 需要「实参只求值一次」绑定。
+//
+// 触发条件（缺一不可）：
+//   - 模板骨架里右值表达式引用 ≥2 次；
+//   - 从未作为赋值左值出现（左值参数绑定会把赋值目标改到临时变量上）；
+//   - 绑定载荷可绑定：语句级实参、宏调用实参、字面量、无返回值的调用
+//     一律跳过（前者无值可绑，字面量无副作用无需绑定）。
+//
+// 返回 map：$参数名 → 临时变量名 __kaula_b<seq>_<参数>。
+func (sg *StatementGenerator) planPrefixLetBindings(renamed []ast.Statement, paramTable map[string]ast.Expression) map[string]string {
+	planner := newPrefixLetPlanner()
+	planner.analyze(renamed)
+	out := map[string]string{}
+	for _, name := range planner.order {
+		if planner.counts[name] < 2 || planner.lhs[name] {
+			continue
+		}
+		if !sg.prefixLetBindable(paramTable[name]) {
+			continue
+		}
+		sg.codegen.prefixLetSeq++
+		out[name] = fmt.Sprintf("%s%d_%s", prefixLetTempPrefix, sg.codegen.prefixLetSeq, name)
+	}
+	return out
+}
+
+// prefixLetBindable 判断绑定载荷能否绑到 __auto_type 临时变量。
+func (sg *StatementGenerator) prefixLetBindable(bound ast.Expression) bool {
+	if bound == nil || isStatementLike(bound) {
+		return false
+	}
+	switch bound.(type) {
+	case *ast.PrefixCallExpression:
+		// 宏调用实参：展开结果是语句序列/语句表达式，不绑
+		return false
+	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.CharLiteral, *ast.BooleanLiteral, *ast.ArrayLiteral, *ast.ObjectLiteral:
+		// 字面量无副作用：内联多少次都一样，无需绑定
+		return false
+	}
+	if sg.prefixLetExprHasNoValue(bound) {
+		// void 调用：`__auto_type x = println(...);` 是非法 C
+		return false
+	}
+	return true
+}
+
+// prefixLetExprHasNoValue 判断绑定载荷是否确定不产生值（void 内建 /
+// 用户 void 函数）。
+func (sg *StatementGenerator) prefixLetExprHasNoValue(e ast.Expression) bool {
+	call, ok := e.(*ast.CallExpression)
+	if !ok || call == nil {
+		return false
+	}
+	name := ""
+	if id, ok := call.Function.(*ast.Identifier); ok {
+		name = id.Name
+	}
+	if name == "" {
+		return false
+	}
+	if macroVoidBuiltins[name] {
+		return true
+	}
+	if prog := sg.codegen.getProgram(); prog != nil {
+		if fn := prog.FindFunction(name); fn != nil {
+			return voidFuncFor(fn)
+		}
+	}
+	// 跨文件 import 的函数：返回类型表里查得到才下结论；查不到无法确认
+	// 无值，保守按"有值"处理（不绑定也不出错，只是退化为内联）。
+	if rt, ok := sg.codegen.localImportReturns[name]; ok {
+		return rt == "" || isVoidType(rt)
+	}
+	return false
+}
+
+// bindPrefixParamRefs 把语句序列里 $param 的全部引用改写为临时变量名。
+// 只对已确认「从未作为赋值左值」的参数生效——绑定计划保证了这类参数
+// 不存在左值引用，全量替换即等价于只替换右值引用。
+//
+// 递归必须由 fn 自己完成（RewriteStatementChildren/RewriteExpressionChildren
+// 只改写**直接子节点**）：遍历形态与 macroRewriter.rewriteStmt/rewriteExpr
+// 同构，否则嵌套在调用实参、二元操作数等槽位里的引用会漏改。
+func bindPrefixParamRefs(stmts []ast.Statement, param, temp string) []ast.Statement {
+	var walkStmt func(s ast.Statement) ast.Statement
+	var walkExpr func(e ast.Expression) ast.Expression
+	walkExpr = func(e ast.Expression) ast.Expression {
+		if e == nil {
+			return nil
+		}
+		if id, ok := e.(*ast.Identifier); ok && id.IsPrefixVar && id.Name == param {
+			return &ast.Identifier{Name: temp, Pos: id.Pos}
+		}
+		return astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				return walkExpr(v)
+			case ast.Statement:
+				return walkStmt(v)
+			}
+			return nil
+		})
+	}
+	walkStmt = func(s ast.Statement) ast.Statement {
+		if s == nil {
+			return nil
+		}
+		return astutil.RewriteStatementChildren(s, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				return walkExpr(v)
+			case ast.Statement:
+				return walkStmt(v)
+			}
+			return nil
+		})
+	}
+	out := make([]ast.Statement, 0, len(stmts))
+	for _, s := range stmts {
+		if s == nil {
+			continue
+		}
+		out = append(out, walkStmt(s))
+	}
+	return out
 }
 
 // macroValueExpression 取「这条语句作为宏返回值时的表达式」，并校验该形态

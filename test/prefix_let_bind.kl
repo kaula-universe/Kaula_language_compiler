@@ -1,0 +1,47 @@
+# prefix_let_bind.kl — 「实参只求值一次」（let 绑定）回归
+#
+# Task #4：模板骨架里右值引用 ≥2 次、且从未作为赋值左值的 $参数，
+# 实参求值一次绑到 __auto_type 临时变量，骨架引用改指临时变量。
+# 回归场景：带副作用的实参（计数器/IO/写变量）不再因为内联两次而执行两遍。
+#
+# 断言方式：g_count 在宏展开期间只应增加 1（bump 只调用一次）；
+# 左值参数（$target = $target + ...）必须继续作用于调用点变量（不绑定）。
+
+fn check(bool cond, string label) {
+    if cond {
+        println("PASS ", label)
+    } else {
+        println("FAIL ", label)
+    }
+}
+
+i64 g_count = 0
+
+fn bump() -> i64 {
+    g_count = g_count + 1
+    return g_count
+}
+
+# 形态一：$x 右值引用两次（$x + $x）→ 实参只求值一次
+prefix Twice {
+    $x
+    println("sum=", $x + $x, " count=", g_count)
+}
+
+# 形态二：$target 是赋值左值 → 绝不绑定，赋值仍作用于调用点变量
+prefix AddTo {
+    $target
+    $value
+    $target = $target + $value
+}
+
+fn main() {
+    # 形态一：bump() 必须只调用一次（sum 用同一份值）
+    @Twice(x = bump())
+    check(g_count == 1, "let-binding evaluates repeated rvalue param once")
+
+    # 形态二：左值参数不绑定，累加作用在本地变量 acc 上
+    i64 acc = 100
+    @AddTo(target = acc, value = 42)
+    check(acc == 142, "let-binding skips lvalue params")
+}

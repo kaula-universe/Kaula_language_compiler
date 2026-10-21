@@ -64,6 +64,16 @@ type CodeGenerator struct {
 	// 保证不同调用点、嵌套展开之间的临时变量互不撞名。
 	macroRenameSeq int
 
+	// prefixLetSeq 「实参只求值一次」绑定临时变量的序号：每次绑定 +1，
+	// 临时变量名为 __kaula_b<seq>_<param>。独立前缀 __kaula_b 与 alpha
+	// 重命名的 __kaula_m* 分族，天然避免撞名。
+	prefixLetSeq int
+	// prefixLetKinds 绑定临时变量的类型提示表（临时变量名 → inferType kind）。
+	// 绑定临时变量以 __auto_type 登记符号，inferType 的 Identifier 分支按
+	// 普通符号查不到具体类型（兜底 "d"，字符串拼接/打印会出错），
+	// 这里用提示表补上（填充时机见 macro_expand.go 第 5.5 步）。
+	prefixLetKinds map[string]string
+
 	// macroDepth 当前宏展开的嵌套深度，用于阻断自引用/互相引用的无限展开。
 	// 展开是递归的（模板体里可以调用另一个前缀），而递归没有任何天然的终止
 	// 条件：`prefix Loop { $v  @Loop(v = $v) }` 会让编译器在展开阶段栈溢出，
@@ -1718,6 +1728,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		sourceMap:                NewSourceMap("", ""),
 		constTable:               make(map[string]string),
 		arrayLens:                make(map[string]int),
+		prefixLetKinds:           make(map[string]string),
 		sorInitSizes:             make(map[string]int),
 		declScopeDepth:           make(map[string]int),
 		assignEscapedVars:        make(map[string]bool),
