@@ -104,9 +104,9 @@ prefix Retry {
 }
 ```
 
-## 结构宏：四个"能看到语法"的能力
+## 结构宏：五个"能看到语法"的能力
 
-前缀不只是"替换文本"，它在 **AST 层**工作。下面四条决定了它能写出真正操作语法的宏。
+前缀不只是"替换文本"，它在 **AST 层**工作。下面五条决定了它能写出真正操作语法的宏。
 
 ### 1. 参数绑定的是 AST，不是字符串
 
@@ -210,6 +210,9 @@ fn AddTo(target: i64, tree(i64) value: i64) {
 | `tree(i64)` / `tree(string)` / `tree(Vec<i64>)` | 指定类型名（对字面量做实校验，标识符放行） |
 | `tree(generic)` / `tree(any)` | 不限 |
 
+结构子类名还有：`binary`、`unary`、`member`、`index`、`prefix_call`、`lambda`、
+`match`、`conditional`、`assign`、`declaration`、`if`、`while`、`for`。
+
 同名 `tree Name { ... }` 声明也可以作为签名来源，其根约束作用到 `$body`。
 
 ### 4. 表达式级宏：`@Name(...)` 可以出现在表达式位置
@@ -243,6 +246,55 @@ int64_t v = ({ int64_t __kaula_m1_base = 67; __kaula_m1_base + 97; }) + 1;
 | 最后一条是 void 调用（`println(...)`、`print`、`assert` 等） | 报错，不把 `printf` 的返回值当宏的值 |
 | 表达式位置却写了 `{ ... }` 调用体 | 报错（调用体只属于语句位置） |
 | 最后一条是 `return expr` / `yield expr` | 取值，不报错 |
+
+### 5. 多规则按结构分派
+
+一个前缀名可以定义**多条规则**，每条用不同的 `tree(...)` 签名声明它接受的实参
+结构。展开时按声明顺序选择**第一条**所有约束都命中的规则——这让 `tree(...)`
+从「断言」变成「分支」：
+
+```kaula
+#[prefix]
+fn Show(tree(identifier), x) {
+    println("identifier: ", $x)
+}
+
+#[prefix]
+fn Show(tree(literal), x) {
+    println("literal: ", $x)
+}
+
+#[prefix]
+fn Show(tree(binary), x) {
+    println("binary: ", $x)
+}
+
+fn main() {
+    i64 a = 10
+    @Show(x = a)        // → identifier: 10
+    @Show(x = 42)       // → literal: 42
+    @Show(x = a + 1)    // → binary: 11
+}
+```
+
+| 规则形态 | 分派行为 |
+|----------|----------|
+| 带 `tree(...)` 约束 | 实参结构命中才选中；按声明顺序取第一条命中的 |
+| 无约束（无 `tree`、无形参类型） | **兜底**：所有带约束的规则都不命中时才选中 |
+| 所有规则都带约束且都不命中 | 报错「结构/类型不匹配」，指出期望结构 vs 实际结构 |
+
+几条实现细节：
+
+- **子类名是分派的关键**。`identifier`、`literal`、`call`、`binary` 都属于
+  `NodeTypeExpression` 这个大类，靠 `Pattern` 里的子类名才能区分。早期
+  `tree(identifier)` 与 `tree(literal)` 都会退化成 `tree(expression)`，规则
+  之间无法区分。
+- **同名前缀规则不生成 C 函数**。`#[prefix] fn` 历史上会额外生成同名 C 函数
+  （兼容「前缀也能当普通函数调用」的老写法），但多条同名规则签名不同，逐条
+  生成会在 clang 阶段撞 `conflicting types for 'Show'`——报错位置与用户写的
+  前缀毫无关系。规则只在调用点展开，本就不该有 C 符号，因此多规则时整组跳过。
+- **普通函数仍然拒绝重名**。放宽的只是 `#[prefix]` / `#[prefix,tree]` / `#[tree]`
+  函数，同名普通函数照旧报「函数名称重复」。
 
 ## 跨文件使用
 

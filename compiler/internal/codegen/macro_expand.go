@@ -95,6 +95,13 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 		bodyStmts = nil
 	}
 	funcDecl := sg.findFunctionDeclaration(e.Name)
+	// Task #1：多规则按结构分派。一个前缀名可以定义多条 #[prefix] fn /
+	// #[prefix,tree] fn / #[tree] fn，每条用不同的 tree(...) 签名声明它接受的
+	// 实参结构。展开时按声明顺序选择第一条「所有约束都命中」的规则；
+	// 无 tree 约束的规则作为兜底，最后才选。
+	if rules := sg.codegen.findPrefixRules(e.Name); len(rules) > 1 {
+		funcDecl = sg.selectPrefixRule(e, rules)
+	}
 	var tplBody []ast.Statement
 	var sig *MacroSignature
 	paramTypeDecls := map[string]string{}
@@ -290,6 +297,65 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 
 	exp.Stmts = expanded
 	return exp, true
+}
+
+// selectPrefixRule 在候选规则里选择第一条「实参结构命中」的规则。
+//
+// 多规则分派的语义（Task #1）：按声明顺序遍历，用调用点实参的 AST 结构去
+// 匹配每条规则的 tree 签名；第一条全部命中者胜出。若没有带约束的规则命中，
+// 回退到第一条无约束规则（兜底，兼容"前缀也能当普通模板"的老写法）。
+// 若所有规则都带约束且都不命中，返回第一条，让后续结构校验报出最有用的
+// 错误（指出期望结构 vs 实际结构），而不是静默选错。
+func (sg *StatementGenerator) selectPrefixRule(e *ast.PrefixCallExpression, rules []*ast.FunctionStatement) *ast.FunctionStatement {
+	if len(rules) == 0 {
+		return nil
+	}
+	if len(rules) == 1 {
+		return rules[0]
+	}
+	// 第一遍：带约束的规则按声明顺序匹配
+	for _, fn := range rules {
+		sig := sg.macroSignatureFor(e.Name, fn, nil)
+		if sig.IsEmpty() {
+			continue // 无约束规则留到第二遍作兜底
+		}
+		if sg.ruleMatches(e, sig) {
+			return fn
+		}
+	}
+	// 第二遍：无约束规则作兜底
+	for _, fn := range rules {
+		if sg.macroSignatureFor(e.Name, fn, nil).IsEmpty() {
+			return fn
+		}
+	}
+	// 全部带约束且都不命中：返回第一条，让结构校验报错
+	return rules[0]
+}
+
+// ruleMatches 判断调用点实参是否满足某条规则的结构签名。
+//
+// 只用调用点**显式传入**的实参（e.Params）做匹配：未传的参数会走模板里的
+// 默认值，其结构由展开阶段校验，分派时不据此判否——否则「某参数有默认值、
+// 但调用点没传」会让规则被错误地排除。约束来自 tree(...) 注解与形参类型
+// 声明（见 macroSignatureFor）。
+func (sg *StatementGenerator) ruleMatches(e *ast.PrefixCallExpression, sig *MacroSignature) bool {
+	if sig == nil || len(sig.Params) == 0 {
+		return true
+	}
+	for name, constraint := range sig.Params {
+		if constraint == nil {
+			continue
+		}
+		value, ok := e.Params[name]
+		if !ok || value == nil {
+			continue // 未传实参：默认值兜底，分派不判否
+		}
+		if err := checkMacroArgument(e.Name, name, value, constraint); err != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // generatePrefixCallBody 生成前缀调用的展开代码（编译期结构宏展开）。

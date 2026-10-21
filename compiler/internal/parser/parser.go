@@ -5652,7 +5652,7 @@ func (p *Parser) Validate(program *ast.Program) {
 		if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
 			if fnStmt.Name == "" {
 				p.error("函数缺少名称")
-			} else if functionNames[fnStmt.Name] {
+			} else if functionNames[fnStmt.Name] && !fnStmt.IsPrefixRule() {
 				p.error(fmt.Sprintf("函数名称重复：%s", fnStmt.Name))
 			} else {
 				functionNames[fnStmt.Name] = true

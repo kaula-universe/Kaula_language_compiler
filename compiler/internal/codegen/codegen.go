@@ -2543,6 +2543,11 @@ static inline String string_concat_float(String s, double v) {
 			if fnStmt.Generic || len(fnStmt.TypeParams) > 0 {
 				continue
 			}
+			// 同名前缀的多条规则（多规则分派）不生成兼容用的 C 原型：
+			// 它们签名不同，原型会互相冲突（clang: conflicting types）。
+			if cg.skipPrefixRuleCFunc(fnStmt) {
+				continue
+			}
 			// 参数/返回值含自定义类型 (struct/class/enum/type alias/跨文件类型) 的函数
 			// 跳过前置声明：这些类型的 typedef 定义在 forwardDecls 之后才输出，
 			// 若先生成原型会导致 C 编译报 "unknown type name"。
@@ -3847,6 +3852,47 @@ func (cg *CodeGenerator) findFunctionByName(name string) *ast.FunctionStatement 
 		}
 	}
 	return nil
+}
+
+// skipPrefixRuleCFunc 判断这条前缀规则是否**不应**生成兼容用的 C 函数与原型。
+//
+// `#[prefix] fn` 除了在调用点展开，还会生成同名 C 函数，兼容"前缀也能当普通
+// 函数调用"的老写法。但一个前缀名可以定义多条规则（Task #1 多规则分派），
+// 它们同名却签名不同——逐条生成会在 clang 阶段撞上
+// `conflicting types for 'Show'`，而且报错位置与用户写的前缀毫无关系。
+//
+// 规则只在调用点按实参结构展开，本来就不该被当普通函数调用，所以多规则时
+// 整组都不生成 C 符号是最干净的：不影响任何合法调用。
+func (cg *CodeGenerator) skipPrefixRuleCFunc(fn *ast.FunctionStatement) bool {
+	if fn == nil || !fn.IsPrefixRule() {
+		return false
+	}
+	return len(cg.findPrefixRules(fn.Name)) > 1
+}
+
+// findPrefixRules 收集同名前缀的全部「结构宏规则」（#[prefix] / #[prefix,tree] /
+// #[tree] 函数），按声明顺序返回。多规则按实参结构分派（Task #1）时遍历此列表，
+// 选择第一条所有 tree 约束都命中的规则。
+//
+// 本文件的同名函数优先于 import 文件的定义；import 文件里的同名函数因是
+// map[string]*ast.FunctionStatement 单值注入，只能提供一条（跨文件多规则暂不支持）。
+func (cg *CodeGenerator) findPrefixRules(name string) []*ast.FunctionStatement {
+	var rules []*ast.FunctionStatement
+	if cg.program != nil {
+		for _, stmt := range cg.program.Statements {
+			if fnStmt, ok := stmt.(*ast.FunctionStatement); ok {
+				if fnStmt.Name == name && fnStmt.IsPrefixRule() {
+					rules = append(rules, fnStmt)
+				}
+			}
+		}
+	}
+	if len(rules) == 0 && cg.localPrefixFuncs != nil {
+		if fn, ok := cg.localPrefixFuncs[name]; ok && fn.IsPrefixRule() {
+			rules = append(rules, fn)
+		}
+	}
+	return rules
 }
 
 // SetLocalExternalPrefixes 注册本地 import 文件中的前缀定义（跨文件可见）。

@@ -303,10 +303,19 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	annotation := stmt.GetAnnotation()
 
 	if annotation == ast.TreeAnnotationPrefix || annotation == ast.TreeAnnotationPrefixTree {
+		// 同名前缀的多条规则（多规则分派）各自展开，不生成同名 C 函数：
+		// 签名不同会在 clang 阶段撞上 conflicting types，而规则本来就不该
+		// 被当普通函数调用。详见 CodeGenerator.skipPrefixRuleCFunc。
+		if fg.codegen.skipPrefixRuleCFunc(stmt) {
+			return ""
+		}
 		return fg.generatePrefixFunction(stmt)
 	}
 
 	if annotation == ast.TreeAnnotationTree {
+		if fg.codegen.skipPrefixRuleCFunc(stmt) {
+			return ""
+		}
 		return fg.generateTreeFunction(stmt)
 	}
 

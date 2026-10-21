@@ -856,6 +856,17 @@ func (f *FunctionStatement) IsTreeFunction() bool {
 	return f.Annotation == TreeAnnotationTree || f.Annotation == TreeAnnotationPrefixTree || f.Annotation == TreeAnnotationRootTree
 }
 
+// IsPrefixRule 判断该函数是否是一条「结构宏规则」（可作为同名前缀的候选之一）。
+//
+// 结构宏支持一个前缀名定义多条规则（同名 #[prefix] fn / #[prefix,tree] fn /
+// #[tree] fn），展开时按实参 AST 结构选择第一条命中的规则。因此同名前缀
+// 函数不视为「名称重复」，允许并存；普通函数仍由 parser.Validate 拒绝重名。
+func (f *FunctionStatement) IsPrefixRule() bool {
+	return f.Annotation == TreeAnnotationPrefix ||
+		f.Annotation == TreeAnnotationPrefixTree ||
+		f.Annotation == TreeAnnotationTree
+}
+
 // HasPrefixVar 检查是否有前缀变量（$开头）
 func (f *FunctionStatement) HasPrefixVar(name string) bool {
 	for _, stmt := range f.Body {
