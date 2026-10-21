@@ -262,11 +262,22 @@ func parseTreeTypeString(s string) *core.TreeConstraint {
 	}
 	name, args := splitGeneric(s)
 	name = strings.TrimSpace(name)
-	nodeType, isCtor := macroTypeNameToNodeType(name)
-	constraint := &core.TreeConstraint{Required: true, NodeType: nodeType}
-	if !isCtor {
-		// 不是 AST 节点类别 → 当作类型名约束（如 i64 / Vec）
-		constraint.Pattern = name
+	constraint := &core.TreeConstraint{Required: true}
+	// 顺序要紧：**先**查子类表。子类名（identifier/literal/binary/…）大多不在
+	// 大类表里，若先查大类表就会被当成"值类型名"，NodeType 落成 generic，
+	// 校验时 macroValueHasType 一律放行——tree(binary) 就成了摆设。
+	if subtypeNodeType, isSubtype := macroSubtypeToNodeType(name); isSubtype {
+		// 结构子类名：NodeType 用大类，Pattern 保留子类名，
+		// 多规则分派才能区分同一大类下的不同结构。
+		constraint.NodeType = subtypeNodeType
+		constraint.Pattern = strings.ToLower(name)
+	} else {
+		nodeType, isCtor := macroTypeNameToNodeType(name)
+		constraint.NodeType = nodeType
+		if !isCtor {
+			// 不是 AST 节点类别 → 当作类型名约束（如 i64 / Vec）
+			constraint.Pattern = name
+		}
 	}
 	for _, arg := range args {
 		if child := parseTreeTypeString(arg); child != nil {
@@ -312,6 +323,12 @@ func splitGeneric(s string) (string, []string) {
 
 // macroTypeNames 结构类型名 → TreeNodeType 的关键字表。
 // 与 `tree` 系统既有的 NodeType* 常量一一对应，避免两套叫法。
+//
+// 「大类名」（generic/statement/expression/function/variable/parameter/block/
+// condition/loop/return）只决定 NodeType，不设 Pattern；「子类名」
+// （identifier/literal/call/...）在 astNodeType 里表现为 Pattern，需要保留
+// 以区分同一 NodeType 下的不同结构（例如 identifier 与 literal 都是
+// NodeTypeExpression，但多规则分派必须能分开它们）。
 var macroTypeNames = map[string]core.TreeNodeType{
 	"generic":      core.NodeTypeGeneric,
 	"any":          core.NodeTypeGeneric,
@@ -338,12 +355,49 @@ var macroTypeNames = map[string]core.TreeNodeType{
 	"transitionIn": core.NodeTypeGeneric,
 }
 
+// macroSubtypeNames 结构「子类名」集合：这些名字映射到某个大类 NodeType，
+// 但本身携带更具体的结构信息（与 astNodeType 返回的 Pattern 一致）。展开时
+// 必须把它们写进 TreeConstraint.Pattern，否则 tree(identifier) 与 tree(literal)
+// 都会退化成 tree(expression)，多规则按结构分派（Task #1）无从区分。
+//
+// 值是该子类对应的大类 NodeType，与 macroTypeNames 保持一致；同时补齐
+// astNodeType 能产出、但宏用户可能书写的其余子类（binary/unary/member/…）。
+var macroSubtypeNames = map[string]core.TreeNodeType{
+	"identifier":   core.NodeTypeExpression,
+	"literal":      core.NodeTypeExpression,
+	"call":         core.NodeTypeExpression,
+	"assign":       core.NodeTypeExpression,
+	"binary":       core.NodeTypeExpression,
+	"unary":        core.NodeTypeExpression,
+	"member":       core.NodeTypeExpression,
+	"index":        core.NodeTypeExpression,
+	"prefix_call":  core.NodeTypeExpression,
+	"lambda":       core.NodeTypeFunction,
+	"match":        core.NodeTypeExpression,
+	"conditional":  core.NodeTypeCondition,
+	"declaration":  core.NodeTypeVariable,
+	"if":           core.NodeTypeCondition,
+	"while":        core.NodeTypeLoop,
+	"for":          core.NodeTypeLoop,
+}
+
 // macroTypeNameToNodeType 结构类型名 → 节点类别，"非类别名"（i64/Vec…）→ false
 func macroTypeNameToNodeType(name string) (core.TreeNodeType, bool) {
 	if t, ok := macroTypeNames[name]; ok {
 		return t, true
 	}
 	if t, ok := macroTypeNames[strings.ToLower(name)]; ok {
+		return t, true
+	}
+	return core.NodeTypeGeneric, false
+}
+
+// macroSubtypeToNodeType 结构子类名 → 大类 NodeType；非子类名返回 false。
+func macroSubtypeToNodeType(name string) (core.TreeNodeType, bool) {
+	if t, ok := macroSubtypeNames[name]; ok {
+		return t, true
+	}
+	if t, ok := macroSubtypeNames[strings.ToLower(name)]; ok {
 		return t, true
 	}
 	return core.NodeTypeGeneric, false
@@ -494,8 +548,14 @@ func checkMacroArgument(macro, param string, value ast.Expression, constraint *c
 			macro, param, constraint.NodeType.String(), describeMacroArg(value))
 	}
 	if constraint.Pattern != "" {
-		// Pattern 既可能是"结构子类"（literal/call/...），也可能是"值类型名"（i64/Point）
-		if subclass, ok := macroTypeNames[strings.ToLower(constraint.Pattern)]; ok && subclass == constraint.NodeType {
+		// Pattern 既可能是"结构子类"（literal/call/binary/...），也可能是"值类型名"（i64/Point）
+		//
+		// 判子类必须查 macroSubtypeNames：它是「子类名」的权威集合，比
+		// macroTypeNames 更全（binary/unary/member/index/prefix_call/lambda/
+		// match/conditional/if/while/for 都在其中）。查错表会把这些子类名
+		// 误当成"值类型名"，走 macroValueHasType 一律放行——于是
+		// tree(binary) 会接受任意实参，多规则分派就形同虚设。
+		if subclass, ok := macroSubtypeToNodeType(constraint.Pattern); ok && subclass == constraint.NodeType {
 			if pattern != "" && pattern != constraint.Pattern {
 				return fmt.Sprintf("前缀 '%s' 的参数 '$%s' 结构不匹配：期望 %s，实际是 %s",
 					macro, param, constraint.Pattern, describeMacroArg(value))
