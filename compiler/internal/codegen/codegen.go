@@ -54,6 +54,16 @@ type CodeGenerator struct {
 	// 由 generatePrefixCallBody 推入/弹出
 	prefixBindings []map[string]PrefixParamBinding
 
+	// macroFreeBindings: 前缀展开期的直引重写栈（内层前缀优先）。
+	// 模板体里既非本地声明、也没有 $ 标记的名字，展开时按这张表改写为
+	// 调用点可见的实际变量名；不做这一步，跨层传递（`$x` 在模板内被直接
+	// 写成 `x`）会变成"外层函数体里的名字"而编译失败。
+	macroFreeBindings []map[string]string
+
+	// macroRenameSeq 宏本地变量的重命名序号：每次展开 +1，
+	// 保证不同调用点、嵌套展开之间的临时变量互不撞名。
+	macroRenameSeq int
+
 	typeGenerator       *TypeGenerator
 	functionGenerator   *FunctionGenerator
 	expressionGenerator *ExpressionGenerator
@@ -80,6 +90,9 @@ type CodeGenerator struct {
 	// （语义阶段一致，因此连错误都没有）。由 CLI 收集后注入。
 	localPrefixStmts map[string]*ast.PrefixStatement
 	localPrefixFuncs map[string]*ast.FunctionStatement
+	// localTreeStmts 本地 import 文件里的 tree 模板（`tree Name { ... }`），
+	// 与前缀同名时充当结构签名（见 macro_tree.go）。
+	localTreeStmts map[string]*ast.TreeStatement
 
 	genericCache        map[string]*GenericInstanceCache
 	genericInstantiated map[string]bool
@@ -3826,6 +3839,11 @@ func (cg *CodeGenerator) SetLocalExternalPrefixes(stmts map[string]*ast.PrefixSt
 	cg.localPrefixFuncs = funcs
 }
 
+// SetLocalTreeTemplates 注册本地 import 文件中的 tree 模板（结构签名，跨文件可见）
+func (cg *CodeGenerator) SetLocalTreeTemplates(trees map[string]*ast.TreeStatement) {
+	cg.localTreeStmts = trees
+}
+
 // findPrefixStatement 在程序中查找 prefix 语句（递归搜索）。
 // 本地找不到时回落到 import 文件里的定义（跨文件可见）。
 func (cg *CodeGenerator) findPrefixStatement(name string) *ast.PrefixStatement {
@@ -3842,10 +3860,24 @@ func (cg *CodeGenerator) findPrefixStatement(name string) *ast.PrefixStatement {
 	return nil
 }
 
-// PrefixParamBinding 前缀参数的一次绑定：实参生成的 C 表达式及其类型提示
+// PrefixParamBinding 前缀参数的一次绑定。
+//
+// 结构宏（结构级参数绑定）：绑定载荷是**实参的 AST 节点本身**，不是预先
+// 生成的 C 字符串。`$param` 在模板体里出现时，展开器直接用 Expr 替换该
+// 标识符节点，随后照常走表达式生成；因此宏"看得到"参数的语法结构
+// （字面量 / 标识符 / 调用 / 算术表达式……），可以为它选择不同的生成策略，
+// 也可以按 NodeKind 做结构约束校验。
+//
+// Code/Kind 是可选的惰性缓存：Expr 非空时 Code 只在首次求值后填充，
+// 不再承担"绑定载荷"的角色（历史实现只有 Code，绑定即固化为文本）。
 type PrefixParamBinding struct {
-	Code string // 实参生成的 C 表达式
-	Kind string // exprgen 类型提示："s"/"d"/"f"/"cstr"/"obj"（推导失败为空）
+	Expr ast.Expression // 实参 AST 节点（结构宏的绑定载荷；默认值也是 AST）
+	Code string         // 首次生成得到的 C 表达式（惰性缓存，调用方不得预先填充）
+	Kind string         // exprgen 类型提示："s"/"d"/"f"/"cstr"/"obj"（推导失败为空）
+
+	// Type 实参的 Kaula 类型名（可空）。前缀函数形参声明了类型时由调用点填写，
+	// 供 `tree` 注解的结构约束做类型级校验。
+	Type string
 }
 
 // pushPrefixBindings 推入一层前缀参数绑定（generatePrefixCallBody 展开时调用）
@@ -3868,6 +3900,87 @@ func (cg *CodeGenerator) lookupPrefixBinding(name string) (PrefixParamBinding, b
 		}
 	}
 	return PrefixParamBinding{}, false
+}
+
+// resolvePrefixBinding 取出 $参数 绑定并保证 Code/Kind 已求值。
+//
+// AST 绑定是唯一事实来源：Code 只是首次展开时的缓存。求值发生在**当前位置**
+// 的生成上下文中（与外层模板里其他表达式同一套作用域/闭包别名），
+// 因此嵌套前缀的实参在展开到内层时仍然解析正确。
+//
+// 每个绑定只求值一次：同一个 $param 出现多次不会把实参表达式生成多遍，
+// 也不会让带副作用的实参被重复求值（生成阶段本来就只有一次文本）。
+func (cg *CodeGenerator) resolvePrefixBinding(name string) (PrefixParamBinding, bool) {
+	for i := len(cg.prefixBindings) - 1; i >= 0; i-- {
+		table := cg.prefixBindings[i]
+		b, ok := table[name]
+		if !ok {
+			continue
+		}
+		if b.Code == "" && b.Expr != nil {
+			b.Code = cg.expressionGenerator.GenerateExpression(b.Expr)
+		}
+		if b.Kind == "" && b.Expr != nil {
+			b.Kind = cg.expressionGenerator.inferType(b.Expr)
+		}
+		table[name] = b
+		return b, true
+	}
+	return PrefixParamBinding{}, false
+}
+
+// pushMacroFreeBindings 推入一层直引重写表（前缀展开时调用）
+func (cg *CodeGenerator) pushMacroFreeBindings(table map[string]string) {
+	cg.macroFreeBindings = append(cg.macroFreeBindings, table)
+}
+
+// popMacroFreeBindings 弹出最内层直引重写表
+func (cg *CodeGenerator) popMacroFreeBindings() {
+	if n := len(cg.macroFreeBindings); n > 0 {
+		cg.macroFreeBindings = cg.macroFreeBindings[:n-1]
+	}
+}
+
+// lookupMacroFree 自内向外查找直引名的实际变量名
+func (cg *CodeGenerator) lookupMacroFree(name string) (string, bool) {
+	for i := len(cg.macroFreeBindings) - 1; i >= 0; i-- {
+		if v, ok := cg.macroFreeBindings[i][name]; ok && v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// resolveMacroFreeName 把模板直引名解析为展开上下文中的实际名字。
+//
+// 原则：**只在名字确实不可见时才重写**。
+//   - 调用点可见同名变量（宏写在定义它的文件/函数里、或调用了外层同名参数）
+//     → 原样使用，行为与改动前完全一致（零回归）；
+//   - 调用点不可见、但外层编译单元里有同名的首个局部变量/形参
+//     （跨层传递：`$x` 被写成裸 `x`）→ 用那个变量的唯一名；
+//   - 都不满足 → 保持原名，交给 C 编译/语义阶段报错（不掩盖真实错误）。
+func (cg *CodeGenerator) resolveMacroFreeName(name string) string {
+	if name == "" {
+		return name
+	}
+	if sym := cg.currentScope.GetSymbol(name); sym != nil {
+		return name
+	}
+	if repl, ok := cg.lookupMacroFree(name); ok {
+		return repl
+	}
+	// 调用点绑定表里的 $参数（形如 `fwd` 对应 `$fwd`）
+	for i := len(cg.prefixBindings) - 1; i >= 0; i-- {
+		if _, ok := cg.prefixBindings[i][name]; ok {
+			return name
+		}
+	}
+	if cc := cg.currentCaptureSet; cc != nil {
+		if _, ok := cc[name]; ok {
+			return name
+		}
+	}
+	return name
 }
 
 // findPrefixInStatements 递归搜索 statements 中的 prefix 语句

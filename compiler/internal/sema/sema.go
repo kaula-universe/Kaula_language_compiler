@@ -59,6 +59,75 @@ type SemanticAnalyzer struct {
 	// 因此由 CLI（collectLocalPrefixDefs）收集后注入。
 	localPrefixStmts map[string]*ast.PrefixStatement   // prefix Name { ... } 语句
 	localPrefixFuncs map[string]*ast.FunctionStatement // #[prefix] / #[prefix,tree] 函数
+
+	// 结构宏（前缀模板）改写栈：自内向外查找 $参数 与「跨层 $""直引」绑定。
+	// 顶层分析某个 @调用时压入一层，嵌套展开（前缀体内再 @另一个前缀）自然叠加。
+	macroBindings []*MacroScope
+}
+
+// MacroScope 前缀展开期的一层绑定环境（语义分析侧）。
+//
+// Params  : $参数 → 已绑定的表达式（实参或默认值），供分析实参/默认值时解析。
+// Declared: 本层前缀声明过的全部 $参数名（用于"只在 @前缀块 中可用"的判定）。
+// Frees   : 直引名 → 调用点可见的实际变量名（跨层传递 `$x` 时使用）。
+type MacroScope struct {
+	Params   map[string]ast.Expression
+	Declared map[string]bool
+	Frees    map[string]string
+}
+
+// pushMacroScope 压入一层前缀绑定环境
+func (sa *SemanticAnalyzer) pushMacroScope(scope *MacroScope) {
+	if scope == nil {
+		scope = &MacroScope{}
+	}
+	if scope.Params == nil {
+		scope.Params = map[string]ast.Expression{}
+	}
+	if scope.Declared == nil {
+		scope.Declared = map[string]bool{}
+	}
+	if scope.Frees == nil {
+		scope.Frees = map[string]string{}
+	}
+	sa.macroBindings = append(sa.macroBindings, scope)
+}
+
+// popMacroScope 弹出最内层前缀绑定环境
+func (sa *SemanticAnalyzer) popMacroScope() {
+	if n := len(sa.macroBindings); n > 0 {
+		sa.macroBindings = sa.macroBindings[:n-1]
+	}
+}
+
+// lookupMacroParam 自内向外查找 $参数 绑定
+func (sa *SemanticAnalyzer) lookupMacroParam(name string) (ast.Expression, bool) {
+	for i := len(sa.macroBindings) - 1; i >= 0; i-- {
+		if e, ok := sa.macroBindings[i].Params[name]; ok && e != nil {
+			return e, true
+		}
+	}
+	return nil, false
+}
+
+// macroDeclaresParam 判断某个外层前缀是否声明了该 $参数
+func (sa *SemanticAnalyzer) macroDeclaresParam(name string) bool {
+	for i := len(sa.macroBindings) - 1; i >= 0; i-- {
+		if sa.macroBindings[i].Declared[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// lookupMacroFree 自内向外查找直引名的调用点实际变量名
+func (sa *SemanticAnalyzer) lookupMacroFree(name string) (string, bool) {
+	for i := len(sa.macroBindings) - 1; i >= 0; i-- {
+		if v, ok := sa.macroBindings[i].Frees[name]; ok && v != "" {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // SetLocalModuleTypes 注册本地 import 文件的类型名(class/struct), 使跨文件类型可见
@@ -379,6 +448,27 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 
 	// 顺序扫描函数体: return 之后的语句不可达 (clang -Wunreachable-code)
 	reached := true
+
+	/* 前缀函数（`#[prefix] fn Name(...)`）的函数体会被**展开**到调用点，
+	 * 里面的 `$参数` 指向前缀参数，不是运行时形参。若按普通函数体分析，
+	 * `$参数` 会被当成"越界使用前缀变量"。这里先把 currentPrefixTable 指向
+	 * 本前缀的符号表（形参 + 模板体内所有 $引用），分析完再还原。 */
+	oldPrefixTable := sa.currentPrefixTable
+	if isPrefixFunction(stmt) {
+		table := symbol.NewSymbolTable(nil, "prefix_"+stmt.Name)
+		for _, param := range stmt.Params {
+			if param != "" {
+				table.AddSymbol(param, "", false, "prefix_"+stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
+			}
+		}
+		for _, ref := range ast.CollectPrefixParamRefs(stmt.Body) {
+			if table.GetSymbol(ref.Name) == nil {
+				table.AddSymbol(ref.Name, "", false, "prefix_"+stmt.Name, ref.Pos.Line, ref.Pos.Column)
+			}
+		}
+		sa.currentPrefixTable = table
+		sa.prefixSymbolTables[stmt.Name] = table
+	}
 	for _, bodyStmt := range stmt.Body {
 		if !reached {
 			sa.errorCollector.AddSemanticWarning(
@@ -392,6 +482,7 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 			reached = false
 		}
 	}
+	sa.currentPrefixTable = oldPrefixTable
 
 	// F10 修复：SOR 原语检查改为仅对显式 #[sor] 注解的函数发出警告
 	// 全局 --sor 模式下普通函数不强制要求使用原语，SOR 分析器自动处理
@@ -1100,6 +1191,24 @@ func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpr
 			}
 		}
 	}
+
+	// 结构宏绑定环境：$参数 的绑定载荷是实参 AST（与 codegen 一致）。
+	// 内层展开时外层的 $参数 依然可查（$fwd = $x 这类转发在嵌套模板里成立）。
+	scope := &MacroScope{Params: map[string]ast.Expression{}, Declared: declared}
+	if prefixStmt != nil {
+		for _, d := range ast.DefaultPrefixParams(prefixStmt.Body) {
+			if _, bound := expr.Params[d.Name]; !bound && d.Value != nil {
+				scope.Params[d.Name] = d.Value
+			}
+		}
+	}
+	for name, value := range expr.Params {
+		if value != nil {
+			scope.Params[name] = value
+		}
+	}
+	sa.pushMacroScope(scope)
+	defer sa.popMacroScope()
 
 	oldPrefixTable := sa.currentPrefixTable
 	if prefixTable != nil {
@@ -2834,7 +2943,10 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 	case *ast.LambdaExpression:
 		sa.analyzeLambdaExpression(e)
 	case *ast.PrefixCallExpression:
-		// 前缀调用表达式已在 analyzePrefixCallExpression 中处理
+		// 语句位置的前缀调用由 analyzeStatement 先行分派；这里覆盖**表达式位置**
+		// （`i64 v = @Max(a = x, b = y)`）：同样要分析实参、校验参数名，
+		// 否则表达式级宏里的参数错误会在生成阶段才暴露。
+		sa.analyzePrefixCallExpression(e)
 	case *ast.SizeOfExpression, *ast.AlignOfExpression, *ast.OffsetOfExpression:
 		// 编译期内建函数，类型检查在 inferExpressionType 中处理
 	case *ast.ComptimeExpression:
@@ -2887,6 +2999,11 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 	if expr.IsPrefixVar {
 		if sa.currentPrefixTable != nil {
 			symbol := sa.currentPrefixTable.GetSymbol(expr.Name)
+			if symbol == nil && sa.macroDeclaresParam(expr.Name) {
+				// 内层前缀体引用了外层前缀的参数（$fwd = $x 这类转发）：
+				// 名字属于外层声明域，本层符号表里没有是正常的。
+				return
+			}
 			if symbol == nil {
 				sa.errorCollector.AddSemanticError(
 					fmt.Sprintf("未定义的前缀变量: '$%s'", expr.Name),
@@ -5102,4 +5219,15 @@ func (sa *SemanticAnalyzer) hasSORPrimitives(body []ast.Statement) bool {
 		}
 	}
 	return false
+}
+
+// isPrefixFunction 判断函数声明是否为前缀模板（`#[prefix] fn`）。
+func isPrefixFunction(fn *ast.FunctionStatement) bool {
+	if fn == nil {
+		return false
+	}
+	ann := fn.GetAnnotation()
+	return ann == ast.TreeAnnotationPrefix ||
+		ann == ast.TreeAnnotationPrefixTree ||
+		ann == ast.TreeAnnotationTree
 }

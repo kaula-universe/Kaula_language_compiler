@@ -343,9 +343,10 @@ func (eg *ExpressionGenerator) generateIdentifier(e *ast.Identifier) string {
 		}
 	}
 
-	// 前缀展开期：$param 替换为调用点实参生成的表达式（绑定优先于常量内联）
+	// 前缀展开期：$param 替换为调用点实参（绑定载荷是实参 AST，此处按需生成）。
+	// 绑定优先于常量内联：同名 $param 在多个展开点可能有不同实参。
 	if e.IsPrefixVar || strings.HasPrefix(e.Name, "$") {
-		if b, ok := eg.codegen.lookupPrefixBinding(strings.TrimPrefix(e.Name, "$")); ok {
+		if b, ok := eg.codegen.resolvePrefixBinding(strings.TrimPrefix(e.Name, "$")); ok {
 			return b.Code
 		}
 	}
@@ -2194,7 +2195,7 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 		// 前缀 $param：类型取绑定实参在调用点的类型提示，
 		// 否则会落到下方默认 "d"，让 `$s + "x"` 被判成数字拼接
 		if e.IsPrefixVar || strings.HasPrefix(e.Name, "$") {
-			if b, ok := eg.codegen.lookupPrefixBinding(strings.TrimPrefix(e.Name, "$")); ok && b.Kind != "" {
+			if b, ok := eg.codegen.resolvePrefixBinding(strings.TrimPrefix(e.Name, "$")); ok && b.Kind != "" {
 				return b.Kind
 			}
 		}
@@ -2808,8 +2809,21 @@ func isIdentifier(code string) bool {
 // generatePrefixCallExpression 生成前缀调用表达式代码（作为表达式返回空）
 // 注意：PrefixCallExpression 应该作为语句处理，在 stmtgen.go 中处理
 func (eg *ExpressionGenerator) generatePrefixCallExpression(e *ast.PrefixCallExpression) string {
-	// 这个方法不应该被调用，因为 PrefixCallExpression 应该在语句层面处理
-	return "// ERROR: PrefixCallExpression should be handled as a statement\n"
+	/*
+	 * 表达式级结构宏（P1）：`@Name(...)` 出现在表达式位置。
+	 *
+	 * 语义：展开结果的**最后一个表达式语句**就是宏的值；其余语句落在 GNU
+	 * 语句表达式 `({ ... })` 里，因此宏体内的局部变量不会泄漏到外层，整个
+	 * 宏在 C 里也仍然是一个表达式（可直接参与算术、作实参、作返回值）。
+	 *
+	 * 非模板前缀（普通函数调用形式）与"没有返回值"的情形必须给出明确错误：
+	 * 这个位置没有被语句层面处理，静默返回空串会生成非法的 C 代码。
+	 */
+	if code, ok := eg.codegen.statementGenerator.expandMacroExpression(e); ok {
+		return code
+	}
+	eg.codegen.error(fmt.Sprintf("前缀 '%s' 不能出现在表达式位置：它不是结构宏模板（需要 prefix 语句或 #[prefix] 函数），且当前上下文要求一个值", e.Name))
+	return "0"
 }
 
 // isObjectTyped 检查表达式是否为动态对象类型

@@ -1242,7 +1242,14 @@ func (p *Parser) parseTreeStatementIterative() *ast.TreeStatement {
 
 	p.nextToken()
 
-	// 解析树名称（可选）
+	// 解析树名称（可选）：`tree Vec { ... }` 的树名，与前缀同名时作为结构签名。
+	// 历史上的 `tree (root) { ... }`（根表达式）仍然支持。
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		stmt.Name = p.curTok.Value
+		p.nextToken()
+	}
+
+	// 解析树根表达式（可选）
 	if p.curTok.Type == lexer.TOKEN_LPAREN {
 		p.nextToken()
 		stmt.Root = p.parseExpressionIterative()
@@ -1437,6 +1444,68 @@ func (p *Parser) parseAttributes() []*ast.Attribute {
 	return result
 }
 
+// tryParseStructSignatureArg 在函数声明的参数位置上尝试解析 `tree(...)` /
+// `struct(...)` 结构签名实参。成功时返回属性节点并把当前 token 移到参数
+// 分隔符之后；不是该形态时返回 nil 且**不移动 token**。
+func (p *Parser) tryParseStructSignatureArg() *ast.Attribute {
+	saveTok := p.curTok
+	savePeek := p.peekTok
+	saveLine := p.lastTokLine
+	saveLex := p.lexer.SaveState()
+	restore := func() {
+		p.curTok = saveTok
+		p.peekTok = savePeek
+		p.lastTokLine = saveLine
+		p.lexer.RestoreState(saveLex)
+	}
+	p.nextToken() // 跳过 'tree'/'struct' 本身，curTok 落到 '('
+	// 若下一个不是 '('，这里不是结构签名实参（例如把 `tree` 当普通类型名用）。
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		restore()
+		return nil
+	}
+	p.nextToken() // 进入 '(' 内部
+	depth := 0
+	var args []string
+	cur := strings.Builder{}
+	for p.curTok.Type != lexer.TOKEN_EOF {
+		switch p.curTok.Type {
+		case lexer.TOKEN_LPAREN, lexer.TOKEN_LBRACKET:
+			depth++
+			cur.WriteString(p.curTok.Value)
+		case lexer.TOKEN_RPAREN, lexer.TOKEN_RBRACKET:
+			if depth == 0 {
+				if p.curTok.Type != lexer.TOKEN_RPAREN {
+					// 括号不配对：不是结构签名实参，回滚。
+					restore()
+					return nil
+				}
+				if a := strings.TrimSpace(cur.String()); a != "" {
+					args = append(args, a)
+				}
+				p.nextToken() // 跳过闭合 ')'
+				return &ast.Attribute{Name: saveTok.Value, Args: args, Pos: ast.Position{Line: saveTok.Line, Column: saveTok.Column, File: p.file}}
+			}
+			depth--
+			cur.WriteString(p.curTok.Value)
+		case lexer.TOKEN_COMMA:
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(cur.String()))
+				cur.Reset()
+			} else {
+				cur.WriteString(",")
+			}
+		default:
+			cur.WriteString(p.curTok.Value)
+		}
+		p.nextToken()
+	}
+	// 没解析出完整参数组：回滚（含词法位置），交给常规逻辑。
+	// 只回滚 token 而不回滚 lexer 位置会让后续 nextToken 重读到错误的位置。
+	restore()
+	return nil
+}
+
 // applyFunctionAttributes 将属性列表应用到函数声明
 // 同时设置兼容旧字段（NoKMM/Inline/SOREnabled/Annotation）
 func applyFunctionAttributes(stmt *ast.FunctionStatement, attrs []*ast.Attribute) {
@@ -1550,6 +1619,30 @@ func (p *Parser) parseFunctionStatementIterative() *ast.FunctionStatement {
 		p.log("开始解析函数参数")
 		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
 			prevTok := p.curTok
+
+			/*
+			 * 结构签名实参：结构宏可以把在**函数声明参数位置**声明结构约束，
+			 * 形式是裸表达式 `tree(...)` / `struct(...)`，例如
+			 *
+			 *	#[prefix] fn pick(tree(expression), a: i64, b: i64) { ... }
+			 *
+			 * 它描述的是 `$body`（这一组语句）的结构，不对应运行时形参。
+			 * 这里把它收集为函数的 `struct(...)` 属性，供宏展开前校验使用；
+			 * 跳过而不是报错，保证旧代码（没有这种写法）的解析完全不变。
+			 */
+			if (p.curTok.Type == lexer.TOKEN_IDENT || p.curTok.Type == lexer.TOKEN_TREE) &&
+				(p.curTok.Value == "tree" || p.curTok.Value == "struct") && p.peekTok.Type == lexer.TOKEN_LPAREN {
+				if attr := p.tryParseStructSignatureArg(); attr != nil {
+					if stmt.Attributes == nil {
+						stmt.Attributes = []*ast.Attribute{}
+					}
+					stmt.Attributes = append(stmt.Attributes, attr)
+					if p.curTok.Type == lexer.TOKEN_COMMA {
+						p.nextToken()
+					}
+					continue
+				}
+			}
 
 			if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_COLON {
 				// name: Type 形式（与 extern fn 参数一致）
@@ -3955,6 +4048,15 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			Operator: "!",
 			Right:    right,
 		}
+	case lexer.TOKEN_AT:
+		/*
+		 * 表达式级结构宏：`i64 v = @Max(a = x, b = y)`。
+		 *
+		 * 语法与语句位置一致（@Name(命名实参) + 可选 { 调用体 }），只是落点
+		 * 在表达式位置。`a = x` 的 `=` 在这里是**命名实参**而不是赋值，因此
+		 * 必须单独解析，不能走通用的二元表达式解析（后者会要求左值是变量）。
+		 */
+		return p.parsePrefixCallExpressionIterative()
 	case lexer.TOKEN_PREFIX_REF:
 		p.nextToken()
 		if p.curTok.Type == lexer.TOKEN_IDENT {
@@ -4882,6 +4984,70 @@ func (p *Parser) parseArrayLiteralIterative() ast.Expression {
 		p.nextToken()
 	}
 	return lit
+}
+
+// parsePrefixCallExpressionIterative 解析表达式位置的前缀调用 `@Name(params)`。
+//
+// 与语句位置的区别：这里返回表达式节点本身（不包 ExpressionStatement），
+// 且支持可选的 `{ 调用体 }`（调用体在表达式位置通常为空）。
+func (p *Parser) parsePrefixCallExpressionIterative() ast.Expression {
+	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+	p.nextToken() // consume @
+	if p.curTok.Type != lexer.TOKEN_IDENT {
+		p.error("expected identifier after @")
+		return nil
+	}
+	name := p.curTok.Value
+	p.nextToken()
+
+	call := &ast.PrefixCallExpression{
+		Name:   name,
+		Params: make(map[string]ast.Expression),
+		Pos:    pos,
+	}
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+			prevTok := p.curTok
+			if p.curTok.Type == lexer.TOKEN_IDENT && p.peekTok.Type == lexer.TOKEN_ASSIGN {
+				paramName := p.curTok.Value
+				p.nextToken() // IDENT
+				p.nextToken() // =
+				if value := p.parseExpressionIterative(); value != nil {
+					call.Params[paramName] = value
+				}
+			}
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			}
+			if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+				p.error(fmt.Sprintf("前缀调用的参数无法解析: %s=%q",
+					lexer.TokenTypeToString(p.curTok.Type), p.curTok.Value))
+				return nil
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken()
+		}
+	}
+	// 表达式位置的调用体：`@M(...) { ... }` 仍按语句块解析，
+	// 展开为该宏的语句级参数（典型用法是把一段代码交给宏处理）。
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			prevTok := p.curTok
+			if stmt := p.parseStatementIterative(); stmt != nil {
+				call.Body = append(call.Body, stmt)
+			}
+			if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+	return call
 }
 
 // parsePrefixCallStatementIterative 迭代解析前缀调用语句

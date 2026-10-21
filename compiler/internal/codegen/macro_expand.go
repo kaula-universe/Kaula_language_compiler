@@ -1,0 +1,690 @@
+package codegen
+
+// 本文件是「结构宏」的展开器：前缀模板在语义上是一次 AST 层面的替换，
+// 而不是文本拼接。
+//
+// 展开一次 @Name(参数…) 的完整流程如下（顺序有语义，不可调换）：
+//
+//  1. 找出模板体（#[prefix] 函数体或 prefix 语句体），跳过参数声明语句，
+//     把调用体拼到占位符处 → 得到"展开骨架"。
+//  2. 克隆骨架：模板 AST 是所有调用点共享的只读对象，任何改写都必须作用在
+//     副本上（后续语义分析阶段也会对展开后的 AST 做事跨越引用解析）。
+//  3. 自动 alpha 重命名：骨架里**本层声明**的局部变量改为唯一名
+//     `__kaula_m<序号>_<原名>`，消除变量捕获（宏的临时变量不再踩调用方的同名变量）。
+//  4. `$参数` 替换：参数绑定载荷是实参 AST（PrefixParamBinding.Expr），
+//     `$p` 处直接换成实参节点的克隆；默认值同理（AST 绑定在模板上下文中求值）。
+//       - 整条语句就是一个 `$p` → 参数展开：表达式参数按语句生成，
+//         语句级参数（调用体内联的 $body）整段替换；
+//       - 表达式位置上的 `$p` → 实参表达式内联。
+//  5. 直引重写：既非本地声明、也非 `$参数` 的名字，若调用点不可见而在外层
+//     可见，则改写为外层变量的唯一名（跨层传递 `$x` 的场景）。
+//  6. 结构约束校验：按 tree 注解 / 形参类型声明逐参数验证（见 macro_tree.go），
+//     不满足时**在生成任何代码之前**报错。
+//  7. 按重写表改写 AST：`$参数` 直接换成实参节点的克隆。
+//
+// 展开结果以语句块交给 generateBlockStatement 生成，这样作用域登记、
+// liveness 与 survivor 回收都发生在块内（手写 "{ }" 文本会让块内变量登记
+// 到外层作用域，回收代码落到块外）。
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"kaula/internal/ast"
+	"kaula/internal/astutil"
+)
+
+// macroExpansion 一次结构宏展开的产物
+type macroExpansion struct {
+	Name  string // 前缀名（用于诊断信息）
+	Stmts []ast.Statement
+
+	// Renames 模板本地变量的重命名表（原名 → 唯一名），诊断与测试用
+	Renames map[string]string
+	// Decls 重命名后的局部变量声明（新名 → 声明节点），tree 结构校验用
+	Decls map[string]*ast.VariableDeclaration
+	// Params 参数名 → 实参 AST（已绑定，含默认值）
+	Params map[string]ast.Expression
+	// Frees 直引名 → 展开时采用的调用点实际名字（仅记录发生了重写的）
+	Frees map[string]string
+	// ParamTypeDecls 形参声明（#[prefix] fn / macro 的形参），供约束校验
+	ParamTypeDecls map[string]string
+	// Sig 前缀的结构签名（tree 注解 / 结构类型形参），供结构约束校验
+	Sig *MacroSignature
+	// BodyStmts 调用体语句（展开前），$body 结构校验用
+	BodyStmts []ast.Statement
+	// Bodies 展开结果里内联进来的调用体（调用体作用域内，$参数 可直接用）
+	Bodies []*macroBodyInfo
+	// AllParams 模板声明的全部 $参数名
+	AllParams []string
+	// Errors 展开期发现的调用点/结构错误（由调用方上报，避免重复报错）
+	Errors []string
+}
+
+// macroBodyInfo 描述一段内联进展开结果的调用体
+type macroBodyInfo struct {
+	Stmts     []ast.Statement
+	AllParams []string
+}
+
+func (e *macroExpansion) addError(msg string) {
+	e.Errors = append(e.Errors, msg)
+}
+
+// expandStructureMacro 按结构宏语义展开一次前缀调用（只做 AST 改写，不生成代码）。
+//
+// 返回 ok=false 表示前缀不是模板（普通函数调用形式），调用方应按语句处理。
+func (sg *StatementGenerator) expandStructureMacro(e *ast.PrefixCallExpression) (*macroExpansion, bool) {
+	exp, ok := sg.expandStructureMacroIn(e, true)
+	return exp, ok
+}
+
+// expandStructureMacroIn 与 expandStructureMacro 相同，spliceBody 指定是否把调用
+// 点提供的 `{ ... }` 调用体拼接进展开结果。
+//
+// 为什么需要区分：`$body` 拼接是针对**语句位置** `@Name(...) { 调用体 }` 的
+// 语法糖；表达式位置的 `@Name(...)` 没有调用体，它的值由模板体自己给出。
+// 统一拼进去会让 `i64 v = @NoValue(x = 1)` 静默取到调用体的最后一条语句。
+func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression, spliceBody bool) (*macroExpansion, bool) {
+	if e == nil {
+		return nil, false
+	}
+	bodyStmts := e.Body
+	if !spliceBody {
+		bodyStmts = nil
+	}
+	funcDecl := sg.findFunctionDeclaration(e.Name)
+	var tplBody []ast.Statement
+	var sig *MacroSignature
+	paramTypeDecls := map[string]string{}
+	found := false
+	if funcDecl != nil {
+		annotation := funcDecl.GetAnnotation()
+		if annotation != ast.TreeAnnotationPrefix &&
+			annotation != ast.TreeAnnotationPrefixTree &&
+			annotation != ast.TreeAnnotationTree {
+			return nil, false
+		}
+		tplBody = funcDecl.Body
+		for i, name := range funcDecl.Params {
+			if i < len(funcDecl.ParamTypes) && funcDecl.ParamTypes[i] != "" {
+				paramTypeDecls[name] = funcDecl.ParamTypes[i]
+			}
+		}
+		found = true
+	} else if prefixStmt := sg.codegen.findPrefixStatement(e.Name); prefixStmt != nil {
+		tplBody = prefixStmt.Body
+		found = true
+	}
+	if !found {
+		return nil, false
+	}
+
+	// 结构签名：`tree(...)` / `struct(...)` 注解参数或同名 `tree Name { ... }`
+	sig = sg.macroSignatureFor(e.Name, funcDecl, nil)
+
+	// 已声明参数与调用体参数分区（sema 已做过一次，此处幂等，兜底 codegen 单独使用的场景）
+	declared := ast.DeclaredPrefixParams(tplBody)
+	for name := range paramTypeDecls {
+		declared[name] = true
+	}
+	e.CollectBodyParams(declared)
+
+	exp := &macroExpansion{
+		Name:           e.Name,
+		BodyStmts:      bodyStmts,
+		Renames:        map[string]string{},
+		Decls:          map[string]*ast.VariableDeclaration{},
+		Params:         map[string]ast.Expression{},
+		Frees:          map[string]string{},
+		ParamTypeDecls: paramTypeDecls,
+		Sig:            sig,
+	}
+	for name := range declared {
+		exp.AllParams = append(exp.AllParams, name)
+	}
+	sort.Strings(exp.AllParams)
+
+	bindings := map[string]ast.Expression{}
+	for name, value := range e.Params {
+		if value != nil {
+			bindings[name] = value
+		}
+	}
+	for _, decl := range ast.DefaultPrefixParams(tplBody) {
+		if _, ok := bindings[decl.Name]; !ok && decl.Value != nil {
+			bindings[decl.Name] = decl.Value
+		}
+	}
+
+	/* 第 1 步：骨架。
+	 *
+	 * 所有裸 `$p` 语句都是**参数声明**（模板体内不声明就等于由调用点提供），
+	 * 因此一律从这里剔除，真正的值由第 4/7 步按绑定表替换。
+	 *
+	 * `$body` 特殊：它是调用体拼接点。为了兼容老写法（`$body` 出现在模板
+	 * 中间、显式标出拼接位置），第一个裸 `$body` 处就地拼接调用体；若模板
+	 * 里没有 `$body`（`#[prefix] fn` 最常见的形态），调用体追加到末尾。
+	 * 没有调用体时（`@Name(x = 1)`，不写 `{ }`）什么都不拼接。
+	 *
+	 * `$p = expr` 有两种完全不同的含义，而且语法上无法区分：
+	 *
+	 *	$limit = 10        // 参数声明，10 是默认值，这一行不生成代码
+	 *	$target = $x + 1   // 普通赋值，改的是调用点传进来的变量
+	 *
+	 * 判据只有一条：**调用点有没有为这个名字传实参**。传了实参就说明 `$p`
+	 * 是参数，这一行只能是普通赋值（实参才是权威绑定），必须生成；
+	 * 没传实参时，若它是模板里第一次出现就紧跟 `=`，按默认值声明丢弃，
+	 * 否则按普通赋值保留。这样 `$target = $target + $value` 永远不会被误吞。 */
+	calledParams := map[string]bool{}
+	for name := range e.Params {
+		calledParams[name] = true
+	}
+	/* leadingDecl：名字在模板体里第一次出现就是 `$p = …`。
+	 * CollectPrefixParamRefs 的「首次出现才算声明」判据只管得到字面顺序，
+	 * 对 `$target = $target + $value` 这种"先赋值后引用"的写法恰好会误判，
+	 * 所以这里再补一条：调用点传了实参的参数，其 `$p = …` 一律不是声明。 */
+	leadingDecl := map[string]bool{}
+	for _, ref := range ast.DefaultPrefixParams(tplBody) {
+		if !calledParams[ref.Name] {
+			leadingDecl[ref.Name] = true
+		}
+	}
+	var skeleton []ast.Statement
+	bodySpliced := false
+	for _, bodyStmt := range tplBody {
+		if name, ok := ast.BarePrefixParamName(bodyStmt); ok {
+			if name == "body" && !bodySpliced && len(bodyStmts) > 0 {
+				skeleton = append(skeleton, bodyStmts...)
+				bodySpliced = true
+			}
+			continue
+		}
+		if name, _, ok := ast.PrefixParamDefaultDecl(bodyStmt); ok && leadingDecl[name] {
+			continue
+		}
+		skeleton = append(skeleton, bodyStmt)
+	}
+	if !bodySpliced {
+		skeleton = append(skeleton, bodyStmts...)
+	}
+
+	// 第 2 步：克隆骨架（模板 AST 共享只读）
+	cloned := astutil.CloneStatements(skeleton)
+
+	// 第 3 步：自动 alpha 重命名
+	sg.codegen.macroRenameSeq++
+	renamed, renames, decls := astutil.AlphaRenameTemplate(cloned, sg.codegen.macroRenameSeq)
+	exp.Renames = renames
+	exp.Decls = decls
+
+	// 第 4 步：参数替换（AST 层面）。实参本身也可能引用 $参数（转发），
+	// 因此替换表按"模板绑定 + 外层已绑定的 $参数"合并，自内向外。
+	sg.codegen.pushMacroFreeBindings(nil)
+	paramTable := make(map[string]ast.Expression, len(bindings))
+	for k, v := range bindings {
+		paramTable[k] = v
+	}
+	// 外层宏的 $参数（嵌套展开时可用）：只补本层没有的，本层优先
+	for i := len(sg.codegen.prefixBindings) - 1; i >= 0; i-- {
+		for k, b := range sg.codegen.prefixBindings[i] {
+			if _, exists := paramTable[k]; exists {
+				continue
+			}
+			if b.Expr != nil {
+				paramTable[k] = b.Expr
+			}
+		}
+	}
+	exp.Params = paramTable
+
+	/* 第 5 步：直引重写。
+	 * 只对"既不是本层本地变量、也不是 $参数"的名字解析，因为这两类的语义
+	 * 已经由第 3/4 步确定；解析结果为空表示保持原名（调用点可见）。 */
+	frees := map[string]string{}
+	for _, name := range astutil.ScanFreeReferences(renamed) {
+		if _, isLocal := renames[name]; isLocal {
+			continue
+		}
+		resolved := sg.codegen.resolveMacroFreeName(name)
+		if resolved != "" && resolved != name {
+			frees[name] = resolved
+		}
+	}
+	exp.Frees = frees
+	sg.codegen.pushMacroFreeBindings(frees)
+
+	// 第 6 步：结构约束校验（tree 注解 / tree 模板），在生成代码之前发现问题
+	if errs := sg.validateMacroArguments(exp, len(e.Body)); len(errs) > 0 {
+		sg.codegen.popMacroFreeBindings()
+		sg.codegen.popMacroFreeBindings()
+		for _, msg := range errs {
+			exp.addError(msg)
+		}
+		/*
+		 * 结构不匹配时不继续展开：继续展开只会把错误推迟到 C 编译阶段，
+		 * 报出与源码无关的行号。返回空展开，主流程以"已报错"终止。
+		 */
+		exp.Stmts = nil
+		return exp, true
+	}
+
+	// 第 7 步：按重写表改写（$参数 克隆、本地变量与直引改名）
+	bind := astutil.NewBindings()
+	bind.Params = paramTable
+	bind.Locals = renames
+	bind.Frees = frees
+	rewriter := &macroRewriter{sg: sg, exp: exp}
+
+	expanded := rewriter.rewriteStmts(renamed)
+
+	sg.codegen.popMacroFreeBindings()
+	sg.codegen.popMacroFreeBindings()
+
+	exp.Stmts = expanded
+	return exp, true
+}
+
+// generatePrefixCallBody 生成前缀调用的展开代码（编译期结构宏展开）。
+//
+// 展开规则（语义见 docs/tutorials/prefix-system.md）：
+//   - 裸 `$param` 声明与 `$param = 默认值` 声明不生成代码；
+//   - `$param` 经前缀绑定栈替换为实参（含默认值）的 AST；
+//   - 模板本地局部变量展开时自动唯一化（alpha 重命名），不再依赖用户手工避让；
+//   - 调用体在首个未绑定的裸 `$param` 处拼接（$body 占位），否则追加在模板体之后；
+//   - 整体包裹块作用域，避免多次展开时变量重定义。
+func (sg *StatementGenerator) generatePrefixCallBody(e *ast.PrefixCallExpression) string {
+	// 非模板（普通函数调用形式的前缀函数）：只处理调用体内的语句
+	if !sg.isPrefixTemplate(e.Name) {
+		code := ""
+		sg.codegen.indent++
+		for _, bodyStmt := range e.Body {
+			code += sg.codegen.indentString() + sg.codegen.generateStatement(bodyStmt)
+		}
+		sg.codegen.indent--
+		return code
+	}
+
+	exp, ok := sg.expandStructureMacro(e)
+	if !ok {
+		/*
+		 * 找不到模板：静默跳过。
+		 *
+		 * 这里**不能**只靠 codegen 报错——语义阶段已经对未知前缀名报过
+		 * undefined_prefix，codegen 再报一次就是双报。真正危险的是
+		 * "语义阶段没报、codegen 也查不到"的组合（跨文件前缀曾经就是如此：
+		 * 编译 Success，@trace(...) 却被整个丢弃）。那种缺口现在由
+		 * sema/codegen 两侧的本地 import 前缀注入（SetLocalExternalPrefixes）
+		 * 堵住，见 cmd/kaulac 的 collectLocalPrefixDefs。
+		 */
+		return ""
+	}
+	for _, msg := range exp.Errors {
+		sg.codegen.error(msg)
+	}
+
+	// 按普通块生成：作用域登记、liveness 与 survivor 回收都在块内完成
+	return sg.generateBlockStatement(&ast.BlockStatement{Statements: exp.Stmts, Pos: e.Pos})
+}
+
+// isPrefixTemplate 判断前缀名是否指向一个模板（#[prefix] 函数或 prefix 语句）
+func (sg *StatementGenerator) isPrefixTemplate(name string) bool {
+	if fn := sg.findFunctionDeclaration(name); fn != nil {
+		ann := fn.GetAnnotation()
+		return ann == ast.TreeAnnotationPrefix ||
+			ann == ast.TreeAnnotationPrefixTree ||
+			ann == ast.TreeAnnotationTree
+	}
+	return sg.codegen.findPrefixStatement(name) != nil
+}
+
+// expandMacroExpression 在表达式位置展开结构宏（P1：表达式级宏返回）。
+//
+// 语义：`@Name(...)` 出现在表达式位置时，展开结果里**最后一个表达式语句**
+// 的值就是宏的值；其余语句被包进 GNU 语句表达式 `({ ... })`，因此宏体里的
+// 局部变量不会泄漏到外层作用域，且整体是一个表达式（可参与算术、可作实参）。
+//
+// 返回值 ok=false 表示没有可用的返回值（展开结果为空、或最后一条语句不是
+// 表达式），调用方会给出明确错误，而不是静默生成 0。
+func (sg *StatementGenerator) expandMacroExpression(e *ast.PrefixCallExpression) (string, bool) {
+	/* 带调用体的 `@Name(...) { ... }` 是**语句**语法糖，不是表达式。
+	 * 若这里把它当表达式处理，脚本会因为"最后一条语句恰好是调用"而静默
+	 * 取到那个值，C 端则是一段不合法的初始值。直接给出错误更诚实。 */
+	if len(e.Body) > 0 {
+		sg.codegen.error(fmt.Sprintf("前缀 '%s' 在表达式位置使用，但携带了 `{ ... }` 调用体；调用体只能用于语句位置，表达式位置请去掉调用体并让模板体末尾给出要返回的表达式", e.Name))
+		return "", true
+	}
+	if !sg.isPrefixTemplate(e.Name) {
+		return "", false
+	}
+	exp, ok := sg.expandStructureMacroIn(e, false)
+	if !ok {
+		return "", false
+	}
+	for _, msg := range exp.Errors {
+		sg.codegen.error(msg)
+	}
+	if len(exp.Stmts) == 0 {
+		sg.codegen.error(fmt.Sprintf("前缀 '%s' 在表达式位置展开后没有任何语句，无法提供返回值", e.Name))
+		return "", true
+	}
+	/* 值从哪来：展开结果的最后一条语句，且它必须是**一条语句里带值**的
+	 * 形态（表达式语句 / return / yield）。
+	 *
+	 * 注意这里不能只看"最后一条语句是 ExpressionStatement"：解析器把每个
+	 * 调用都包成 ExpressionStatement，于是 void 调用（println）也满足该条件，
+	 * 宏会在毫无提示的情况下被当成"返回 println 的返回值"——C 端把
+	 * `printf(...)` 的 int 塞进 i64 变量，语义完全不是用户写的那个。
+	 * 所以还要确认语句形态本身允许出现在语句表达式末尾。 */
+	last := exp.Stmts[len(exp.Stmts)-1]
+	lastExpr, err := macroValueExpression(last)
+	if err != nil {
+		sg.codegen.error(fmt.Sprintf("前缀 '%s' 在表达式位置使用，但模板体没给出返回值：%s", e.Name, err.Error()))
+		return "", true
+	}
+
+	// 前缀是模板才能走到这里：确有返回值即成功
+	if len(exp.Stmts) == 1 {
+		return sg.codegen.expressionGenerator.GenerateExpression(lastExpr), true
+	}
+
+	// 多条语句：语句表达式里逐条生成，保证局部变量作用域封闭
+	prevInFunction := sg.codegen.inFunctionBody
+	sg.codegen.inFunctionBody = false
+	code := "({ "
+	prevIndent := sg.codegen.indent
+	sg.codegen.indent = 0
+	for _, s := range exp.Stmts {
+		gen := sg.codegen.generateStatement(s)
+		code += strings.TrimSpace(gen) + " "
+	}
+	sg.codegen.indent = prevIndent
+	sg.codegen.inFunctionBody = prevInFunction
+	code += "})"
+	return code, true
+}
+
+// macroRewriter 在克隆后的骨架上做参数替换、参数展开与调用体作用域处理
+type macroRewriter struct {
+	sg  *StatementGenerator
+	exp *macroExpansion
+}
+
+// rewriteStmts 逐条改写；整条语句是单个 `$p` 时按参数展开处理
+func (r *macroRewriter) rewriteStmts(stmts []ast.Statement) []ast.Statement {
+	out := make([]ast.Statement, 0, len(stmts))
+	for _, s := range stmts {
+		if s == nil {
+			continue
+		}
+		if id, ok := prefixVarStatement(s); ok {
+			out = append(out, r.expandParamStatement(id, s.GetPosition())...)
+			continue
+		}
+		out = append(out, r.rewriteStmt(s))
+	}
+	return out
+}
+
+// prefixVarStatement 识别「整条语句就是单个 $p」的形态（裸 `$p` 语句）
+func prefixVarStatement(s ast.Statement) (*ast.Identifier, bool) {
+	es, ok := s.(*ast.ExpressionStatement)
+	if !ok {
+		return nil, false
+	}
+	id, ok := es.Expression.(*ast.Identifier)
+	if !ok || !id.IsPrefixVar {
+		return nil, false
+	}
+	return id, true
+}
+
+// expandParamStatement 参数展开：把 `$p` 语句替换为实参对应的语句序列。
+//
+//   - 表达式参数 → 一条表达式语句（`$a + 1` 这样的参数是真实存在的用法）；
+//   - 语句级参数（调用体、语句字面量）→ 整段语句替换。
+func (r *macroRewriter) expandParamStatement(id *ast.Identifier, pos ast.Position) []ast.Statement {
+	bound, ok := r.exp.Params[id.Name]
+	if !ok || bound == nil {
+		return nil
+	}
+	if _, isPrefix := bound.(*ast.PrefixCallExpression); isPrefix {
+		// 参数本身是宏调用：递归展开为语句
+		if exp, ok := r.sg.expandStructureMacro(bound.(*ast.PrefixCallExpression)); ok {
+			return exp.Stmts
+		}
+	}
+	if isStatementLike(bound) {
+		stmts := astutil.CloneStatements([]ast.Statement{boundAsStatement(bound)})
+		// 语句级实参内部同样可能引用 $参数（`$target = $value` 里的 `$target` 是
+		// 等号左侧的左值位置，不会被当作独立语句展开），必须一并改写，否则
+		// 未绑定的 `$p` 会漏到 C 代码里。
+		return r.rewriteStmts(stmts)
+	}
+	e := astutil.CloneExpression(bound)
+	e.SetPosition(pos)
+	return []ast.Statement{&ast.ExpressionStatement{Expression: r.rewriteExpr(e), Pos: pos}}
+}
+
+// isStatementLike 判断绑定值是否应按语句序列处理（语句级参数）
+func isStatementLike(e ast.Expression) bool {
+	_, ok := e.(ast.Statement)
+	return ok
+}
+
+// boundAsStatement 把语句级绑定还原为语句节点
+func boundAsStatement(e ast.Expression) ast.Statement {
+	if s, ok := e.(ast.Statement); ok {
+		return s
+	}
+	return &ast.ExpressionStatement{Expression: e, Pos: e.GetPosition()}
+}
+
+func (r *macroRewriter) rewriteStmt(s ast.Statement) ast.Statement {
+	return astutil.RewriteStatementChildren(s, func(node ast.Node) ast.Node {
+		switch v := node.(type) {
+		case ast.Expression:
+			return r.rewriteExpr(v)
+		case ast.Statement:
+			return r.rewriteStmt(v)
+		}
+		return nil
+	})
+}
+
+// rewriteExpr 改写表达式：`$p` 内联实参 AST，其余下钻
+func (r *macroRewriter) rewriteExpr(e ast.Expression) ast.Expression {
+	if e == nil {
+		return nil
+	}
+	if id, ok := e.(*ast.Identifier); ok && id.IsPrefixVar {
+		if bound, ok := r.exp.Params[id.Name]; ok && bound != nil {
+			clone := astutil.CloneExpression(bound)
+			clone.SetPosition(id.Pos)
+			return clone
+		}
+		return e
+	}
+	return astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+		switch v := node.(type) {
+		case ast.Expression:
+			return r.rewriteExpr(v)
+		case ast.Statement:
+			return r.rewriteStmt(v)
+		}
+		return nil
+	})
+}
+
+// macroValueExpression 取「这条语句作为宏返回值时的表达式」，并校验该形态
+// 确实可以出现在 GNU 语句表达式末尾（也即 C 里能给出值）。
+//
+// 允许：
+//   - 表达式语句，且表达式本身是**有值表达式**（不是 void 调用）；
+//   - `return expr`（宏体内的 return 表示"宏的值"）；
+//   - `yield expr`。
+//
+// 其余（声明、赋值、println、if/while/块…）一律报错：静默取一个无关的值
+// 比报错危险得多。
+func macroValueExpression(stmt ast.Statement) (ast.Expression, error) {
+	switch s := stmt.(type) {
+	case *ast.ExpressionStatement:
+		if s.Expression == nil {
+			return nil, fmt.Errorf("最后一条语句是空表达式语句")
+		}
+		if exprHasNoValue(s.Expression) {
+			return nil, fmt.Errorf("最后一个语句不是有值的表达式（%s 不产生值）；请把要返回的表达式写在模板体末尾", describeMacroExpr(s.Expression))
+		}
+		return s.Expression, nil
+	case *ast.ReturnStatement:
+		if s.Value == nil {
+			return nil, fmt.Errorf("最后一条语句是 `return`（无值）")
+		}
+		return s.Value, nil
+	case *ast.YieldStatement:
+		if s.Source == nil {
+			return nil, fmt.Errorf("最后一条语句是 `yield`（无源对象）")
+		}
+		return s.Source, nil
+	default:
+		return nil, fmt.Errorf("最后一个语句是 %s，它不产生值；请把要返回的表达式写在模板体末尾", describeMacroStmt(stmt))
+	}
+}
+
+// exprHasNoValue 判断表达式是否**确定不产生值**。
+//
+// 只对能静态判定的一类下手：直接调用一个「无返回值」的已知 void 函数
+// （println/print/puts 等内建输出，或返回类型为空的用户函数）。
+// 其余表达式一律当作有值——宏的参数可能是任意类型，过度判定会误报。
+func exprHasNoValue(expr ast.Expression) bool {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok || call == nil {
+		return false
+	}
+	name := ""
+	if id, ok := call.Function.(*ast.Identifier); ok {
+		name = id.Name
+	}
+	if name == "" {
+		return false
+	}
+	if macroVoidBuiltins[name] {
+		return true
+	}
+	return false
+}
+
+// macroVoidBuiltins 无返回值的语言/标准库内建调用（名字层面即可判定）
+var macroVoidBuiltins = map[string]bool{
+	"println":  true,
+	"print":    true,
+	"printf":   true,
+	"puts":     true,
+	"eprintln": true,
+	"eprint":   true,
+	"panic":    true,
+	"assert":   true,
+}
+
+// describeMacroExpr / describeMacroStmt 给出简短可读的节点描述（诊断用）
+func describeMacroExpr(expr ast.Expression) string {
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		if id, ok := e.Function.(*ast.Identifier); ok {
+			return "调用 " + id.Name + "(...)"
+		}
+		return "函数调用"
+	case *ast.Identifier:
+		return "标识符 " + e.Name
+	}
+	return fmt.Sprintf("%T", expr)
+}
+
+func describeMacroStmt(stmt ast.Statement) string {
+	switch stmt.(type) {
+	case *ast.VariableDeclaration:
+		return "变量声明"
+	case *ast.BlockStatement:
+		return "块语句"
+	case *ast.IfStatement:
+		return "if 语句"
+	case *ast.WhileStatement:
+		return "while 语句"
+	case *ast.ForStatement, *ast.ForInStatement:
+		return "for 语句"
+	case nil:
+		return "空语句"
+	}
+	return fmt.Sprintf("%T", stmt)
+}
+
+// prefixBodyParamNames 收集前缀函数体"可以直接直译成 C 函数体"的替换表：
+// 形参名 → 同名的 C 形参标识符。
+//
+// 返回 nil 表示这个函数体不该被直译。判据是"体内只用到了形参"：
+// 一旦模板体自己声明了 `$p`（如 `$limit = 10`），这个 `$p` 在函数体里没有
+// 任何 C 变量可以指代——它只存在于宏展开的世界里。此时生成一个空函数体，
+// 而不是编造一个未声明的标识符（那会让整个程序在 clang 阶段失败，用户看到
+// 的错误与真实原因毫无关系）。
+//
+// 空函数体是安全的：注解前缀函数只会在"当成普通函数调用"时被链接到，
+// 而 `$参数` 形态的模板本来就不该被当成普通函数调用。
+func (cg *CodeGenerator) prefixBodyParamNames(fn *ast.FunctionStatement) map[string]bool {
+	if fn == nil {
+		return nil
+	}
+	params := map[string]bool{}
+	for _, name := range fn.Params {
+		if name != "" {
+			params[name] = true
+		}
+	}
+	for name := range ast.DeclaredPrefixParams(fn.Body) {
+		if !params[name] {
+			return nil // 模板体自声明了 $参数：无法直译
+		}
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}
+
+// rewritePrefixBodyStatement 把语句里的 `$参数` 改写成同名形参标识符。
+//
+// 只用于 generatePrefixFunction 生成的那个"兼容用 C 函数体"：宏语义在调用点
+// 展开时处理，这里只需要保证代码能在 C 里编译通过、行为等价于直译。
+func (cg *CodeGenerator) rewritePrefixBodyStatement(stmt ast.Statement, params map[string]bool) ast.Statement {
+	if stmt == nil || len(params) == 0 {
+		return stmt
+	}
+	renamed := astutil.RewriteStatementChildren(stmt, func(node ast.Node) ast.Node {
+		switch v := node.(type) {
+		case ast.Expression:
+			return cg.rewritePrefixBodyExpression(v, params)
+		case ast.Statement:
+			return cg.rewritePrefixBodyStatement(v, params)
+		}
+		return nil
+	})
+	return renamed
+}
+
+func (cg *CodeGenerator) rewritePrefixBodyExpression(e ast.Expression, params map[string]bool) ast.Expression {
+	if e == nil {
+		return nil
+	}
+	if id, ok := e.(*ast.Identifier); ok && id.IsPrefixVar && params[id.Name] {
+		return &ast.Identifier{Name: id.Name, Pos: id.Pos}
+	}
+	return astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+		switch v := node.(type) {
+		case ast.Expression:
+			return cg.rewritePrefixBodyExpression(v, params)
+		case ast.Statement:
+			return cg.rewritePrefixBodyStatement(v, params)
+		}
+		return nil
+	})
+}
