@@ -52,15 +52,15 @@ kaulac hello.kl
 Kaula 默认使用 KMM V4 作为内存分配器，无需手动 free：
 
 ```kaula
+import std.io
 import std.memory
 
 fn main() {
     // 直接使用 KMM V4 池分配器，作用域退出自动回收
-    auto buf = std.memory.kmm_v4_alloc(1024)
-    
-    // 使用 buf...
-    memset(buf, 0, 1024)
-    
+    i32* buf = as<i32*>(std.memory.kmm_v4_alloc(64))
+    buf[0] = 42
+
+    println("buf[0] = ", buf[0])   # buf[0] = 42
     // 函数退出时自动回收，无需 free
 }
 ```
