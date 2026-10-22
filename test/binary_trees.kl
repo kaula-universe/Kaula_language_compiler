@@ -1,0 +1,67 @@
+// binary_trees.kl — CLBG 风格分配风暴（Kaula arena 模型）
+// 每轮在 kmm_v4 scope 内 bump 分配整棵树的节点数组，递归 build + 中序遍历，
+// scope_exit 一次性批量回收（O(1) rewind，无逐节点 free、无标记清除 GC）。
+// 对标 Go/Rust/Nsoar binary-trees 分配风暴。
+import std.io
+import std.memory
+import std.time
+
+// 节点 16 字节：left/right 下标 + value
+struct Node {
+    left: i64
+    right: i64
+    value: i64
+}
+
+fn build(Node* nodes, i64 idx, i64 d, i64 maxD) {
+    nodes[idx].left = -1
+    nodes[idx].right = -1
+    nodes[idx].value = d
+    if d < maxD {
+        i64 li = idx * 2 + 1
+        i64 ri = idx * 2 + 2
+        nodes[idx].left = li
+        nodes[idx].right = ri
+        build(nodes, li, d + 1, maxD)
+        build(nodes, ri, d + 1, maxD)
+    }
+}
+
+fn check(Node* nodes, i64 idx) i64 {
+    if idx < 0 {
+        return 0
+    }
+    i64 l = check(nodes, nodes[idx].left)
+    i64 r = check(nodes, nodes[idx].right)
+    i64 total = l + nodes[idx].value + r
+    return total
+}
+
+fn main() {
+    i64 depth = 25                  // 节点 = 2^26 - 1 = 67108863 ≈ 6710 万（对标图里 ~7000 万）
+    i64 nodesCount = 67108863
+    i64 iters = 5                   // 5 轮 × 6710 万 ≈ 3.3 亿节点分配/回收
+
+    std.io.println("=== Kaula binary_trees (arena alloc storm) ===")
+    std.io.println("depth=", depth, " nodes/tree=", nodesCount, " iters=", iters)
+
+    i64 checksum = 0
+    i64 t0 = std.time.time_now_ms()
+    i64 i = 0
+    while i < iters {
+        std.memory.kmm_v4_scope_enter()
+        Node* nodes = as<Node*>(std.memory.kmm_v4_alloc(nodesCount * 24))
+        build(nodes, 0, 1, depth)
+        checksum = checksum + check(nodes, 0)
+        std.memory.kmm_v4_scope_exit()
+        i = i + 1
+    }
+    i64 t1 = std.time.time_now_ms()
+
+    i64 perTree = (t1 - t0) * 1000000 / iters
+    i64 perNode = (t1 - t0) * 1000000 / (iters * nodesCount)
+    std.io.println("total ", t1 - t0, " ms")
+    std.io.println("per-tree ", perTree, " ns")
+    std.io.println("per-node ", perNode, " ns (alloc+build+check+bulk-reclaim)")
+    std.io.println("checksum ", checksum)
+}
