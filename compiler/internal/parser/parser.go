@@ -404,6 +404,56 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 		return p.parseExpressionStatementIterative()
 	case lexer.TOKEN_AT:
 		return p.parsePrefixCallStatementIterative()
+	case lexer.TOKEN_PREFIX_REF:
+		// `$x` 裸参数声明走表达式语句；`$( ... ),*` 是变参构造：
+		//   - `$( $x ),*` 精确形态 → PrefixVarArgDecl（匹配声明，绑定参数 x）
+		//   - `$( <语句> ),*` → PrefixRepeatStmt（按位置实参个数重复 <语句>）
+		if p.peekTok.Type == lexer.TOKEN_LPAREN {
+			pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+			p.nextToken() // consume $
+			p.nextToken() // consume (
+			// 匹配声明形态：$ IDENT ) , *
+			if p.curTok.Type == lexer.TOKEN_PREFIX_REF && p.peekTok.Type == lexer.TOKEN_IDENT {
+				param := p.peekTok.Value
+				p.nextToken() // consume $
+				p.nextToken() // consume IDENT
+				if p.curTok.Type == lexer.TOKEN_RPAREN && p.peekTok.Type == lexer.TOKEN_COMMA {
+					p.nextToken() // consume )
+					if p.curTok.Type == lexer.TOKEN_COMMA && p.peekTok.Type == lexer.TOKEN_MULTIPLY {
+						p.nextToken() // consume ,
+						p.nextToken() // consume *
+						return &ast.PrefixVarArgDecl{Param: param, Pos: pos}
+					}
+				}
+				p.error("expected ,* after $( $name ) 变参匹配声明")
+				return nil
+			}
+			// 语句重复占位：解析一条语句直到 )
+			var body []ast.Statement
+			for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+				prevTok := p.curTok
+				if stmt := p.parseStatementIterative(); stmt != nil {
+					body = append(body, stmt)
+				}
+				if p.curTok.Type == prevTok.Type && p.curTok.Value == prevTok.Value {
+					p.error("无法解析 $( ... ) 内的语句")
+					return nil
+				}
+			}
+			if p.curTok.Type != lexer.TOKEN_RPAREN {
+				p.error("expected ) to close $( ... )")
+				return nil
+			}
+			p.nextToken() // consume )
+			if p.curTok.Type != lexer.TOKEN_COMMA || p.peekTok.Type != lexer.TOKEN_MULTIPLY {
+				p.error("expected ,* after $( ... )")
+				return nil
+			}
+			p.nextToken() // consume ,
+			p.nextToken() // consume *
+			return &ast.PrefixRepeatStmt{Body: body, Pos: pos}
+		}
+		return p.parseExpressionStatementIterative()
 	case lexer.TOKEN_CONSTRUCTOR:
 		return nil
 	case lexer.TOKEN_SEMICOLON:
@@ -4072,6 +4122,29 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 		return p.parsePrefixCallExpressionIterative()
 	case lexer.TOKEN_PREFIX_REF:
 		p.nextToken()
+		if p.curTok.Type == lexer.TOKEN_LPAREN {
+			// `$( <表达式> ),*` —— 表达式重复占位（变参宏）：
+			// 按位置实参个数重复 <表达式> 并以逗号连接。
+			pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
+			p.nextToken() // consume (
+			fragment := p.parseExpressionIterative()
+			if fragment == nil {
+				p.error("expected expression after $(")
+				return nil
+			}
+			if p.curTok.Type != lexer.TOKEN_RPAREN {
+				p.error("expected ) to close $( ... )")
+				return nil
+			}
+			p.nextToken() // consume )
+			if p.curTok.Type != lexer.TOKEN_COMMA || p.peekTok.Type != lexer.TOKEN_MULTIPLY {
+				p.error("expected ,* after $( ... )")
+				return nil
+			}
+			p.nextToken() // consume ,
+			p.nextToken() // consume *
+			return &ast.PrefixRepeatExpr{Fragment: fragment, Pos: pos}
+		}
 		if p.curTok.Type == lexer.TOKEN_IDENT {
 			ident := &ast.Identifier{
 				Name:        p.curTok.Value,
@@ -5214,6 +5287,11 @@ func (p *Parser) parsePrefixCallExpressionIterative() ast.Expression {
 				if value := p.parseExpressionIterative(); value != nil {
 					call.Params[paramName] = value
 				}
+			} else if p.curTok.Type != lexer.TOKEN_COMMA {
+				// 位置实参（变参宏）：未被 `name =` 绑定的实参按顺序收集
+				if value := p.parseExpressionIterative(); value != nil {
+					call.VarArgs = append(call.VarArgs, value)
+				}
 			}
 			if p.curTok.Type == lexer.TOKEN_COMMA {
 				p.nextToken()
@@ -5254,6 +5332,7 @@ func (p *Parser) parsePrefixCallExpressionIterative() ast.Expression {
 func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 	var prefixName string
 	params := make(map[string]ast.Expression)
+	var varArgs []ast.Expression
 	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
 
 	// 检查是否是 @ 前缀调用
@@ -5277,6 +5356,13 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 					p.nextToken() // skip ASSIGN
 					if paramValue := p.parseExpressionIterative(); paramValue != nil {
 						params[paramName] = paramValue
+					}
+				} else if p.curTok.Type != lexer.TOKEN_COMMA {
+					// 位置实参（变参宏）：`@Name(1, x + 1)` 中未被 `name =`
+					// 绑定的实参按顺序收集。只有模板含 `$( $x ),*` 匹配声明的
+					// 宏才允许位置实参，混用与合法性由展开器校验。
+					if value := p.parseExpressionIterative(); value != nil {
+						varArgs = append(varArgs, value)
 					}
 				}
 				if p.curTok.Type == lexer.TOKEN_COMMA {
@@ -5337,10 +5423,11 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 			p.nextToken()
 		}
 		prefixCall := &ast.PrefixCallExpression{
-			Name:   prefixName,
-			Params: params,
-			Body:   blockBody,
-			Pos:    pos,
+			Name:    prefixName,
+			Params:  params,
+			VarArgs: varArgs,
+			Body:    blockBody,
+			Pos:     pos,
 		}
 		return &ast.ExpressionStatement{
 			Expression: prefixCall,
@@ -5355,9 +5442,10 @@ func (p *Parser) parsePrefixCallStatementIterative() *ast.ExpressionStatement {
 	}
 	return &ast.ExpressionStatement{
 		Expression: &ast.PrefixCallExpression{
-			Name:   prefixName,
-			Params: params,
-			Pos:    pos,
+			Name:    prefixName,
+			Params:  params,
+			VarArgs: varArgs,
+			Pos:     pos,
 		},
 		Pos: pos,
 	}

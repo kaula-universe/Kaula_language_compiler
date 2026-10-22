@@ -308,8 +308,21 @@ func traverseNode(node Node, visitor func(Node)) {
 			traverseNode(n.Expression, visitor)
 		}
 	case *PrefixCallExpression:
+		for _, arg := range n.VarArgs {
+			traverseNode(arg, visitor)
+		}
 		for _, stmt := range n.Body {
 			traverseNode(stmt, visitor)
+		}
+	case *PrefixVarArgDecl:
+		// 无子节点（Param 是字符串字段，由 CollectPrefixParamRefs 单独登记）
+	case *PrefixRepeatStmt:
+		for _, stmt := range n.Body {
+			traverseNode(stmt, visitor)
+		}
+	case *PrefixRepeatExpr:
+		if n.Fragment != nil {
+			traverseNode(n.Fragment, visitor)
 		}
 	case *BlockStatement:
 		for _, stmt := range n.Statements {
@@ -503,6 +516,85 @@ func (p *PrefixStatement) GetPosition() Position {
 // SetPosition 实现Node接口
 func (p *PrefixStatement) SetPosition(pos Position) {
 	p.Pos = pos
+}
+
+// PrefixVarArgDecl 变参匹配声明 `$( $x ),*`：
+// 作为一条裸语句出现在模板体（仅此形态），声明该宏接受零个或多个**位置实参**，
+// 绑定到参数 x。模板体内 `$( ... ),*` 重复占位按实参个数重复展开，
+// 片段中的 `$x` 依次绑定到每个位置实参。
+type PrefixVarArgDecl struct {
+	Param string
+	Pos   Position
+}
+
+// statementNode 实现Statement接口
+func (v *PrefixVarArgDecl) statementNode() {}
+
+// String 实现Node接口
+func (v *PrefixVarArgDecl) String() string {
+	return "PrefixVarArgDecl(" + v.Param + ")"
+}
+
+// GetPosition 实现Node接口
+func (v *PrefixVarArgDecl) GetPosition() Position {
+	return v.Pos
+}
+
+// SetPosition 实现Node接口
+func (v *PrefixVarArgDecl) SetPosition(pos Position) {
+	v.Pos = pos
+}
+
+// PrefixRepeatStmt 语句重复占位 `$( <语句> ),*`（语句位置，非匹配声明形态）：
+// 按位置实参个数重复 <语句>，片段内的 `$x`（匹配参数）依次绑定到每个实参。
+// 片段通常是一条语句；多条语句用花括号块包住。
+type PrefixRepeatStmt struct {
+	Body []Statement
+	Pos  Position
+}
+
+// statementNode 实现Statement接口
+func (r *PrefixRepeatStmt) statementNode() {}
+
+// String 实现Node接口
+func (r *PrefixRepeatStmt) String() string {
+	return "PrefixRepeatStmt"
+}
+
+// GetPosition 实现Node接口
+func (r *PrefixRepeatStmt) GetPosition() Position {
+	return r.Pos
+}
+
+// SetPosition 实现Node接口
+func (r *PrefixRepeatStmt) SetPosition(pos Position) {
+	r.Pos = pos
+}
+
+// PrefixRepeatExpr 表达式重复占位 `$( <表达式> ),*`（表达式位置）：
+// 只能出现在调用实参列表、数组字面量元素或前缀调用位置实参中；
+// 按位置实参个数重复 <表达式> 并以逗号连接，片段内的 `$x` 依次绑定。
+type PrefixRepeatExpr struct {
+	Fragment Expression
+	Pos      Position
+}
+
+// expressionNode 实现Expression接口
+func (r *PrefixRepeatExpr) expressionNode() {}
+
+// String 实现Node接口
+func (r *PrefixRepeatExpr) String() string {
+	return "PrefixRepeatExpr"
+}
+
+// GetPosition 实现Node接口
+func (r *PrefixRepeatExpr) GetPosition() Position {
+	return r.Pos
+}
+
+// SetPosition 实现Node接口
+func (r *PrefixRepeatExpr) SetPosition(pos Position) {
+	r.Pos = pos
 }
 
 // TreeAnnotationType tree annotation types
@@ -1602,11 +1694,15 @@ func (i *IndexExpression) SetPosition(pos Position) {
 // PrefixCallExpression 表示前缀调用表达式
 // 语法: @PrefixName(param1=value1, param2=value2) { body }
 type PrefixCallExpression struct {
-	Name       string
-	Params     map[string]Expression
-	Body       []Statement
+	Name   string
+	Params map[string]Expression
+	// VarArgs 位置实参（变参宏）：`@Name(a = 1, 2, 3)` 中未被 `name =` 绑定的
+	// 实参按出现顺序收集到这里。只有模板含 `$( $x ),*` 匹配声明的宏才允许
+	// 位置实参；与命名参数混用由展开器报错。实参在展开块开头求值一次。
+	VarArgs []Expression
+	Body    []Statement
 	Annotation TreeAnnotationType
-	Pos        Position
+	Pos     Position
 }
 
 // expressionNode 实现Expression接口
@@ -1740,6 +1836,11 @@ func CollectPrefixParamRefs(body []Statement) []PrefixParamRef {
 			refs = append(refs, PrefixParamRef{Name: name, Kind: PrefixParamBare, Pos: stmt.GetPosition()})
 			seen[name] = true
 			handled = true
+		} else if vd, ok := stmt.(*PrefixVarArgDecl); ok {
+			// 变参匹配声明 `$( $x ),*`：像裸声明一样登记参数 x（可选参数）
+			refs = append(refs, PrefixParamRef{Name: vd.Param, Kind: PrefixParamBare, Pos: vd.Pos})
+			seen[vd.Param] = true
+			handled = true
 		} else if name, value, ok := PrefixParamDefaultDecl(stmt); ok && !seen[name] {
 			refs = append(refs, PrefixParamRef{Name: name, Kind: PrefixParamDefault, Value: value, Pos: stmt.GetPosition()})
 			seen[name] = true
@@ -1783,10 +1884,17 @@ func RequiredPrefixParams(body []Statement) []string {
 			hasDefault[ref.Name] = true
 		}
 	}
+	// 变参匹配声明 `$( $x ),*` 声明的参数由位置实参供给，不参与必填校验
+	vararg := map[string]bool{}
+	for _, s := range body {
+		if vd, ok := s.(*PrefixVarArgDecl); ok {
+			vararg[vd.Param] = true
+		}
+	}
 	var required []string
 	seen := make(map[string]bool)
 	for _, ref := range refs {
-		if ref.Kind != PrefixParamExprRef || hasDefault[ref.Name] || seen[ref.Name] {
+		if ref.Kind != PrefixParamExprRef || hasDefault[ref.Name] || seen[ref.Name] || vararg[ref.Name] {
 			continue
 		}
 		seen[ref.Name] = true

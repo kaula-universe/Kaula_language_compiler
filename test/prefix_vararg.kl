@@ -1,0 +1,53 @@
+# prefix_vararg.kl — 结构宏变参 `$( ... ),*` 匹配与重复展开（Task #3）
+#
+# 模板 `$( $x ),*` 声明接受零个或多个位置实参；`$( <语句> ),*` /
+# `$( <表达式> ),*` 按实参个数重复展开，`$x` 依次绑定。位置实参在展开块
+# 开头各求值一次（副作用不翻倍）。
+
+fn check(bool cond, string label) {
+    if cond {
+        println("PASS ", label)
+    } else {
+        println("FAIL ", label)
+    }
+}
+
+i64 g_calls = 0
+
+fn counter() -> i64 {
+    g_calls = g_calls + 1
+    return g_calls
+}
+
+# 表达式重复：println($( $x ),*) → println(实参, 实参, ...)
+prefix PrintAll {
+    $( $x ),*
+    println($( $x ),*)
+}
+
+# 语句重复：$( println($x) ),* → 每个实参一条 println
+prefix EmitAll {
+    $( $x ),*
+    $( println("v=", $x) ),*
+}
+
+# 零个实参：重复占位展开为空，宏体只留模板其余部分
+prefix Maybe {
+    $( $x ),*
+    println("no-args")
+}
+
+# 实参只求值一次：$( $x + $x ),* 中 counter() 不应被调两遍
+prefix Once {
+    $( $x ),*
+    println("sum=", $( $x + $x ),*)
+}
+
+fn main() {
+    @PrintAll(10, 20, 30)
+    @EmitAll(1, 2, 3)
+    @Maybe()
+
+    @Once(counter())
+    check(g_calls == 1, "vararg arg evaluated once")
+}

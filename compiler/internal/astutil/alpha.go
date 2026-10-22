@@ -113,6 +113,11 @@ func (r *alphaRenamer) collectDecls(s ast.Statement, local map[string]string) {
 			r.renameTable()[id.Name] = MacroLocalName(r.seq, id.Name)
 			local[id.Name] = r.renames[id.Name]
 		}
+	case *ast.PrefixRepeatStmt:
+		// 重复占位片段里的局部声明同样参与 alpha 重命名
+		for _, c := range n.Body {
+			r.collectDecls(c, local)
+		}
 	}
 }
 
@@ -244,6 +249,13 @@ func (r *alphaRenamer) rewriteStmt(s ast.Statement, local map[string]string) ast
 		c.Default = sub(n.Default)
 		return &c
 	case *ast.PrefixStatement:
+		c := *n
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.PrefixVarArgDecl:
+		// 匹配声明 `$( $x ),*`：无局部变量槽位
+		return s
+	case *ast.PrefixRepeatStmt:
 		c := *n
 		c.Body = sub(n.Body)
 		return &c
@@ -393,6 +405,8 @@ func ScanFreeReferences(stmts []ast.Statement) []string {
 			walkExpr(n.Condition)
 			walkExpr(n.TrueExpr)
 			walkExpr(n.FalseExpr)
+		case *ast.PrefixRepeatExpr:
+			walkExpr(n.Fragment)
 		case *ast.TypeCastExpression:
 			walkExpr(n.Expression)
 		case *ast.AwaitExpression:
@@ -430,6 +444,10 @@ func ScanFreeReferences(stmts []ast.Statement) []string {
 				}
 			}
 		case *ast.PrefixCallExpression:
+			// 命名实参是绑定参数不重命名；位置实参是调用方代码，需要收集
+			for _, a := range n.VarArgs {
+				walkExpr(a)
+			}
 			for _, v := range n.Params {
 				walkExpr(v)
 			}
@@ -529,6 +547,12 @@ func ScanFreeReferences(stmts []ast.Statement) []string {
 				walkExpr(f)
 			}
 			walkExpr(n.Value)
+		case *ast.PrefixVarArgDecl:
+			// 匹配声明：无子节点
+		case *ast.PrefixRepeatStmt:
+			for _, c := range n.Body {
+				walkStmt(c)
+			}
 		}
 	}
 
@@ -587,6 +611,10 @@ func collectLocalNames(s ast.Statement, locals map[string]bool) {
 			locals[p] = true
 		}
 	case *ast.CallStatement:
+		for _, c := range n.Body {
+			collectLocalNames(c, locals)
+		}
+	case *ast.PrefixRepeatStmt:
 		for _, c := range n.Body {
 			collectLocalNames(c, locals)
 		}
