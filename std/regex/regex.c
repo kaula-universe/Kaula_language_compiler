@@ -6,16 +6,21 @@
 //   2. 内存池          —— AST 节点批量分配/释放
 //   3. 递归下降解析器  —— 模式串 → AST
 //   4. 指令生成器      —— AST → 扁平指令数组（Thompson 风格）
-//   5. 回溯虚拟机      —— 迭代式执行，带步数预算
+//   5. Pike VM         —— Thompson NFA 模拟，线性时间 O(代码长 × 文本长)
 //   6. 公开 API
 //
-// 为什么用「回溯 + 显式栈」而不是递归 NFA 模拟：
-//   回溯天然支持惰性量词与非贪婪交替，且捕获组语义直白；代价是最坏情况
-//   指数级。这里用「步数预算」（默认 200 万步）把最坏情况从「挂死」降级为
-//   「放弃并报错」，regex_aborted() 可以区分「无匹配」与「超预算放弃」。
+// 为什么用 Pike VM（Thompson NFA 模拟）而不是回溯：
+//   回溯（DFA 以外的经典实现）对 `(a+)+b` 这类「可空重复」最坏指数级，
+//   旧实现只能靠步数预算（默认 200 万步）把挂死降级为「放弃并报错」。
+//   Pike VM 每个输入位置维护一个活跃状态集合，ε 闭包展开 + 逐位消费，
+//   任意输入都线性完成，regex_aborted() 只在显式设置的步数预算被超限时为真。
+//
+// 捕获语义：活跃状态携带不可变的保存列表（SAVE 快照链，块池节点），
+//   SAVE 时 prepend 一个 (slot, pos) 节点，SPLIT/JMP 共享父链；命中 MATCH
+//   时沿链回填 caps[]。块池在编译期按 code_len 预分配，匹配期零堆分配。
 //
 // 为什么不用递归写匹配器：像 `a*` 匹配十万字符的串，递归深度会顶爆 C 栈。
-// 这里改成显式回溯栈，深度只受堆内存限制。
+//   Pike VM 用显式列表/闭包工作队列，深度只受堆内存限制。
 // ============================================================================
 
 #include "regex.h"
@@ -813,14 +818,14 @@ typedef struct {
     u32 iflags;
 } RxInst;
 
-// 回溯帧：kind=0 是 SPLIT 的备选分支，kind=1 是捕获槽回滚
+// Pike VM 保存列表节点：不可变快照链。SAVE 时 prepend 一个节点，
+// SPLIT/JMP 共享父节点号；命中 MATCH 时沿链回填 caps[]。
+// 用「块号索引」而非指针引用——块池 realloc 不悬垂。
 typedef struct {
-    int kind;
-    int pc;
-    size_t pos;
     int slot;
-    long long old;
-} RxFrame;
+    size_t pos;
+    int next;   // 前一节点号；-1 表示空链
+} RxSaveNode;
 
 typedef struct {
     RxInst* code;
@@ -832,6 +837,9 @@ typedef struct {
     size_t group_count;
     char group_names[REGEX_MAX_GROUPS][REGEX_MAX_NAME_LEN];
 
+    // 步数预算：step_limit_set 为真时用显式值；否则自适应
+    // max(3*(len+1)*code_len, REGEX_DEFAULT_STEP_LIMIT)，线性引擎正常输入不触限
+    bool_t step_limit_set;
     size_t step_limit;
     size_t steps;
     bool_t aborted;
@@ -840,9 +848,19 @@ typedef struct {
     long long* caps;   // 2*(group_count+1) 个槽位，-1 表示未参与
     size_t caps_len;
 
-    RxFrame* stack;
-    size_t stack_len;
-    size_t stack_cap;
+    // ---- Pike VM 工作区（编译期预分配，匹配期零堆分配） ----
+    int* cur;            // 当前位置活跃状态（已过 ε 闭包的消费态 PC）
+    int* nxt;            // 下一位置待闭包的入口 PC
+    int* cur_blk;        // cur[i] 对应的保存链块号（-1 = 空链）
+    int* nxt_blk;
+    int* work;           // ε 闭包 DFS 栈（容量 2*code_len）
+    int* work_blk;
+    size_t ncur;
+    size_t nnxt;
+    unsigned char* mark; // PC 访问标记（每位置清零，code_len 维）
+    RxSaveNode* pool;   // 保存链块池（动态增长，块号引用不因 realloc 悬垂）
+    size_t pool_used;
+    size_t pool_cap;
 
     RxArena arena;
     char err[RX_ERR_LEN];
@@ -1051,108 +1069,137 @@ static int rx_is_word(int c) {
            c == '_';
 }
 
-static int rx_push(RxProgram* pr, int kind, int pc, size_t pos, int slot, long long old) {
-    if (pr->stack_len == pr->stack_cap) {
-        size_t ncap = pr->stack_cap ? pr->stack_cap * 2 : 128;
-        RxFrame* n = (RxFrame*)kmm_v4_malloc(ncap * sizeof(RxFrame));
-        if (n == NULL) return 0;
-        if (pr->stack != NULL) {
-            memcpy(n, pr->stack, pr->stack_len * sizeof(RxFrame));
-            kmm_v4_free(pr->stack);
-        }
-        pr->stack = n;
-        pr->stack_cap = ncap;
+// ============================================================================
+// 5. Pike VM（Thompson NFA 模拟，线性时间）
+// ============================================================================
+
+// rx_lower / rx_char_eq / rx_is_word 已在本节上方定义，复用。
+
+// 在块池 prepend 一个 (slot,pos) 节点；父链块号为 blk（-1 表示空链）。
+// 块号引用，池满时 realloc 增长不悬垂。返回新块号；OOM 返回 -1。
+static int rx_save_push(RxProgram* pr, int slot, size_t pos, int blk) {
+    RxSaveNode* nd;
+    if (pr->pool_used >= pr->pool_cap) {
+        size_t ncap = pr->pool_cap ? pr->pool_cap * 2 : 64;
+        RxSaveNode* n = (RxSaveNode*)kmm_v4_realloc(pr->pool, ncap * sizeof(RxSaveNode));
+        if (n == NULL) return -1;
+        pr->pool = n;
+        pr->pool_cap = ncap;
     }
-    pr->stack[pr->stack_len].kind = kind;
-    pr->stack[pr->stack_len].pc = pc;
-    pr->stack[pr->stack_len].pos = pos;
-    pr->stack[pr->stack_len].slot = slot;
-    pr->stack[pr->stack_len].old = old;
-    pr->stack_len++;
-    return 1;
+    nd = &pr->pool[pr->pool_used];
+    nd->slot = slot;
+    nd->pos = pos;
+    nd->next = blk;
+    return (int)pr->pool_used++;
 }
 
-// 从 start 处锚定执行一次匹配。捕获结果写入 pr->caps。
-// 前置条件：调用方已把 caps 全部置 -1 并重置 steps/aborted。
-static bool_t rx_run(RxProgram* pr, const char* s, size_t len, size_t start) {
-    int pc = 0;
-    size_t pos = start;
-
-    pr->stack_len = 0;
-    pr->match_end = start;
-
-    for (;;) {
-        const RxInst* in;
-        if (pr->step_limit != 0 && ++pr->steps > pr->step_limit) {
-            pr->aborted = true;
-            break;
+// 沿保存链回填 caps[]：链是 prepend 顺序，slot 首次出现即路径上最近一次保存。
+static void rx_caps_from_block(RxProgram* pr, int blk) {
+    size_t i;
+    for (i = 0; i < pr->caps_len; i++) pr->caps[i] = -1;
+    while (blk >= 0) {
+        RxSaveNode* nd = &pr->pool[blk];
+        if ((size_t)nd->slot < pr->caps_len && pr->caps[nd->slot] == -1) {
+            pr->caps[nd->slot] = (long long)nd->pos;
         }
+        blk = nd->next;
+    }
+}
+
+// 检查步数预算。返回 false 表示超预算。
+static bool_t rx_step_tick(RxProgram* pr, size_t budget) {
+    pr->steps++;
+    if (budget != 0 && pr->steps > budget) {
+        pr->aborted = true;
+        return false;
+    }
+    return true;
+}
+
+// ε 闭包：从 entry[0..n) 出发展开 SPLIT/JMP/SAVE/锚点，消费态追加到 pr->cur。
+// 迭代 DFS（工作栈 pr->work，容量 2*code_len），无递归栈溢出风险。
+// 命中 MATCH 时记录首个候选（first-trial 分支后压先弹，与回溯贪婪语义一致）。
+static void rx_closure_list(RxProgram* pr, const int* entry, const int* entry_blk,
+                            size_t n, const char* s, size_t len, size_t pos,
+                            size_t budget, bool_t* hit) {
+    size_t wi = 0;
+    size_t i;
+    for (i = 0; i < n && wi < 2 * pr->code_len; i++) {
+        pr->work[wi] = entry[i];
+        pr->work_blk[wi] = entry_blk[i];
+        wi++;
+    }
+    while (wi > 0 && !pr->aborted) {
+        int pc = pr->work[--wi];
+        int blk = pr->work_blk[wi];
+        const RxInst* in;
+        if (pc < 0 || (size_t)pc >= pr->code_len) continue;
+        if (pr->mark[pc]) continue;
+        pr->mark[pc] = 1;
+        if (!rx_step_tick(pr, budget)) return;
         in = &pr->code[pc];
         switch (in->op) {
-            case RX_OP_CHAR:
-                if (pos < len &&
-                    rx_char_eq((unsigned char)s[pos], (unsigned char)in->ch,
-                               (in->iflags & REGEX_FLAG_IGNORECASE) != 0)) {
-                    pc++;
-                    pos++;
-                } else {
-                    goto backtrack;
-                }
-                break;
-            case RX_OP_ANY:
-                if (pos < len && ((in->iflags & REGEX_FLAG_DOTALL) || s[pos] != '\n')) {
-                    pc++;
-                    pos++;
-                } else {
-                    goto backtrack;
-                }
-                break;
-            case RX_OP_CLASS:
-                if (pos < len && rx_bs_get(in->set, (int)(unsigned char)s[pos])) {
-                    pc++;
-                    pos++;
-                } else {
-                    goto backtrack;
-                }
-                break;
             case RX_OP_SPLIT:
-                if (!rx_push(pr, 0, in->lazy ? in->x : in->y, pos, 0, 0)) {
-                    pr->aborted = true;
-                    goto done;
+                // 先压 y 再压 x → x（first-trial）先弹出展开
+                if (wi < 2 * pr->code_len) {
+                    pr->work[wi] = in->y;
+                    pr->work_blk[wi] = blk;
+                    wi++;
                 }
-                pc = in->lazy ? in->y : in->x;
+                if (wi < 2 * pr->code_len) {
+                    pr->work[wi] = in->x;
+                    pr->work_blk[wi] = blk;
+                    wi++;
+                }
                 break;
             case RX_OP_JMP:
-                pc = in->x;
+                if (wi < 2 * pr->code_len) {
+                    pr->work[wi] = in->x;
+                    pr->work_blk[wi] = blk;
+                    wi++;
+                }
                 break;
             case RX_OP_SAVE: {
                 int slot = in->slot;
+                int nb;
                 if (slot < 0 || (size_t)slot >= pr->caps_len) {
-                    pc++;
+                    if (wi < 2 * pr->code_len) {
+                        pr->work[wi] = pc + 1;
+                        pr->work_blk[wi] = blk;
+                        wi++;
+                    }
                     break;
                 }
-                if (!rx_push(pr, 1, 0, 0, slot, pr->caps[slot])) {
+                nb = rx_save_push(pr, slot, pos, blk);
+                if (nb < 0) {
                     pr->aborted = true;
-                    goto done;
+                    return;
                 }
-                pr->caps[slot] = (long long)pos;
-                pc++;
+                if (wi < 2 * pr->code_len) {
+                    pr->work[wi] = pc + 1;
+                    pr->work_blk[wi] = nb;
+                    wi++;
+                }
                 break;
             }
             case RX_OP_BOL:
                 if (pos == 0 ||
                     ((in->iflags & REGEX_FLAG_MULTILINE) && pos > 0 && s[pos - 1] == '\n')) {
-                    pc++;
-                } else {
-                    goto backtrack;
+                    if (wi < 2 * pr->code_len) {
+                        pr->work[wi] = pc + 1;
+                        pr->work_blk[wi] = blk;
+                        wi++;
+                    }
                 }
                 break;
             case RX_OP_EOL:
                 if (pos == len ||
                     ((in->iflags & REGEX_FLAG_MULTILINE) && pos < len && s[pos] == '\n')) {
-                    pc++;
-                } else {
-                    goto backtrack;
+                    if (wi < 2 * pr->code_len) {
+                        pr->work[wi] = pc + 1;
+                        pr->work_blk[wi] = blk;
+                        wi++;
+                    }
                 }
                 break;
             case RX_OP_WORDB:
@@ -1161,75 +1208,122 @@ static bool_t rx_run(RxProgram* pr, const char* s, size_t len, size_t start) {
                 int after = (pos < len) ? rx_is_word((int)(unsigned char)s[pos]) : 0;
                 int boundary = (before != after);
                 int want = (in->op == RX_OP_WORDB) ? boundary : !boundary;
-                if (want) {
-                    pc++;
-                } else {
-                    goto backtrack;
+                if (want && wi < 2 * pr->code_len) {
+                    pr->work[wi] = pc + 1;
+                    pr->work_blk[wi] = blk;
+                    wi++;
                 }
                 break;
             }
             case RX_OP_MATCH:
+                // 每个命中都更新：位置单调递增，后命中的即更长匹配（贪婪）。
+                rx_caps_from_block(pr, blk);
                 pr->match_end = pos;
-                pr->stack_len = 0;
-                return true;
+                *hit = true;
+                break;
             default:
-                goto done;
-        }
-        continue;
-
-    backtrack:
-        for (;;) {
-            RxFrame f;
-            if (pr->stack_len == 0) goto done;
-            f = pr->stack[--pr->stack_len];
-            if (f.kind == 1) {
-                pr->caps[f.slot] = f.old;
-                continue;
-            }
-            pc = f.pc;
-            pos = f.pos;
-            break;
+                // CHAR / ANY / CLASS：消费态，加入当前位置活跃列表
+                if (pr->ncur < pr->code_len) {
+                    pr->cur[pr->ncur] = pc;
+                    pr->cur_blk[pr->ncur] = blk;
+                    pr->ncur++;
+                }
+                break;
         }
     }
-
-done:
-    pr->stack_len = 0;
-    return false;
 }
 
-static void rx_caps_reset(RxProgram* pr) {
-    size_t i;
-    for (i = 0; i < pr->caps_len; i++) pr->caps[i] = -1;
+// 主循环：外层按起点 from..len 逐位置尝试（最左优先）；内层从某一起点持续消费
+// 直到无法进展——MATCH 命中不立即返回，而是继续扩展取最长匹配（贪婪语义）。
+static bool_t rx_run_pike(RxProgram* pr, const char* s, size_t len, size_t from) {
+    size_t start;
+    size_t budget;
+
+    pr->pool_used = 0;
     pr->steps = 0;
     pr->aborted = false;
-}
 
-// 每个候选起点都要重置步数：预算是「单次匹配」的上限，
-// 而 rx_search 会从 from 到 len 逐点尝试，若不在每次尝试前清零，
-// 长串上累计步数会早早越过预算，后续起点全被 aborted 短路成「无匹配」。
-static void rx_caps_reset_try(RxProgram* pr) {
-    size_t i;
-    for (i = 0; i < pr->caps_len; i++) pr->caps[i] = -1;
-    pr->steps = 0;
+    // 步数预算：显式设置原样执行（0=不限）；否则自适应线性上界
+    if (pr->step_limit_set) {
+        budget = pr->step_limit;
+    } else {
+        size_t adaptive = 3 * (len + 1) * pr->code_len;
+        budget = adaptive > REGEX_DEFAULT_STEP_LIMIT ? adaptive : REGEX_DEFAULT_STEP_LIMIT;
+    }
+
+    for (start = from; start <= len && !pr->aborted; start++) {
+        bool_t hit = false;
+        size_t pos;
+
+        // 从 start 起点开始
+        pr->nxt[0] = 0;
+        pr->nxt_blk[0] = -1;
+        pr->nnxt = 1;
+
+        for (pos = start; pos <= len && !pr->aborted; pos++) {
+            size_t i;
+            size_t entry_n;
+
+            memset(pr->mark, 0, pr->code_len);
+            pr->ncur = 0;
+            entry_n = pr->nnxt;
+
+            // 闭包：MATCH 命中时回填 caps / match_end，但继续扩展
+            rx_closure_list(pr, pr->nxt, pr->nxt_blk, entry_n, s, len, pos, budget, &hit);
+            if (pr->aborted) return false;
+
+            // 消费：cur 中每个消费态若匹配 s[pos]，入口压入 nxt 供下一位置闭包
+            pr->nnxt = 0;
+            for (i = 0; i < pr->ncur; i++) {
+                int pc = pr->cur[i];
+                int blk = pr->cur_blk[i];
+                const RxInst* in = &pr->code[pc];
+                bool_t ok = false;
+                switch (in->op) {
+                    case RX_OP_CHAR:
+                        if (pos < len &&
+                            rx_char_eq((unsigned char)s[pos], (unsigned char)in->ch,
+                                       (in->iflags & REGEX_FLAG_IGNORECASE) != 0)) {
+                            ok = true;
+                        }
+                        break;
+                    case RX_OP_ANY:
+                        if (pos < len && ((in->iflags & REGEX_FLAG_DOTALL) || s[pos] != '\n')) {
+                            ok = true;
+                        }
+                        break;
+                    case RX_OP_CLASS:
+                        if (pos < len && rx_bs_get(in->set, (int)(unsigned char)s[pos])) {
+                            ok = true;
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                if (ok && pr->nnxt < 2 * pr->code_len) {
+                    pr->nxt[pr->nnxt] = pc + 1;
+                    pr->nxt_blk[pr->nnxt] = blk;
+                    pr->nnxt++;
+                }
+            }
+            // 已命中但无后续可消费状态：当前起点的最长匹配已定，停
+            if (hit && pr->nnxt == 0) break;
+            if (!hit && pr->nnxt == 0) break;
+        }
+        if (hit) return true;
+    }
+    return false;
 }
 
 // 从 from 起做非锚定搜索（最左优先）
 static bool_t rx_search(RxProgram* pr, const char* s, size_t len, size_t from) {
-    size_t start;
-    rx_caps_reset(pr);
-    for (start = from; start <= len; start++) {
-        rx_caps_reset_try(pr);
-        if (rx_run(pr, s, len, start)) return true;
-        if (pr->aborted) return false;
-    }
-    return false;
+    return rx_run_pike(pr, s, len, from);
 }
 
-// 整串匹配
+// 整串匹配：起点必须是 0（caps[0]），且消费到串尾
 static bool_t rx_match_full(RxProgram* pr, const char* s, size_t len) {
-    rx_caps_reset(pr);
-    if (!rx_run(pr, s, len, 0)) return false;
-    return pr->match_end == len;
+    if (!rx_run_pike(pr, s, len, 0)) return false;
+    return pr->match_end == len && pr->caps[0] == 0;
 }
 
 // ============================================================================
@@ -1258,7 +1352,14 @@ static void rx_prog_free(RxProgram* pr) {
     rx_arena_free(&pr->arena);
     if (pr->code != NULL) kmm_v4_free(pr->code);
     if (pr->caps != NULL) kmm_v4_free(pr->caps);
-    if (pr->stack != NULL) kmm_v4_free(pr->stack);
+    if (pr->cur != NULL) kmm_v4_free(pr->cur);
+    if (pr->nxt != NULL) kmm_v4_free(pr->nxt);
+    if (pr->cur_blk != NULL) kmm_v4_free(pr->cur_blk);
+    if (pr->nxt_blk != NULL) kmm_v4_free(pr->nxt_blk);
+    if (pr->work != NULL) kmm_v4_free(pr->work);
+    if (pr->work_blk != NULL) kmm_v4_free(pr->work_blk);
+    if (pr->mark != NULL) kmm_v4_free(pr->mark);
+    if (pr->pool != NULL) kmm_v4_free(pr->pool);
     kmm_v4_free(pr);
 }
 
@@ -1345,7 +1446,30 @@ Regex* regex_create_ex(const char* pattern, u32 flags) {
         re->valid = false;
         return re;
     }
-    rx_caps_reset(pr);
+
+    // Pike VM 工作区：编译期一次性预分配，匹配期零堆分配。
+    {
+        size_t n = pr->code_len ? pr->code_len : 1;
+        size_t w = 2 * n;
+        size_t i;
+        pr->cur = (int*)kmm_v4_malloc(n * sizeof(int));
+        pr->nxt = (int*)kmm_v4_malloc(w * sizeof(int));
+        pr->cur_blk = (int*)kmm_v4_malloc(n * sizeof(int));
+        pr->nxt_blk = (int*)kmm_v4_malloc(w * sizeof(int));
+        pr->work = (int*)kmm_v4_malloc(w * sizeof(int));
+        pr->work_blk = (int*)kmm_v4_malloc(w * sizeof(int));
+        pr->mark = (unsigned char*)kmm_v4_malloc(n);
+        pr->pool = (RxSaveNode*)kmm_v4_malloc(n * sizeof(RxSaveNode));
+        pr->pool_cap = n;
+        if (pr->cur == NULL || pr->nxt == NULL || pr->cur_blk == NULL ||
+            pr->nxt_blk == NULL || pr->work == NULL || pr->work_blk == NULL ||
+            pr->mark == NULL || pr->pool == NULL) {
+            rx_pr_fail(pr, "内存不足");
+            re->valid = false;
+            return re;
+        }
+        for (i = 0; i < pr->caps_len; i++) pr->caps[i] = -1;
+    }
 
     re->valid = (pr->err[0] == '\0');
     return re;
@@ -1423,6 +1547,7 @@ void regex_set_step_limit(Regex* regex, size_t limit) {
     if (regex == NULL || regex->compiled == NULL) return;
     pr = (RxProgram*)regex->compiled;
     pr->step_limit = limit;
+    pr->step_limit_set = true;
 }
 
 bool_t regex_aborted(const Regex* regex) {
