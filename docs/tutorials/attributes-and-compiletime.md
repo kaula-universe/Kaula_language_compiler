@@ -132,6 +132,30 @@ fn main() {
 - 对未知类型调用 `type_kind` 返回 `"unknown"`，不会报错；
 - 越界的 `field_name` / `field_type` 返回空字符串 `""`（运行时是 SSO 空 `String`），不触发 panic。
 
+### 形状查询：`shape_of(expr)`
+
+与反射五件套查**类型**不同，`shape_of` 查的是**表达式实参的语法形状**——这是展开器在 prefix 宏 tree 分派时本来就知道、但此前不对外暴露的事实。它**只能出现在 `comptime(...)` 上下文里**（直接写在普通表达式位置会报 `shape_of_outside_comptime`），编译期静态返回一个字符串：
+
+| 实参形态 | 返回 |
+|------|------|
+| 整数字面量 | `"int"` |
+| 浮点 / 布尔 / 字符串字面量 | `"float"` / `"bool"` / `"string"` |
+| 标识符 | `"ident"` |
+| 二元 / 一元 / 条件表达式 | `"binary"` / `"unary"` / `"conditional"` |
+| 调用 / 下标 / 成员访问 | `"call"` / `"index"` / `"field"` |
+| 括号表达式 / 结构体字面量 | `"paren"` / `"struct_literal"` |
+| 其他 | `"expression"` |
+
+```kaula
+fn main(x: i32, a: i32, b: i32) {
+    println(comptime(shape_of(123)))   # int
+    println(comptime(shape_of(x)))     # ident
+    println(comptime(shape_of(a + b)))# binary
+}
+```
+
+它是「宏 tree 分派」与「comptime 值域」之间的层间桥：宏作者可以在 comptime 里读到实参形状并据此分叉，而不必让宏体本身变成可执行程序。
+
 ### 编译期表达式：`comptime(...)`
 
 `comptime` 是一个**表达式包装**，语义是"在编译期把里面的常量表达式算出来"：

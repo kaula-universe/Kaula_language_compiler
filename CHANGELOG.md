@@ -10,6 +10,12 @@
 ## [Unreleased]
 
 ### Added
+- **`shape_of(expr)` comptime 形状查询内建**：返回实参的语法形状类别字符串
+  （`int`/`float`/`bool`/`string`/`ident`/`binary`/`unary`/`call`/`index`/`field`/
+  `paren`/`conditional`/`struct_literal`/`comptime`/`expression`）。**只允许出现在
+  `comptime(...)` 上下文**（语义错误码 `shape_of_outside_comptime`），是把展开器
+  tree 形状事实开放到 comptime 值域的层间查询接口；codegen 期静态解析为 String 字面量。
+  回归用例 `test/shape_of_comptime.kl`。
 - **文档**：新增《强制消费流（spend / call）》(`docs/tutorials/spend-and-call.md`)，
   覆盖数组/枚举两种模式、全部编译期错误码、生成的 C 代码形态、运行时 API 与数据结构；
   修正 `docs/code-generation.md` 中与实现不符的 spend 示例
