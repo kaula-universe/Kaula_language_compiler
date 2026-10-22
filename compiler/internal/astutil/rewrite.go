@@ -158,7 +158,12 @@ func RewriteExpressionChildren(e ast.Expression, fn RewriteTransform) ast.Expres
 		for k, v := range n.Params {
 			c.Params[k] = ex(v)
 		}
+		c.VarArgs = rewriteExprSlice(n.VarArgs, fn)
 		c.Body = stmts(n.Body)
+		return &c
+	case *ast.PrefixRepeatExpr:
+		c := *n
+		c.Fragment = ex(n.Fragment)
 		return &c
 	case *ast.LiteralExpression:
 		// Value 是 interface{}：只在确实是表达式时改写

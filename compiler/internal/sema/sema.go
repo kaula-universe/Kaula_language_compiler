@@ -1314,6 +1314,15 @@ func (sa *SemanticAnalyzer) checkPrefixVariableShadowing(stmt ast.Statement, pre
 		if s.Expression != nil {
 			sa.checkExpressionForShadowing(s.Expression, prefixParams)
 		}
+
+	case *ast.PrefixRepeatStmt:
+		// 语句重复占位 `$( <语句> ),*`：片段内的 `$参数` 与局部名同样参与遮蔽检查
+		for _, stmt := range s.Body {
+			sa.checkPrefixVariableShadowing(stmt, prefixParams)
+		}
+
+	case *ast.PrefixVarArgDecl:
+		// 匹配声明 `$( $x ),*`：无语句子节点
 	}
 }
 
@@ -1344,6 +1353,16 @@ func (sa *SemanticAnalyzer) checkExpressionForShadowing(expr ast.Expression, pre
 	case *ast.BinaryExpression:
 		sa.checkExpressionForShadowing(e.Left, prefixParams)
 		sa.checkExpressionForShadowing(e.Right, prefixParams)
+
+	case *ast.PrefixRepeatExpr:
+		// 表达式重复占位 `$( <表达式> ),*`：片段参与遮蔽检查
+		sa.checkExpressionForShadowing(e.Fragment, prefixParams)
+
+	case *ast.PrefixCallExpression:
+		// 位置实参（变参宏）参与遮蔽检查
+		for _, arg := range e.VarArgs {
+			sa.checkExpressionForShadowing(arg, prefixParams)
+		}
 	}
 }
 

@@ -209,8 +209,14 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 		}
 	}
 	var skeleton []ast.Statement
+	var varargParam string
 	bodySpliced := false
 	for _, bodyStmt := range tplBody {
+		if vd, ok := bodyStmt.(*ast.PrefixVarArgDecl); ok {
+			// 变参匹配声明 `$( $x ),*`：记录参数名，本身不生成代码
+			varargParam = vd.Param
+			continue
+		}
 		if name, ok := ast.BarePrefixParamName(bodyStmt); ok {
 			if name == "body" && !bodySpliced && len(bodyStmts) > 0 {
 				skeleton = append(skeleton, bodyStmts...)
@@ -226,6 +232,17 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 	if !bodySpliced {
 		skeleton = append(skeleton, bodyStmts...)
 	}
+	// 变参合法性校验：
+	//  - 模板没有 `$( $x ),*` 匹配声明却收到位置实参 → 报错
+	//  - 模板声明了变参却又收到命名参数 → 报错（不支持混用）
+	if len(e.VarArgs) > 0 && varargParam == "" {
+		exp.addError(fmt.Sprintf("前缀 '%s' 不接受位置实参：模板缺少 `$( $x ),*` 匹配声明（收到的位置实参个数 %d）",
+			e.Name, len(e.VarArgs)))
+	}
+	if varargParam != "" && len(e.Params) > 0 {
+		exp.addError(fmt.Sprintf("前缀 '%s' 不支持命名参数与位置实参混用：模板声明了变参 `$( $%s ),*`，位置实参应全部写在 @%s(…) 内且不带名字",
+			e.Name, varargParam, e.Name))
+	}
 
 	// 第 2 步：克隆骨架（模板 AST 共享只读）
 	cloned := astutil.CloneStatements(skeleton)
@@ -235,6 +252,48 @@ func (sg *StatementGenerator) expandStructureMacroIn(e *ast.PrefixCallExpression
 	renamed, renames, decls := astutil.AlphaRenameTemplate(cloned, sg.codegen.macroRenameSeq)
 	exp.Renames = renames
 	exp.Decls = decls
+
+	/* 第 3.5 步：变参绑定 + 重复展开。
+	 *
+	 * 模板含 `$( $x ),*` 匹配声明时，调用点的位置实参在展开块开头各求值
+	 * 一次，绑定到 `__auto_type` 临时变量（__kaula_b{seq}_va{i}，与第 5.5 步
+	 * 的 let 绑定共用同一序号计数器，名字不会碰撞），重复占位按实参个数
+	 * 展开并把 `$x` 依次替换为临时变量：
+	 *   - `$( <语句> ),*`（PrefixRepeatStmt）→ 重复整条语句；
+	 *   - `$( <表达式> ),*`（PrefixRepeatExpr）→ 只允许出现在调用实参、
+	 *     数组元素或前缀位置实参中，重复并以逗号连接。
+	 *
+	 * 语义保证：位置实参只求值一次（副作用不翻倍）；零个位置实参时重复
+	 * 占位展开为空。模板若没有引用变参的重复占位，位置实参不求值、不绑定。 */
+	if varargParam != "" {
+		if sg.containsVarArgRepeat(renamed) {
+			temps := make([]ast.Expression, 0, len(e.VarArgs))
+			prelude := make([]ast.Statement, 0, len(e.VarArgs))
+			for i, arg := range e.VarArgs {
+				sg.codegen.prefixLetSeq++
+				temp := fmt.Sprintf("%s%d_va%d", prefixLetTempPrefix, sg.codegen.prefixLetSeq, i)
+				prelude = append(prelude, &ast.VariableDeclaration{
+					Name:   temp,
+					Type:   "__auto_type",
+					IsAuto: true,
+					Value:  astutil.CloneExpression(arg),
+					Pos:    e.Pos,
+				})
+				temps = append(temps, &ast.Identifier{Name: temp})
+			}
+			renamed = append(prelude, renamed...)
+			if errs := sg.expandVarArgRepeatsInPlace(&renamed, varargParam, temps); len(errs) > 0 {
+				for _, err := range errs {
+					exp.addError(err)
+				}
+			}
+		}
+		// 重复展开后残留的裸 `$x` 引用：变参只能通过重复占位消费
+		if hasPrefixVarRef(renamed, varargParam) {
+			exp.addError(fmt.Sprintf("前缀 '%s' 的变参 '$%s' 只能通过 `$( $%s ),*` 重复占位引用",
+				e.Name, varargParam, varargParam))
+		}
+	}
 
 	// 第 4 步：参数替换（AST 层面）。实参本身也可能引用 $参数（转发），
 	// 因此替换表按"模板绑定 + 外层已绑定的 $参数"合并，自内向外。
@@ -903,6 +962,466 @@ func bindPrefixParamRefs(stmts []ast.Statement, param, temp string) []ast.Statem
 		out = append(out, walkStmt(s))
 	}
 	return out
+}
+
+/* ── 变参：$( ... ),* 匹配与重复展开（Task #3）── */
+
+// containsVarArgRepeat 判断语句序列中是否存在变参重复占位
+// （PrefixRepeatStmt / PrefixRepeatExpr）。存在意味着模板消费了变参，
+// 位置实参需要绑定；不存在则位置实参不求值、不绑定。
+func (sg *StatementGenerator) containsVarArgRepeat(stmts []ast.Statement) bool {
+	found := false
+	var walkStmt func(s ast.Statement)
+	var walkExpr func(e ast.Expression)
+	walkExpr = func(e ast.Expression) {
+		if found || e == nil {
+			return
+		}
+		if _, ok := e.(*ast.PrefixRepeatExpr); ok {
+			found = true
+			return
+		}
+		astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				walkExpr(v)
+			case ast.Statement:
+				walkStmt(v)
+			}
+			return nil
+		})
+	}
+	walkStmt = func(s ast.Statement) {
+		if found || s == nil {
+			return
+		}
+		if _, ok := s.(*ast.PrefixRepeatStmt); ok {
+			found = true
+			return
+		}
+		astutil.RewriteStatementChildren(s, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				walkExpr(v)
+			case ast.Statement:
+				walkStmt(v)
+			}
+			return nil
+		})
+	}
+	for _, s := range stmts {
+		walkStmt(s)
+		if found {
+			break
+		}
+	}
+	return found
+}
+
+// hasPrefixVarRef 判断语句序列中是否残留裸 `$param` 引用
+// （重复展开后变参引用应已全部替换为临时变量；残留说明用错了位置）
+func hasPrefixVarRef(stmts []ast.Statement, param string) bool {
+	found := false
+	var walkStmt func(s ast.Statement)
+	var walkExpr func(e ast.Expression)
+	walkExpr = func(e ast.Expression) {
+		if found || e == nil {
+			return
+		}
+		if id, ok := e.(*ast.Identifier); ok && id.IsPrefixVar && id.Name == param {
+			found = true
+			return
+		}
+		astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				walkExpr(v)
+			case ast.Statement:
+				walkStmt(v)
+			}
+			return nil
+		})
+	}
+	walkStmt = func(s ast.Statement) {
+		if found || s == nil {
+			return
+		}
+		astutil.RewriteStatementChildren(s, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				walkExpr(v)
+			case ast.Statement:
+				walkStmt(v)
+			}
+			return nil
+		})
+	}
+	for _, s := range stmts {
+		walkStmt(s)
+		if found {
+			break
+		}
+	}
+	return found
+}
+
+// expandVarArgRepeatsInPlace 展开模板（已 alpha 重命名）中的变参重复占位：
+//   - PrefixRepeatStmt（语句级）→ 按位置实参个数重复片段，$param 依次绑定；
+//   - PrefixRepeatExpr（表达式级）→ 仅允许出现在调用实参列表、数组元素或
+//     前缀调用位置实参中，按实参个数重复片段、逗号连接；
+//   - 出现在其他位置的表达式重复占位、重复片段内的嵌套重复 → 报错。
+//
+// temps 为空表示零个位置实参：所有重复占位展开为空。
+func (sg *StatementGenerator) expandVarArgRepeatsInPlace(stmts *[]ast.Statement, param string, temps []ast.Expression) []string {
+	var errs []string
+	*stmts = sg.expandVarArgStmtList(*stmts, param, temps, &errs)
+	return errs
+}
+
+// expandVarArgStmtList 处理语句列表：语句级重复占位在此拼接（可返回多条语句）
+func (sg *StatementGenerator) expandVarArgStmtList(stmts []ast.Statement, param string, temps []ast.Expression, errs *[]string) []ast.Statement {
+	var out []ast.Statement
+	for _, s := range stmts {
+		if s == nil {
+			continue
+		}
+		if rep, ok := s.(*ast.PrefixRepeatStmt); ok {
+			if len(temps) == 0 {
+				continue // 零个位置实参：重复占位展开为空
+			}
+			for _, temp := range temps {
+				frag := astutil.CloneStatements(rep.Body)
+				frag = sg.replaceVarArgRefsStmts(frag, param, temp)
+				if sg.containsVarArgRepeat(frag) {
+					*errs = append(*errs, "嵌套的 $( ... ),* 重复占位不支持：把内层重复移到外层或用普通循环")
+					continue
+				}
+				out = append(out, frag...)
+			}
+			continue
+		}
+		out = append(out, sg.expandVarArgNestedStmt(s, param, temps, errs))
+	}
+	return out
+}
+
+// expandVarArgNestedStmt 处理非重复语句：表达式与嵌套语句下钻。
+// 与 astutil.RewriteStatementChildren 同构，但嵌套语句列表交给
+// expandVarArgStmtList（语句级重复可在任意嵌套层拼接）。
+func (sg *StatementGenerator) expandVarArgNestedStmt(s ast.Statement, param string, temps []ast.Expression, errs *[]string) ast.Statement {
+	if s == nil {
+		return nil
+	}
+	ex := func(x ast.Expression) ast.Expression {
+		if x == nil {
+			return nil
+		}
+		return sg.expandVarArgExpr(x, param, temps, errs)
+	}
+	sub := func(in []ast.Statement) []ast.Statement {
+		return sg.expandVarArgStmtList(in, param, temps, errs)
+	}
+	switch n := s.(type) {
+	case *ast.ExpressionStatement:
+		c := *n
+		c.Expression = ex(n.Expression)
+		return &c
+	case *ast.VariableDeclaration:
+		var copyDecl func(d *ast.VariableDeclaration) *ast.VariableDeclaration
+		copyDecl = func(d *ast.VariableDeclaration) *ast.VariableDeclaration {
+			nd := *d
+			nd.Value = ex(d.Value)
+			nd.More = nil
+			for _, m := range d.More {
+				if m == nil {
+					continue
+				}
+				nd.More = append(nd.More, copyDecl(m))
+			}
+			return &nd
+		}
+		return copyDecl(n)
+	case *ast.ReturnStatement:
+		c := *n
+		c.Value = ex(n.Value)
+		return &c
+	case *ast.YieldStatement:
+		c := *n
+		c.Source = ex(n.Source)
+		return &c
+	case *ast.ReleaseStatement:
+		c := *n
+		c.Source = ex(n.Source)
+		return &c
+	case *ast.ExtractStatement:
+		c := *n
+		c.Source = ex(n.Source)
+		c.Index = ex(n.Index)
+		return &c
+	case *ast.IfStatement:
+		c := *n
+		c.Condition = ex(n.Condition)
+		c.Body = sub(n.Body)
+		c.Else = sub(n.Else)
+		return &c
+	case *ast.WhileStatement:
+		c := *n
+		c.Condition = ex(n.Condition)
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.ForStatement:
+		c := *n
+		if n.Init != nil {
+			c.Init = sg.expandVarArgNestedStmt(n.Init, param, temps, errs)
+		}
+		c.Condition = ex(n.Condition)
+		if n.Update != nil {
+			c.Update = sg.expandVarArgNestedStmt(n.Update, param, temps, errs)
+		}
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.ForInStatement:
+		c := *n
+		c.Iterable = ex(n.Iterable)
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.BlockStatement:
+		c := *n
+		c.Statements = sub(n.Statements)
+		return &c
+	case *ast.CallStatement:
+		c := *n
+		c.Target = ex(n.Target)
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.SpendStatement:
+		c := *n
+		c.Target = ex(n.Target)
+		if n.Calls != nil {
+			c.Calls = make([]*ast.CallClause, len(n.Calls))
+			for i, cl := range n.Calls {
+				if cl == nil {
+					continue
+				}
+				nc := *cl
+				nc.Index = ex(cl.Index)
+				nc.Body = sub(cl.Body)
+				c.Calls[i] = &nc
+			}
+		}
+		return &c
+	case *ast.NonLocalStatement:
+		c := *n
+		c.Value = ex(n.Value)
+		return &c
+	case *ast.ObjectStatement:
+		c := *n
+		c.Fields = sg.expandVarArgExprSlice(n.Fields, param, temps, errs)
+		c.Value = ex(n.Value)
+		return &c
+	case *ast.SwitchStatement:
+		c := *n
+		c.Scrutinee = ex(n.Scrutinee)
+		c.Cases = make([]*ast.SwitchCase, len(n.Cases))
+		for i, cs := range n.Cases {
+			if cs == nil {
+				continue
+			}
+			nc := *cs
+			nc.Values = sg.expandVarArgExprSlice(cs.Values, param, temps, errs)
+			nc.Body = sub(cs.Body)
+			c.Cases[i] = &nc
+		}
+		c.Default = sub(n.Default)
+		return &c
+	case *ast.PrefixStatement:
+		c := *n
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.TreeStatement:
+		c := *n
+		c.Root = ex(n.Root)
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.FunctionStatement:
+		c := *n
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.ClassStatement:
+		c := *n
+		c.Methods = nil
+		for _, m := range n.Methods {
+			if m == nil {
+				continue
+			}
+			c.Methods = append(c.Methods, sg.expandVarArgNestedStmt(m, param, temps, errs).(*ast.MethodStatement))
+		}
+		c.Constructors = nil
+		for _, ct := range n.Constructors {
+			if ct == nil {
+				continue
+			}
+			c.Constructors = append(c.Constructors, sg.expandVarArgNestedStmt(ct, param, temps, errs).(*ast.ConstructorStatement))
+		}
+		return &c
+	case *ast.MethodStatement:
+		c := *n
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.ConstructorStatement:
+		c := *n
+		c.Body = sub(n.Body)
+		return &c
+	case *ast.PrefixVarArgDecl:
+		// 匹配声明在骨架阶段已剔除，不应残留
+		return s
+	default:
+		return s
+	}
+}
+
+// expandVarArgExprSlice 处理表达式列表：表达式重复占位在此拼接（可返回多条表达式）
+func (sg *StatementGenerator) expandVarArgExprSlice(exprs []ast.Expression, param string, temps []ast.Expression, errs *[]string) []ast.Expression {
+	var out []ast.Expression
+	for _, e := range exprs {
+		if e == nil {
+			continue
+		}
+		if rep, ok := e.(*ast.PrefixRepeatExpr); ok {
+			if len(temps) == 0 {
+				continue // 零个位置实参：展开为空
+			}
+			for _, temp := range temps {
+				frag := astutil.CloneExpression(rep.Fragment)
+				frag = sg.replaceVarArgRefsExpr(frag, param, temp)
+				if sg.containsVarArgRepeatExpr(frag) {
+					*errs = append(*errs, "嵌套的 $( ... ),* 重复占位不支持：把内层重复移到外层或用普通循环")
+					continue
+				}
+				out = append(out, frag)
+			}
+			continue
+		}
+		out = append(out, sg.expandVarArgExpr(e, param, temps, errs))
+	}
+	return out
+}
+
+// expandVarArgExpr 处理表达式：只下钻（重复占位只能在列表槽位拼接）
+func (sg *StatementGenerator) expandVarArgExpr(e ast.Expression, param string, temps []ast.Expression, errs *[]string) ast.Expression {
+	if e == nil {
+		return nil
+	}
+	if _, ok := e.(*ast.PrefixRepeatExpr); ok {
+		*errs = append(*errs, "表达式重复占位 $( ... ),* 只能出现在调用实参、数组元素或前缀位置实参中")
+		return e
+	}
+	switch n := e.(type) {
+	case *ast.CallExpression:
+		c := *n
+		c.Function = sg.expandVarArgExpr(n.Function, param, temps, errs)
+		c.Args = sg.expandVarArgExprSlice(n.Args, param, temps, errs)
+		return &c
+	case *ast.SpawnExpression:
+		c := *n
+		c.Function = sg.expandVarArgExpr(n.Function, param, temps, errs)
+		c.Args = sg.expandVarArgExprSlice(n.Args, param, temps, errs)
+		return &c
+	case *ast.ArrayLiteral:
+		c := *n
+		c.Elements = sg.expandVarArgExprSlice(n.Elements, param, temps, errs)
+		return &c
+	case *ast.PrefixCallExpression:
+		c := *n
+		c.Params = make(map[string]ast.Expression, len(n.Params))
+		for k, v := range n.Params {
+			c.Params[k] = sg.expandVarArgExpr(v, param, temps, errs)
+		}
+		c.VarArgs = sg.expandVarArgExprSlice(n.VarArgs, param, temps, errs)
+		c.Body = sg.expandVarArgStmtList(n.Body, param, temps, errs)
+		return &c
+	default:
+		return astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				return sg.expandVarArgExpr(v, param, temps, errs)
+			case ast.Statement:
+				return sg.expandVarArgNestedStmt(v, param, temps, errs)
+			}
+			return nil
+		})
+	}
+}
+
+// containsVarArgRepeatExpr 判断表达式内是否含嵌套的表达式重复占位
+func (sg *StatementGenerator) containsVarArgRepeatExpr(e ast.Expression) bool {
+	found := false
+	var walk func(x ast.Expression)
+	walk = func(x ast.Expression) {
+		if found || x == nil {
+			return
+		}
+		if _, ok := x.(*ast.PrefixRepeatExpr); ok {
+			found = true
+			return
+		}
+		astutil.RewriteExpressionChildren(x, func(node ast.Node) ast.Node {
+			switch v := node.(type) {
+			case ast.Expression:
+				walk(v)
+			}
+			return nil
+		})
+	}
+	walk(e)
+	return found
+}
+
+// replaceVarArgRefsStmts 把片段内的 `$param` 引用全部替换为临时变量引用（1:1 替换）
+func (sg *StatementGenerator) replaceVarArgRefsStmts(stmts []ast.Statement, param string, temp ast.Expression) []ast.Statement {
+	out := make([]ast.Statement, 0, len(stmts))
+	for _, s := range stmts {
+		if s == nil {
+			continue
+		}
+		out = append(out, sg.replaceVarArgRefsStmt(s, param, temp))
+	}
+	return out
+}
+
+func (sg *StatementGenerator) replaceVarArgRefsStmt(s ast.Statement, param string, temp ast.Expression) ast.Statement {
+	if s == nil {
+		return nil
+	}
+	return astutil.RewriteStatementChildren(s, func(node ast.Node) ast.Node {
+		switch v := node.(type) {
+		case ast.Expression:
+			return sg.replaceVarArgRefsExpr(v, param, temp)
+		case ast.Statement:
+			return sg.replaceVarArgRefsStmt(v, param, temp)
+		}
+		return nil
+	})
+}
+
+func (sg *StatementGenerator) replaceVarArgRefsExpr(e ast.Expression, param string, temp ast.Expression) ast.Expression {
+	if e == nil {
+		return nil
+	}
+	if id, ok := e.(*ast.Identifier); ok && id.IsPrefixVar && id.Name == param {
+		ref := astutil.CloneExpression(temp)
+		ref.SetPosition(id.Pos)
+		return ref
+	}
+	return astutil.RewriteExpressionChildren(e, func(node ast.Node) ast.Node {
+		switch v := node.(type) {
+		case ast.Expression:
+			return sg.replaceVarArgRefsExpr(v, param, temp)
+		case ast.Statement:
+			return sg.replaceVarArgRefsStmt(v, param, temp)
+		}
+		return nil
+	})
 }
 
 // macroValueExpression 取「这条语句作为宏返回值时的表达式」，并校验该形态
