@@ -95,6 +95,8 @@ func (e *Evaluator) Eval(expr ast.Expression) (*Value, error) {
 		return e.evalAlignOf(ex)
 	case *ast.ComptimeExpression:
 		return e.Eval(ex.Inner)
+	case *ast.ShapeOfExpression:
+		return e.evalShapeOf(ex)
 	default:
 		return nil, fmt.Errorf("unsupported expression type for comptime evaluation: %T", expr)
 	}
@@ -311,6 +313,42 @@ func (e *Evaluator) evalAlignOf(expr *ast.AlignOfExpression) (*Value, error) {
 		return nil, fmt.Errorf("unknown type for alignof: %s", expr.TargetType)
 	}
 	return &Value{Kind: KindInt, IntVal: uint64(align)}, nil
+}
+
+// evalShapeOf 把实参 AST 节点归为语法形状类别（与 codegen 侧同表）。
+func (e *Evaluator) evalShapeOf(expr *ast.ShapeOfExpression) (*Value, error) {
+	cat := "expression"
+	switch expr.Target.(type) {
+	case *ast.IntegerLiteral:
+		cat = "int"
+	case *ast.FloatLiteral:
+		cat = "float"
+	case *ast.BooleanLiteral:
+		cat = "bool"
+	case *ast.StringLiteral:
+		cat = "string"
+	case *ast.Identifier:
+		cat = "ident"
+	case *ast.BinaryExpression:
+		cat = "binary"
+	case *ast.UnaryExpression:
+		cat = "unary"
+	case *ast.CallExpression:
+		cat = "call"
+	case *ast.IndexExpression:
+		cat = "index"
+	case *ast.MemberAccessExpression:
+		cat = "field"
+	case *ast.ParenExpression:
+		cat = "paren"
+	case *ast.ConditionalExpression:
+		cat = "conditional"
+	case *ast.StructLiteral:
+		cat = "struct_literal"
+	case *ast.ComptimeExpression:
+		cat = "comptime"
+	}
+	return &Value{Kind: KindString, StringVal: cat}, nil
 }
 
 func (e *Evaluator) isTruthy(v *Value) bool {
