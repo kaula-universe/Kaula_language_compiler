@@ -4250,6 +4250,11 @@ func (p *Parser) parsePrimaryExpressionIterative() ast.Expression {
 			return expr
 		}
 		return nil
+	case lexer.TOKEN_SHAPE_OF:
+		if expr := p.parseShapeOfExpressionIterative(); expr != nil {
+			return expr
+		}
+		return nil
 	case lexer.TOKEN_MATCH:
 		return p.parseMatchExpressionIterative()
 	case lexer.TOKEN_OBJECT:
@@ -6295,6 +6300,35 @@ func (p *Parser) parseTypeKindExpressionIterative() *ast.TypeKindExpression {
 	return &ast.TypeKindExpression{
 		TargetType: targetType,
 		Pos:        pos,
+	}
+}
+
+// parseShapeOfExpressionIterative 解析 shape_of(expr) —— comptime 专用形状查询
+func (p *Parser) parseShapeOfExpressionIterative() *ast.ShapeOfExpression {
+	pos := ast.Position{
+		Line:   p.curTok.Line,
+		Column: p.curTok.Column,
+		File:   p.file,
+	}
+	p.nextToken()
+	if p.curTok.Type != lexer.TOKEN_LPAREN {
+		p.error("shape_of 后应该跟 (")
+		return nil
+	}
+	p.nextToken()
+	target := p.parseExpressionIterative()
+	if target == nil {
+		p.error("shape_of 中缺少表达式")
+		return nil
+	}
+	if p.curTok.Type != lexer.TOKEN_RPAREN {
+		p.error("shape_of 表达式后应该跟 )")
+		return nil
+	}
+	p.nextToken()
+	return &ast.ShapeOfExpression{
+		Target: target,
+		Pos:    pos,
 	}
 }
 

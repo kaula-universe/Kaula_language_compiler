@@ -2614,6 +2614,19 @@ func (t *TypeKindExpression) String() string           { return "TypeKindExpress
 func (t *TypeKindExpression) GetPosition() Position    { return t.Pos }
 func (t *TypeKindExpression) SetPosition(pos Position) { t.Pos = pos }
 
+// ShapeOfExpression —— comptime 专用：shape_of(expr) 返回实参的语法形状类别
+// （int/float/bool/string/ident/binary/unary/call/index/field/paren/...）。
+// 只能出现在 comptime(...) 上下文；codegen 期静态解析为 String 字面量。
+type ShapeOfExpression struct {
+	Target Expression
+	Pos    Position
+}
+
+func (s *ShapeOfExpression) expressionNode()          {}
+func (s *ShapeOfExpression) String() string           { return "ShapeOfExpression" }
+func (s *ShapeOfExpression) GetPosition() Position    { return s.Pos }
+func (s *ShapeOfExpression) SetPosition(pos Position) { s.Pos = pos }
+
 // ==================== 属性注解系统 ====================
 
 // Attribute 表示声明注解

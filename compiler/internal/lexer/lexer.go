@@ -56,6 +56,7 @@ const (
 	TOKEN_FIELD_NAME
 	TOKEN_FIELD_TYPE
 	TOKEN_TYPE_KIND
+	TOKEN_SHAPE_OF
 	TOKEN_ENUM
 	TOKEN_MATCH
 	TOKEN_ARROW
@@ -705,6 +706,8 @@ func (l *Lexer) scanIdentifier() Token {
 		tokenType = TOKEN_FIELD_TYPE
 	case "type_kind":
 		tokenType = TOKEN_TYPE_KIND
+	case "shape_of":
+		tokenType = TOKEN_SHAPE_OF
 	case "enum":
 		tokenType = TOKEN_ENUM
 	case "match":
@@ -1098,6 +1101,8 @@ func TokenTypeToString(tokenType TokenType) string {
 		return "FIELD_TYPE"
 	case TOKEN_TYPE_KIND:
 		return "TYPE_KIND"
+	case TOKEN_SHAPE_OF:
+		return "SHAPE_OF"
 	case TOKEN_ENUM:
 		return "ENUM"
 	case TOKEN_MATCH:
