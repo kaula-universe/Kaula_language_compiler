@@ -6,8 +6,8 @@
 
 ```kaula
 struct Point {
-    x: int,
-    y: int
+    x: i64,
+    y: i64
 }
 
 struct Rectangle {
@@ -23,40 +23,71 @@ struct Rectangle {
 通过 `.` 运算符访问：
 
 ```kaula
-fn area(Rectangle r) int {
-    int w = r.br.x - r.tl.x
-    int h = r.br.y - r.tl.y
+import std.io
+
+struct Point {
+    x: i64,
+    y: i64
+}
+
+struct Rectangle {
+    tl: Point,
+    br: Point
+}
+
+fn area(Rectangle r) i64 {
+    i64 w = r.br.x - r.tl.x
+    i64 h = r.br.y - r.tl.y
     return w * h
+}
+
+fn main() {
+    Rectangle rect = Rectangle {
+        tl: Point { x: 0, y: 0 },
+        br: Point { x: 3, y: 4 }
+    }
+    println("area = ", area(rect))   # area = 12
 }
 ```
 
-### 结构体作为参数
+### 结构体字面量
 
-结构体可以作为函数参数按值传递：
+构造时用 `TypeName { field: value, ... }`，嵌套结构体同样嵌套写：
 
 ```kaula
-Point p1 = { .tl = 0, .y = 10 }
-```
+import std.io
 
-> 注意：当前 Kaula 版本的结构体字面量语法有限，推荐使用字段逐个赋值。
+struct Point {
+    x: i64,
+    y: i64
+}
+
+fn main() {
+    Point p = Point { x: 3, y: 4 }
+    println(p.x, p.y)
+}
+```
 
 ## 枚举
 
 使用 `enum` 定义枚举类型，支持无变体枚举（类似 C enum）：
 
 ```kaula
+import std.io
+
 enum Color {
     Red,
     Green,
     Blue
 }
+
+fn main() {
+    Color c = Color.Red
+    println("color = ", c)
+}
 ```
 
-访问枚举值：
-
-```kaula
-Color c = Color.Red
-```
+访问枚举值用限定名 `Color.Red`。带载荷的枚举变体与 `match` 解构见 [match.md](match.md)。
 
 ## 完整示例
 
@@ -68,8 +99,8 @@ Kaula 编译器将 struct 编译为 C 的 `typedef struct`，并自动添加 `K_
 
 ```kaula
 struct Point {
-    x: int,
-    y: int
+    x: i64,
+    y: i64
 }
 
 struct Rectangle {

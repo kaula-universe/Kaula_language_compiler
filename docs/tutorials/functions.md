@@ -7,16 +7,28 @@ Kaula 使用 `fn` 关键字定义函数，采用类似 Go 的语法风格。
 **无返回值函数：**
 
 ```kaula
+import std.io
+
 fn greet(string name) {
     println("Hello, ", name)
+}
+
+fn main() {
+    greet("Kaula")
 }
 ```
 
 **有返回值函数：**
 
 ```kaula
-fn add(int a, int b) int {
+import std.io
+
+fn add(i64 a, i64 b) i64 {
     return a + b
+}
+
+fn main() {
+    println("2 + 3 = ", add(2, 3))
 }
 ```
 
@@ -27,9 +39,15 @@ fn add(int a, int b) int {
 函数参数使用 `type name` 的格式声明：
 
 ```kaula
-fn calculate(int x, int y, string label) int {
+import std.io
+
+fn calculate(i64 x, i64 y, string label) i64 {
     println(label)
     return x + y
+}
+
+fn main() {
+    calculate(10, 20, "sum = ")
 }
 ```
 
@@ -42,11 +60,17 @@ fn calculate(int x, int y, string label) int {
 Kaula 支持递归函数调用：
 
 ```kaula
-fn factorial(int n) int {
+import std.io
+
+fn factorial(i64 n) i64 {
     if (n <= 1) {
         return 1
     }
     return n * factorial(n - 1)
+}
+
+fn main() {
+    println("5! = ", factorial(5))
 }
 ```
 
@@ -57,14 +81,20 @@ Kaula 允许在函数体内定义嵌套函数（`fn`），嵌套函数可以**�
 为其追加隐式捕获参数 `_cap_N`，并在调用点自动传入外层变量的地址。
 
 ```kaula
+import std.io
+
 fn counter() {
-    int count = 0
-    fn increment() int {
+    i64 count = 0
+    fn increment() i64 {
         count = count + 1    # 读+写外层局部变量（自动捕获）
         return count
     }
     println("count = ", increment())   # count = 1
     println("count = ", increment())   # count = 2
+}
+
+fn main() {
+    counter()
 }
 ```
 
@@ -74,13 +104,20 @@ fn counter() {
 便于阅读与静态校验，不影响捕获行为：
 
 ```kaula
+import std.io
+
 fn outer() {
-    int x = 10
+    i64 x = 10
     fn inner() {
-        nonlocal int x       # 显式声明绑定外层 x
+        nonlocal i64 x       # 显式声明绑定外层 x
         x = x + 1
     }
     inner()
+    println("x = ", x)
+}
+
+fn main() {
+    outer()
 }
 ```
 
@@ -101,8 +138,8 @@ fn outer() {
 | lambda 捕获外层局部变量 | ❌ 暂不支持（编译报错），请改用嵌套函数 |
 | 带捕获的嵌套函数作为返回值传递（闭包逃逸） | ❌ 不支持（捕获指针仅在原作用域内有效） |
 
->捕获按引用传递（`&var`），与 Kotlin/C++ 的引用捕获语义一致，所以嵌套函数
->只能在声明它的外层函数作用域内被调用；需要跨作用域携带环境时请使用类/结构体。
+> 捕获按引用传递（`&var`），与 Kotlin/C++ 的引用捕获语义一致，所以嵌套函数
+> 只能在声明它的外层函数作用域内被调用；需要跨作用域携带环境时请使用类/结构体。
 
 ## 完整示例
 

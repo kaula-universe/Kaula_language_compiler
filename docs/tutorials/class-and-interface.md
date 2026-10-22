@@ -5,17 +5,20 @@
 `class` 定义引用语义的类型，支持字段、方法和构造函数：
 
 ```kaula
+import std.io
+import std.math
+
 class Vec2 {
     x: f64,
     y: f64
 
-    constructor(f64 x, f64 y) {
-        self.x = x
-        self.y = y
+    constructor(f64 ax, f64 ay) {
+        self.x = ax
+        self.y = ay
     }
 
     fn length() f64 {
-        return math_sqrt(self.x * self.x + self.y * self.y)
+        return std.math.sqrt(self.x * self.x + self.y * self.y)
     }
 
     fn scale(f64 factor) {
@@ -25,15 +28,34 @@ class Vec2 {
 }
 ```
 
-方法通过 `self` 引用实例字段。
+方法通过 `self` 引用实例字段。构造参数名避免与字段同名（否则触发 shadowing 警告）。
 
 ### 使用类
 
 ```kaula
+import std.io
+import std.math
+
+class Vec2 {
+    x: f64,
+    y: f64
+    constructor(f64 ax, f64 ay) {
+        self.x = ax
+        self.y = ay
+    }
+    fn length() f64 {
+        return std.math.sqrt(self.x * self.x + self.y * self.y)
+    }
+    fn scale(f64 factor) {
+        self.x = self.x * factor
+        self.y = self.y * factor
+    }
+}
+
 fn main() {
     Vec2 v = Vec2(3.0, 4.0)
-    auto len = v.length()
-    println("length: ", len)    # length: 5.0
+    f64 len = v.length()
+    println("length: ", len)    # length: 5
 
     v.scale(2.0)
     println("scaled: (", v.x, ", ", v.y, ")")
@@ -45,28 +67,35 @@ fn main() {
 `interface` 定义一组方法签名，类通过 `implements` 实现接口：
 
 ```kaula
-interface Drawable {
-    fn draw() void
+import std.io
+
+interface Shape {
+    fn area() f64
+    fn describe() string
 }
 
-interface Printable {
-    fn to_string() string
-}
-
-class Circle implements Drawable, Printable {
+class Circle implements Shape {
     radius: f64
+    tag: string
 
-    constructor(f64 r) {
+    constructor(f64 r, string t) {
         self.radius = r
+        self.tag = t
     }
 
-    fn draw() void {
-        println("drawing circle")
+    fn area() f64 {
+        return 3.14159 * self.radius * self.radius
     }
 
-    fn to_string() string {
-        return "Circle(radius=" + string_from_f64(self.radius) + ")"
+    fn describe() string {
+        return self.tag
     }
+}
+
+fn main() {
+    Shape s = Circle(2.0, "my-circle")
+    println("area = ", s.area())
+    println("name = ", s.describe())
 }
 ```
 
