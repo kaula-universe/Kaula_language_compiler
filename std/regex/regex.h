@@ -3,8 +3,10 @@
 // ============================================================================
 // std/regex/regex.h - Kaula 标准库正则模块
 //
-// 自带引擎实现（递归下降解析 + 回溯匹配），不依赖 libc <regex.h>，
-// 因此 Windows / Linux / macOS / freestanding 行为一致。
+// 自带引擎实现（递归下降解析 + Pike VM / Thompson NFA 线性时间模拟），
+// 不依赖 libc <regex.h>，因此 Windows / Linux / macOS / freestanding 行为一致。
+// 匹配复杂度 O(模式长度 × 文本长度)，无灾难性回溯；regex_aborted() 仅在
+// 显式设置步数预算且被超限时为真，正常输入不会误触。
 //
 // 支持语法：
 //   .            任意字符（不含换行，REGEX_FLAG_DOTALL 下含）
@@ -27,8 +29,8 @@
 //   regex_destroy(re);
 //
 // 线程安全：Regex 编译后只读，可被多线程共享；但匹配过程使用 Regex 内部的
-// 步数计数器与回溯栈，**同一个 Regex 实例不可被多线程同时用于匹配**。
-// 并发场景请为每个线程单独 regex_create。
+// 工作区（活跃状态列表与捕获快照池），**同一个 Regex 实例不可被多线程同时
+// 用于匹配**。并发场景请为每个线程单独 regex_create。
 // ============================================================================
 
 #include "../base/types.h"
@@ -58,10 +60,15 @@ typedef struct {
 } Regex;
 
 // 单个匹配区间（find_all / split 的产物）
+//
+// 布局注记：尾部 bool_t matched 必须保留——regex_captures 返回的数组类型是
+// RegexCapture（48B），但释放统一走 regex_free_matches（按 RegexMatch 步长
+// 40B 遍历）。补这个字段后两者步长一致，跨类型释放才不会错位越界。
 typedef struct {
-    size_t start;  // 起始下标
-    size_t end;    // 结束下标（不含）
-    String text;   // 匹配文本；需 regex_free_matches 释放
+    size_t start;    // 起始下标
+    size_t end;      // 结束下标（不含）
+    String text;     // 匹配文本；需 regex_free_matches 释放
+    bool_t matched;  // 始终为 true（仅为与 RegexCapture 步长对齐而存在）
 } RegexMatch;
 
 // 单次匹配的捕获结果。captures[0] 是整体匹配，captures[1..n] 是各捕获组。
