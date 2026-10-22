@@ -1,12 +1,10 @@
-// binary_trees.kl — CLBG 风格分配风暴（Kaula arena 模型）
-// 每轮在 kmm_v4 scope 内 bump 分配整棵树的节点数组，递归 build + 中序遍历，
-// scope_exit 一次性批量回收（O(1) rewind，无逐节点 free、无标记清除 GC）。
-// 对标 Go/Rust/Nsoar binary-trees 分配风暴。
+// binary_trees.kl — CLBG 风格分配风暴（Kaula 自动内存管理）
+// 不手动管作用域：KMM V4 在块作用域退出时自动批量回收，SOR 自动分析生命周期。
+// 分配统一走 kmm_v4_alloc。每轮 while 块内建一棵大树，块退出自动回收。
 import std.io
 import std.memory
 import std.time
 
-// 节点 16 字节：left/right 下标 + value
 struct Node {
     left: i64
     right: i64
@@ -38,30 +36,27 @@ fn check(Node* nodes, i64 idx) i64 {
 }
 
 fn main() {
-    i64 depth = 25                  // 节点 = 2^26 - 1 = 67108863 ≈ 6710 万（对标图里 ~7000 万）
+    i64 depth = 25
     i64 nodesCount = 67108863
-    i64 iters = 5                   // 5 轮 × 6710 万 ≈ 3.3 亿节点分配/回收
+    i64 iters = 5
 
-    std.io.println("=== Kaula binary_trees (arena alloc storm) ===")
+    std.io.println("=== Kaula binary_trees (auto memory, kmm_v4_alloc) ===")
     std.io.println("depth=", depth, " nodes/tree=", nodesCount, " iters=", iters)
 
     i64 checksum = 0
     i64 t0 = std.time.time_now_ms()
     i64 i = 0
     while i < iters {
-        std.memory.kmm_v4_scope_enter()
         Node* nodes = as<Node*>(std.memory.kmm_v4_alloc(nodesCount * 24))
         build(nodes, 0, 1, depth)
         checksum = checksum + check(nodes, 0)
-        std.memory.kmm_v4_scope_exit()
         i = i + 1
+        # while 块退出：KMM 自动批量回收本轮分配的树
     }
     i64 t1 = std.time.time_now_ms()
 
     i64 perTree = (t1 - t0) * 1000000 / iters
-    i64 perNode = (t1 - t0) * 1000000 / (iters * nodesCount)
     std.io.println("total ", t1 - t0, " ms")
     std.io.println("per-tree ", perTree, " ns")
-    std.io.println("per-node ", perNode, " ns (alloc+build+check+bulk-reclaim)")
     std.io.println("checksum ", checksum)
 }
