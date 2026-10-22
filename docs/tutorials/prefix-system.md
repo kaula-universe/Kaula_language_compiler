@@ -288,9 +288,27 @@ fn AddTo(target: i64, tree(i64) value: i64) {
 | `tree(literal)` / `tree(call)` / `tree(identifier)` | 对应具体节点类别 |
 | `tree(i64)` / `tree(string)` / `tree(Vec<i64>)` | 指定类型名（对字面量做实校验，标识符放行） |
 | `tree(generic)` / `tree(any)` | 不限 |
+| `tree(mode = :int)` | **值约束**：实参经 comptime 求值后字符串结果须等于 `int` |
 
 结构子类名还有：`binary`、`unary`、`member`、`index`、`prefix_call`、`lambda`、
 `match`、`conditional`、`assign`、`declaration`、`if`、`while`、`for`。
+
+#### 值约束：comptime 值反哺规则选择
+
+冒号前缀 `:value` 是**值约束**——与结构约束并列，分派时用 comptime 求值实参，
+字符串结果相等才命中。这让 `comptime(shape_of(v))` 算出的形状字符串直接决定宏走哪条骨架：
+
+```kaula
+#[prefix] fn Gen(tree(mode = :int), mode)    { /* int 分支 */ }
+#[prefix] fn Gen(tree(mode = :string), mode) { /* string 分支 */ }
+#[prefix] fn Gen(mode)                       { /* 兜底 */ }
+
+@Gen(mode = comptime(shape_of(v)))   # 按 shape_of 算出的字符串选规则
+```
+
+值约束不限实参结构本身（NodeType 为 generic），只比 comptime 求值结果；与结构约束
+可叠加在同一参数上。这是「值域 → 宏分派」的反向跨，与 `shape_of`（形状 → 值域的
+正向跨）成对闭合。
 
 同名 `tree Name { ... }` 声明也可以作为签名来源，其根约束作用到 `$body`。
 

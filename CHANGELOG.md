@@ -10,6 +10,10 @@
 ## [Unreleased]
 
 ### Added
+- **prefix 宏值约束 `tree(param = :value)`**：`tree(...)` 注解支持冒号前缀的字面量值
+  约束，分派时用 comptime 求值实参并按字符串结果选规则——`comptime(shape_of(v))`
+  算出的值可直接决定宏展开哪条骨架（值域反哺宏分派的反向跨）。回归用例
+  `test/prefix_value_dispatch.kl`。
 - **`shape_of(expr)` comptime 形状查询内建**：返回实参的语法形状类别字符串
   （`int`/`float`/`bool`/`string`/`ident`/`binary`/`unary`/`call`/`index`/`field`/
   `paren`/`conditional`/`struct_literal`/`comptime`/`expression`）。**只允许出现在
