@@ -1,73 +1,63 @@
 # SOR Sub-structural Ownership
 
-SOR（Sub-structural Ownership）是 Kaula 独特的编译期内存安全机制，
-追踪每个资源的**唯一所有权**，在编译期消除数据竞争和悬垂指针，零运行时开销。
+SOR（Sub-structural Ownership）是 Kaula 的**编译期**所有权与内存安全分析，
+追踪每个资源的唯一所有权，在编译期消除数据竞争和悬垂指针，**零运行时开销**。
 
-> 启用方式：全局 `--sor` 参数，或单函数 `#[sor]` 注解。
+> 启用方式：编译命令行加全局标志 `kaulac --sor main.kl`。
+> SOR 是**自动**分析——你写的业务代码不需要任何特殊关键字，编译器在语义分析阶段
+> 自动推断每个对象的所有权状态并报告违规。
 
-## 三大原语
+## 它对普通程序做什么
 
-### yield — 所有权转移
-
-将资源的所有权从一个变量转移到另一个，原变量不再可用（move 语义）：
+下面这段普通 Kaula 代码，加不加 `--sor` 都能编译运行；加了 `--sor` 后，编译器
+会额外做一遍所有权检查（比如同一块内存被两个可变别名同时借用、或被 use 两次）：
 
 ```kaula
-#[sor]
-fn transfer() {
-    auto buf = alloc(1024)
+import std.io
+import std.memory
 
-    yield buf -> owner       # 所有权转移到 owner
-    # buf 不再可用
-    use(owner)               # ✅ 正确
+fn main() {
+    // KMM V4 在作用域退出时批量回收，SOR 在此之上再做编译期别名/逃逸检查
+    i64* p = as<i64*>(std.memory.kmm_v4_alloc(64))
+    p[0] = 100
+    p[1] = 200
+    println("sum = ", p[0] + p[1])
 }
 ```
 
-### extract — 子结构提取
+编译：
 
-从复合类型中提取出某个子元素的所有权，原位置留下空位：
-
-```kaula
-#[sor]
-fn split() {
-    auto arr = alloc_array(10)
-
-    extract arr[0] -> first   # 取出第 0 个元素
-    extract arr[1] -> second  # 取出第 1 个元素
-
-    use(first)
-    use(second)
-}
+```sh
+kaulac --sor main.kl
 ```
 
-### release — 所有权分发
+> 当前 SOR 是分析与报错层，不改变生成的 C 代码形态；它只在 `--sor` 开启时
+> 把所有权问题作为编译错误报出。
 
-将一个资源的只读访问权分发给多个持有者（必须形成 DAG，无环）：
+## 设计上的三大所有权原语（背景）
 
-```kaula
-#[sor]
-fn share() {
-    auto data = compute()
+SOR 的分析模型基于三个概念（详见 [SOR 系统实现](../sor-system.md)）：
 
-    release data -> [reader1, reader2]   # 两个只读持有者
-    # 所有持有者都可读
-    reader1.process()
-    reader2.process()
-}
-```
+| 原语 | 含义 | 代码里如何体现 |
+|------|------|----------------|
+| **yield**（转移/move） | 资源唯一所有权从一个变量转到另一个，原变量失效 | 函数传参、返回值按 move 语义传递 |
+| **release**（共享只读） | 把只读访问权分发出去，允许多个读者 | 只读借用、不可变引用 |
+| **extract**（提取） | 从复合结构中取出某子项的所有权 | 容器元素取出后原位置留空 |
 
-## 运行时支持
+这些是分析引擎内部的状态机（`Owned / Released / Extracted / Moved / Hollow`），
+不是你要手写的语句。你只要像平时一样写代码，SOR 在 `--sor` 模式下判定是否违反
+了"同一时刻只有一个可变写者"的规则。
 
-SOR 在 debug 模式下会插入安全断言检查；release 模式下完全消除。
+## 调试 SOR 报错
 
-```kaula
-#[sor]
-fn demo() {
-    auto resource = Resource()
-    yield resource -> r1
-    # yield resource -> r2   # 编译错误：resource 已 move
-}
-```
+当 `--sor` 报告所有权违规时：
+
+- 错误信息会指向具体的变量与行号；
+- 常见原因：把同一块内存的可变别名传给了两条独立执行路径（线程逃逸）、
+  或在资源已经 move 之后再次使用；
+- 修正方式通常是缩短资源作用域、或把需要共享的数据改成只读传递。
 
 ## 完整示例
 
-参见 [examples/sor_demo.kl](examples/sor_demo.kl)。
+参见 [examples/sor_demo.kl](examples/sor_demo.kl) 与 `test/` 下 `--sor` 模式
+（`scripts/run_tests.py --mode sor`）全部通过的用例。

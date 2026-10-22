@@ -33,13 +33,14 @@ import string
 ### std.string — 字符串操作
 
 ```kaula
+import std.io
 import std.string
 
 fn main() {
-    string s = string_create("hello")
-    char c = string_char_at(s, 0)
-    println("First char: ", c)
-    string_free(s)
+    string s = std.string.create("hello")
+    i64 n = std.string.length(s)
+    println("len = ", n)   # len = 5
+    # Kaula 自动内存管理：无需手动 free，作用域结束自动回收
 }
 ```
 
