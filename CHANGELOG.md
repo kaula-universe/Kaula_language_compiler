@@ -21,6 +21,21 @@
 - **回归用例**：`test/reflect_builtins.kl`（25 项断言）、`test/spend_and_call.kl`（8 项断言）、
   Go 单测 `TestImplicitStdModuleDeps` / `TestImplicitStdModuleNoDuplicate` /
   `TestAutoIntegerLiteralIsInt`。
+- **`std.regex` 引擎 RE2 化（Pike VM 替换回溯 VM）**：
+  解析器、AST→指令生成器、公开 API 与 `RxInst` 指令集零改动，匹配内核整体替换为
+  Thompson NFA 模拟（Pike VM）。复杂度 O(代码长 × 文本长)，任意输入线性完成，
+  `(a+)+b` 式灾难性回溯不再靠步数预算放弃。
+  - 工作区（活跃状态列表 / ε 闭包 DFS 栈 / 保存链块池）在 `regex_create` 时按
+    指令数预分配，匹配期零堆分配；块池块号引用，realloc 不悬垂。
+  - 捕获语义：保存链不可变快照（SAVE prepend 节点、SPLIT/JMP 共享父链），
+    命中 MATCH 时沿链回填 `caps[]`；贪婪取「最长命中」（位置单调递增）。
+  - 步数预算：显式 `regex_set_step_limit` 原样执行（0=不限）；未显式设置时自适应
+    `max(3*(len+1)*code_len, 2_000_000)`，正常输入不再误触 aborted。
+  - **修复既有潜伏 bug**：`RegexMatch` 尾部补 `bool_t matched` 字段，与
+    `RegexCapture` 步长对齐——此前 `regex_captures` 返回 48B 数组却按
+    `regex_free_matches` 的 40B 步长释放，数组错位必崩。公开签名/语义零变化。
+  - 差分压测：`test/bench/regex_difftest_tool.c`（手写 323 用例 + 20 万模糊，
+    新旧引擎全功能对拍两遍收敛），旧引擎快照 `test/bench/regex_ref/` 仅作参考不发行。
 - **`std.regex` 正则引擎重写**：自带引擎（递归下降解析 + 迭代式回溯匹配），
   不再依赖 libc `<regex.h>`，三平台与 freestanding 行为一致。
   - 语法：贪婪/惰性量词、`{n}` `{n,}` `{n,m}`、非捕获组、具名组
