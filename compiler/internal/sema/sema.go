@@ -49,6 +49,7 @@ type SemanticAnalyzer struct {
 	localPubVars             map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
 	localPubTypes            map[string]*LocalPubTypeInfo   // 本地 import 的类型定义（class 含完整定义）
 	inElseIfChain            bool                           // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
+	comptimeDepth            int                            // 嵌套进入 comptime(...) 的层数；shape_of 等仅 comptime 可用的内建据此判定
 	usedFunctions            map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
 	libraryMode              bool                           // 库文件分析模式(跳过 unused-function 检查)
 	localModuleTypes         map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
@@ -2989,7 +2990,18 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 	case *ast.SizeOfExpression, *ast.AlignOfExpression, *ast.OffsetOfExpression:
 		// 编译期内建函数，类型检查在 inferExpressionType 中处理
 	case *ast.ComptimeExpression:
+		sa.comptimeDepth++
 		sa.analyzeExpression(e.Inner)
+		sa.comptimeDepth--
+	case *ast.ShapeOfExpression:
+		if sa.comptimeDepth == 0 {
+			sa.errorCollector.AddSemanticError(
+				"shape_of 只能用在 comptime(...) 上下文里",
+				e.Pos.Line, e.Pos.Column, "shape_of_outside_comptime",
+				"把表达式包进 comptime(...)：comptime(shape_of(x))",
+			)
+		}
+		sa.analyzeExpression(e.Target)
 	case *ast.TypeNameExpression, *ast.FieldCountExpression, *ast.TypeKindExpression:
 		// 编译期反射函数，不需要额外分析
 	case *ast.FieldNameExpression:
@@ -4771,6 +4783,8 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	case *ast.ComptimeExpression:
 		return sa.inferExpressionType(e.Inner)
 	case *ast.TypeNameExpression, *ast.FieldNameExpression, *ast.FieldTypeExpression, *ast.TypeKindExpression:
+		return "string"
+	case *ast.ShapeOfExpression:
 		return "string"
 	case *ast.FieldCountExpression:
 		return "u64"
