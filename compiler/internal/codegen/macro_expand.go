@@ -33,6 +33,7 @@ import (
 
 	"kaula/internal/ast"
 	"kaula/internal/astutil"
+	"kaula/internal/comptime"
 )
 
 // macroExpansion 一次结构宏展开的产物
@@ -466,6 +467,16 @@ func (sg *StatementGenerator) ruleMatches(e *ast.PrefixCallExpression, sig *Macr
 		}
 		if err := checkMacroArgument(e.Name, name, value, constraint); err != "" {
 			return false
+		}
+		// 值约束 tree(mode = "int")：用 comptime 求值实参并比较字符串结果。
+		// 这是值域反哺宏分派的反向跨——comptime(shape_of(v)) 算出的字符串
+		// 能直接决定选中哪条规则。
+		if constraint.Value != "" {
+			ev := comptime.NewEvaluator()
+			val, err := ev.Eval(value)
+				if err != nil || val == nil || val.String() != constraint.Value {
+				return false
+			}
 		}
 	}
 	return true

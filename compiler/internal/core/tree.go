@@ -105,6 +105,10 @@ type TreeConstraint struct {
 	Type string
 	// Name 可选的绑定名约束：约束作用于哪个节点（tree 注解里的 `$p`）。
 	Name string
+	// Value 可选的**值约束**：tree(mode = "int") 引号字面量。分派时用
+	// comptime 求值实参，其字符串结果必须与 Value 相等；空表示不限制值。
+	// 这是「值域反哺宏分派」的跨：comptime 算出的字符串/整数值参与规则选择。
+	Value string
 }
 
 // ---- TreeConstraint ↔ 结构宏桥接 ----

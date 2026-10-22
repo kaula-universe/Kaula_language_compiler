@@ -260,6 +260,17 @@ func parseTreeTypeString(s string) *core.TreeConstraint {
 	if s == "" {
 		return nil
 	}
+	// 引号字面量 tree(mode = "int") → 值约束：只要求 comptime 求值结果相等，
+	// 不限实参结构本身。双向跨的反向：外部 comptime 值反哺规则选择。
+	// 值约束 tree(mode = :int) —— 冒号前缀标记。引号在参数位置被词法剥掉，
+	// 故用 :value 区分「值相等」与「类型/结构」约束。
+	if strings.HasPrefix(s, ":") {
+		return &core.TreeConstraint{
+			Required: true,
+			NodeType: core.NodeTypeGeneric,
+			Value:    strings.TrimSpace(s[1:]),
+		}
+	}
 	name, args := splitGeneric(s)
 	name = strings.TrimSpace(name)
 	constraint := &core.TreeConstraint{Required: true}
