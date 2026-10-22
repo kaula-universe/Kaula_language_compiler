@@ -11,10 +11,17 @@
 ## 基本语法
 
 ```kaula
-spend(目标) {
-    call(1) { ... }
-    call(2) { ... }
-    call(default) { ... }   # 可选：兜底消费剩余全部元素
+import std.io
+
+fn main() {
+    i64 items[3] = [10, 20, 30]
+    i64 sum = 0
+    spend(items) {
+        call(1) { sum = sum + 10 }
+        call(2) { sum = sum + 20 }
+        call(3) { sum = sum + 30 }
+    }
+    println("sum = ", sum)   # sum = 60
 }
 ```
 

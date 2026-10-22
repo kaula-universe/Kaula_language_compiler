@@ -6,70 +6,52 @@
 
 ### 声明级属性
 
+`#[name]` 注解放在声明前面。常用可移植属性示例：
+
 ```kaula
-#[packed]                         # 紧凑内存布局（无填充）
+import std.io
+
+#[packed]                       # 紧凑内存布局（无填充）
 struct PacketHeader {
-    u8 version,
-    u8 flags,
-    u16 length
+    version: u8,
+    flags: u8,
+    length: u16
 }
 
-#[aligned(16)]                    # 16 字节对齐
-struct AlignedBuf {
-    data: [64]u8
+#[inline]                       # 内联提示
+fn fast_path() i64 {
+    return 42
 }
 
-#[section(".isr_vector")]         # 链接到指定段
-#[naked]                          # 裸函数（无 prologue/epilogue）
-fn vector_handler() void {
-    // raw asm body
+fn main() {
+    PacketHeader h
+    h.version = 1
+    h.flags = 0
+    h.length = 16
+    println(h.version, h.flags, h.length, fast_path())
 }
-
-#[inline]                         # 内联提示
-fn fast_path() int { return 42 }
-
-#[deprecated]                     # 标记弃用
-fn old_api() { }
-
-#[weak]                           # 弱符号
-fn fallback() int { return -1 }
-
-#[no_kmm]                         # 禁用 KMM 内存管理（回退到系统 malloc）
-
-#[volatile]                       # volatile 语义
-u32* status_reg = 0x40000000
 ```
+
+> 裸机/平台相关属性——如 `#[section(".isr_vector")]`、`#[naked]`、`#[weak]`、
+> `#[volatile]`、`#[no_kmm]`——面向 freestanding / 交叉编译场景，普通托管程序用不到，
+> 详见 [freestanding 文档](../freestanding.md) 与 [高级属性扩展](../attributes.md)。
 
 ### #[no_kmm] 详解
 
 `#[no_kmm]` 属性在特定函数中禁用 KMM V4 内存管理：
 
 - 函数内不插入 `kmm_v4_scope_push()`/`kmm_v4_scope_pop()`
-- `std_malloc` 不会被重写为 `kmm_v4_alloc_auto`，保持系统 malloc 调用
-- 适用于需要手动管理内存生命周期的场景（如 C 库互操作）
+- 堆分配走系统 malloc 而非 KMM 池
+- 适用于需要手动管理内存生命周期的场景（如 C 库互操作、裸机）
 
-```kaula
-#[no_kmm]
-fn manual_memory() void* {
-    // 使用系统 malloc，不受 KMM 作用域管理
-    auto ptr = std.memory.std_malloc(1024)
-    // ... 需要手动 std_free ...
-    return ptr
-}
-
-fn kmm_managed() {
-    // 默认 KMM 管理，函数退出自动回收
-    auto ptr = std.memory.std_malloc(1024)
-    // 无需 free
-}
-```
+这是面向底层/互操作的属性，普通业务代码不需要；完整语义见
+[高级属性扩展](../attributes.md)。
 
 ### 表达式级属性
 
-```kaula
-auto cr3 = #[asm("mov %cr3, %rax")]     # 内联汇编
-#[fence()]                                # 内存屏障
-```
+表达式级属性（如内联汇编 `#[asm(...)]`、内存屏障 `#[fence()]`）面向
+systems / freestanding 场景，需要平台特定指令，不在通用教程展开，见
+[裸机文档](../freestanding.md)。
 
 ## 编译期反射
 
@@ -147,12 +129,18 @@ fn main() {
 | 其他 | `"expression"` |
 
 ```kaula
-fn main(x: i32, a: i32, b: i32) {
-    println(comptime(shape_of(123)))   # int
-    println(comptime(shape_of(x)))     # ident
-    println(comptime(shape_of(a + b)))# binary
+import std.io
+
+fn main() {
+    i64 a = 1
+    i64 b = 2
+    println(comptime(shape_of(123)))    # int
+    println(comptime(shape_of(a + b)))  # binary
 }
 ```
+
+> `shape_of` 只能出现在 `comptime(...)` 里；它返回一个编译期字符串常量，
+> 用于宏在编译期按实参形状分派。
 
 它是「宏 tree 分派」与「comptime 值域」之间的层间桥：宏作者可以在 comptime 里读到实参形状并据此分叉，而不必让宏体本身变成可执行程序。
 
@@ -184,16 +172,17 @@ Kaula 还提供了三个高级属性，用于自动化常见开发任务：
 标记函数为测试函数，使用 `kaulac unittest` 命令自动发现并运行：
 
 ```kaula
+import std.io
+
 #[test]
 fn test_add() {
     i64 result = 2 + 3
     assert(result == 5)
 }
 
-#[test]
-#[ignore]
-fn test_not_ready() {
-    // 暂时跳过的测试
+fn main() {
+    test_add()
+    println("tests ran")
 }
 ```
 
@@ -209,49 +198,36 @@ kaulac unittest my_tests.kl
 
 ### `#[derive]` - 派生宏
 
-为结构体自动生成 Debug、Clone、Eq 方法：
+为结构体自动生成 Debug、Eq 方法：
 
 ```kaula
-#[derive(Debug, Clone, Eq)]
+import std.io
+
+#[derive(Debug, Eq)]
 struct Point {
-    x: i64
+    x: i64,
     y: i64
 }
 
 fn main() {
-    Point p
-    p.x = 10
-    p.y = 20
-
-    Point_debug(&p)           // 输出: Point { x: 10, y: 20 }
-    Point* p2 = Point_clone(&p)  // 深拷贝
-    if Point_equals(&p, p2) == 1 {
-        println("p == p2")
+    Point a = Point { x = 10, y = 20 }
+    Point b = Point { x = 10, y = 20 }
+    if Point_equals(&a, &b) == 1 {
+        println("a == b")
     }
 }
 ```
 
-### `#[command]` - 命令行参数解析
+生成 `Point_debug`（打印）与 `Point_equals`（相等比较）方法。
 
-为结构体自动生成命令行参数解析函数：
+### `#[command]` - 命令行参数解析（规划中）
 
-```kaula
-#[command]
-struct Config {
-    #[arg(short="v", long="verbose", help="启用详细输出")]
-    verbose: bool
+`#[command]` 计划为结构体自动生成命令行参数解析函数（类似 clap）：
+用 `#[arg(short=..., long=..., default=..., help=...)]` 标注字段，
+编译器生成 `Config_parse(argc, argv)` 入口。
 
-    #[arg(short="o", long="output", default="out.txt", help="输出文件")]
-    output: string
-}
-
-fn main(i32 argc, char** argv) {
-    Config* cfg = Config_parse(argc, argv)
-    if cfg.verbose == 1 {
-        println("详细模式")
-    }
-}
-```
+> 该属性尚未实现，编译时会报"未知的属性表达式"。完整设计见
+> [高级属性扩展](../attributes.md)。
 
 详细用法参见 [`#[]` 高级属性扩展](../attributes.md)。
 
