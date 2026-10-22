@@ -297,6 +297,8 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 		return eg.generateFieldTypeExpression(e)
 	case *ast.TypeKindExpression:
 		return eg.generateTypeKindExpression(e)
+	case *ast.ShapeOfExpression:
+		return eg.generateShapeOfExpression(e)
 	case *ast.ParenExpression:
 		return "(" + eg.GenerateExpression(e.Inner) + ")"
 	case *ast.ConditionalExpression:
@@ -2323,6 +2325,9 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.TypeKindExpression:
 		// type_kind(T) 返回 String（kinds: int/float/bool/char/string/void/struct/unknown）
 		return "s"
+	case *ast.ShapeOfExpression:
+		// shape_of(expr) 返回 String（语法形状类别）
+		return "s"
 	case *ast.FieldCountExpression, *ast.SizeOfExpression, *ast.AlignOfExpression, *ast.OffsetOfExpression:
 		// 编译期反射的数值内建统一产出 u64；此前落到默认 "d"，生成
 		// printf("%d\n", sizeof(T)) 对 uint64_t 类型不匹配（-Wformat）。
@@ -3293,7 +3298,7 @@ func (eg *ExpressionGenerator) comptimeValueToC(val *comptime.Value) string {
 		}
 		return "false"
 	case comptime.KindString:
-		return "\"" + escapeCString(val.StringVal) + "\""
+		return kaulaStringLiteralC(val.StringVal)
 	default:
 		return "NULL"
 	}
@@ -3347,6 +3352,46 @@ func (eg *ExpressionGenerator) generateFieldTypeExpression(e *ast.FieldTypeExpre
 func (eg *ExpressionGenerator) generateTypeKindExpression(e *ast.TypeKindExpression) string {
 	kind := eg.getTypeKind(e.TargetType)
 	return kaulaStringLiteralC(kind)
+}
+
+// shapeOfCategory 把实参 AST 节点归为语法形状类别（comptime 期静态判定）。
+func shapeOfCategory(target ast.Expression) string {
+	switch target.(type) {
+	case *ast.IntegerLiteral:
+		return "int"
+	case *ast.FloatLiteral:
+		return "float"
+	case *ast.BooleanLiteral:
+		return "bool"
+	case *ast.StringLiteral:
+		return "string"
+	case *ast.Identifier:
+		return "ident"
+	case *ast.BinaryExpression:
+		return "binary"
+	case *ast.UnaryExpression:
+		return "unary"
+	case *ast.CallExpression:
+		return "call"
+	case *ast.IndexExpression:
+		return "index"
+	case *ast.MemberAccessExpression:
+		return "field"
+	case *ast.ParenExpression:
+		return "paren"
+	case *ast.ConditionalExpression:
+		return "conditional"
+	case *ast.StructLiteral:
+		return "struct_literal"
+	case *ast.ComptimeExpression:
+		return "comptime"
+	default:
+		return "expression"
+	}
+}
+
+func (eg *ExpressionGenerator) generateShapeOfExpression(e *ast.ShapeOfExpression) string {
+	return kaulaStringLiteralC(shapeOfCategory(e.Target))
 }
 
 func (eg *ExpressionGenerator) getStructFieldCount(typeName string) int {
