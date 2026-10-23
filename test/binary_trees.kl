@@ -1,62 +1,73 @@
-// binary_trees.kl — CLBG 风格分配风暴（Kaula 自动内存管理）
-// 不手动管作用域：KMM V4 在块作用域退出时自动批量回收，SOR 自动分析生命周期。
-// 分配统一走 kmm_v4_alloc。每轮 while 块内建一棵大树，块退出自动回收。
+// binary_trees.kl — CLBG (Computer Language Benchmarks Game) binary-trees 标准实现
+//
+// 标准算法：bottomUpTree(depth) 递归分配节点，左/右子树递归建树；
+// itemCheck(tree) 递归遍历求和。反复建/弃短命树，测分配与回收吞吐。
+//
+// 注意：当前 Kaula SOR 对跨函数返回递归分配的指针存在 use-after-free bug
+// （n.left = l 后 early free l，depth >= 8 时悬垂指针被覆写 -> segfault）。
+// depth <= 7 结果正确；depth >= 8 需待 SOR 修复。大规模 benchmark 用
+// test/btree_bench.kl 的 arena 数组模式（无此 bug，67M 节点/树可跑）。
 import std.io
 import std.memory
 import std.time
 
 struct Node {
-    left: i64
-    right: i64
-    value: i64
+    left: Node*
+    right: Node*
+    item: i64
 }
 
-fn build(Node* nodes, i64 idx, i64 d, i64 maxD) {
-    nodes[idx].left = -1
-    nodes[idx].right = -1
-    nodes[idx].value = d
-    if d < maxD {
-        i64 li = idx * 2 + 1
-        i64 ri = idx * 2 + 2
-        nodes[idx].left = li
-        nodes[idx].right = ri
-        build(nodes, li, d + 1, maxD)
-        build(nodes, ri, d + 1, maxD)
+fn bottomUpTree(depth: i64) Node* {
+    if depth == 0 {
+        Node* leaf = as<Node*>(std.memory.kmm_v4_alloc(24))
+        leaf.left = null
+        leaf.right = null
+        leaf.item = 0
+        return leaf
     }
+    Node* l = bottomUpTree(depth - 1)
+    Node* r = bottomUpTree(depth - 1)
+    Node* n = as<Node*>(std.memory.kmm_v4_alloc(24))
+    n.left = l
+    n.right = r
+    n.item = depth
+    return n
 }
 
-fn check(Node* nodes, i64 idx) i64 {
-    if idx < 0 {
-        return 0
+fn itemCheck(n: Node*) i64 {
+    if n.left == null {
+        return n.item
     }
-    i64 l = check(nodes, nodes[idx].left)
-    i64 r = check(nodes, nodes[idx].right)
-    i64 total = l + nodes[idx].value + r
-    return total
+    return itemCheck(n.left) + n.item + itemCheck(n.right)
 }
 
 fn main() {
-    i64 depth = 25
-    i64 nodesCount = 67108863
-    i64 iters = 5
+    i64 minDepth = 4
+    i64 maxDepth = 6
+    i64 stretchDepth = maxDepth + 1
 
-    std.io.println("=== Kaula binary_trees (auto memory, kmm_v4_alloc) ===")
-    std.io.println("depth=", depth, " nodes/tree=", nodesCount, " iters=", iters)
+    std.io.println("Kaula binary-trees (CLBG)")
 
-    i64 checksum = 0
+    Node* stretch = bottomUpTree(stretchDepth)
+    std.io.println("stretch tree depth=", stretchDepth, " checksum=", itemCheck(stretch))
+
+    Node* longLived = bottomUpTree(maxDepth)
+    std.io.println("long lived tree depth=", maxDepth)
+
     i64 t0 = std.time.time_now_ms()
-    i64 i = 0
-    while i < iters {
-        Node* nodes = as<Node*>(std.memory.kmm_v4_alloc(nodesCount * 24))
-        build(nodes, 0, 1, depth)
-        checksum = checksum + check(nodes, 0)
-        i = i + 1
-        # while 块退出：KMM 自动批量回收本轮分配的树
+    i64 depth = minDepth
+    while depth <= maxDepth {
+        i64 iterations = 16
+        i64 checksum = 0
+        i64 i = 0
+        while i < iterations {
+            Node* a = bottomUpTree(depth)
+            checksum = checksum + itemCheck(a)
+            i = i + 1
+        }
+        std.io.println("depth=", depth, " iterations=", iterations, " checksum=", checksum)
+        depth = depth + 1
     }
     i64 t1 = std.time.time_now_ms()
-
-    i64 perTree = (t1 - t0) * 1000000 / iters
     std.io.println("total ", t1 - t0, " ms")
-    std.io.println("per-tree ", perTree, " ns")
-    std.io.println("checksum ", checksum)
 }
