@@ -52,7 +52,7 @@ fn main() {
 
 Kaula 的 `import` 语句按以下顺序查找模块：
 
-1. **标准库**：`compiler/stdlib.json` 中注册的 53+ 个模块
+1. **标准库**：`compiler/stdlib.json` 中注册的 67 个模块（62 个 `std.*` + 5 个 `freestanding.*`）
 2. **本地文件**：相对路径的 `.kl` 文件（`pub` 函数可见）
 3. **第三方库**：`pkglib/` 目录下的扩展库
 
