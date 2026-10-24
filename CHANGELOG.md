@@ -201,6 +201,10 @@
     `test_prepin_like_spawn()` 补等价预 pin；否则 `pin_refs` 恒为 0，
     `release` 只是对 0 做减法再夹回，「归还 pin」的断言会假通过。
   - 验证：`test_ws_deque` 33 passed、`test_task` 全通过（各 `--stress 5`）。
+- **Release 正文与产物不一致**：正文曾宣称未构建的 `.zip` / `.tar.gz`，且文件名
+  写作 `kaula-v<ver>-…`（安装包脚本一律 `lstrip('v')`，实际产物是
+  `kaula-<ver>-…`），下载链接全部指向不存在的文件。现 `release.yml` 只列
+  exe/deb/rpm/dmg 四类实际产物，并新增 `ver` 输出去掉 v 前缀；`files:` 同步收敛。
 - **Windows 上 `TestDetectCCFamilyCachesResult` 误报**：该用例用 `#!/bin/sh`
   脚本伪造编译器来统计 `--version` 调用次数，Windows 无 `sh`，cmd 执行脚本
   失败后 `detectCCFamily` 回退到 clang，与被测的进程内缓存行为无关。现按

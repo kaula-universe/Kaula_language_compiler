@@ -237,8 +237,12 @@ jobs:
       - name: Get version from generated file
         id: version
         run: |
-          echo "version=$(python scripts/version.py --release --from-file)" >> $GITHUB_OUTPUT
-          echo "snapshot=$(python scripts/version.py --snapshot --from-file)" >> $GITHUB_OUTPUT
+          VERSION="$(python scripts/version.py --release --from-file)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # 安装包文件名一律不带 v 前缀（build_deb/rpm/dmg 与 NSIS OutFile 都 lstrip('v')），
+          # Release 正文必须与实际产物同名，否则下载链接指向不存在的文件。
+          echo "ver=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "snapshot=$(python scripts/version.py --snapshot --from-file)" >> "$GITHUB_OUTPUT"
         env:
           PYTHONIOENCODING: utf-8
 
@@ -269,14 +273,14 @@ jobs:
             ### Downloads
 
             #### Windows
-            - **Installer (recommended):** `kaula-${{ steps.version.outputs.version }}-windows-x64.exe`
+            - **Installer (recommended):** `kaula-${{ steps.version.outputs.ver }}-windows-x64.exe`
 
             #### Linux
-            - **Debian/Ubuntu:** `kaula_${{ steps.version.outputs.version }}_amd64.deb`
-            - **Fedora/RHEL:** `kaula-${{ steps.version.outputs.version }}-1.x86_64.rpm`
+            - **Debian/Ubuntu:** `kaula_${{ steps.version.outputs.ver }}_amd64.deb`
+            - **Fedora/RHEL:** `kaula-${{ steps.version.outputs.ver }}-1.x86_64.rpm`
 
             #### macOS
-            - **DMG (recommended):** `kaula-${{ steps.version.outputs.version }}-macos-x64.dmg`
+            - **DMG (recommended):** `kaula-${{ steps.version.outputs.ver }}-macos-x64.dmg`
 
             ### Installation
 
