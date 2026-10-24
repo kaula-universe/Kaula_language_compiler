@@ -32,6 +32,7 @@
 
 - [SOR Sub-structural Ownership](sor-system.md) - 所有权原语、分析流程、内存优化
 - [核心运行时](core-runtime.md) - 并发内核（conc fn lowering、IoDriver、阻塞车道、epoch 回收）与 KMM V4（slab / per-thread heap）
+- [P3 返回链去逐对象提升 + TLAB 区域回收](perf/P3-chain-tlab-reclaim.md) - 链构造器识别、调用方接收者校验、TLAB 登记表与实测数据
 - [增量编译缓存](cache-system.md) - SHA-256 验证、原子写入、自动清理
 - [超时与内存控制](timeout-memory.md) - 资源监控、阶段统计、调试输出
 

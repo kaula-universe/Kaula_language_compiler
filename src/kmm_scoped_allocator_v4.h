@@ -652,9 +652,10 @@ struct kmm_union_domain {
 
 // 作用域栈结构（支持嵌套作用域，每层独立保存/恢复 thread_heap {base, offset}）
 // 修复 Bug A：只保存 offset 会在 TLAB refill 后破坏回卷——refill 会重置
-// base/offset/capacity（kmm_scoped_allocator_v4.c:174-176），scope_pop 把旧
-// offset 恢复到新 TLAB 上会导致后续分配从新 TLAB 中间开始，覆盖存活对象。
-// 因此每帧保存完整 {base, offset}，恢复时若 base 变了就失效重填。
+// base/offset/capacity，scope_pop 把旧 offset 恢复到新 TLAB 上会导致后续分配
+// 从新 TLAB 中间开始，覆盖存活对象。因此每帧保存完整 {base, offset}；
+// 恢复时 base 变了统一走 kmm_v4_tlab_restore_to（TLAB 登记表）：
+// 目标 TLAB 若仍有存活前缀则收缩水位，当前 TLAB 置 offset=0 原地复用。
 typedef struct {
     struct {
         uint8_t* base;    // push 时的 thread_heap.base
@@ -670,6 +671,43 @@ typedef struct {
     size_t   capacity;    // 当前 thread heap 容量
     size_t   total_allocated; // 该线程累计分配总量（用于统计）
 } kmm_thread_heap_t;
+
+// ==================== TLAB 区域登记表（非侵入式回收） ====================
+// 背景：mark_restore / scope_pop 遇到「保存的 base 不是当前 TLAB」时，旧实现
+// 只把当前 TLAB 的 offset 置 0，保存 base 指向的旧 TLAB 从此不再被使用——
+// 它的剩余容量（最多 KMM_TLS_BUFFER_SIZE）被永久浪费。嵌套作用域交替
+// refill 时，每个被跨过的 TLAB 都会留下这样一段死容量。
+//
+// 本登记表把 TLAB 的 **元数据** 放在 TLS 数组里，绝不向 TLAB payload 写入
+// 任何 header/魔术字（payload 中的每个字节都属于用户对象，回卷时可能仍被
+// 上层存活对象引用）：
+//   - suspended[]：因 refill 被换下、且仍可能承载「目标 mark 之前存活
+//     对象」的 TLAB。登记其最新存活水位 offset；回卷命中时只收缩水位，
+//     不抢占当前 TLAB（避免循环里 A↔B 乒乓 refill）；
+//   - free_list[]：因「回卷到更旧 mark」而整体死亡的 TLAB，可被下一次
+//     refill 直接复用（LIFO），无需推进全局 offset。
+//
+// 安全性依赖 mark/scope 的严格 LIFO 使用：回卷到 mark 时，seq 更大的
+// TLAB 及其中的全部分配都位于被回卷区间内，整体死亡，可安全退役/复用。
+// 登记表满或目标未命中时回退到旧语义（当前 TLAB offset=0），只泄漏容量，
+// 不会错误复用仍存活的对象。
+#define KMM_V4_TLAB_REGISTRY_CAP 512
+
+typedef struct {
+    uint8_t* base;
+    size_t   capacity;
+    size_t   offset;   // 存活水位（仅 suspended 有意义）
+    uint64_t seq;      // 分配序号：越小越老，用于判断谁在回卷区间内
+} kmm_tlab_region_t;
+
+typedef struct {
+    kmm_tlab_region_t suspended[KMM_V4_TLAB_REGISTRY_CAP];
+    kmm_tlab_region_t free_list[KMM_V4_TLAB_REGISTRY_CAP];
+    size_t suspended_count;
+    size_t free_count;
+    uint64_t next_seq;      // 单调递增的 TLAB 分配序号
+    uint64_t current_seq;   // 当前 thread heap 的序号
+} kmm_tlab_registry_t;
 
 // ==================== 智能内存池（自动化管理） ====================
 // 内存池声明（实际定义在 .c 文件中）
@@ -773,6 +811,9 @@ static inline size_t kmm_v4_scope_depth_restore(size_t depth) {
 // Per-thread heap（线程本地）
 extern KMM_TLS kmm_thread_heap_t g_kmm_v4_thread_heap;
 
+// TLAB 区域登记表（线程本地；元数据独立于 payload，见上方结构注释）
+extern KMM_TLS kmm_tlab_registry_t g_kmm_v4_tlab_registry;
+
 #ifdef KMM_V4_DEBUG
 // 同上：extern 类型与 .c 定义一致，不随级别变形。
 extern KMM_ATOMIC_TYPE g_kmm_v4_peak;
@@ -782,6 +823,21 @@ extern KMM_ATOMIC_TYPE g_kmm_v4_alloc_count;
 // Thread heap refill 函数声明（实现在 .c 文件中）
 extern uint8_t* kmm_v4_thread_heap_refill(size_t min_needed);
 extern void kmm_v4_thread_heap_invalidate(void);
+
+// 跨 base 回卷：把逻辑回卷点恢复为 base/offset，并回收被回卷区间内的
+// TLAB 区域。由 mark_restore / scope_pop 在 base 变化时调用（out-of-line，
+// 避免把登记表操作内联进每个回卷点）。
+//
+// 策略（非侵入式，保持循环快速路径稳定）：
+//   - 命中 suspended[]：只把目标 TLAB 的存活水位收缩到 offset；当前 TLAB
+//     的分配全部位于回卷区间之后，整体死亡 → offset=0 原地复用（不抢占
+//     当前 TLAB，避免每次迭代都 refill 造成 A↔B 乒乓）；
+//   - seq 比目标更新的 suspended 条目整体死亡 → 退役到 free_list；
+//   - base==NULL（mark 保存于任何 TLAB 之前）：suspended 全部退役到
+//     free_list，当前 TLAB 保留并置 offset=0（与旧语义一致，避免循环
+//     每次回卷都重新 refill）；
+//   - 目标未命中：保留当前 TLAB，回退到 offset=0（安全，只泄漏容量）。
+extern void kmm_v4_tlab_restore_to(uint8_t* base, size_t offset);
 
 // 完整重置（P1 削峰平谷 · 方案 3）：主池 offset 归零 + survivor 段清空 +
 // thread heap 失效 + 扩展段 trim_tail。头文件 inline 版 kmm_v4_reset 与
@@ -1007,14 +1063,12 @@ static inline void kmm_v4_mark_restore(kmm_v4_mark_t m) {
     if (KMM_V4_LIKELY(g_kmm_v4_thread_heap.base == m.base)) {
         g_kmm_v4_thread_heap.offset = m.offset;
     } else {
-        // 区间内发生过 refill：旧 offset 对当前 TLAB 无意义，从头复用新 TLAB。
-        // 旧 TLAB 内存仍在池中，其中已提升（survivor）或仍被引用的对象不受影响。
-        g_kmm_v4_thread_heap.offset = 0;
+        // 区间内发生过 refill（或 m.base 为 NULL）：交给 TLAB 登记表。
+        // 旧实现只把当前 TLAB offset 置 0，保存 base 指向的旧 TLAB 从此
+        // 被永久弃用；kmm_v4_tlab_restore_to 会重新激活它，并把当前已
+        // 整体死亡的 TLAB 放入 free_list 供后续 refill 复用。
+        kmm_v4_tlab_restore_to(m.base, m.offset);
     }
-    // 与 scope_pop 对称：回卷后归还全空扩展段（仅 LEVEL 0，见 scope_pop 注释）。
-#if KMM_THREAD_SAFETY_LEVEL == 0
-    kmm_v4_pool_trim_tail(g_kmm_v4_offset);
-#endif
 }
 #endif
 
@@ -1865,26 +1919,21 @@ static inline void kmm_v4_scope_pop(void) {
     if (stack->depth == 0) {
         g_kmm_v4_scope_owner = NULL;
     }
-    // 修复 Bug A：若 push 后发生过 refill，当前 base != saved_base，
-    // 旧 offset 指向的是已废弃的旧 TLAB，直接恢复会覆盖新 TLAB 中的存活对象。
-    // 性能优化（循环内分配超线性修复）：不 invalidate TLAB，而是保留新 TLAB
-    // 并重置 offset=0，供下次 scope/循环迭代复用。旧 TLAB 内存仍在 pool 中，
-    // 其中的存活对象不受影响（bump allocator 不释放单对象）。
-    // 旧逻辑每次都 invalidate 导致循环内每次迭代都重新 refill，pool offset
-    // 不断增长，pool_fit_offset O(n) 遍历段链 → 超线性开销。
+    // 修复 Bug A：若 push 后发生过 refill，当前 base != saved_base。
+    // 旧逻辑只把当前 TLAB offset 置 0，保存 base 指向的旧 TLAB 从此被弃用；
+    // 现在交给 TLAB 登记表：重新激活 saved_base（若仍登记在 suspended[]），
+    // 并把当前已整体死亡的 TLAB 退役到 free_list，供后续 refill 复用。
+    // 目标未命中时仍回退到 offset=0（安全：只泄漏容量，不误用存活对象）。
     if (g_kmm_v4_thread_heap.base == saved_base) {
         g_kmm_v4_thread_heap.offset = saved_offset;
     } else {
-        g_kmm_v4_thread_heap.offset = 0;
+        kmm_v4_tlab_restore_to(saved_base, saved_offset);
     }
-    // Task #25：回卷后检查段链尾部，归还全空扩展段。
-    // 仅 LEVEL 0 触发：回卷只作用于 thread heap，全局 offset 不回退，
-    // 尾段几乎不可能满足归还条件，检查开销为一次空链判空；LEVEL>=1
-    // 下并发 refill 可能在摘除瞬间遍历段链（use-after-free 窗口），
-    // 故不在此触发，归还由 kmm_v4_reset（单线程上下文约定）承担。
-#if KMM_THREAD_SAFETY_LEVEL == 0
-    kmm_v4_pool_trim_tail(g_kmm_v4_offset);
-#endif
+    // 注意：这里不再调用 kmm_v4_pool_trim_tail。全局 offset 是单调递增的
+    // 跨段额度计数器，回卷只作用于线程 TLAB，不会让全局 offset 回退；
+    // 用当前全局 offset 作水位永远摘不掉任何尾段，反而在 LEVEL 0 的每个
+    // 循环/作用域出口做一次无意义段链遍历。扩展段归还统一由 kmm_v4_reset
+    // （单线程上下文，offset 归零后 trim_tail(0)）承担。
 }
 
 // 作用域自动清理（支持嵌套，每层独立管理）

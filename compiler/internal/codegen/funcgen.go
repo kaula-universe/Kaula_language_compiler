@@ -462,6 +462,15 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	savedUseMark := fg.codegen.kmmUseMark
 	savedMarkStack := fg.codegen.kmmMarkStack
 	savedFnMark := fg.codegen.kmmFnMark
+	// 链构造器状态同样是 per-function 的：嵌套函数生成会经
+	// ResetFunctionLocalState 清空它，返回后必须恢复外层函数的链信息，
+	// 否则外层 return/字段写穿的闸门会失效。
+	savedChain := fg.codegen.currentChain
+	savedChainReceivers := fg.codegen.chainReceivers
+	defer func() {
+		fg.codegen.currentChain = savedChain
+		fg.codegen.chainReceivers = savedChainReceivers
+	}()
 	fg.codegen.kmmScopeDepth = 0
 	fg.codegen.funcEmitsPromote = false
 	fg.codegen.funcEmitsInternalPromote = false
@@ -484,6 +493,13 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// 必须在函数体生成前就位——stmtgen 在变量声明处就要据此决定
 	// kmm_v4_alloc 分配到 bump 区还是 survivor 段。
 	fg.codegen.SetReturnEscapedLocals(scan.ReturnEscaped)
+	// 返回链逃逸：注入当前函数的链构造器信息 / 安全接收者集合。
+	// 必须在 shouldUseKMMScopeForFunc 之前就位——链构造函数要显式关闭
+	// 函数级 KMM 作用域（节点归调用方 bump 区所有）。
+	if rescan := fg.codegen.ReturnEscapeScanResult(); rescan != nil {
+		fg.codegen.SetChainFunctionInfo(rescan.ChainFuncs[stmt.Name])
+		fg.codegen.SetChainReceivers(rescan.Receivers[stmt.Name])
+	}
 	// 进入时必须重置，避免嵌套函数继承外层模式
 	fg.codegen.SetKMMUseMark(false)
 
@@ -563,6 +579,12 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 		// 跨函数分析：结合函数签名判断是否需要 KMM
 		useKMM := fg.shouldUseKMMScopeForFunc(stmt.Name, stmt.Body)
+		if fg.codegen.InChainFunction() {
+			// 链构造器：整条链留在调用方 bump 区，函数自身绝不建立 KMM
+			// 作用域。否则函数出口的 mark_restore/scope_pop 会回收刚建好的
+			// 链节点（调用方仍持有），而节点本来应由调用方作用域统一回收。
+			useKMM = false
+		}
 		if useKMM {
 			// 递归环内函数改用 mark 回收：必须在函数体生成之前决定，
 			// 因为函数体内所有块级/函数级 KMM 区间都要按同一模式发射。
@@ -988,6 +1010,21 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 
 	// main 始终返回 int，设置返回类型供 return 语句生成使用
 	fg.codegen.currentFunctionReturnType = "int"
+
+	// 链逃逸状态：main 不是链构造器，但可能是安全的链接收者宿主
+	// （stretch/longLived/a）。保存/恢复外层状态，避免嵌套函数生成后污染。
+	prevChain := fg.codegen.currentChain
+	prevChainReceivers := fg.codegen.chainReceivers
+	fg.codegen.SetChainFunctionInfo(nil)
+	if rescan := fg.codegen.ReturnEscapeScanResult(); rescan != nil {
+		fg.codegen.SetChainReceivers(rescan.Receivers[stmt.Name])
+	} else {
+		fg.codegen.SetChainReceivers(nil)
+	}
+	defer func() {
+		fg.codegen.currentChain = prevChain
+		fg.codegen.chainReceivers = prevChainReceivers
+	}()
 
 	// 静态分析：与普通函数路径保持一致，暴露别名组给回收路径，
 	// 防止 main 中别名变量被重复释放（double-free）

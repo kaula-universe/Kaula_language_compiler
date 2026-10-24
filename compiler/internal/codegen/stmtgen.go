@@ -260,6 +260,12 @@ func (sg *StatementGenerator) upgradeAllocSiteForReturnEscape(name, initValue st
 	if name == "" || initValue == "" {
 		return initValue
 	}
+	// 链构造器：节点必须留在调用方 bump 区，即使该变量同时被 P-A 判为
+	// return-escaped 也不能升级到 survivor 段（否则整条链的回收语义断裂：
+	// 根节点在 survivor、子树在 bump，调用方回卷后子树悬垂）。
+	if sg.codegen.IsChainValueVar(name) {
+		return initValue
+	}
 	if !sg.codegen.IsReturnEscapedLocal(name) {
 		return initValue
 	}
@@ -1398,6 +1404,11 @@ func (sg *StatementGenerator) generateObjectStatement(stmt *ast.ObjectStatement)
 
 // generateIfStatement 生成 if 语句代码
 func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string {
+	// 链构造器：分支内分配的节点属于整条返回链，绝不能在这里发射
+	// mark_restore / survivor checkpoint（分支退出时链还在被构建/返回）。
+	if sg.codegen.InChainFunction() {
+		return sg.generateChainIfStatement(stmt)
+	}
 	condCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
 
 	/*
@@ -1606,6 +1617,40 @@ func (sg *StatementGenerator) generateIfStatement(stmt *ast.IfStatement) string 
 
 	code += "\n"
 	return code
+}
+
+// generateChainIfStatement 链构造器内的 if：纯 C 分支，不建立任何 KMM
+// 区间。链节点的所有权在调用方，分支退出时回收就等于把返回值里的子树
+// 提前释放。
+func (sg *StatementGenerator) generateChainIfStatement(stmt *ast.IfStatement) string {
+	condCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Condition)
+	indent := sg.codegen.indentString()
+
+	var code strings.Builder
+	code.WriteString("if (")
+	code.WriteString(condCode)
+	code.WriteString(") {\n")
+
+	sg.codegen.indent++
+	sg.codegen.EnterScope("if_body")
+	code.WriteString(sg.generateStmtsWithLiveness(stmt.Body, nil))
+	sg.codegen.ExitScope()
+	sg.codegen.indent--
+	code.WriteString(indent)
+	code.WriteString("}")
+
+	if len(stmt.Else) > 0 {
+		code.WriteString(" else {\n")
+		sg.codegen.indent++
+		sg.codegen.EnterScope("else_body")
+		code.WriteString(sg.generateStmtsWithLiveness(stmt.Else, nil))
+		sg.codegen.ExitScope()
+		sg.codegen.indent--
+		code.WriteString(indent)
+		code.WriteString("}")
+	}
+	code.WriteString("\n")
+	return code.String()
 }
 
 // generateWhileStatement 生成 while 语句代码
@@ -2935,6 +2980,13 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 	retType := sg.codegen.currentFunctionReturnType
 	isVoid := (retType == "" || retType == "void" || retType == "Void")
 
+	// 链构造器 return 快路径：返回的节点归调用方 bump 区所有。
+	// 不做 promote、不做 per-object free、不回卷 survivor/bump、不弹 KMM 栈——
+	// 这些都是「对象归本帧所有」的处理，与链构造器的所有权模型相反。
+	if sg.codegen.InChainFunction() {
+		return sg.generateChainReturnStatement(stmt, isVoid)
+	}
+
 	var b strings.Builder
 
 	// 尾调用改写（TCO）判定：受 KMM 作用域托管的自递归函数，把 `return f(...)`
@@ -3108,6 +3160,19 @@ func (sg *StatementGenerator) generateReturnStatementNormal(stmt *ast.ReturnStat
 	return b.String()
 }
 
+// generateChainReturnStatement 链构造器的 return：只求值并返回，不回收。
+// 整条链的存活期由调用方作用域决定（见 return_escape_scan.go）。
+func (sg *StatementGenerator) generateChainReturnStatement(stmt *ast.ReturnStatement, isVoid bool) string {
+	indent := sg.codegen.indentString()
+	if isVoid || stmt.Value == nil {
+		return indent + "return;\n"
+	}
+	exprCode := sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+	retType := sg.codegen.currentFunctionReturnType
+	exprCode = sg.codegen.expressionGenerator.liftInterfaceValue(retType, exprCode, stmt.Value)
+	return indent + "return " + exprCode + ";\n"
+}
+
 // generateBreakStatement 生成 break 语句代码
 func (sg *StatementGenerator) generateBreakStatement(stmt *ast.BreakStatement) string {
 	return sg.codegen.indentString() + "break;\n"
@@ -3169,6 +3234,18 @@ func (sg *StatementGenerator) generateNonLocalStatement(stmt *ast.NonLocalStatem
 func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) string {
 	sg.codegen.EnterScope("block")
 	indent := sg.codegen.indentString()
+
+	// 链构造器：块内分配归属整条返回链，不做块级 mark_restore，
+	// 也不发射 per-object free（由调用方作用域统一回收）。
+	if sg.codegen.InChainFunction() {
+		code := "{\n"
+		sg.codegen.indent++
+		code += sg.generateStmtsWithLiveness(stmt.Statements, nil)
+		sg.codegen.indent--
+		code += indent + "}\n"
+		sg.codegen.ExitScope()
+		return code
+	}
 
 	adapter := sg.codegen.GetSORAdapter()
 	needsKMM := false
@@ -3471,6 +3548,13 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 			}
 		}
 		if effIdx != stmtIndex {
+			continue
+		}
+		// 链托管变量：整条链由调用方作用域统一回收，绝不逐对象释放。
+		// （深释放 cb 会遍历整棵子树，既浪费 O(n) 又可能释放仍在链上的
+		//  节点；浅释放对 bump 指针虽是 no-op，但没有任何收益。）
+		if sg.codegen.IsChainManagedVar(name) {
+			freed[name] = true
 			continue
 		}
 		if freed[name] {
@@ -3988,6 +4072,11 @@ func (sg *StatementGenerator) generateAssignEscapeStatement(stmt *ast.Expression
 	}
 	srcIdent, okSrc := unwrapAssignSource(bin.Right)
 	if !okSrc {
+		return ""
+	}
+	// 链托管变量（链构造器内的节点 / 调用方安全接收者）：对象归调用方
+	// bump 区所有，任何 promote/浅拷贝都会把根节点搬出链、子树留在回卷区。
+	if sg.codegen.IsChainManagedVar(srcIdent.Name) {
 		return ""
 	}
 	// 源必须是指针/String 类型的局部变量
@@ -4671,6 +4760,10 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 		if !sg.isPointerTyped(name) && !sg.isStringTyped(name) {
 			continue
 		}
+		// 链托管变量：归属调用方 bump 区，由调用方作用域回卷统一回收。
+		if sg.codegen.IsChainManagedVar(name) {
+			continue
+		}
 		// 已被 early free 的变量跳过（防止重复释放）
 		if sg.codegen.IsEarlyFreed(name) {
 			continue
@@ -4820,6 +4913,11 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 			}
 			seen[name] = true
 			if returnedAliases[name] {
+				continue
+			}
+			// 链托管变量：归属调用方 bump 区，return 路径不得回收。
+			// 链构造器内所有节点、以及调用方接收者都属于这一类。
+			if sg.codegen.IsChainManagedVar(name) {
 				continue
 			}
 			// F8 修复：函数参数是借用指针，所有权属于调用方，不应在 return 时释放

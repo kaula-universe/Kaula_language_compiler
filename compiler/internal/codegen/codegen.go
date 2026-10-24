@@ -497,6 +497,19 @@ type CodeGenerator struct {
 	// 入口重置）。命中者的 kmm_v4_alloc 分配点直接改发射 kmm_v4_alloc_global
 	// （survivor 段），消除"bump 一份 + return 浅拷贝一份"的 promote 复制链。
 	returnEscapedLocals map[string]bool
+
+	// returnEscapeScan: 全局「返回链逃逸」预扫描结果（见 return_escape_scan.go）。
+	// 识别「链构造器」函数与安全接收者，让整条递归构造的指针链留在调用方
+	// bump 区：不逐对象 promote、不逐对象 free、不发射块级 mark_restore。
+	returnEscapeScan *ReturnEscapeScan
+	// currentChain: 当前正在生成的函数若是链构造器，指向其信息；否则 nil。
+	// 逐函数重建（ResetFunctionLocalState），供 stmtgen 的 alloc/free/promote
+	// 路径查询。
+	currentChain *ChainFunctionInfo
+	// chainReceivers: 当前非链构造函数中「安全接收链指针」的局部变量集合。
+	// 这些变量只读/借用链，不把链带出当前 bump 区；promote 与 per-object
+	// free 必须跳过（否则浅拷贝只复制根节点、子树留在会被回卷的 bump 区）。
+	chainReceivers map[string]bool
 	// deepPromoteCBBlock: 组装好的 cb 代码块（注释 + 全部 static cb 定义），
 	// 由 Generate 尾部在 classImplCode 之前输出（修复先使用后定义问题）
 	deepPromoteCBBlock string
@@ -1973,6 +1986,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	astutil.FlattenDeclarations(program)
 
 	cg.program = program
+	// 返回链逃逸预扫描：必须在 FlattenDeclarations 之后（多声明符已展开），
+	// 在任何函数体生成之前。纯 AST 遍历，不依赖符号表；识别链构造器后，
+	// codegen 让整条链留在调用方 bump 区（见 return_escape_scan.go）。
+	cg.returnEscapeScan = ScanReturnEscapeChains(program)
 	cg.usedThirdPartyLibs = make(map[string]bool)
 	cg.lambdaCounter = 0
 	cg.objectLiteralCounter = 0
@@ -3403,6 +3420,81 @@ func (cg *CodeGenerator) ResetFunctionLocalState() {
 	cg.chainEscapingVars = make(map[string]bool)
 	cg.escapedVars = make(map[string]bool)
 	cg.returnEscapedLocals = make(map[string]bool)
+	cg.currentChain = nil
+	cg.chainReceivers = make(map[string]bool)
+}
+
+// SetReturnEscapeScan 注入全局「返回链逃逸」预扫描结果（见 return_escape_scan.go）。
+// 由 Generate 在 AST 展平之后、函数体生成之前调用一次。
+func (cg *CodeGenerator) SetReturnEscapeScan(scan *ReturnEscapeScan) {
+	cg.returnEscapeScan = scan
+}
+
+// ReturnEscapeScanResult 返回全局链逃逸预扫描结果（可能为 nil）。
+func (cg *CodeGenerator) ReturnEscapeScanResult() *ReturnEscapeScan {
+	return cg.returnEscapeScan
+}
+
+// SetChainFunctionInfo 设置当前函数的链构造器信息（nil = 非链构造函数）。
+func (cg *CodeGenerator) SetChainFunctionInfo(info *ChainFunctionInfo) {
+	cg.currentChain = info
+}
+
+// SetChainReceivers 设置当前非链构造函数中安全的链接收者变量集合。
+func (cg *CodeGenerator) SetChainReceivers(names map[string]bool) {
+	if len(names) == 0 {
+		cg.chainReceivers = make(map[string]bool)
+		return
+	}
+	cg.chainReceivers = names
+}
+
+// IsChainBuilderFunc 判断 name 是否为已确认的链构造器（全局预扫描结果）。
+func (cg *CodeGenerator) IsChainBuilderFunc(name string) bool {
+	if name == "" {
+		return false
+	}
+	if cg.currentChain != nil && cg.currentChain.Name == name {
+		return true
+	}
+	return cg.returnEscapeScan != nil && cg.returnEscapeScan.ChainFuncs[name] != nil
+}
+
+// InChainFunction 报告当前正在生成的函数是否为链构造器。
+func (cg *CodeGenerator) InChainFunction() bool {
+	return cg.currentChain != nil
+}
+
+// IsChainValueVar 报告 name 是否为当前链构造器的「链值」（bump 分配/链调用结果）。
+func (cg *CodeGenerator) IsChainValueVar(name string) bool {
+	if name == "" || cg.currentChain == nil {
+		return false
+	}
+	return cg.currentChain.Values[name]
+}
+
+// IsChainReceiver 报告 name 是否为当前函数中安全的链接收者变量。
+func (cg *CodeGenerator) IsChainReceiver(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.chainReceivers[name]
+}
+
+// IsChainManagedVar 报告 name 的对象是否归「调用方 bump 区链」所有：
+// 链构造器内的 Values/Owned，或非链构造函数中的安全接收者。
+//
+// 用途：promote 与 per-object free 的统一闸门。命中者不得浅拷贝到
+// survivor 段（只复制根节点、子树仍留在会被回卷的 bump 区），也不得
+// 逐对象释放（整条链由调用方作用域统一回收）。
+func (cg *CodeGenerator) IsChainManagedVar(name string) bool {
+	if name == "" {
+		return false
+	}
+	if cg.currentChain != nil && cg.currentChain.Owned[name] {
+		return true
+	}
+	return cg.chainReceivers[name]
 }
 
 // SetReturnEscapedLocals 以预扫描结果替换当前函数的 return 逃逸局部变量集合

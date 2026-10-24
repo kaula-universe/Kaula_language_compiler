@@ -605,6 +605,27 @@ kmm_v4_survivor_free(q);
 同一函数内分配的相似大小对象连续命中），命中后跳过桶号计算与懒分配检查，
 是 O(1) 无分支。
 
+### 2.3.1 TLAB 区域登记表（跨 base 回卷回收）
+
+`mark_restore` / `scope_pop` 跨 TLAB（区间内 refill 换过 base）时，旧实现
+只把当前 TLAB 的 offset 置 0，保存 base 指向的旧 TLAB 从此弃用，剩余容量
+永久浪费。现在每线程维护一张 TLAB 登记表：
+
+- `suspended[]`：refill 换下、仍可能承载「目标 mark 之前存活对象」的
+  TLAB，登记其存活水位 `offset` 与分配序号 `seq`；
+- `free_list[]`：因回卷到更旧 mark 而整体死亡的 TLAB，下一次 refill
+  直接 LIFO 复用，不推进全局 offset。
+
+恢复时**不抢占当前 TLAB**：命中 suspended 目标只收缩其存活水位，当前
+TLAB 置 offset=0 原地复用（否则循环里会在两块 TLAB 之间乒乓 refill）；
+`seq` 比目标新的 suspended 条目整体退役。`base == NULL` 时 suspended 全部
+退役，当前 TLAB 保留。目标未命中 / 表满回退到 offset=0，只泄漏容量，不会
+错误复用仍存活对象。
+
+登记表只存 TLS 元数据，**不向 TLAB payload 写 header**（payload 每个字节
+都可能被上层存活对象引用）。完整设计、安全性论证与实测见
+[P3 返回链去逐对象提升 + TLAB 区域回收](perf/P3-chain-tlab-reclaim.md)。
+
 ## 2.4 survivor 段为什么是 slab 而不是 bump
 
 早期 survivor 段是全局池的一个 bump 子区域，**单调增长、永不回收**——
