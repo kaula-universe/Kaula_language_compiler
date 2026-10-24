@@ -57,6 +57,9 @@ KMM_TLS kmm_scope_stack_t g_kmm_v4_scope_stack = { .frames = {{0, 0}}, .depth = 
 // 修复 #1：per-thread heap 替代旧的 TLAB
 KMM_TLS kmm_thread_heap_t g_kmm_v4_thread_heap = { NULL, 0, 0, 0 };
 
+// TLAB 区域登记表（元数据独立于 payload，绝不向对象区写 header）
+KMM_TLS kmm_tlab_registry_t g_kmm_v4_tlab_registry = {0};
+
 // ==================== Survivor 段（方案 A：slab 分配器） ====================
 #ifdef KMM_V4_STATIC_POOL
 // 静态池：slab 桶 slots + 大对象区统一从一块静态数组划分
@@ -1032,6 +1035,53 @@ void kmm_v4_pool_trim_tail(size_t watermark) {
 // 每个线程从全局池批量获取一块内存，后续分配在 TLS 内完成，无原子操作
 // 只有当 thread heap 耗尽时才回退到全局 CAS
 
+// 把当前 TLAB 登记为 suspended（refill 换下但可能仍是活跃 mark 的 base）。
+// 登记表满时直接丢弃：该 TLAB 的容量泄漏，但不会影响正确性（目标未命中
+// 时 kmm_v4_tlab_restore_to 会回退到 offset=0）。
+static void kmm_v4_tlab_suspend_current(void) {
+    kmm_thread_heap_t* th = &g_kmm_v4_thread_heap;
+    if (th->base == NULL || th->capacity == 0) {
+        return;
+    }
+    kmm_tlab_registry_t* reg = &g_kmm_v4_tlab_registry;
+    if (KMM_V4_UNLIKELY(reg->suspended_count >= KMM_V4_TLAB_REGISTRY_CAP)) {
+        return;
+    }
+    reg->suspended[reg->suspended_count].base = th->base;
+    reg->suspended[reg->suspended_count].capacity = th->capacity;
+    reg->suspended[reg->suspended_count].offset = th->offset;
+    reg->suspended[reg->suspended_count].seq = reg->current_seq;
+    reg->suspended_count++;
+}
+
+// 把一块整体死亡的 TLAB 放入 free_list（LIFO）。表满则丢弃容量：安全泄漏。
+static void kmm_v4_tlab_retire(uint8_t* base, size_t capacity) {
+    if (base == NULL || capacity == 0) {
+        return;
+    }
+    kmm_tlab_registry_t* reg = &g_kmm_v4_tlab_registry;
+    if (KMM_V4_UNLIKELY(reg->free_count >= KMM_V4_TLAB_REGISTRY_CAP)) {
+        return;
+    }
+    reg->free_list[reg->free_count].base = base;
+    reg->free_list[reg->free_count].capacity = capacity;
+    reg->free_list[reg->free_count].offset = 0;
+    reg->free_list[reg->free_count].seq = 0;
+    reg->free_count++;
+}
+
+// 从 free_list（LIFO）取一块已整体死亡的 TLAB；无可用项返回 {NULL,0}。
+static kmm_tlab_region_t kmm_v4_tlab_pop_free(void) {
+    kmm_tlab_registry_t* reg = &g_kmm_v4_tlab_registry;
+    kmm_tlab_region_t r = { NULL, 0 };
+    if (reg->free_count == 0) {
+        return r;
+    }
+    reg->free_count--;
+    r = reg->free_list[reg->free_count];
+    return r;
+}
+
 // 为当前线程填充 thread heap
 // min_needed: 最小需要的字节数（用于大对象直接分配）
 // 返回 thread heap 的起始地址，如果失败返回 NULL
@@ -1054,6 +1104,15 @@ uint8_t* kmm_v4_thread_heap_refill(size_t min_needed) {
         return NULL;
     }
 
+    uint8_t* new_base = NULL;
+    size_t   new_capacity = heap_size;
+
+    // 优先复用因回卷整体退役的 TLAB：不推进全局 offset，也不触碰 payload。
+    kmm_tlab_region_t reused = kmm_v4_tlab_pop_free();
+    if (reused.base != NULL) {
+        new_base = reused.base;
+        new_capacity = reused.capacity;
+    } else {
 #if KMM_THREAD_SAFETY_LEVEL >= 1
     // 使用 CAS 从全局池（含扩展段，Task #17）获取一大块内存。
     // thread heap 永远是单次 refill 的完整段块（不跨段拼接），
@@ -1076,14 +1135,7 @@ uint8_t* kmm_v4_thread_heap_refill(size_t min_needed) {
     if (new_offset <= g_kmm_v4_pool_capacity) {
         pool_commit_up_to(new_offset);
     }
-
-    // 设置当前线程的 thread heap
-    g_kmm_v4_thread_heap.base = pool_offset_to_addr(fit);
-    g_kmm_v4_thread_heap.offset = 0;
-    g_kmm_v4_thread_heap.capacity = heap_size;
-    g_kmm_v4_thread_heap.total_allocated += heap_size;
-
-    return g_kmm_v4_thread_heap.base;
+    new_base = pool_offset_to_addr(fit);
 #else
     // 单线程模式：直接分配（Task #17：额度不足时自动扩容）
     size_t offset = g_kmm_v4_offset;
@@ -1099,14 +1151,113 @@ uint8_t* kmm_v4_thread_heap_refill(size_t min_needed) {
     if (new_offset <= g_kmm_v4_pool_capacity) {
         pool_commit_up_to(new_offset);
     }
-
-    g_kmm_v4_thread_heap.base = pool_offset_to_addr(fit);
-    g_kmm_v4_thread_heap.offset = 0;
-    g_kmm_v4_thread_heap.capacity = heap_size;
-    g_kmm_v4_thread_heap.total_allocated += heap_size;
-
-    return g_kmm_v4_thread_heap.base;
+    new_base = pool_offset_to_addr(fit);
 #endif
+    }
+
+    // 新 TLAB 已就位，再换下当前 TLAB。顺序很重要：全局池分配失败时
+    // 直接返回 NULL，当前 TLAB 保持原样，不会在 suspended[] 里留下
+    // 指向“仍是 current”的重复登记。
+    kmm_v4_tlab_suspend_current();
+
+    kmm_tlab_registry_t* reg = &g_kmm_v4_tlab_registry;
+    reg->next_seq++;
+    reg->current_seq = reg->next_seq;
+
+    g_kmm_v4_thread_heap.base = new_base;
+    g_kmm_v4_thread_heap.offset = 0;
+    g_kmm_v4_thread_heap.capacity = new_capacity;
+    g_kmm_v4_thread_heap.total_allocated += new_capacity;
+
+    return new_base;
+}
+
+// ==================== 跨 base 回卷 / TLAB 复用 ====================
+// 把逻辑回卷点恢复为 {base, offset}，并回收被回卷区间内的 TLAB 区域。
+//
+// 关键取舍：**不抢占当前 TLAB**。若每次回卷到旧 base 都把当前 TLAB 换掉，
+// 循环体（每轮开始时重新 mark_save）会在 A/B 两块 TLAB 之间乒乓 refill，
+// 实测 bt12 从 220ms 退化到 570ms。因此命中 suspended[] 时：
+//   - 目标 TLAB 只收缩存活水位到 offset（其后的分配已死亡）；
+//   - 当前 TLAB 的分配全部位于回卷点之后 → offset=0，原地复用；
+//   - seq 比目标新的 suspended 条目全部整体死亡 → 退役到 free_list。
+// 既回收整块死亡的 TLAB，又让循环稳定落在同一块当前 TLAB 上。
+__attribute__((used))
+void kmm_v4_tlab_restore_to(uint8_t* base, size_t offset) {
+    kmm_thread_heap_t* th = &g_kmm_v4_thread_heap;
+    kmm_tlab_registry_t* reg = &g_kmm_v4_tlab_registry;
+
+    if (base == NULL) {
+        // 目标 mark 保存于任何 TLAB 之前：本线程现存的所有 TLAB 都在回卷
+        // 区间内。但不能销毁当前 TLAB——旧语义（base 不匹配只置 offset=0）
+        // 会保留它供下一轮复用；若这里清空 base/capacity，每次循环
+        // mark_restore(NULL) 都会重新 refill（flat churn 2000 轮 × 128KB，
+        // kmm_v4_usage 线性增长）。
+        // suspended[] 中的 TLAB 全部整体死亡，退役到 free_list 供 refill
+        // 原地复用；当前 TLAB 保留为 current，offset=0。
+        for (size_t i = 0; i < reg->suspended_count; i++) {
+            kmm_v4_tlab_retire(reg->suspended[i].base, reg->suspended[i].capacity);
+        }
+        reg->suspended_count = 0;
+        th->offset = 0;
+        return;
+    }
+
+    if (th->base == base) {
+        th->offset = offset;
+        return;
+    }
+
+    // 目标必须在 suspended[] 中：suspended 按 refill 顺序追加，但这里按
+    // seq 判断新旧，不依赖数组顺序（swap/压缩都可能打乱）。
+    size_t idx = reg->suspended_count;
+    while (idx > 0) {
+        if (reg->suspended[idx - 1].base == base) {
+            break;
+        }
+        idx--;
+    }
+    if (idx == 0) {
+        // 目标未命中（登记表满/陈旧 mark）：旧语义，安全但泄漏当前前缀。
+        th->offset = 0;
+        return;
+    }
+    idx--;
+    kmm_tlab_region_t target = reg->suspended[idx];
+    uint64_t target_seq = target.seq;
+
+    // 压缩 suspended：保留比目标更老的条目；比目标新的条目整体死亡，
+    // 全部退役到 free_list。目标本身单独处理。
+    size_t write = 0;
+    for (size_t read = 0; read < reg->suspended_count; read++) {
+        if (read == idx) {
+            continue;
+        }
+        kmm_tlab_region_t e = reg->suspended[read];
+        if (e.seq > target_seq) {
+            kmm_v4_tlab_retire(e.base, e.capacity);
+        } else {
+            reg->suspended[write++] = e;
+        }
+    }
+    reg->suspended_count = write;
+
+    if (offset == 0 || target.offset == 0) {
+        // 目标 TLAB 在回卷点之前没有任何存活对象：整块退役。
+        kmm_v4_tlab_retire(target.base, target.capacity);
+    } else {
+        // 保留 target 的存活前缀：仅把水位收缩到 offset（不回写 payload）。
+        target.offset = offset;
+        if (reg->suspended_count < KMM_V4_TLAB_REGISTRY_CAP) {
+            reg->suspended[reg->suspended_count++] = target;
+        } else {
+            kmm_v4_tlab_retire(target.base, target.capacity);
+        }
+    }
+
+    // 当前 TLAB 中的所有分配都在回卷点之后，整体死亡；保留它作为当前
+    // TLAB 并从 0 复用，避免下一轮循环再次 refill。
+    th->offset = 0;
 }
 
 // 失效当前线程的 thread heap（用于 reset 等操作）
@@ -1115,6 +1266,12 @@ void kmm_v4_thread_heap_invalidate(void) {
     g_kmm_v4_thread_heap.base = NULL;
     g_kmm_v4_thread_heap.offset = 0;
     g_kmm_v4_thread_heap.capacity = 0;
+    // reset/destroy 后所有 TLAB 归属都已失效，登记表一并清空。这里只清
+    // 计数，不写 payload；旧表项残留指针不会被读取。
+    g_kmm_v4_tlab_registry.suspended_count = 0;
+    g_kmm_v4_tlab_registry.free_count = 0;
+    g_kmm_v4_tlab_registry.next_seq = 0;
+    g_kmm_v4_tlab_registry.current_seq = 0;
 }
 
 // ==================== 核心分配 ====================

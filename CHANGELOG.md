@@ -10,6 +10,22 @@
 ## [Unreleased]
 
 ### Added
+- **返回链「去逐对象提升」（P3）**：新增返回链逃逸预扫描
+  （`compiler/internal/codegen/return_escape_scan.go`），识别
+  `bottomUpTree` 这类「整条返回值就是一条新对象链」的构造器。命中后整条链
+  留在调用方 bump 区：不建函数级 KMM 作用域、不发射 return promote、不逐
+  对象 `survivor_free`、不发块/if 的 `mark_restore`；调用方仍用作用域与循环
+  回卷一次性回收。识别为全有或全无的保守集合，任何别名/外部写穿/非借用
+  调用/逃逸接收者都会退回原 P-A 路径。
+  - 配套 borrow-only 不动点：只读遍历（如 `itemCheck`）可接收链指针；
+    空返回类型不会被假设为安全。
+  - 调用方接收者按「最内层可见声明」按路径归属，支持兄弟块同名重声明。
+  - 文档：`docs/perf/P3-chain-tlab-reclaim.md`；回归单测覆盖扫描、生成形态
+    与 C 级 TLAB 行为。
+- **TLAB 区域登记表**：KMM V4 新增每线程 `suspended[]` / `free_list[]`
+  元数据（`src/kmm_scoped_allocator_v4.{h,c}`），跨 base 回卷时回收旧
+  TLAB 容量：命中目标只收缩存活水位、当前 TLAB 原地复用，整体死亡的 TLAB
+  退役后由下一次 refill LIFO 复用。元数据只在 TLS，绝不写 TLAB payload。
 - **CLBG 三边对比基准套件**（`test/bench/clbg/`）：以 Computer Language Benchmarks Game
   官方标准题目、官方参考算法与参数，对比 **C（手动内存管理）/ Go（自动 GC）/ Kaula
   （自动内存管理）** 三边。
@@ -137,6 +153,15 @@
   任一依赖失败在全部任务收敛后统一报错（`fetchAllConcurrent` / `firstError`）。
 
 ### Performance
+- **binary-trees 指针形态热态 ~30ms（P3）**：链构造器整条留在调用方 bump
+  区后，bt10 从 348ms/5.3MB 降到 29.8ms/2.19MB，bt12 从 1714ms/3.1MB 降到
+  30.6ms/2.57MB（Windows，warm 5 次中位数，1ms 采样；首跑含缺页约 290ms）。
+  `stress_ptr_tree` 8.35s 全 checksum 对齐；`leak_*` 四例水位 growth=0
+  （`after1=afterN=131072`）。
+- **移除每轮回卷的 `pool_trim_tail` 空遍历**：`mark_restore` / `scope_pop`
+  在 LEVEL 0 不再用单调递增的全局 offset 作水位做无意义段链遍历；扩展段
+  归还统一由 `kmm_v4_reset` 的 `trim_tail(0)` 承担。TLAB 容量复用改由新增
+  登记表完成。
 - **多 TU 并行编译实测**（40 个库串联、42 个 TU、`-O2`）：
   TU 编译阶段 **2.77s → 0.72s（jobs=4 起持平，约 3.8x）**；
   冷启动整链路 1.41s（单 TU）→ 1.80s，热启动 0.42s → 0.63s。
@@ -164,6 +189,10 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **Windows 上 `TestDetectCCFamilyCachesResult` 误报**：该用例用 `#!/bin/sh`
+  脚本伪造编译器来统计 `--version` 调用次数，Windows 无 `sh`，cmd 执行脚本
+  失败后 `detectCCFamily` 回退到 clang，与被测的进程内缓存行为无关。现按
+  `runtime.GOOS == "windows"` 跳过，缓存语义仍由 Linux/macOS CI 覆盖。
 - **PCH 在 gcc 上未适配（`-cc gcc` 构建直接失败）**：PCH 的生成/消费语法是
   编译器私有的，此前只按 clang 实现：
   - 消费侧 clang 用 `-include-pch <file>` 显式点名 `.gch`；gcc 没有这个选项

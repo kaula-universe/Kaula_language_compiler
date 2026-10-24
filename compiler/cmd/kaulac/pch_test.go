@@ -91,6 +91,12 @@ func TestDetectCCFamilyFakeCompilers(t *testing.T) {
 // 探测结果必须进程内缓存：每次构建多起一个 --version 子进程是可避免的
 // 固定税（多 TU 路径虽只探一次，库调用/格式化等路径会重复进来）。
 func TestDetectCCFamilyCachesResult(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// 本用例用 `#!/bin/sh` 脚本伪造编译器来数探测次数：Windows 无 sh，
+		// cmd 会把脚本当成批处理执行并失败，detectCCFamily 回退到 clang，
+		// 与被测的缓存行为无关。缓存语义由 Linux/macOS CI 覆盖。
+		t.Skip("fake #!/bin/sh compiler is POSIX-only; cache logic is covered on Linux/macOS")
+	}
 	dir := t.TempDir()
 	counter := filepath.Join(dir, "probe.count")
 	cc := filepath.Join(dir, "countcc")
