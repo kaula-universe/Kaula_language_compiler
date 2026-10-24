@@ -1,0 +1,159 @@
+// nbody.kl — CLBG n-body 标准算法的 Kaula 实现
+//
+// 算法来源：CLBG n-body（ Christoph Bauer 的 C 版 / Go Authors 的 Go 版）。
+// 三边（C 手动 / Go GC / Kaula SOR 自动内存管理）同算法同参数：
+//   5 行星（sun/jupiter/saturn/uranus/neptune），symplectic 积分器，
+//   advance() 成对引力 + 位置更新，energy() 动能+势能，offset_momentum() 动量归零。
+// 输出：CLBG 标准两行 %.9f（offset 后 energy、n 步后 energy）。
+//
+// 参数：N_STEPS 由 runner 在编译前注入（CLBG 官方标准值 5000000）。
+// 本题无堆分配——5 个行星是栈上结构体数组，是"纯计算"基线边，
+// 用来隔离「代码生成质量」与「内存管理策略」两个变量。
+import std.io
+import std.format
+import std.math
+import std.memory
+
+struct Planet {
+    x: f64
+    y: f64
+    z: f64
+    vx: f64
+    vy: f64
+    vz: f64
+    mass: f64
+}
+
+const PI = 3.141592653589793
+const DAYS_PER_YEAR = 365.24
+
+// advance: 成对引力（i<j 全对），再统一更新位置。与 C 参考逐公式一致
+// （mag = dt / (distance*distance*distance)，不用 dSquared*distance 变体，
+//  保证三边浮点位级一致）。
+fn advance(Planet* bodies, i64 nbodies, f64 dt) {
+    i64 i = 0
+    while i < nbodies {
+        i64 j = i + 1
+        while j < nbodies {
+            f64 dx = bodies[i].x - bodies[j].x
+            f64 dy = bodies[i].y - bodies[j].y
+            f64 dz = bodies[i].z - bodies[j].z
+            f64 distance = std.math.sqrt(dx * dx + dy * dy + dz * dz)
+            f64 mag = dt / (distance * distance * distance)
+            bodies[i].vx = bodies[i].vx - dx * bodies[j].mass * mag
+            bodies[i].vy = bodies[i].vy - dy * bodies[j].mass * mag
+            bodies[i].vz = bodies[i].vz - dz * bodies[j].mass * mag
+            bodies[j].vx = bodies[j].vx + dx * bodies[i].mass * mag
+            bodies[j].vy = bodies[j].vy + dy * bodies[i].mass * mag
+            bodies[j].vz = bodies[j].vz + dz * bodies[i].mass * mag
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i64 k = 0
+    while k < nbodies {
+        bodies[k].x = bodies[k].x + dt * bodies[k].vx
+        bodies[k].y = bodies[k].y + dt * bodies[k].vy
+        bodies[k].z = bodies[k].z + dt * bodies[k].vz
+        k = k + 1
+    }
+}
+
+fn energy(Planet* bodies, i64 nbodies) f64 {
+    f64 e = 0.0
+    i64 i = 0
+    while i < nbodies {
+        e = e + 0.5 * bodies[i].mass * (bodies[i].vx * bodies[i].vx + bodies[i].vy * bodies[i].vy + bodies[i].vz * bodies[i].vz)
+        i64 j = i + 1
+        while j < nbodies {
+            f64 dx = bodies[i].x - bodies[j].x
+            f64 dy = bodies[i].y - bodies[j].y
+            f64 dz = bodies[i].z - bodies[j].z
+            f64 distance = std.math.sqrt(dx * dx + dy * dy + dz * dz)
+            e = e - (bodies[i].mass * bodies[j].mass) / distance
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return e
+}
+
+// offset_momentum: 把系统总动量搬到 sun 上（CLBG 参考的 offset_momentum）。
+fn offsetMomentum(Planet* bodies, i64 nbodies, f64 solarMass) {
+    f64 px = 0.0
+    f64 py = 0.0
+    f64 pz = 0.0
+    i64 i = 0
+    while i < nbodies {
+        px = px + bodies[i].vx * bodies[i].mass
+        py = py + bodies[i].vy * bodies[i].mass
+        pz = pz + bodies[i].vz * bodies[i].mass
+        i = i + 1
+    }
+    bodies[0].vx = -px / solarMass
+    bodies[0].vy = -py / solarMass
+    bodies[0].vz = -pz / solarMass
+}
+
+fn main() {
+    f64 solarMass = 4.0 * PI * PI
+    f64 dpy = DAYS_PER_YEAR
+    i64 nSteps = N_STEPS_PLACEHOLDER
+
+    Planet bodies[5]
+    // sun
+    bodies[0].x = 0.0
+    bodies[0].y = 0.0
+    bodies[0].z = 0.0
+    bodies[0].vx = 0.0
+    bodies[0].vy = 0.0
+    bodies[0].vz = 0.0
+    bodies[0].mass = solarMass
+    // jupiter
+    bodies[1].x = 4.84143144246472090e+00
+    bodies[1].y = -1.16032004402742839e+00
+    bodies[1].z = -1.03622044471123109e-01
+    bodies[1].vx = 1.66007664274403694e-03 * dpy
+    bodies[1].vy = 7.69901118419740425e-03 * dpy
+    bodies[1].vz = -6.90460016972063023e-05 * dpy
+    bodies[1].mass = 9.54791938424326609e-04 * solarMass
+    // saturn
+    bodies[2].x = 8.34336671824457987e+00
+    bodies[2].y = 4.12479856412430479e+00
+    bodies[2].z = -4.03523417114321381e-01
+    bodies[2].vx = -2.76742510726862411e-03 * dpy
+    bodies[2].vy = 4.99852801234917238e-03 * dpy
+    bodies[2].vz = 2.30417297573763929e-05 * dpy
+    bodies[2].mass = 2.85885980666130812e-04 * solarMass
+    // uranus
+    bodies[3].x = 1.28943695621391310e+01
+    bodies[3].y = -1.51111514016986312e+01
+    bodies[3].z = -2.23307578892655734e-01
+    bodies[3].vx = 2.96460137564761618e-03 * dpy
+    bodies[3].vy = 2.37847173959480950e-03 * dpy
+    bodies[3].vz = -2.96589568540237556e-05 * dpy
+    bodies[3].mass = 4.36624404335156298e-05 * solarMass
+    // neptune
+    bodies[4].x = 1.53796971148509165e+01
+    bodies[4].y = -2.59193146099879611e+01
+    bodies[4].z = 1.79258772950371181e-01
+    bodies[4].vx = 2.68067772490389322e-03 * dpy
+    bodies[4].vy = 1.62824170038242295e-03 * dpy
+    bodies[4].vz = -9.51592254519715870e-05 * dpy
+    bodies[4].mass = 5.15138902046611451e-05 * solarMass
+
+    offsetMomentum(bodies, 5, solarMass)
+
+    char* buf = as<char*>(std.memory.kmm_v4_alloc(64))
+    std.format.format_printf(buf, 64, "%.9f", energy(bodies, 5))
+    std.io.println(buf)
+
+    i64 i = 0
+    while i < nSteps {
+        advance(bodies, 5, 0.01)
+        i = i + 1
+    }
+
+    std.format.format_printf(buf, 64, "%.9f", energy(bodies, 5))
+    std.io.println(buf)
+}

@@ -10,6 +10,22 @@
 ## [Unreleased]
 
 ### Added
+- **CLBG 三边对比基准套件**（`test/bench/clbg/`）：以 Computer Language Benchmarks Game
+  官方标准题目、官方参考算法与参数，对比 **C（手动内存管理）/ Go（自动 GC）/ Kaula
+  （自动内存管理）** 三边。
+  - `run_bench.py` 统一 runner：三边编译（`kaulac -release`/`clang -O3`、`gcc -O3`、
+    `go build`）→ 第 1 轮 stdout 三边 checksum 校验 → `/usr/bin/time -v` 多轮采样取
+    中位数（wall clock + peak RSS）→ 生成 `REPORT.md`。
+  - 4 题全 PASS：binary-trees N=21、n-body 5M 步、spectral-norm N=5500 三边逐字节
+    一致；fannkuch-redux n=12 按行子集口径（C 参考不输出 checksum 行）。
+  - Kaula 标准参数侧为 arena 数组形态——标准递归指针形态在 N=21 下受
+    「survivor 段只增不减」限制 OOM，arena 是当前可跑完整标准参数的形态
+    （1.65s / 65MB，输出与 C/Go 一致）；指针形态另在 N=10 与 C 逐字节一致，
+    证明 arena 改写语义等价。
+  - 实测（AMD EPYC 9K65，3 轮中位数）：n-body Kaula 0.31s vs C 0.24s vs Go 0.36s；
+    spectral-norm 1.35s vs 1.33s vs 3.91s；fannkuch 单线程口径 37.1s vs 34.7s
+    （Go 参考 `GOMAXPROCS(4)` 并行 7.0s，并行度差异不可比）；binary-trees arena
+    1.65s/65MB vs C 15.9s/257MB vs Go 31.8s/206MB。
 - **prefix 宏值约束 `tree(param = :value)`**：`tree(...)` 注解支持冒号前缀的字面量值
   约束，分派时用 comptime 求值实参并按字符串结果选规则——`comptime(shape_of(v))`
   算出的值可直接决定宏展开哪条骨架（值域反哺宏分派的反向跨）。回归用例

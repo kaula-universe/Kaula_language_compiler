@@ -1,0 +1,107 @@
+// fannkuchredux.kl — CLBG fannkuch-redux 标准算法的 Kaula 实现
+//
+// 算法来源：CLBG fannkuch-redux（Joseph Piché 由 Mazurov 算法转 C 的版本，
+// 逐行对照翻译，保证三边同算法同结果）。CLBG 官方 Go 版为并行（720 chunk +
+// goroutine），本套件统一**串行口径**，隔离并行度变量，只比语言与内存管理。
+// 参数：n 由 runner 编译前注入（CLBG 官方标准值 12）。
+//
+// 算法：perm1 按进位式递推逐个生成排列；对每个排列数 perm[0] 引导的
+// 翻煎饼次数；checksum 按 permCount 奇偶加减；maxFlips 取最大。
+// 输出与 C 参考逐字节一致：
+//   <checksum>
+//   Pfannkuchen(<n>) = <maxFlips>
+//
+// 内存：3 个 n 长度 i32 栈数组（perm/perm1/count），无堆分配——
+// 与 n-body 同属"隔离内存变量"的对照边，压测小数组 + 密集整数运算的
+// 代码生成质量。
+import std.io
+import std.format
+import std.memory
+
+
+
+fn fannkuch(n: i64) i64 {
+    i32 perm[32]
+    i32 perm1[32]
+    i32 count[32]
+
+    i64 maxFlips = 0
+    i64 checksum = 0
+    i64 permCount = 0
+    i64 r = n
+
+    i64 i = 0
+    while i < n {
+        perm1[i] = as<i32>(i)
+        i = i + 1
+    }
+
+    while true {
+        // r 回落到 1：count[1..n-1] 全部就位
+        while r != 1 {
+            count[r - 1] = as<i32>(r)
+            r = r - 1
+        }
+        i64 j = 0
+        while j < n {
+            perm[j] = perm1[j]
+            j = j + 1
+        }
+
+        // 数翻煎饼次数
+        i64 flips = 0
+        i64 k = perm[0]
+        while k != 0 {
+            i64 k2 = (k + 1) / 2
+            i64 a = 0
+            while a < k2 {
+                i32 t = perm[a]
+                perm[a] = perm[k - a]
+                perm[k - a] = t
+                a = a + 1
+            }
+            flips = flips + 1
+            k = perm[0]
+        }
+        if maxFlips < flips {
+            maxFlips = flips
+        }
+        if permCount % 2 == 0 {
+            checksum = checksum + flips
+        } else {
+            checksum = checksum - flips
+        }
+
+        // 进位式递推生成下一个排列
+        while true {
+            if r == n {
+                char* buf = as<char*>(std.memory.kmm_v4_alloc(64))
+                std.format.format_printf(buf, 64, "%lld", checksum)
+                std.io.println(buf)
+                std.format.format_printf(buf, 64, "Pfannkuchen(%lld) = %lld", n, maxFlips)
+                std.io.println(buf)
+                return maxFlips
+            }
+            i32 perm0 = perm1[0]
+            i = 0
+            while i < r {
+                i64 jj = i + 1
+                perm1[i] = perm1[jj]
+                i = jj
+            }
+            perm1[r] = perm0
+            count[r] = count[r] - 1
+            if count[r] > 0 {
+                break
+            }
+            r = r + 1
+        }
+        permCount = permCount + 1
+    }
+    return maxFlips
+}
+
+fn main() {
+    i64 n = N_PLACEHOLDER
+    fannkuch(n)
+}

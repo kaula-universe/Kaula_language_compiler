@@ -3,10 +3,12 @@
 // 标准算法：bottomUpTree(depth) 递归分配节点，左/右子树递归建树；
 // itemCheck(tree) 递归遍历求和。反复建/弃短命树，测分配与回收吞吐。
 //
-// 注意：当前 Kaula SOR 对跨函数返回递归分配的指针存在 use-after-free bug
-// （n.left = l 后 early free l，depth >= 8 时悬垂指针被覆写 -> segfault）。
-// depth <= 7 结果正确；depth >= 8 需待 SOR 修复。大规模 benchmark 用
-// test/btree_bench.kl 的 arena 数组模式（无此 bug，67M 节点/树可跑）。
+// 历史：曾因 SOR 对跨函数返回递归分配指针误判 liveness（n.left = l 后
+// early free l）在 depth >= 8 时 UAF 段错误；已修复（字段写穿产生的
+// 字段引用随宿主存活，源对象豁免 early free 与 return 回收），
+// depth 12/14 回归见 test/recursive_ptr_tree.kl。
+// CLBG 标准参数的三边对比套件见 test/bench/clbg/（arena 形态跑标准参数，
+// 本形态为指针语义验证）。
 import std.io
 import std.memory
 import std.time

@@ -776,7 +776,7 @@ slab 位图用 `KMM_V4_ALIGN64`（`__attribute__((aligned(8)))`）显式对齐�
   且**不递归释放子树**。后果是「反复建/弃指针树」型 workload（CLBG
   binary-trees 的标准用法）在 Kaula 边内存单调增长——标准参数
   （depth 12..15）理论驻留 ~17GB，实测 OOM 打断。规避方式是数组 arena
-  模式（`test/btree_bench.kl`，67M 节点/树、内存 O(1)），或用户自行在
+  模式（`test/bench/clbg/kaula/binary_trees.kl`，67M 节点/树、内存 O(1)），或用户自行在
   宿主侧逐节点 `survivor_free`。这是与 Go GC（可回收）的本质差异，
   属于待补能力，不是待优化项。
 - **slab 桶槽位固定**（每桶 256 槽）。极端的单尺寸分布会频繁触发桶满→
