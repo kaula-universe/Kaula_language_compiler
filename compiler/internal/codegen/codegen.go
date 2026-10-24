@@ -3275,7 +3275,7 @@ func (cg *CodeGenerator) IsWrittenThroughContainer(name string) bool {
 	return cg.writtenThroughContainers[name]
 }
 
-// SetChainLinkedVars 记录被写穿进安全局部容器的源对象名集合。
+// SetChainLinkedVars 记录被写穿进字段/元素的源对象名集合。
 func (cg *CodeGenerator) SetChainLinkedVars(names map[string]bool) {
 	if names == nil {
 		cg.chainLinkedVars = make(map[string]bool)
@@ -3284,8 +3284,9 @@ func (cg *CodeGenerator) SetChainLinkedVars(names map[string]bool) {
 	cg.chainLinkedVars = names
 }
 
-// IsChainLinked 报告 name 是否为「已挂在链上的对象」（方案 A'）。
-// 这类对象的 early free 必须豁免：对象由容器持有，游标不再引用并不代表它死了。
+// IsChainLinked 报告 name 是否为「已被写穿进宿主字段/元素的对象」。
+// 这类对象的 early free 必须豁免：字段存储产生随宿主存活的引用，
+// 局部变量不再被引用并不代表对象死了（宿主逃逸时引用最长命，豁免最必要）。
 func (cg *CodeGenerator) IsChainLinked(name string) bool {
 	if name == "" {
 		return false
@@ -3295,8 +3296,9 @@ func (cg *CodeGenerator) IsChainLinked(name string) bool {
 
 // SetChainEscapingVars 记录「写穿容器的链首被带出函数」的容器名集合。
 //
-// 与 ChainLinked 的区别：ChainLinked 说的是**挂进去的对象**（nd）不能提前释放；
-// ChainEscaping 说的是**容器本身**（cur）不能提前释放——因为 cur 指向的
+// 与 ChainLinked 的区别：ChainLinked 说的是**被写穿进宿主字段的对象**（nd）
+// 不能提前释放——字段引用随宿主存活；ChainEscaping 说的是**容器本身**（cur）
+// 不能提前释放——因为 cur 指向的
 // 正是链首节点，而 `i64 head = as<i64>(cur); ...; return head` 把链首
 // 交了出去。见 SafeContainerScan.ChainEscaping 的注释。
 func (cg *CodeGenerator) SetChainEscapingVars(names map[string]bool) {

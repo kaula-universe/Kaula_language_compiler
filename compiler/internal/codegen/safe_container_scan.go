@@ -38,13 +38,17 @@ type SafeContainerScan struct {
 	// （出现过 `obj.field = p` / `arr[i] = p` 且 obj 是安全局部容器）。
 	// 游标推进（cur = nd）据此与链一起放弃 promote（方案 A'）。
 	WrittenThrough map[string]bool
-	// ChainLinked: 被**写穿进安全局部容器**的源对象名集合
-	// （`cur.next = nd` 里的 nd）。
+	// ChainLinked: 被**写穿进任何字段/元素**的源对象名集合
+	// （`cur.next = nd` 里的 nd、`n.left = l` 里的 l）。
 	//
-	// 用途：这些对象已经从游标变量"转交"给了容器（链表结构），
-	// 游标变量自身随后不再持有它们，liveness 分析会把游标处的最后使用点
-	// 误判为对象死亡点、发射 early free —— 在方案 A' 下直接造成 UAF
-	// （对象还在链上）。故 ChainLinked 成员必须豁免 early free。
+	// 用途：字段存储产生一个随宿主存活的字段引用，对象的真实死亡点是
+	// 宿主死亡点而非局部变量的词法最后使用点。liveness 若按后者判定就会
+	// 在写穿点后把仍被宿主字段引用的对象回收 → 悬垂。ChainLinked 成员
+	// 必须豁免 early free。
+	//
+	// 与宿主是否逃逸无关：`n.left = l; return n` 里 n 逃逸，l 的字段引用
+	// 最长命，豁免反而最必要。宿主是否逃逸只影响宿主自身的 promote/回卷
+	// 待遇（ChainEscaping），不波及挂进去的源对象。
 	ChainLinked map[string]bool
 	// Escaped: 逃逸过的名字集合（含别名闭包传播后的结果）。
 	//
@@ -147,13 +151,31 @@ func ScanSafeLocalContainers(body []ast.Statement, params []string) SafeContaine
 		}
 	}
 
-	// ChainLinked：只保留那些"写穿目标确为安全局部容器"的源对象。
-	// 非安全容器上的写穿走旧路径（源已 promote），early free 由既有逻辑处理。
+	// ChainLinked：**所有**写穿目标（字段/元素）里存入的源对象，一律豁免
+	// early free——不论宿主是否逃逸。
+	//
+	// 语义说明（与 yield 的区别，勿混）：
+	//   `n.left = l` 不是 yield，l 没有交出所有权；它只是往 n 的字段里
+	//   存了一个指针值。但这个存储动作产生了一个**随宿主存活的字段引用**：
+	//   宿主 n 活多久，n.left 里的地址就可读多久。词法 liveness 只看到
+	//   "l 此后不再出现在源码里"，看不到这个字段引用，于是在写穿点后
+	//   回收 l 指向的对象 → 宿主字段悬垂。
+	//
+	//   正确的死亡判据是「所有引用（含字段引用）都消亡」，不是「局部
+	//   变量的词法最后使用点」。本豁免即该判据的落地：对象的死亡点
+	//   推迟到宿主死亡点。
+	//
+	// 宿主逃逸（`n.left = l; ...; return n`）时字段引用最长命，恰恰是
+	// 最需要保活的场景。旧判据要求"宿主是安全局部容器"（即不逃逸），
+	// 正好在这种场景下失灵：递归建树 depth>=8 时回收掉子树节点，
+	// 下一轮分配覆写该槽位 → 读树踩空（depth<=7 slab 未耗尽不暴露）。
+	//
+	// 代价：宿主字段引用的对象不再有机会提前回收，只能随宿主/作用域尾
+	// 统一回收。这是"用回收粒度换正确性"的保守取舍——与 ChainLinked
+	// 机制既有的安全姿态一致（最坏只是该回收的没回收，绝不会悬垂）。
 	cl := make(map[string]bool)
 	for _, pair := range s.writeThroughPairs {
-		if safe[pair.container] {
-			cl[pair.source] = true
-		}
+		cl[pair.source] = true
 	}
 
 	// ChainEscaping 结算：写穿容器的**链首**随返回值离开函数时，
@@ -178,7 +200,8 @@ func ScanSafeLocalContainers(body []ast.Statement, params []string) SafeContaine
 			value, container := p[0], p[1]
 			if writtenThroughNow[container] && returned[value] {
 				chainEscaping[container] = true
-				// 该容器不再安全：退出 Safe，并撤销由它派生的写穿/链上判定。
+				// 该容器不再安全：退出 Safe（写穿不再享受"不 promote"待遇，
+				// 退回 promote + 回卷旧路径）。
 				delete(safe, container)
 				delete(wt, container)
 				// 关键：把容器并入逃逸集合。这一处改动同时修好两个下游消费者：
@@ -189,13 +212,10 @@ func ScanSafeLocalContainers(body []ast.Statement, params []string) SafeContaine
 				escaped[container] = true
 			}
 		}
-		// 派生集合同步收敛：wt 已是 safe 子集；cl 需剔除来源容器已退出的项。
-		for _, pair := range s.writeThroughPairs {
-			if !safe[pair.container] {
-				delete(cl, pair.source)
-			}
-		}
 	}
+	// 注意：ChainLinked 不再随 safe 收敛——字段引用延命与宿主是否逃逸无关，
+	// 容器退出 safe 只影响它自身的 promote/回卷待遇，不影响挂进去的源对象
+	// 的豁免（否则宿主逃逸时源对象反被暴露给 early free，正是本判据要修的 bug）。
 
 	return SafeContainerScan{
 		Safe:           safe,

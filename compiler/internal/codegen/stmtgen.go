@@ -4748,14 +4748,25 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 				b.WriteString(" (escaped / aliased with an outgoing object) */\n")
 				continue
 			}
-			// 已提升到幸存段的变量：所有权已移交给被调方/全局，出口不得回收
-			if sg.codegen.IsPromoted(name) {
-				b.WriteString(indent)
-				b.WriteString("/* structural: skip survivor_free on return for ")
-				b.WriteString(name)
-				b.WriteString(" (promoted, ownership moved to survivor) */\n")
-				continue
-			}
+		// 已提升到幸存段的变量：所有权已移交给被调方/全局，出口不得回收
+		if sg.codegen.IsPromoted(name) {
+			b.WriteString(indent)
+			b.WriteString("/* structural: skip survivor_free on return for ")
+			b.WriteString(name)
+			b.WriteString(" (promoted, ownership moved to survivor) */\n")
+			continue
+		}
+		// 方案 A'：被写穿进宿主字段/元素的对象跳过（字段引用随宿主存活，
+		// return 处回收 = 释放宿主仍引用的对象 → 悬垂）。
+		// 与 generateEarlyFreeForStmtIndex 的 ChainLinked 豁免对称：字段存储
+		// 产生随宿主存活的引用，局部变量不再被引用 ≠ 对象死亡。
+		if sg.codegen.IsChainLinked(name) {
+			b.WriteString(indent)
+			b.WriteString("/* structural: skip survivor_free on return for ")
+			b.WriteString(name)
+			b.WriteString(" (field-referenced by host, reclaim deferred to host) */\n")
+			continue
+		}
 			// SOR 优化层：ShouldSkipSurvivorFree 网关
 			if sorActive {
 				if d := adapter.GetVarDecision(name); d != nil {
