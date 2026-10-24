@@ -98,3 +98,4 @@ test/bench/service3/__pycache__/
 # service3 的原始测量结果同样「本机本时段」，但本轮报告引用它，
 # 因此 results.json 明确入库（不 ignore）；report_tables.md 是生成物，入库便于 diff。
 scratch/
+core.*

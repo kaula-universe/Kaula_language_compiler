@@ -148,6 +148,23 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **递归指针树跨函数返回 UAF（`n.left = l` 写穿点回收子树）**：
+  字段写穿不是 `yield`——`l` 没有交出所有权，但 `n.left = l` 这个存储动作
+  产生了一个**随宿主 n 存活的字段引用**。词法 liveness 只看到"l 此后不再
+  出现在源码里"，看不到该字段引用，于是在写穿点与 return 点回收 l 指向的
+  对象 → 宿主字段悬垂。旧判据（ChainLinked）要求"宿主是安全局部容器"，
+  而 `return n` 使 n 逃逸，l/r 反而拿不到豁免——宿主逃逸时字段引用最长命，
+  恰恰是最需要保活的场景。表现为递归建树 depth>=8 必崩（slab 耗尽后分配
+  覆写已回收槽位），depth<=7 因 slab 未耗尽不暴露。
+  - `safe_container_scan.go`：ChainLinked 不再要求宿主是安全局部容器，
+    所有写穿源对象一律豁免；宿主是否逃逸只影响宿主自身的 promote/回卷
+    待遇（ChainEscaping），不波及挂进去的源对象（删除随 safe 收敛的撤销逻辑）。
+  - `stmtgen.go`：return 路径回收循环补对称闸门——字段引用的对象跳过
+    `survivor_free on return`，回收推迟到宿主。
+  - 回归用例 `test/recursive_ptr_tree.kl`（depth=10 单树 + depth=8×20 轮
+    反复建弃 + depth=12×3 深树，checksum 精确收敛）；压测
+    `test/stress_ptr_tree.kl`（CLBG 标准参数，depth 12..15）。
+  - 全量回归：`run_tests.py` 134/134（67 程序 × default/sor 双模式）通过。
 - **反射五件套此前不可用（生成代码无法编译）**：`type_name` / `type_kind` /
   `field_count` / `field_name` / `field_type` 的代码生成直接返回裸 C 字符串
   `"..."`，与 Kaula 的 `String`（SSO 结构体）不兼容：
