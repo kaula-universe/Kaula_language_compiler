@@ -2,12 +2,19 @@
 
 编译器通过 `stdlib.json` 管理标准库函数签名，支持自动发现第三方库。实现位于 `internal/stdlib/` 目录。
 
-当前标准库包含 **62 个模块**，超过 **800+** 个函数，分为标准库和 freestanding 无依赖标准库两大体系：
+当前标准库包含 **67 个模块键**（62 个 `std.*` + 5 个 `freestanding.*`）、**1547 个已登记函数签名**，分为标准库和 freestanding 无依赖标准库两大体系：
 
-| 体系 | 模块数 | 特点 |
-|------|--------|------|
-| **std (标准库)** | 57 | 完整功能，依赖 libc，用户态应用首选 |
-| **freestanding (无依赖库)** | 5 | 零依赖，弱符号，裸机/内核/嵌入式首选 |
+| 体系 | 模块数 | 函数签名 | 特点 |
+|------|--------|----------|------|
+| **std (标准库)** | 62 | 1426 | 完整功能，依赖 libc，用户态应用首选 |
+| **freestanding (无依赖库)** | 5 | 121 | 零依赖，弱符号，裸机/内核/嵌入式首选 |
+| **合计** | **67** | **1547** | `std/` 下共 60 个物理目录（含未登记目录） |
+
+> 统计口径：模块与函数签名以 `compiler/stdlib.json` 为准，运行
+> `python scripts/stdlib_stats.py` 复核。`std/` 下 60 个物理目录中，57 个目录登记了
+> 62 个 `std.*` 模块（`hash` / `container` / `testing` / `toml` / `xml` 等目录拆出
+> `.ext` 子模块）；`gui`、`i18n` 已有实现目录但尚未登记进 `stdlib.json`，`prefix` 为编译器内部模块。
+> 已知缺口：`std.logging` 仅有头文件占位（`logging.c` 为空），`std.serialize` 已实现但函数签名尚未登记。
 
 ## 设计
 
@@ -82,7 +89,7 @@ type Module struct {
 }
 ```
 
-模块示例：`std.io`、`std.math`、`std.memory`、`std.string` 等 57 个模块。
+模块示例：`std.io`、`std.math`、`std.memory`、`std.string` 等 62 个模块。
 
 ### freestanding 无依赖标准库（`--freestanding` 模式）
 
@@ -476,3 +483,4 @@ func ValidateConfig(config *StdlibConfig) []string {
 3. **使用自动分析**：为新库生成初始配置
 4. **检查依赖**：确保模块依赖关系正确
 5. **版本控制**：将 `stdlib.json` 纳入版本控制
+6. **统计校验**：改动 `stdlib.json` 或 `std/` 目录后运行 `python scripts/stdlib_stats.py --check`，并同步 README 与本文件中的统计数字

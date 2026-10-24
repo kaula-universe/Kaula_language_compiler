@@ -89,8 +89,8 @@
 - **String SSO**（≤15 字节零堆分配）；StringBuilder 暴露。
 - **空安全 / 静态分析增强**：路径敏感空安全快照恢复、多项空安全优化与静态分析能力。
 - **新 stdlib 模块**：algebra / algorithm / db / ipaddress / obj / panic / hash / limit /
-  serialize 等（57 个物理 std/ 目录；stdlib.json 共登记 67 个模块键：62 个 `std.*` + 5 个
-  `freestanding.*`），1500+ 函数。
+  serialize 等（60 个物理 std/ 目录；stdlib.json 共登记 67 个模块键：62 个 `std.*` + 5 个
+  `freestanding.*`），1547 个函数签名。
 - **跨运行时基准框架**：CONC vs Go GMP vs Rust Tokio（含 F1–F13 实测发现）。
 - **公开 ABI 预留字段**：`Spendable`、`FastAllocator`、`KaulaRuntimeConfig`、`KaulaMetrics`、
   `KaulaResumeResult`、`KaulaHandle`、`KaulaTask` 末尾新增 `uint64_t reserved[4]`，后续加字段不破坏栈分配尺寸。

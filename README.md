@@ -2,13 +2,15 @@
 
 <div align="center">
 
-<img src="logo.png" alt="Kaula Logo" width="200">
+![Kaula Logo](logo.png)
 
 **更现代、更好用的 C**
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8.svg?logo=go)](https://go.dev/)
-[![Language](https://img.shields.io/badge/runtime-C-A8B9CC.svg?logo=c)](https://en.wikipedia.org/wiki/C_(programming_language))
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
+
+![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8.svg?logo=go)
+
+![Language](https://img.shields.io/badge/runtime-C-A8B9CC.svg?logo=c)
 
 </div>
 
@@ -37,12 +39,14 @@ Kaula 是一门**静态类型的系统级编程语言**，编译到 C，由 Clan
 #### Linux
 
 **Debian/Ubuntu:**
+
 ```bash
 sudo dpkg -i kaula_{version}_amd64.deb
 sudo apt-get install -f  # 如有依赖问题
 ```
 
 **Fedora/RHEL:**
+
 ```bash
 sudo rpm -i kaula-{version}-1.x86_64.rpm
 ```
@@ -52,6 +56,7 @@ sudo rpm -i kaula-{version}-1.x86_64.rpm
 下载并打开 `kaula-{version}-macos-x64.dmg`，将 Kaula 拖入 Applications。
 
 然后将以下内容添加到你的 `~/.zshrc` 或 `~/.bash_profile`：
+
 ```bash
 export PATH="/Applications/Kaula.app/Contents/MacOS/bin:$PATH"
 ```
@@ -74,7 +79,7 @@ cd compiler && go build -o ../build/bin/kaulac ./cmd/kaulac/
 import std.io
 
 fn main() {
-    println("Hello, Kaula!")
+    std.io.println("Hello, Kaula!")
 }
 ```
 
@@ -101,10 +106,10 @@ kaulac --version
 
 Kaula 使用双版本号系统：
 
-| 类型 | 格式 | 示例 | 说明 |
-|------|------|------|------|
-| **发布版本** | `v1.0.x` | `v1.0.42` | x = 自 v1.0 以来的提交次数 |
-| **快照版本** | `YY.M.DD-branch-hash` | `26.8.23-master-67ffac3` | 构建时自动生成 |
+| 类型       | 格式                    | 示例                       | 说明                 |
+| -------- | --------------------- | ------------------------ | ------------------ |
+| **发布版本** | `v1.0.x`              | `v1.0.42`                | x = 自 v1.0 以来的提交次数 |
+| **快照版本** | `YY.M.DD-branch-hash` | `26.8.23-master-67ffac3` | 构建时自动生成            |
 
 版本号自动生成：
 
@@ -148,8 +153,11 @@ kaulac pkg list
 ```
 
 `pkg add` 自动识别 HTTP(S) 归档（`.tar.gz` / `.tgz` / `.tar` / `.zip`），底层走 **Range 分片并发下载**
+
 （worker 池，默认 `min(16, CPU 核数)`，可用 `-j <n>` 或环境变量 `KAULAC_DL_CONCURRENCY` 调整），
+
 再安全解压、自动分析与构建。服务器不支持 Range 时自动退化为单连接流式下载；分片逐段重试、
+
 失败清理临时文件，保证数据收敛、不留半成品，并做 sha256/大小双重校验。
 
 ### 项目依赖
@@ -171,6 +179,7 @@ kaulac pkg list
 ```
 
 支持两种依赖格式：
+
 - **版本约束**：简单字符串（如 `"0.12"` 或 `"^1.0"`），从注册表下载
 - **Git 仓库**：对象格式，指定 git URL、标签、分支或 commit
 
@@ -186,6 +195,7 @@ kaulac pkg lock
 ```
 
 `pkg fetch` / `pkg update` 用 worker 池**并发拉取多个依赖**（默认 8，环境变量
+
 `KAULAC_FETCH_CONCURRENCY` 调整，上限 32），结果仍按声明顺序输出，保证确定性。
 
 ### 本地路径覆盖
@@ -302,6 +312,7 @@ kaulac fmt check main.kl
 ```
 
 格式化特性：
+
 - 4 空格缩进
 - Import 自动排序（`std.*` 优先）
 - 二元表达式括号保留（基于优先级）
@@ -313,19 +324,19 @@ kaulac fmt check main.kl
 
 ## 编译选项
 
-| 选项 | 说明 |
-|------|------|
-| `--opt <level>` | 优化级别 O0/O1/O2/O3 |
-| `--release` | Release 模式（-O3） |
-| `--sor` | 启用 SOR 所有权分析 |
-| `--debug` | 生成 DWARF 调试符号 |
+| 选项                      | 说明                    |
+| ----------------------- | --------------------- |
+| `--opt <level>`         | 优化级别 O0/O1/O2/O3      |
+| `--release`             | Release 模式（-O3）       |
+| `--sor`                 | 启用 SOR 所有权分析          |
+| `--debug`               | 生成 DWARF 调试符号         |
 | `--debug-level <level>` | 调试级别：line-tables/full |
-| `--sourcemap` | 生成源码映射 |
-| `--freestanding` | 裸机模式 |
-| `--no-cache` | 禁用增量编译 |
-| `--offline` | 强制离线模式 |
-| `--online` | 强制在线模式 |
-| `--verbose` | 详细输出 |
+| `--sourcemap`           | 生成源码映射                |
+| `--freestanding`        | 裸机模式                  |
+| `--no-cache`            | 禁用增量编译                |
+| `--offline`             | 强制离线模式                |
+| `--online`              | 强制在线模式                |
+| `--verbose`             | 详细输出                  |
 
 ### 配置文件
 
@@ -361,23 +372,27 @@ kaulac --init
 
 ## 标准库
 
-57 个物理标准库模块目录（stdlib.json 共登记 67 个模块键：62 个 `std.*` + 5 个 `freestanding.*`），1500+ 函数，覆盖从系统编程到 Web 开发：
+`std/` 下 60 个物理目录，`compiler/stdlib.json` 共登记 **67 个模块键**（**62 个 `std.*`** + **5 个 `freestanding.*`**）与 **1547 个函数签名**（含 `.ext` 扩展模块），覆盖从系统编程到 Web 开发：
 
-| 分类 | 模块 |
-|------|------|
-| **内存** | memory（KMM V4 per-thread heap 作用域分配器，比 malloc 快 2-20x）、bitset |
-| **容器** | container（Vector/LinkedList/HashMap/Stack）、deque、heap、trie、graph |
-| **字符串** | string、regex、unicode、template |
-| **I/O** | io、fs、path |
-| **并发** | concurrent（线程/锁/原子/线程池/Channel/Future）、async、parallel |
-| **网络** | net、web、ssh、tls |
-| **序列化** | json、toml、xml、protobuf、msgpack、serialize |
-| **数学** | math、cmath、decimal、random |
-| **编码** | encoding、crypto、compress、archive |
-| **系统** | system、subprocess、cli、time、datetime、calendar |
-| **类型** | option、traits、base、error |
-| **运行时** | vo、prefix、task、format、logging、testing |
+| 分类               | 模块                                                                                                            |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| **内存**           | memory（KMM V4 per-thread heap 作用域分配器，比 malloc 快 2-20x）、bitset                                                 |
+| **容器**           | container（Vector/LinkedList/HashMap/Stack）、container.ext、deque、heap、trie、graph                                |
+| **字符串**          | string、regex、unicode、template                                                                                 |
+| **算法**           | algorithm（排序/查找/遍历）、algebra（bigint/rational/poly/matrix/几何）                                              |
+| **I/O**          | io、fs、path、cli                                                                                               |
+| **并发**           | concurrent（线程/锁/原子/线程池/Channel/Future）、async、parallel、task                                               |
+| **网络**           | net、web、ssh、tls、ipaddress                                                                                   |
+| **序列化**          | json、toml、toml.ext、xml、xml.ext、protobuf、msgpack、serialize（已实现，函数签名待登记）                                  |
+| **数学**           | math、cmath、decimal、random                                                                                     |
+| **编码与安全**       | encoding、crypto、hash、hash.ext、compress、archive                                                              |
+| **系统**           | system、subprocess、time、datetime、calendar                                                                     |
+| **数据**           | db（SQLite/MySQL/PostgreSQL 统一接口）                                                                            |
+| **类型与错误**       | option、traits、base、error、panic、limit、obj                                                                   |
+| **运行时**          | format、logging（接口占位，尚未实现）、testing、testing.ext                                                         |
 | **Freestanding** | freestanding.base、freestanding.memory、freestanding.string、freestanding.math、freestanding.io（无依赖，弱符号，裸机/托管双环境） |
+
+> 统计口径：模块键与函数签名以 `compiler/stdlib.json` 为准（`python scripts/stdlib_stats.py` 可复核）。`std/` 共 60 个物理目录，其中 57 个目录登记了 62 个 `std.*` 模块（部分目录拆出 `.ext` 子模块）；`gui`、`i18n` 已有实现目录但尚未登记进 `stdlib.json`，`prefix` 为编译器内部模块。
 
 ---
 
@@ -395,6 +410,7 @@ fn main() {
 ```
 
 特性：
+
 - **自动分析**：Clang 解析头文件生成 JSON 配置
 - **自动桥接**：C++ 头自动生成 `*_kbridge.h/.cpp`
 - **自动构建**：编译静态库 `lib<name>.a`
@@ -408,11 +424,11 @@ fn main() {
 
 ### 性能对比
 
-| 场景 | KMM V4 | malloc/free | 加速比 |
-|------|--------|-------------|--------|
-| 16B 小对象分配+回收 | 51.8 ms | 634.3 ms | **12.2x** |
-| 64B 对象分配+回收 | 65.9 ms | 661.5 ms | **10.0x** |
-| 纯分配吞吐量（64B, 1M 次） | 3.5 ms | 72.7 ms | **20.5x** |
+| 场景                | KMM V4  | malloc/free | 加速比       |
+| ----------------- | ------- | ----------- | --------- |
+| 16B 小对象分配+回收      | 51.8 ms | 634.3 ms    | **12.2x** |
+| 64B 对象分配+回收       | 65.9 ms | 661.5 ms    | **10.0x** |
+| 纯分配吞吐量（64B, 1M 次） | 3.5 ms  | 72.7 ms     | **20.5x** |
 
 ### 设计特点
 
@@ -449,10 +465,11 @@ kaula/
 │   ├── concurrency/           # 并发内核（work-stealing 调度器）
 │   └── ...
 ├── test/                      # 测试（.kl 冒烟 / 压力 / C / 内核回归）
-├── std/                       # 标准库（C 实现，57 个物理模块目录）
+├── std/                       # 标准库（C 实现，60 个物理目录）
 ├── pkglib/                    # 第三方库
 ├── scripts/
-│   └── version.py             # 版本号生成工具
+│   ├── version.py             # 版本号生成工具
+│   └── stdlib_stats.py        # 标准库统计与登记校验
 ├── tools/debug/               # GDB/LLDB 调试工具
 │   ├── kaula_pretty_printers.py
 │   └── kaula_lldb_formatters.py
@@ -470,16 +487,17 @@ kaula/
 
 ## 文档
 
-| 文档 | 说明 |
-|------|------|
-| [docs/tools/kaulac.md](docs/tools/kaulac.md) | 命令行工具完整参考 |
-| [docs/tools/package-management.md](docs/tools/package-management.md) | 包管理指南 |
-| [docs/tools/debugging.md](docs/tools/debugging.md) | 调试支持文档 |
-| [docs/tools/formatter.md](docs/tools/formatter.md) | 代码格式化文档 |
-| [docs/tools/versioning.md](docs/tools/versioning.md) | 版本号管理文档 |
-| [docs/build-config.md](docs/build-config.md) | 配置文件参考 |
-| [docs/gitee-sync.md](docs/gitee-sync.md) | GitHub/Gitee 仓库同步与镜像体系 |
-| [docs/tools/translate.py](docs/tools/translate.py) | 多语言翻译脚本 |
+| 文档                                                                   | 说明                     |
+| -------------------------------------------------------------------- | ---------------------- |
+| [docs/tools/kaulac.md](docs/tools/kaulac.md)                         | 命令行工具完整参考              |
+| [docs/tools/package-management.md](docs/tools/package-management.md) | 包管理指南                  |
+| [docs/tools/debugging.md](docs/tools/debugging.md)                   | 调试支持文档                 |
+| [docs/tools/formatter.md](docs/tools/formatter.md)                   | 代码格式化文档                |
+| [docs/tools/versioning.md](docs/tools/versioning.md)                 | 版本号管理文档                |
+| [docs/build-config.md](docs/build-config.md)                         | 配置文件参考                 |
+| [docs/stdlib-integration.md](docs/stdlib-integration.md)             | 标准库集成、模块登记与统计口径        |
+| [docs/gitee-sync.md](docs/gitee-sync.md)                             | GitHub/Gitee 仓库同步与镜像体系 |
+| [docs/tools/translate.py](docs/tools/translate.py)                   | 多语言翻译脚本                |
 
 ### 多语言文档
 
