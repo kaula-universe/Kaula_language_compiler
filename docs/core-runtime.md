@@ -769,6 +769,16 @@ slab 位图用 `KMM_V4_ALIGN64`（`__attribute__((aligned(8)))`）显式对齐�
 - **survivor 的 `rewind` 非线程安全**：回卷会释放该 checkpoint 之后的全部对象，
   调用方需确保那些对象没有被其他线程引用。多线程下安全的做法是用
   `survivor_free` 逐个释放。
+- **survivor 段只增不减，弃用的聚合树不回收**：`scope_promote_p` 是浅拷贝
+  提升——递归场景下子节点已先提升，浅拷贝恰好安全（这是 `n.left = l` 类
+  递归指针树能正确工作的原因），但提升进 survivor 段的对象没有任何自动
+  回收路径：`scope_pop` 只回卷 bump 段、`survivor_free` 只按单对象标记空闲
+  且**不递归释放子树**。后果是「反复建/弃指针树」型 workload（CLBG
+  binary-trees 的标准用法）在 Kaula 边内存单调增长——标准参数
+  （depth 12..15）理论驻留 ~17GB，实测 OOM 打断。规避方式是数组 arena
+  模式（`test/btree_bench.kl`，67M 节点/树、内存 O(1)），或用户自行在
+  宿主侧逐节点 `survivor_free`。这是与 Go GC（可回收）的本质差异，
+  属于待补能力，不是待优化项。
 - **slab 桶槽位固定**（每桶 256 槽）。极端的单尺寸分布会频繁触发桶满→
   批量归还→重试，而不是升级到更大档。这是有意的选择：避免为一个窄分布
   预留过多常驻内存。
