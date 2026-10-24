@@ -486,6 +486,17 @@ type CodeGenerator struct {
 	// deepPromoteCBCode: 合成的 static C 函数体（文件作用域，在 typedef 之后、函数代码之前输出）
 	deepPromoteCBEmitted map[string]struct{}
 	deepPromoteCBCode    strings.Builder
+	// deepFreeCBEmitted: 深释放回调（P-B 修复）的去重登记。
+	// 与 deepPromoteCBEmitted 分开：两个 cb 的合成条件不同（free 不要求
+	// 字段可提升，只要求可遍历），任一侧触发都不该连带另一侧。
+	// cb 代码同样写入 deepPromoteCBCode（同一条输出通道：typedef 之后、
+	// classImplCode 之前，见 Generate 尾部）。
+	deepFreeCBEmitted map[string]struct{}
+	// returnEscapedLocals: 本函数体内 `return <裸标识符>` 出现过的局部变量
+	// （P-A 修复·分配点提升，由 ScanSafeLocalContainers.ReturnEscaped 每函数
+	// 入口重置）。命中者的 kmm_v4_alloc 分配点直接改发射 kmm_v4_alloc_global
+	// （survivor 段），消除"bump 一份 + return 浅拷贝一份"的 promote 复制链。
+	returnEscapedLocals map[string]bool
 	// deepPromoteCBBlock: 组装好的 cb 代码块（注释 + 全部 static cb 定义），
 	// 由 Generate 尾部在 classImplCode 之前输出（修复先使用后定义问题）
 	deepPromoteCBBlock string
@@ -816,6 +827,163 @@ func (cg *CodeGenerator) EnsureDeepPromoteCB(kaulaType string) string {
 	cg.deepPromoteCBCode.WriteString(body.String())
 	cg.deepPromoteCBEmitted[kaulaType] = struct{}{}
 	return "__kaula_deeppromote_" + kaulaType
+}
+
+// EnsureDeepFreeCB 为给定 kaula class/struct 类型合成类型化深释放回调（P-B 修复）。
+// 与 EnsureDeepPromoteCB 完全同构：同一套字段遍历，动作对称——
+//
+//	promote：把字段指向的对象搬进 survivor 段并改写字段（跨作用域保活）
+//	free  ：递归释放字段指向的 survivor 段对象，释放顺序先子树后根
+//	       （根释放前宿主字段仍可读，与 promote 的 cb 调用点语义一致）
+//
+// 为什么需要它（P-B 根因）：块尾/early-free/return 路径的 per-object
+// kmm_v4_survivor_free(var) 只归还**根节点**那一个槽位。递归构造形态
+// （bottomUpTree 每层 return promote 一份）下整棵树的其余节点全部滞留
+// survivor 段，直到函数级 rewind——循环体里反复建/弃树时表现为
+// total_usage 逐轮单调爬升、跨轮 chunk 不重用（R3 起 OOM）。深释放把
+// 归还粒度从"根"扩展到"以 var 为宿主的整棵聚合结构"。
+//
+// 安全性（三层）：
+//  1. 仅递归 class 指针字段：POD 指针（i64*/f64*）长度与所有权不可知，
+//     保持浅语义（与深提升的口径一致，见 EnsureDeepPromoteCB 注释）；
+//     void* opaque 字段跳过；String 字段走 string_survivor_free（SSO 感知）。
+//  2. kmm_v4_survivor_free 对非 survivor 指针（bump 区/libc/extern）是
+//     安全 no-op——混合段树（部分节点未 promote）逐层经过无副作用。
+//  3. double-free 幂等：hdr->alive 的 CAS 1→0 抢占使第二次释放返回
+//     false 且无副作用——共享 DAG（SOR 模型外用法）不会崩溃，只可能
+//     读已归还内存（该风险由 SOR 唯一所有权模型排除 + 全量回归兜底）。
+//
+// 递归深度 = 结构高度，与 itemCheck 等用户遍历同构；循环引用结构不在
+// SOR 所有权模型内（自环在用户遍历时同样发散），不做环检测。
+func (cg *CodeGenerator) EnsureDeepFreeCB(kaulaType string) string {
+	if kaulaType == "" {
+		return ""
+	}
+	if cg.typeGenerator == nil {
+		return ""
+	}
+	// class 与 struct 都参与：struct 形态（left/right 指针树）是 P-B 的
+	// 主要受害面（repro/btreenode.kl），字段遍历只依赖声明不依赖 class 语义。
+	if !cg.typeGenerator.classTypes[kaulaType] && !cg.typeGenerator.structTypes[kaulaType] {
+		return "" // 非聚合类型：无字段可遍历
+	}
+	if _, ok := cg.deepFreeCBEmitted[kaulaType]; ok {
+		return "__kaula_deepfree_" + kaulaType // 已合成过，直接复用
+	}
+	// 递归类型（A 含 *B，B 含 *A）重入保护：先占位登记，与
+	// EnsureDeepPromoteCB 同一理由（C 允许 static 函数先使用后定义）。
+	cg.deepFreeCBEmitted[kaulaType] = struct{}{}
+	fields := cg.typeGenerator.getClassFields(kaulaType)
+	if len(fields) == 0 {
+		// 空结构体：无字段，cb 为空操作
+		cb := fmt.Sprintf(
+			"/* SOR deep-free callback for '%s' (no fields, no-op) */\n"+
+				"static void __kaula_deepfree_%s(void* obj) {\n"+
+				"    (void)obj;\n"+
+				"}\n\n",
+			kaulaType, kaulaType)
+		cg.deepPromoteCBCode.WriteString(cb)
+		return "__kaula_deepfree_" + kaulaType
+	}
+
+	cTagName := kaulaType // class 在 C 中 typedef 为 struct <Name>（typedef 名 <Name>）
+
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf(
+		"/* SOR deep-free callback for '%s' (P-B fix):\n"+
+			"   递归释放聚合结构的 survivor 段子树——浅 survivor_free 只归还根，\n"+
+			"   子树滞留 survivor 段直到函数 rewind（跨轮 chunk 不重用根因）。\n"+
+			"   顺序：先子树后根（根释放前字段仍可读）。 */\n"+
+			"static void __kaula_deepfree_%s(void* obj) {\n"+
+			"    %s* self = (%s*)obj;\n",
+		kaulaType, kaulaType, cTagName, cTagName))
+
+	hasPtrField := false
+	for _, f := range fields {
+		if f == nil || f.Name == "" {
+			continue
+		}
+		fcType := cg.typeGenerator.convertType(f.Type, f.Nullable)
+		if fcType != "" && strings.HasSuffix(fcType, "*") && fcType != "void*" {
+			hasPtrField = true
+			// f.Type 对指针字段带星号（"Node*"，见 parser 的 typeName 组装），
+			// 聚合判定必须用 pointee 裸名——直接查 classTypes[f.Type] 会因
+			// 键不匹配永远走 POD 分支（cb 退化为空操作，P-B 修复静默失效）。
+			pointeeName := strings.TrimSpace(strings.TrimRight(f.Type, "*"))
+			if cg.typeGenerator != nil && pointeeName != "" &&
+				(cg.typeGenerator.classTypes[pointeeName] || cg.typeGenerator.structTypes[pointeeName]) {
+				// class/struct 指针字段：递归释放 pointee（子树），再归还该槽位。
+				// 与深提升 cb 的子 cb 递归保持同一套可达性判定。
+				subCB := cg.EnsureDeepFreeCB(pointeeName)
+				if subCB == "" {
+					// classTypes[f.Type] 为真却合成失败 = 内部不一致，
+					// 不静默退化为浅释放（会重新引入 P-B 泄漏）。
+					msg := fmt.Sprintf(
+						"字段 %q 类型 %q 是 class 但深释放子 cb 合成失败（聚合树将滞留 survivor 段）",
+						f.Name, f.Type)
+					cg.error("[SOR deep-free] " + msg)
+					body.WriteString(fmt.Sprintf(
+						"    #error SOR_DEEPFREE_SUB_CB_MISSING: owner=%s field=%s type=%s /* audit: P-B nested */\n",
+						kaulaType, f.Name, f.Type))
+					continue
+				}
+				body.WriteString(fmt.Sprintf(
+					"    if (self->%s != NULL) {\n"+
+						"        %s(self->%s);\n"+
+						"        kmm_v4_survivor_free(self->%s);\n"+
+						"    }\n",
+					f.Name, subCB, f.Name, f.Name))
+			} else {
+				// POD 指针字段（i64*/f64*/不定长缓冲）：pointee 字节数不可知，
+				// 深释放会按错误长度归还/或归还借用内存。保持浅语义——只归还
+				// 根外壳，POD 载荷的所有权由显式管理决定（与深提升同口径）。
+				body.WriteString(fmt.Sprintf(
+					"    /* POD pointer field '%s' (%s): length/ownership opaque to SOR; shallow only */\n",
+					f.Name, f.Type))
+			}
+		} else if f.Type == "string" || f.Type == "str" || f.Type == "String" || fcType == "String" {
+			// String 字段：载荷单独分配，SSO 感知归还（len<=15 时是内联载荷，
+			// string_survivor_free 安全 no-op）。
+			hasPtrField = true
+			body.WriteString(fmt.Sprintf(
+				"    /* String field '%s': reclaim heap payload if non-SSO */\n"+
+					"    string_survivor_free(self->%s);\n",
+				f.Name, f.Name))
+		} else if fcType == "void*" {
+			// opaque void* 字段：所有权不可知，跳过（与深提升口径一致）
+			hasPtrField = true
+			body.WriteString(fmt.Sprintf(
+				"    /* void* field '%s' is opaque to SOR; leaving shallow */\n",
+				f.Name))
+		} else if cg.typeGenerator != nil &&
+			(cg.typeGenerator.classTypes[f.Type] || cg.typeGenerator.structTypes[f.Type]) {
+			// 内嵌 class/struct 值字段：不是独立分配对象（无自己的槽位），
+			// 只需递归处理其内部指针字段——与深提升的 inline 处理对称。
+			innerCB := cg.EnsureDeepFreeCB(f.Type)
+			if innerCB == "" {
+				msg := fmt.Sprintf(
+					"内嵌 class 字段 %q 类型 %q 的深释放子 cb 合成失败", f.Name, f.Type)
+				cg.error("[SOR deep-free] " + msg)
+				body.WriteString(fmt.Sprintf(
+					"    #error SOR_DEEPFREE_INNER_CB_MISSING: owner=%s field=%s type=%s /* audit: P-B inline */\n",
+					kaulaType, f.Name, f.Type))
+				continue
+			}
+			body.WriteString(fmt.Sprintf(
+				"    /* inline class field '%s' (%s): not separately allocated; reclaim inner pointers only */\n"+
+					"    %s(&(self->%s));\n",
+				f.Name, f.Type, innerCB, f.Name))
+		}
+	}
+
+	if !hasPtrField {
+		// 字段全部是 POD：无递归释放，cb 为空操作
+		body.WriteString("    /* all POD fields; no recursive reclaim needed */\n")
+	}
+	body.WriteString("}\n\n")
+
+	cg.deepPromoteCBCode.WriteString(body.String())
+	return "__kaula_deepfree_" + kaulaType
 }
 
 // AddObjectDecl 添加动态对象字面量的静态变量声明（文件作用域）
@@ -1747,6 +1915,7 @@ func NewCodeGenerator(cfg *config.Config) *CodeGenerator {
 		earlyFreedVars:           make(map[string]bool),
 		exportedFuncNames:        make(map[string]bool),
 		deepPromoteCBEmitted:     make(map[string]struct{}),
+		deepFreeCBEmitted:        make(map[string]struct{}),
 		// 缺口4：整数溢出检查。debug 模式默认启用（零开销 __builtin_*_overflow），
 		// release 模式禁用（wrapping 行为，与 C 一致，零开销）。
 		enableOverflowCheck: !cfg.Release,
@@ -3233,6 +3402,26 @@ func (cg *CodeGenerator) ResetFunctionLocalState() {
 	cg.chainLinkedVars = make(map[string]bool)
 	cg.chainEscapingVars = make(map[string]bool)
 	cg.escapedVars = make(map[string]bool)
+	cg.returnEscapedLocals = make(map[string]bool)
+}
+
+// SetReturnEscapedLocals 以预扫描结果替换当前函数的 return 逃逸局部变量集合
+// （P-A 修复·分配点提升）。由 GenerateFunctionStatement 在生成函数体之前调用。
+func (cg *CodeGenerator) SetReturnEscapedLocals(names map[string]bool) {
+	if names == nil {
+		cg.returnEscapedLocals = make(map[string]bool)
+		return
+	}
+	cg.returnEscapedLocals = names
+}
+
+// IsReturnEscapedLocal 报告 name 是否为当前函数内被 return 交出的局部变量
+// （分配点提升的判定入口，见 returnEscapedLocals 字段注释）。
+func (cg *CodeGenerator) IsReturnEscapedLocal(name string) bool {
+	if name == "" {
+		return false
+	}
+	return cg.returnEscapedLocals[name]
 }
 
 // SetSafeLocalContainers 以预扫描结果替换当前函数的「安全局部容器」集合（方案 A'）。

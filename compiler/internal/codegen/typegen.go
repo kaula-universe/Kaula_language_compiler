@@ -613,9 +613,17 @@ func (tg *TypeGenerator) getClassFields(className string) []*ast.FieldDeclaratio
 		return nil
 	}
 	for _, stmt := range tg.codegen.program.Statements {
+		// class 与 struct 都参与字段遍历：深释放（P-B）与深提升回调的
+		// 合成都依赖此查询，struct 形态（test/recursive_ptr_tree.kl 等）
+		// 的指针字段同样需要按宿主存活语义回收/提升。
 		if classStmt, ok := stmt.(*ast.ClassStatement); ok {
 			if classStmt.Name == className {
 				return classStmt.Fields
+			}
+		}
+		if structStmt, ok := stmt.(*ast.StructStatement); ok {
+			if structStmt.Name == className {
+				return structStmt.Fields
 			}
 		}
 	}

@@ -238,6 +238,37 @@ func (sg *StatementGenerator) noteSpawnAssignedToTarget(expr ast.Expression) {
 	}
 }
 
+// upgradeAllocSiteForReturnEscape（P-A 修复·分配点提升）
+// 把 return 逃逸局部变量的 kmm_v4_alloc(N) 分配点改发射 kmm_v4_alloc_global(N)：
+// 对象直接在 survivor 段分配，return 时无需"浅拷贝一份到 survivor 段"。
+//
+// 为什么安全（三个不变）：
+//  1. return 的 kmm_v4_scope_promote_p 对 survivor 段指针自动 no-op——
+//     pool_owned 护栏只认主池/扩展段，survivor 段不在其列；
+//     funcEmitsPromote 仍为 true（抑制函数出口 rewind），行为不变。
+//  2. 块尾/early-free/return 路径的 kmm_v4_survivor_free(var) 对 survivor
+//     段对象正是其语义（精确回收），深释放 cb 同样只遍历字段——P-A 与
+//     P-B 两条修复在此闭合：树生于 survivor、死于宿主作用域尾。
+//  3. 大小参数与 TLAB 版一致（都是同一 N），仅分配段不同；对
+//     kmm_v4_alloc_auto(/global( 等其它 malloc 系调用不匹配（子串
+//     "kmm_v4_alloc(" 不出现），不误伤。
+//
+// 收益：消除 promote 复制链——递归构造形态（bottomUpTree）每返回帧不再
+// 复制一层，depth=22 峰值 RSS 678MB（对拍 C-malloc 263MB）中的拷贝份
+// 与 paged 大对象开销随之消失，depth=25 的 3-4GB OOM 直接解除。
+func (sg *StatementGenerator) upgradeAllocSiteForReturnEscape(name, initValue string) string {
+	if name == "" || initValue == "" {
+		return initValue
+	}
+	if !sg.codegen.IsReturnEscapedLocal(name) {
+		return initValue
+	}
+	if !strings.Contains(initValue, "kmm_v4_alloc(") {
+		return initValue
+	}
+	return strings.Replace(initValue, "kmm_v4_alloc(", "kmm_v4_alloc_global(", 1)
+}
+
 // generateVariableDeclaration 生成变量声明代码
 func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDeclaration) string {
 	if stmt.IsAuto {
@@ -423,10 +454,14 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 				sg.codegen.pendingEnumCtxType = stmt.Type
 				initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 				sg.codegen.pendingEnumCtxType = prevCtx
-				// 声明类型是 interface 而初始值是具体类对象 → 装箱成接口句柄。
-				// SOR 路径绕过了基础层的 liftInterfaceValue 调用点（见下方 else 分支），
-				// 不在这里装箱会生成 K_Shape sh = Square_new(...) → C 类型不匹配。
-				initValue = sg.codegen.expressionGenerator.liftInterfaceValue(stmt.Type, initValue, stmt.Value)
+			// 声明类型是 interface 而初始值是具体类对象 → 装箱成接口句柄。
+			// SOR 路径绕过了基础层的 liftInterfaceValue 调用点（见下方 else 分支），
+			// 不在这里装箱会生成 K_Shape sh = Square_new(...) → C 类型不匹配。
+			initValue = sg.codegen.expressionGenerator.liftInterfaceValue(stmt.Type, initValue, stmt.Value)
+			// P-A 修复：return 逃逸局部变量的分配点提升（bump → survivor 段），
+			// 必须在 recordAllocSizeHint/GenerateSmartVarAlloc 之前完成——
+			// 后续登记看到的 initValue 需与最终生成码一致。
+			initValue = sg.upgradeAllocSiteForReturnEscape(stmt.Name, initValue)
 			}
 			// 修复 #25：登记编译期可知的堆分配常量大小（promote 回退用）
 			sg.codegen.recordAllocSizeHint(stmt.Name, initValue)
@@ -475,10 +510,14 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 				sg.codegen.pendingArrayElemType = strings.TrimSpace(baseType)
 			}
 
-			initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
+		initValue = sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)
 
-			sg.codegen.pendingEnumCtxType = prevCtx
-			sg.codegen.pendingArrayElemType = prevElem
+		sg.codegen.pendingEnumCtxType = prevCtx
+		sg.codegen.pendingArrayElemType = prevElem
+		// P-A 修复：return 逃逸局部变量的分配点提升（bump → survivor 段）。
+		// 在 recordAllocSizeHint 之前——后者从 initValue 文本提取常量大小，
+		// 替换只改函数名不改参数，两者皆可，但保持一致更可审计。
+		initValue = sg.upgradeAllocSiteForReturnEscape(stmt.Name, initValue)
 		}
 		if initValue != "" {
 			// 有初始值：直接用初始值初始化，不调用 alloc_auto
@@ -3528,11 +3567,12 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 			b.WriteString("); /* structural: early free (liveness, libc_malloc) */\n")
 			sg.codegen.MarkEarlyFreed(name)
 		} else {
-			// kmm 或 unknown 来源：用 survivor_free（对非 KMM 指针是安全 no-op）
-			b.WriteString(indent)
-			b.WriteString("kmm_v4_survivor_free(")
-			b.WriteString(name)
-			b.WriteString("); /* structural: early free (liveness, kmm) */\n")
+			// kmm 或 unknown 来源：用 survivor_free（对非 KMM 指针是安全 no-op）。
+			// P-B 修复：满足深释放条件时先归还整棵聚合树（子树），
+			// 再由 survivor_free 收尾根节点——btiter 场景每轮 4.2M 节点的
+			// 树只归还 1 个根就是"跨轮 chunk 不重用"的直接来源。
+			deepCode, _ := sg.emitSurvivorFreeWithDeep(name, origin)
+			b.WriteString(deepCode)
 			sg.codegen.MarkEarlyFreed(name)
 		}
 		// 代表释放后标记全组成员，防止 return/scope 回收路径重复释放别名
@@ -4443,6 +4483,129 @@ func (sg *StatementGenerator) sorActive() bool {
 	return sg.codegen.sorAdapter != nil && sg.codegen.sorAdapter.IsActive
 }
 
+// ============================================================================
+// P-B 修复：深释放（deep reclaim）升级判定
+// 浅 survivor_free(var) 只归还根节点；递归构造形态下整棵聚合树的其余
+// 节点滞留 survivor 段，直到函数级 rewind——循环体反复建/弃树时
+// total_usage 逐轮单调爬升、跨轮 chunk 不重用（R3 起 OOM）。
+// deepFreeCBFor 判定"此回收点能否把归还粒度从根扩展到整棵树"。
+// ============================================================================
+
+// deepFreeCBFor 判断变量在回收点是否升级为深释放，返回深释放 cb 名；
+// 不升级返回 ""（调用方保持原浅释放路径，行为与修复前完全一致）。
+//
+// 保守优先——升级错误 = use-after-free，不升级 = 滞留泄漏（旧行为，
+// 由 P-B 修复目标收敛）。全部条件满足才升级：
+//  1. SOR active 时：决策必须为 DropScopeEnd + BumpPool——与浅
+//     survivor_free 同一组前置条件（此刻浅释放正在发射，升级只改归还
+//     粒度）。SOR 不活跃（default 模式）时走基础层：default 路径同样
+//     发射 scope_promote_p（needsReturnPromote 的结构化所有权路径），
+//     聚合树同样滞留 survivor 段（stress_ptr_tree [default] OOM 7.3GB
+//     即此形态），故不要求 decision。
+//  2. C 类型是 T*，pointee T 是 class/struct（有字段遍历 cb 可合成）；
+//  3. 未 assign-escape / 未 promote / 非 promote holder（所有权已移出
+//     或持有他处副本的对象，不属于本回收点）；
+//  4. 非 extern 来源（深释放要读字段，外部对象不可遍历）；
+//  5. 非别名组成员（别名跨块/跨路径语义复杂，保持浅释放无回归）；
+//  6. EnsureDeepFreeCB 合成成功（字段可达，无 #error 内部不一致）。
+//
+// 共享 DAG（SOR 模型外用法）不崩溃——kmm_v4_survivor_free 的 alive
+// CAS 1→0 抢占使二次释放无副作用；读已归还内存的残留风险由 SOR 唯一
+// 所有权模型排除（--sor）与全量回归兜底（default）。
+func (sg *StatementGenerator) deepFreeCBFor(name string) string {
+	debug := os.Getenv("KAULA_DEBUG_DEEPFREE") != ""
+	reject := func(format string, args ...interface{}) string {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[DEEPFREE] var=%s reject: "+format+"\n", append([]interface{}{name}, args...)...)
+		}
+		return ""
+	}
+	if name == "" {
+		return ""
+	}
+	if sg.sorActive() {
+		adapter := sg.codegen.GetSORAdapter()
+		if adapter == nil {
+			return ""
+		}
+		d := adapter.GetVarDecision(name)
+		if d == nil {
+			return reject("no decision")
+		}
+		if d.DropActionID != 1 || d.AllocKindID != 1 {
+			return reject("drop=%d alloc=%d", d.DropActionID, d.AllocKindID)
+		}
+	}
+	if sg.codegen.IsAssignEscaped(name) || sg.codegen.IsPromoted(name) ||
+		sg.codegen.IsPromoteHolder(name) {
+		return reject("escaped/promoted/holder")
+	}
+	if sg.codegen.IsExternOrigin(name) || sg.codegen.GetVarOrigin(name) == OriginExtern {
+		return reject("extern origin")
+	}
+	if len(sg.codegen.GetVarAliasGroup(name)) >= 2 {
+		return reject("alias group")
+	}
+	kaulaType := sg.codegen.GetSymbolType(name)
+	if kaulaType == "" {
+		return reject("no symbol type")
+	}
+	cType := sg.codegen.typeGenerator.convertType(kaulaType, false)
+	if cType == "" || cType == "void*" || !strings.HasSuffix(cType, "*") {
+		return reject("cType=%q kaulaType=%q", cType, kaulaType)
+	}
+	pointee := strings.TrimSpace(strings.TrimRight(kaulaType, "*"))
+	if pointee == "" || sg.codegen.typeGenerator == nil ||
+		(!sg.codegen.typeGenerator.classTypes[pointee] && !sg.codegen.typeGenerator.structTypes[pointee]) {
+		return reject("pointee=%q not aggregate", pointee)
+	}
+	cb := sg.codegen.EnsureDeepFreeCB(pointee)
+	if debug {
+		fmt.Fprintf(os.Stderr, "[DEEPFREE] var=%s UPGRADE cb=%s\n", name, cb)
+	}
+	return cb
+}
+
+// emitSurvivorFreeWithDeep 发射单个变量的 survivor 释放；当该变量满足
+// 深释放条件时先发射深释放 cb（整棵聚合树），再发射原有的浅释放（根）。
+// 两行都保留：cb 释放子树，浅释放归还根——与 cb 内部"先子树后根"的
+// 顺序互补（cb 不动根本身，根由浅释放收尾）。
+// 第二个返回值报告是否真的发射了回收动作（extern 跳过时为 false），
+// 供 return 路径的 F17 求值提升判定使用。
+func (sg *StatementGenerator) emitSurvivorFreeWithDeep(name, origin string) (string, bool) {
+	var b strings.Builder
+	indent := sg.codegen.indentString()
+	if cb := sg.deepFreeCBFor(name); cb != "" {
+		b.WriteString(indent)
+		b.WriteString(cb)
+		b.WriteString("(")
+		b.WriteString(name)
+		b.WriteString("); /* SOR: deep reclaim aggregate tree (P-B fix) */\n")
+	}
+	switch origin {
+	case OriginLibcMalloc:
+		b.WriteString(indent)
+		b.WriteString("free(")
+		b.WriteString(name)
+		b.WriteString("); /* structural: per-object reclaim (libc_malloc) */\n")
+		return b.String(), true
+	case OriginExtern:
+		b.WriteString(indent)
+		b.WriteString("/* structural: skip free for ")
+		b.WriteString(name)
+		b.WriteString(" (extern-origin, ownership opaque) */\n")
+		return b.String(), false
+	default:
+		// OriginKmm 与 unknown 来源：survivor_free（对非 survivor 指针
+		// 是安全 no-op——bump 区对象由 mark_restore/scope_pop 回卷回收）
+		b.WriteString(indent)
+		b.WriteString("kmm_v4_survivor_free(")
+		b.WriteString(name)
+		b.WriteString("); /* structural: per-object reclaim (kmm) */\n")
+		return b.String(), true
+	}
+}
+
 // generateSurvivorFreeForScope 生成当前作用域中需要 per-object 回收的 survivor 对象的释放代码。
 // 方案 A：在作用域退出点发射 kmm_v4_survivor_free，精确回收 survivor 段 slab 桶中的对象。
 // 只对 SOR 决策为 DropAction=ScopeEnd && AllocKind=BumpPool 的指针变量发射。
@@ -4593,31 +4756,12 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 			b.WriteString(name)
 			b.WriteString("); /* structural: String payload reclaim (SSO-aware) */\n")
 		} else {
-			// 多分配器 origin 追踪：按来源选择释放函数
+			// 多分配器 origin 追踪：按来源选择释放函数。
+			// P-B 修复：满足深释放条件时先发射 __kaula_deepfree_T(name)
+			// 归还整棵聚合树，再按来源收尾根节点（见 emitSurvivorFreeWithDeep）。
 			origin := sg.codegen.GetVarOrigin(name)
-			switch origin {
-			case OriginKmm:
-				b.WriteString(indent)
-				b.WriteString("kmm_v4_survivor_free(")
-				b.WriteString(name)
-				b.WriteString("); /* structural: per-object reclaim (kmm) */\n")
-			case OriginLibcMalloc:
-				b.WriteString(indent)
-				b.WriteString("free(")
-				b.WriteString(name)
-				b.WriteString("); /* structural: per-object reclaim (libc_malloc) */\n")
-			case OriginExtern:
-				b.WriteString(indent)
-				b.WriteString("/* structural: skip free for ")
-				b.WriteString(name)
-				b.WriteString(" (extern-origin, ownership opaque) */\n")
-			default:
-				// unknown 来源：保守用 survivor_free（对非 KMM 指针是安全 no-op）
-				b.WriteString(indent)
-				b.WriteString("kmm_v4_survivor_free(")
-				b.WriteString(name)
-				b.WriteString("); /* structural: per-object reclaim (unknown origin, safe no-op) */\n")
-			}
+			deepCode, _ := sg.emitSurvivorFreeWithDeep(name, origin)
+			b.WriteString(deepCode)
 		}
 	}
 	return b.String()
@@ -4783,35 +4927,16 @@ func (sg *StatementGenerator) generateSurvivorFreeForReturn(excludeName string) 
 					}
 				}
 			}
-			// 多分配器 origin 追踪：按来源选择释放函数
-			origin := sg.codegen.GetVarOrigin(name)
-			switch origin {
-			case OriginKmm:
-				b.WriteString(indent)
-				b.WriteString("kmm_v4_survivor_free(")
-				b.WriteString(name)
-				b.WriteString("); /* structural: reclaim on return (kmm) */\n")
-				freed = append(freed, name)
-			case OriginLibcMalloc:
-				b.WriteString(indent)
-				b.WriteString("free(")
-				b.WriteString(name)
-				b.WriteString("); /* structural: reclaim on return (libc_malloc) */\n")
-				freed = append(freed, name)
-			case OriginExtern:
-				b.WriteString(indent)
-				b.WriteString("/* structural: skip free on return for ")
-				b.WriteString(name)
-				b.WriteString(" (extern-origin, ownership opaque) */\n")
-			default:
-				// unknown 来源：保守用 survivor_free（对非 KMM 指针是安全 no-op）
-				b.WriteString(indent)
-				b.WriteString("kmm_v4_survivor_free(")
-				b.WriteString(name)
-				b.WriteString("); /* structural: reclaim on return (unknown origin) */\n")
-				freed = append(freed, name)
-			}
+			// 多分配器 origin 追踪：按来源选择释放函数。
+		// P-B 修复：满足深释放条件时先归还整棵聚合树（子树），
+		// 再按来源收尾根节点（见 emitSurvivorFreeWithDeep）。
+		origin := sg.codegen.GetVarOrigin(name)
+		deep, reclaimed := sg.emitSurvivorFreeWithDeep(name, origin)
+		b.WriteString(deep)
+		if reclaimed {
+			freed = append(freed, name)
 		}
+	}
 	}
 	return b.String(), freed
 }

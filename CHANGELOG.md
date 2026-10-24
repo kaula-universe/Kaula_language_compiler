@@ -181,6 +181,28 @@
     反复建弃 + depth=12×3 深树，checksum 精确收敛）；压测
     `test/stress_ptr_tree.kl`（CLBG 标准参数，depth 12..15）。
   - 全量回归：`run_tests.py` 134/134（67 程序 × default/sor 双模式）通过。
+- **跨轮 chunk 不重用导致 survivor 段复用断链（P-B）**：块尾 / early-free /
+  return 路径的 `kmm_v4_survivor_free(var)` 仅归还根节点，聚合树其余节点
+  滞留 survivor 段直到函数级 rewind → 循环体反复建弃树时 `total_usage`
+  逐轮单调爬升，GB 级 live-set × 每轮再分配直接 OOM（R3 起）。合成
+  `__kaula_deepfree_T` 回调（与深提升同构、动作对称：先递归子树后释放根），
+  块尾 / early-free / return 三处升级为「深释放子树 + 浅释放根」。护栏：
+  仅递归 class/struct 指针字段；`survivor_free` 对非 survivor 指针安全
+  no-op；alive CAS 1→0 幂等防 double-free。`struct` 形态（left/right 指针树）
+  为主要受害面，`typegen.getClassFields` 扩展支持 `StructStatement`。
+  - 复现 `test/binary_trees.kl` 类形态（btiter）：PEAK_RSS 1360MB→105MB
+    （-92%），usage 几乎完全回落，所有 checksum 逐位一致。
+  - 回归用例 `test/btree_bench.kl` / `test/binary_trees.kl`。
+- **递归构造形态 promote 复制链放大 RSS（P-A）**：`return` 逃逸局部变量经
+  `kmm_v4_scope_promote_p` 每帧浅拷贝到 survivor 段，递归构造每返回一层
+  复制一份，depth 放大 RSS 呈 1→2→3→3.2× 增长，depth=25 递归版首轮即
+  ~3-4GB 被 cgroup OOM 杀。新增**分配点提升**：return 逃逸局部改发
+  `kmm_v4_alloc_global`（survivor 段直接分配），消除双份拷贝；
+  `scope_promote_p` 对 survivor 段指针自动 no-op 护栏保持不变。
+  `safe_container_scan` 识别 return 逃逸局部并维护 `returnEscapedLocals`
+  集合，接入 SOR 路由与基础层两条初始化路径。
+  - 复现 `test/stress_ptr_tree.kl` / `pa22` 形态：stress_ptr_tree（sor）
+    全 checksum 收敛、PEAK_RSS≈38MB 无 OOM；pa22 `check` 值稳定无 UAF。
 - **反射五件套此前不可用（生成代码无法编译）**：`type_name` / `type_kind` /
   `field_count` / `field_name` / `field_type` 的代码生成直接返回裸 C 字符串
   `"..."`，与 Kaula 的 `String`（SSO 结构体）不兼容：

@@ -480,6 +480,10 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	fg.codegen.SetChainLinkedVars(scan.ChainLinked)
 	fg.codegen.SetChainEscapingVars(scan.ChainEscaping)
 	fg.codegen.SetEscapedVars(scan.Escaped)
+	// P-A 修复：return 逃逸局部变量集合（分配点提升的判定集）。
+	// 必须在函数体生成前就位——stmtgen 在变量声明处就要据此决定
+	// kmm_v4_alloc 分配到 bump 区还是 survivor 段。
+	fg.codegen.SetReturnEscapedLocals(scan.ReturnEscaped)
 	// 进入时必须重置，避免嵌套函数继承外层模式
 	fg.codegen.SetKMMUseMark(false)
 

@@ -75,6 +75,22 @@ type SafeContainerScan struct {
 	//   （X 由 as<T>(容器) 或直接取容器地址得到）。此时该容器的链首已交出去，
 	//   容器不得再被当作安全局部容器（退回旧路径：promote + 回卷）。
 	ChainEscaping map[string]bool
+	// ReturnEscaped: 函数体内 `return <裸标识符>` 出现过的局部变量名集合
+	// （穿透 as<T>()/括号；排除形参与全局——它们的所有权不在本函数）。
+	//
+	// 用途（P-A 修复·分配点提升）：这些名字的 kmm_v4_alloc 分配点直接把
+	// 对象分配到 survivor 段（kmm_v4_alloc_global），而不是"bump 区分配 +
+	// return 时浅拷贝一份到 survivor 段"。后者即 promote 复制链——递归
+	// 构造形态（bottomUpTree）下每返回帧复制一层，depth=22 峰值 RSS
+	// 678MB vs C-malloc 对拍 263MB，depth=25 直接 3-4GB OOM。
+	// 分配点提升后对象天然活在 survivor 段，return 的 scope_promote_p 被
+	// pool_owned 护栏 no-op 化（survivor 段不属于主池），funcEmitsPromote
+	// 仍为 true（抑制 rewind），语义不变而双份拷贝消失。
+	//
+	// 与 Escaped 的区别：Escaped 含实参/赋值右值/yield 等一切逃逸通道；
+	// ReturnEscaped 只取 return 这一条精确通道——只有它能证明"本函数
+	// 分配的该对象必将跨函数边界存活"，才是分配点提升的充分条件。
+	ReturnEscaped map[string]bool
 }
 
 // ScanSafeLocalContainers 扫描函数体，返回「安全局部容器」名集合（方案 A'）。
@@ -217,12 +233,23 @@ func ScanSafeLocalContainers(body []ast.Statement, params []string) SafeContaine
 	// 容器退出 safe 只影响它自身的 promote/回卷待遇，不影响挂进去的源对象
 	// 的豁免（否则宿主逃逸时源对象反被暴露给 early free，正是本判据要修的 bug）。
 
+	// ReturnEscaped（P-A）：return 语句交出的裸标识符（排除形参/全局）。
+	// 分配点提升的充分条件集——见字段注释。
+	returnEscaped := make(map[string]bool)
+	for _, n := range s.returnedNames {
+		if n == "" || paramSet[n] {
+			continue
+		}
+		returnEscaped[n] = true
+	}
+
 	return SafeContainerScan{
 		Safe:           safe,
 		WrittenThrough: wt,
 		ChainLinked:    cl,
 		Escaped:        escaped,
 		ChainEscaping:  chainEscaping,
+		ReturnEscaped:  returnEscaped,
 	}
 }
 
@@ -247,6 +274,13 @@ type containerScan struct {
 	addressAliases [][2]string
 	// returnedNames: 各 return 语句返回值里出现的裸标识符（穿透 as<T>()/括号）。
 	returnedNames []string
+	// returnedNamesNested: 嵌套函数体内的 return 标识符（不进 ReturnEscaped——
+	// 嵌套函数是独立生成单元，有自己的 ScanSafeLocalContainers 调用，
+	// 其 return 逃逸通道属于它自己；混入外层会把外层同名变量误标为
+	// return-escaped，触发分配点提升的多余 survivor 分配）。
+	returnedNamesNested []string
+	// nestedDepth: 当前遍历深度是否位于嵌套函数体内（>0 = 是）。
+	nestedDepth int
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +329,13 @@ func (s *containerScan) scanStmt(stmt ast.Statement) {
 		s.markEscapedExpr(st.Value)
 		// 记录返回值里出现的**裸标识符**，供 ChainEscaping 结算：
 		// `return head` 且 head 是某写穿容器的地址值别名 → 该容器的链首已交出去。
-		s.returnedNames = append(s.returnedNames, collectRootIdentifiers(st.Value)...)
+		// 嵌套函数体内的 return 分流到 returnedNamesNested（P-A：ReturnEscaped
+		// 只认本函数自己的 return 通道；ChainEscaping 维持既有口径仍用外层集）。
+		if s.nestedDepth == 0 {
+			s.returnedNames = append(s.returnedNames, collectRootIdentifiers(st.Value)...)
+		} else {
+			s.returnedNamesNested = append(s.returnedNamesNested, collectRootIdentifiers(st.Value)...)
+		}
 	case *ast.YieldStatement:
 		s.markEscapedExpr(st.Source)
 	case *ast.ReleaseStatement:
@@ -339,8 +379,12 @@ func (s *containerScan) scanStmt(stmt ast.Statement) {
 		}
 		s.scanExpr(st.Value)
 	case *ast.FunctionStatement:
-		// 嵌套函数：其形参与本函数局部集合互不影响；仅登记其名（不是容器）
+		// 嵌套函数：其形参与本函数局部集合互不影响；仅登记其名（不是容器）。
+		// return 标识符分流（nestedDepth>0 时不进本层 returnedNames），
+		// 但 declared/escaped/writtenThrough 维持既有口径继续合并扫描。
+		s.nestedDepth++
 		s.scanStmts(st.Body)
+		s.nestedDepth--
 	default:
 		// 其他语句类型（break/continue/import/struct/...）不影响容器逃逸判定
 	}
