@@ -1,0 +1,89 @@
+// spectralnorm.kl — CLBG spectral-norm 标准算法的 Kaula 实现
+//
+// 算法来源：CLBG spectral-norm（Sebastien Loisel 的 C 版 / chaishushan 的 Go 版）。
+// 三边同算法同参数：eval_A(i,j)=1/((i+j)(i+j+1)/2+i+1)，10 轮 AtA 幂迭代，
+// 输出 sqrt(vBv/vv)，CLBG 标准参数 N=5500。
+//
+// 本题是「数组分配」边：两个 N 长度 f64 向量 + AtA 中间向量。
+// C 参考在栈上用 VLA（double u[N]）；Kaula 无 VLA，走 kmm_v4_alloc 堆分配
+// （作用域尾统一回收）——分配路径差异正是本题要测的变量之一。
+// N 由 runner 编译前注入（CLBG 官方标准值 5500）。
+import std.io
+import std.format
+import std.math
+import std.memory
+
+// eval_A：与 C 参考同式（整数除法在 i64 上进行，N=5500 不溢出）
+fn evalA(i: i64, j: i64) f64 {
+    i64 denom = (i + j) * (i + j + 1) / 2 + i + 1
+    return 1.0 / as<f64>(denom)
+}
+
+// Au = A * u
+fn aTimesU(n: i64, f64* u, f64* au) {
+    i64 i = 0
+    while i < n {
+        f64 s = 0.0
+        i64 j = 0
+        while j < n {
+            s = s + evalA(i, j) * u[j]
+            j = j + 1
+        }
+        au[i] = s
+        i = i + 1
+    }
+}
+
+// Au = A^T * u
+fn atTimesU(n: i64, f64* u, f64* au) {
+    i64 i = 0
+    while i < n {
+        f64 s = 0.0
+        i64 j = 0
+        while j < n {
+            s = s + evalA(j, i) * u[j]
+            j = j + 1
+        }
+        au[i] = s
+        i = i + 1
+    }
+}
+
+// atAu = A^T * (A * u)：先 A*u 到中间向量 v，再 A^T*v
+fn atATimesU(n: i64, f64* u, f64* atAu, f64* v) {
+    aTimesU(n, u, v)
+    atTimesU(n, v, atAu)
+}
+
+fn main() {
+    i64 n = N_PLACEHOLDER
+    f64* u = as<f64*>(std.memory.kmm_v4_alloc(n * 8))
+    f64* v = as<f64*>(std.memory.kmm_v4_alloc(n * 8))
+    f64* t = as<f64*>(std.memory.kmm_v4_alloc(n * 8))
+
+    i64 i = 0
+    while i < n {
+        u[i] = 1.0
+        i = i + 1
+    }
+
+    i64 iter = 0
+    while iter < 10 {
+        atATimesU(n, u, v, t)
+        atATimesU(n, v, u, t)
+        iter = iter + 1
+    }
+
+    f64 vBv = 0.0
+    f64 vv = 0.0
+    i = 0
+    while i < n {
+        vBv = vBv + u[i] * v[i]
+        vv = vv + v[i] * v[i]
+        i = i + 1
+    }
+
+    char* buf = as<char*>(std.memory.kmm_v4_alloc(64))
+    std.format.format_printf(buf, 64, "%0.9f", std.math.sqrt(vBv / vv))
+    std.io.println(buf)
+}

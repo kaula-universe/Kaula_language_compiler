@@ -1,0 +1,81 @@
+// binary_trees_ptr.kl — CLBG binary-trees 标准算法的 Kaula 实现
+// （标准递归指针树形态，与 C/Go 参考的节点分配方式对齐）
+//
+// 与 binary_trees.kl（arena 数组模式）算法完全一致、checksum 完全一致，
+// 差别只在**分配形态**：本文件按 CLBG 参考逐节点分配指针树
+// （kmm_v4_alloc，无手动 free——自动内存管理），用来测量 Kaula 自动内存
+// 管理在"反复建/弃指针树"下的真实行为。
+//
+// 已知限制（docs/core-runtime.md §2.10）：递归指针树的节点经
+// scope_promote_p 提升进 survivor 段后，弃树不回收（scope_pop 只回卷
+// bump 段、survivor_free 不递归释放子树）。因此本形态只能跑**缩小参数**
+// （N=10，runner 编译前注入）；CLBG 标准参数 N=21 的理论驻留 ~17GB，
+// 实测 OOM 打断——这是 Kaula 自动内存管理与 Go GC 的本质差异，
+// 属待补能力，不是本文件的缺陷。完整标准参数跑 arena 模式
+// （binary_trees.kl）。
+import std.io
+import std.format
+import std.memory
+
+struct Node {
+    left: Node*
+    right: Node*
+}
+
+fn bottomUpTree(depth: i64) Node* {
+    if depth <= 0 {
+        Node* leaf = as<Node*>(std.memory.kmm_v4_alloc(16))
+        leaf.left = null
+        leaf.right = null
+        return leaf
+    }
+    Node* l = bottomUpTree(depth - 1)
+    Node* r = bottomUpTree(depth - 1)
+    Node* n = as<Node*>(std.memory.kmm_v4_alloc(16))
+    n.left = l
+    n.right = r
+    return n
+}
+
+fn itemCheck(Node* n) i64 {
+    if n.left == null {
+        return 1
+    }
+    return 1 + itemCheck(n.left) + itemCheck(n.right)
+}
+
+fn main() {
+    i64 n = N_PLACEHOLDER
+    i64 minDepth = 4
+    i64 maxDepth = n
+    if minDepth + 2 > n {
+        maxDepth = minDepth + 2
+    }
+    i64 stretchDepth = maxDepth + 1
+
+    char* buf = as<char*>(std.memory.kmm_v4_alloc(96))
+
+    Node* stretch = bottomUpTree(stretchDepth)
+    std.format.format_printf(buf, 96, "stretch tree of depth %lld\t check: %lld", stretchDepth, itemCheck(stretch))
+    std.io.println(buf)
+
+    Node* longLived = bottomUpTree(maxDepth)
+
+    i64 depth = minDepth
+    while depth <= maxDepth {
+        i64 iterations = 1 << (maxDepth - depth + minDepth)
+        i64 checksum = 0
+        i64 i = 0
+        while i < iterations {
+            Node* a = bottomUpTree(depth)
+            checksum = checksum + itemCheck(a)
+            i = i + 1
+        }
+        std.format.format_printf(buf, 96, "%lld\t trees of depth %lld\t check: %lld", iterations, depth, checksum)
+        std.io.println(buf)
+        depth = depth + 2
+    }
+
+    std.format.format_printf(buf, 96, "long lived tree of depth %lld\t check: %lld", maxDepth, itemCheck(longLived))
+    std.io.println(buf)
+}
