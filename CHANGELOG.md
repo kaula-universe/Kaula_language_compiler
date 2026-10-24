@@ -164,6 +164,32 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **PCH 在 gcc 上未适配（`-cc gcc` 构建直接失败）**：PCH 的生成/消费语法是
+  编译器私有的，此前只按 clang 实现：
+  - 消费侧 clang 用 `-include-pch <file>` 显式点名 `.gch`；gcc 没有这个选项
+    （会被拆成 `-include` + `-pch`，报
+    `fatal error: -pch: No such file or directory`），它的 PCH 查找随
+    `#include` 搜索路径逐目录进行（每目录先找 `<name>.h.gch`）。
+  - 现按家族分派（`cmd/kaulac/pch.go`）：gcc 把 `.gch` 所在目录用 `-I` 插到
+    最前，让生成 TU 的 `#include "kaula.h"` 先命中缓存目录里的
+    `kaula.h.gch`。该方向天然安全——`.gch` 语义失效时 gcc 静默跳过按普通头
+    继续编，不会打挂构建（clang 侧则是硬错误）。
+  - 判活从"`.gch` 不比 `kaula.h` 旧"升级为 `.stamp` sidecar 指纹：编译器
+    路径 + `--version` 摘要 + 家族 + 优化级 + 生成参数语义项 + 全部 `.h` 的
+    内容摘要与 mtime（递归扫描 `src`/`std`/`freestanding`，按"首个根命中"
+    去重）。旧判据有三个洞：只扫 `src/` 顶层（漏 `std/io/io.h` 等嵌套头）、
+    不含编译器身份（clang 的 `.gch` 会被 `-cc gcc` 放行 → clang 吃错格式
+    硬失败）、纯内容指纹对 clang 的 mtime 硬检查失明（bare touch 即
+    `fatal error: ... has been modified since the precompiled header ... was built`）。
+  - stamp 另绑定 `.gch` 自身身份（内容摘要 + size + mtime）：缓存目录跨进程
+    共享，两个并行构建可能交错发布出"gcc 格式 `.gch` 配 clang 指纹 stamp"，
+    绑定后必然失配重编（原子写 + rename，不留半个文件）。
+  - 验证：gcc 全量语料 120/122（唯一失败 `stress_ptr_tree` 两模式 exit -9，
+    沙箱内存限制，clang 基线与旧二进制同结果）；`gcc -H` 输出
+    `x ...kaula.h.gch` 正面证实消费；clang/gcc 互切、touch 主头/嵌套头、
+    `-O0`/`-O2` 分级缓存均按预期重编或命中，无硬失败。
+  - Go 单测 14 条覆盖家族判定/探测缓存/消费参数分派/指纹六类输入/嵌套头/
+    mtime/stamp sidecar/`.gch` 换载。
 - **递归指针树跨函数返回 UAF（`n.left = l` 写穿点回收子树）**：
   字段写穿不是 `yield`——`l` 没有交出所有权，但 `n.left = l` 这个存储动作
   产生了一个**随宿主 n 存活的字段引用**。词法 liveness 只看到"l 此后不再
