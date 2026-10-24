@@ -4316,6 +4316,11 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		compilerPrefix = []string{clangPath}
 	}
 
+	// PCH 的生成/消费语法随编译器家族而变（clang: -include-pch；gcc: 搜索
+	// 路径里的 .gch）。这里探测一次（进程内缓存），下面 PCH 段按家族分派。
+	// 探的是真实编译器（clangPath），ccache 只是包装层。
+	ccProbe := detectCCInfo(clangPath)
+
 	// 查找 kaula.h 所在的目录（优先级：KAULA_HOME > 可执行文件路径 > 相对路径）
 	var kaulaRoot string
 
@@ -4522,98 +4527,100 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 	// 预编译头文件 (PCH)：将 kaula.h 预编译为 .gch
 	//
 	// PCH 是"宏与编译语义的冻结体"：.gch 里存的是预处理之后的 token 流，
-	// 生成时生效的每一个宏取值都被固化了。所以它的缓存新鲜度**不能只看
-	// kaula.h 的 mtime**——同一份 kaula.h 在 -O0 与 -O2 下展开出的
-	// KMM_V4_OPT_LEVEL / KMM_THREAD_SAFETY_LEVEL / TLAB 大小完全不同。
-	// 旧实现只比 mtime，且把 -DKMM_THREAD_SAFETY_LEVEL=1 写死在生成命令里，
-	// 于是在目标指纹目录内，一次 -O0 构建留下的 .gch 会被后续 -O2 构建静默
-	// 复用，反之亦然 —— 这正是"把宏不一致冻结成静默错误"的载体。
+	// 生成时生效的每一个宏取值都被固化了。同一份 kaula.h 在 -O0 与 -O2 下
+	// 展开出的 KMM_V4_OPT_LEVEL / KMM_THREAD_SAFETY_LEVEL / TLAB 大小完全
+	// 不同，所以它的缓存判据不能只看 kaula.h 的 mtime。
 	//
-	// 现在 PCH **只在本函数内被 std .o / runtime .o 消费**（生成 TU 不查 PCH，
-	// 见下方 clangArgs 处的注释），所以它的生成参数直接复用 moduleSemanticDefines，
-	// 与那些 .o 的编译命令同源；缓存判据是 PCH 及其源头的 mtime
-	// （kaula.h + src 下全部 .h，避免"只改了子头"被漏判）。
+	// 现在 PCH **只被生成 TU 消费**（std .o / runtime .o 的 .c 各自位于
+	// src/ 或 std/<模块>/ 下，quoted #include "kaula.h" 先命中所在目录的
+	// 真身，搜索路径里的 .gch 永远排不上——见下方消费侧注释），所以它的
+	// 生成参数直接复用 moduleSemanticDefines，与生成 TU 的语义同源。
+	//
+	// 判活用 .gch 旁的 stamp 指纹（pchStampValue）：覆盖编译器身份、
+	// 优化级别、语义参数与全部 .h 内容摘要。旧实现的 mtime 扫描只覆盖
+	// src/ 顶层 .h，漏掉 kaula.h 经 #include "../std/io/io.h" 冻结的
+	// std 侧头（改 std/io/io.h 不会判死），也不含编译器身份（clang 的
+	// .gch 被后续 -cc gcc 构建放行后，clang 再吃它就是
+	// "not a valid precompiled PCH file" 硬错误）。
 	pchPath := filepath.Join(objectCacheDir, "kaula.h.gch")
-	pchFresh := false
-	// pchUsable 决定是否把 -include-pch 交给 clang：只有 gch 确实存在、
-	// 不比 kaula.h 旧、且本轮生成成功时才为真。否则宁可多花解析时间，
-	// 也不能拿一份过期/半成品的 PCH 去编译 —— 那会以"宏/类型对不上"
-	// 的诡异形式报错，且报错点远离根因。
+	// pchUsable 决定是否把 PCH 消费参数交给编译器：只有 .gch 存在且判活
+	// 通过时才为真。宁可多花一次头解析，也不能拿一份来历不明/半成品的
+	// .gch 去编译。
 	pchUsable := false
-	if kaulaSrcPath != "" {
-		hInfo, hErr := os.Stat(filepath.Join(kaulaSrcPath, "kaula.h"))
-		gchInfo, gchErr := os.Stat(pchPath)
-		if hErr == nil && gchErr == nil &&
-			(gchInfo.ModTime().After(hInfo.ModTime()) || gchInfo.ModTime().Equal(hInfo.ModTime())) {
-			pchFresh = true
-			for _, p := range validSrcPaths {
-				entries, err := os.ReadDir(p)
-				if err != nil {
-					continue
-				}
-				for _, e := range entries {
-					if e.IsDir() || filepath.Ext(e.Name()) != ".h" {
-						continue
-					}
-					if fi, ierr := e.Info(); ierr == nil && fi.ModTime().After(gchInfo.ModTime()) {
-						pchFresh = false
-						break
-					}
-				}
-				if !pchFresh {
-					break
-				}
-			}
+	// PCH 生成参数里的"语义部分"：判活指纹与生成命令共用同一份，防止两侧
+	// 漂移（顺序与旧的逐段 append 保持一致：语义 CFlags → 调试 → 语义宏）。
+	pchSemanticArgs := append([]string{}, tuSemanticCFlags...)
+	if cfg != nil && cfg.Debug {
+		pchSemanticArgs = append(pchSemanticArgs, "-g")
+		if cfg.DebugLevel == "full" {
+			pchSemanticArgs = append(pchSemanticArgs, "-gdwarf-4")
 		}
 	}
-	if pchFresh {
-		pchUsable = true
-		if verboseMode {
-			fmt.Printf("[Compile] PCH cache hit: %s\n", pchPath)
-		}
-	} else {
-		pchArgs := []string{"-x", "c-header", "-c", filepath.Join(kaulaSrcPath, "kaula.h"), "-o", pchPath, optLevel}
-		for _, p := range validSrcPaths {
-			pchArgs = append(pchArgs, "-I", p)
-		}
-		for _, p := range validStdPaths {
-			pchArgs = append(pchArgs, "-I", p)
-		}
-		for _, p := range validFreePaths {
-			pchArgs = append(pchArgs, "-I", p)
-		}
-		/*
-		 * 语义相关选项必须与真正编译 TU 时**完全一致**，否则 clang 会拒绝
-		 * 复用 PCH：
-		 *     error: signed integer overflow handling differs in
-		 *            PCH file vs. current file
-		 * 这正是 PCH 长期只能靠"别打开 -include-pch"来回避的真因 ——
-		 * 生成侧漏了 -fwrapv / -fno-strict-aliasing，而生成 TU 的
-		 * clangArgs 里是有的（见下方 clangArgs 处），两边一对就炸。
-		 *
-		 * 顺序不能反过来指望：这些是"构建语义"，不是"用户可选优化"。
-		 * 任何人往生成 TU 加语义开关，都必须同步加到这一行，
-		 * 否则 -include-pch 一开就是全量报错。
-		 */
-		pchArgs = append(pchArgs, tuSemanticCFlags...)
-		if cfg != nil && cfg.Debug {
-			pchArgs = append(pchArgs, "-g")
-			if cfg.DebugLevel == "full" {
-				pchArgs = append(pchArgs, "-gdwarf-4")
-			}
-		}
-		pchArgs = append(pchArgs, moduleSemanticDefines...)
-		if err := compilerCommand(clangPath, pchArgs...).Run(); err == nil {
+	pchSemanticArgs = append(pchSemanticArgs, moduleSemanticDefines...)
+	// PCH 的全部 .h 源头 = 生成命令的 -I 根（顺序固定 src → std → free）。
+	pchHeaderRoots := append(append(append([]string{}, validSrcPaths...), validStdPaths...), validFreePaths...)
+	// 判活输入构造一次，判活与生成两处共用（防止两侧漂移）。
+	// mtime 与内容都进指纹的理由见 pchStampInputs：clang 对 -include-pch 有
+	// mtime 硬检查（bare touch 都会致命），gcc 则要求 .gch 不旧于 .h。
+	pchStampIn := pchStampInputs{
+		cc:           clangPath,
+		versionKey:   ccProbe.versionKey,
+		family:       ccProbe.family,
+		optLevel:     optLevel,
+		semanticArgs: pchSemanticArgs,
+		headerRoots:  pchHeaderRoots,
+	}
+	if kaulaSrcPath != "" {
+		stamp := pchStampValue(pchStampIn)
+		if _, err := os.Stat(pchPath); err == nil && pchStampMatches(pchPath, stamp) {
 			pchUsable = true
 			if verboseMode {
-				fmt.Printf("[Compile] PCH generated: %s\n", pchPath)
+				fmt.Printf("[Compile] PCH cache hit: %s\n", pchPath)
 			}
 		} else {
-			// PCH 只是加速手段：失败不影响正确性（clang 找不到可用 .gch 就
-			// 正常解析头文件）。这里保留静默降级，但不再掩盖"参数分叉"，
-			// 因为参数已经与 std .o 同源。
-			if verboseMode {
-				fmt.Printf("[Compile] PCH generation failed, falling back to header parsing\n")
+			pchArgs := []string{"-x", "c-header", "-c", filepath.Join(kaulaSrcPath, "kaula.h"), "-o", pchPath, optLevel}
+			for _, p := range validSrcPaths {
+				pchArgs = append(pchArgs, "-I", p)
+			}
+			for _, p := range validStdPaths {
+				pchArgs = append(pchArgs, "-I", p)
+			}
+			for _, p := range validFreePaths {
+				pchArgs = append(pchArgs, "-I", p)
+			}
+			/*
+			 * 语义相关选项必须与真正编译 TU 时**完全一致**，否则 clang 会拒绝
+			 * 复用 PCH：
+			 *     error: signed integer overflow handling differs in
+			 *            PCH file vs. current file
+			 * 这正是 PCH 长期只能靠"别打开 -include-pch"来回避的真因 ——
+			 * 生成侧漏了 -fwrapv / -fno-strict-aliasing，而生成 TU 的
+			 * clangArgs 里是有的（见下方 clangArgs 处），两边一对就炸。
+			 *
+			 * 顺序不能反过来指望：这些是"构建语义"，不是"用户可选优化"。
+			 * 任何人往生成 TU 加语义开关，都必须同步加到这一行，
+			 * 否则 -include-pch 一开就是全量报错。
+			 */
+			pchArgs = append(pchArgs, pchSemanticArgs...)
+			// 原子生成：缓存目录是跨进程共享的，两个并行构建同时写同一个
+			// .gch 会交出写了一半的文件（.o 侧同一问题的修法是
+			// compileToObjectAtomic，这里同源）。先写临时文件再 rename，
+			// 读者只会看到完整产物。
+			if out, err := compileToObjectAtomic(compilerCommand(clangPath, pchArgs...), pchPath); err == nil {
+				pchUsable = true
+				writePchStamp(pchPath, stamp)
+				if verboseMode {
+					fmt.Printf("[Compile] PCH generated: %s\n", pchPath)
+				}
+			} else {
+				// PCH 只是加速手段：失败不影响正确性（找不到可用 .gch 就
+				// 正常解析头文件）。这里保留静默降级，但不再掩盖"参数分叉"，
+				// 因为参数已经与 std .o 同源。verbose 下带上编译器的真实
+				// 输出——裸机交叉目标缺系统头（.gch 生成必然失败）时，
+				// 这句话是唯一能看出"为什么没有 PCH"的地方。
+				if verboseMode {
+					fmt.Printf("[Compile] PCH generation failed, falling back to header parsing\n%s\n", out)
+				}
 			}
 		}
 	}
@@ -4704,7 +4711,7 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 	 */
 
 	/*
-	 * PCH：显式 -include-pch 复用上面生成的 kaula.h.gch。
+	 * PCH：按编译器家族复用上面生成的 kaula.h.gch。
 	 *
 	 * 原先这里是注释掉的（"暂时禁用 PCH 以调试崩溃问题"），只留一个 -I
 	 * objectCacheDir 试图让 clang 自动命中——这不成立：gch 自动查找要求
@@ -4715,19 +4722,34 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 	 * 单 TU 下这点开销只是十几毫秒；多 TU 要乘 TU 数：40 个 TU 各解析一遍
 	 * kaula.h，实测每个 TU 因此多花 ~40ms，并行也压不下去。
 	 *
-	 * 安全性：pchUsable 只在 gch 确实比 .h 新（或同时）时才为真；否则退回
-	 * 正常头文件解析。-include-pch 与源码里的 #include "kaula.h" 并存是
-	 * clang 支持的用法（对应头文件已在 PCH 里，后续 #include 会被跳过）。
+	 * 安全性：pchUsable 只在 stamp 判活通过时才为真（编译器身份 / 优化级 /
+	 * 语义参数 / 全部 .h 内容，见 pchStampValue）；否则退回正常头文件解析。
+	 *
+	 * 家族分派（pchConsumeFlags）：
+	 *   clang: -include-pch <gch> —— 显式点名，与源码里的 #include "kaula.h"
+	 *          并存是 clang 支持的用法（对应头文件已在 PCH 里，后续 #include
+	 *          会被跳过）。
+	 *   gcc:   -I <gch 所在目录>，且必须插在**其它 -I 之前**。GCC 没有
+	 *          -include-pch；它的 PCH 查找随 #include 的搜索路径逐目录进行
+	 *          （每目录先找 kaula.h.gch）。生成 TU 的 C 来自 stdin，"文件
+	 *          所在目录"不存在，-I 顺序即查找顺序，缓存目录排第一才命得中。
+	 *          语义失效时 GCC 静默跳过 .gch 按普通头继续编，不会打挂构建。
+	 *
+	 * 注意 std .o / runtime .o 不走这里：那些 .c 位于 src/ 或 std/<模块>/
+	 * 下，quoted #include "kaula.h" 先命中所在目录的真身，-I 顺序对它们
+	 * 无意义（PCH 对模块 .o 的加速要靠显式 -include，那是另一处决策）。
 	 */
 	if pchUsable {
 		/*
-		 * 必须插在输入（"-"）**之前**：-include-pch 与 -include 一样是驱动层
-		 * 选项，一旦出现在输入之后，clang 会把它当成追加的输入参数处理并报
-		 * "fatal error: '-pch <path>' file not found"（把选项名当文件名）。
+		 * 必须插在输入（"-"）**之前**：-include-pch 与 -include/-I 一样是
+		 * 驱动层选项，一旦出现在输入之后，clang 会把它当成追加的输入参数处理
+		 * 并报 "fatal error: '-pch <path>' file not found"（把选项名当文件名）。
 		 * clangArgs 的第 0..4 项是 "-x c - -o <out>"，不能把 PCH 塞进去，
 		 * 只能在这里重建前缀。
 		 */
-		clangArgs = append([]string{"-x", "c", "-include-pch", pchPath, "-", "-o", outputFile}, clangArgs[5:]...)
+		pchPrefix := append([]string{"-x", "c"}, pchConsumeFlags(ccProbe.family, pchPath)...)
+		pchPrefix = append(pchPrefix, "-", "-o", outputFile)
+		clangArgs = append(pchPrefix, clangArgs[5:]...)
 	}
 
 	// 自动解析模块传递依赖（读取 dependencies.json 递归展开）
