@@ -1,0 +1,84 @@
+// stress_ptr_tree.kl — 递归指针树大规模压测（内存收敛验证）
+//
+// CLBG binary-trees 用法：按标准参数反复建/弃树（每棵子树都跨函数返回后
+// 存入父节点字段，写穿源对象的回收全部推迟到宿主/作用域尾）。
+// 验证点：
+//   1. checksum 精确收敛（与理论节点数逐位一致）
+//   2. RSS 不随轮数单调增长（字段引用延命不泄漏）
+//   3. 深度>=13 大规模分配下无 UAF（旧 bug 在此规模必崩）
+import std.io
+import std.memory
+import std.time
+
+struct Node {
+    left: Node*
+    right: Node*
+}
+
+fn bottomUpTree(depth: i64) Node* {
+    if depth <= 0 {
+        Node* leaf = as<Node*>(std.memory.kmm_v4_alloc(16))
+        leaf.left = null
+        leaf.right = null
+        return leaf
+    }
+    Node* l = bottomUpTree(depth - 1)
+    Node* r = bottomUpTree(depth - 1)
+    Node* n = as<Node*>(std.memory.kmm_v4_alloc(16))
+    n.left = l
+    n.right = r
+    return n
+}
+
+fn itemCheck(n: Node*) i64 {
+    if n.left == null {
+        return 1
+    }
+    return 1 + itemCheck(n.left) + itemCheck(n.right)
+}
+
+fn main() {
+    i64 maxDepth = 15
+    i64 minDepth = 12
+    i64 stretchDepth = maxDepth + 1
+
+    // stretch 树：depth=16 → 131071 节点
+    Node* stretch = bottomUpTree(stretchDepth)
+    i64 stretchChk = itemCheck(stretch)
+    i64 stretchExpect = (1 << (stretchDepth + 1)) - 1
+    std.io.println("stretch depth=", stretchDepth, " check=", stretchChk, " expect=", stretchExpect)
+
+    Node* longLived = bottomUpTree(maxDepth)
+    std.io.println("long lived depth=", maxDepth, " check=", itemCheck(longLived), " expect=", (1 << (maxDepth + 1)) - 1)
+
+    // 标准循环：depth 12..15，iterations = 2^(maxDepth-depth+minDepth)
+    i64 depth = minDepth
+    while depth <= maxDepth {
+        i64 iterations = 1 << (maxDepth - depth + minDepth)
+        i64 checksum = 0
+        i64 i = 0
+        while i < iterations {
+            Node* a = bottomUpTree(depth)
+            checksum = checksum + itemCheck(a)
+            i = i + 1
+        }
+        i64 expect = iterations * ((1 << (depth + 1)) - 1)
+        std.io.println("depth=", depth, " iters=", iterations, " checksum=", checksum, " expect=", expect)
+        depth = depth + 1
+    }
+
+    // RSS 收敛探针：同样 workload 重复 3 批，每批后打印（由 runner 采样 RSS）
+    i64 batch = 0
+    while batch < 3 {
+        i64 acc = 0
+        i64 i = 0
+        while i < 4 {
+            Node* a = bottomUpTree(14)
+            acc = acc + itemCheck(a)
+            i = i + 1
+        }
+        std.io.println("batch=", batch, " acc=", acc, " expect=", 4 * 32767)
+        batch = batch + 1
+    }
+    std.io.println("DONE")
+}
