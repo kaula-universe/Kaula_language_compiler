@@ -1,0 +1,105 @@
+// revcomp.kl — CLBG reverse-complement 标准算法的 Kaula 实现
+//
+// 算法来源：CLBG reverse-complement（Petr Prokhorenkov 的 C 多线程版 /
+// Krzysztof Kowalczyk 的 Go 多线程版）。三边**输出语义完全一致**：
+//   读 FASTA 标准输入，对每条序列体做「反转 + 互补」，表头原样打印，
+//   结果按 60 字符折行。C 版用线程池 + 16bit pair 查表并行，Go 版用
+//   goroutine 流水线；Kaula 边这里是**同语义串行实现**（线程/分块是
+//   并行度变量，本套件隔离掉，只比算法与输出正确性）。
+// 互补表与 C 参考逐字节对齐：from "acbdghkmnsrutwvy" -> to "TGVHCDMKNSYAAWBR"。
+import std.io
+import std.memory
+
+u8 tbl[256]
+
+fn buildTable() {
+    i64 i = 0
+    while i < 256 {
+        tbl[i] = as<u8>(i)
+        i = i + 1
+    }
+    // 与 C 参考同表（大小写都设）
+    tbl['A'] = 'T'; tbl['a'] = 'T'
+    tbl['C'] = 'G'; tbl['c'] = 'G'
+    tbl['G'] = 'C'; tbl['g'] = 'C'
+    tbl['T'] = 'A'; tbl['t'] = 'A'
+    tbl['B'] = 'V'; tbl['b'] = 'V'
+    tbl['D'] = 'H'; tbl['d'] = 'H'
+    tbl['H'] = 'D'; tbl['h'] = 'D'
+    tbl['K'] = 'M'; tbl['k'] = 'M'
+    tbl['M'] = 'K'; tbl['m'] = 'K'
+    tbl['N'] = 'N'; tbl['n'] = 'N'
+    tbl['R'] = 'Y'; tbl['r'] = 'Y'
+    tbl['S'] = 'S'; tbl['s'] = 'S'
+    tbl['V'] = 'B'; tbl['v'] = 'B'
+    tbl['W'] = 'W'; tbl['w'] = 'W'
+    tbl['Y'] = 'R'; tbl['y'] = 'R'
+    tbl['U'] = 'A'; tbl['u'] = 'A'
+}
+
+fn slen(s: char*) i64 {
+    i64 i = 0
+    while s[i] != 0 {
+        i = i + 1
+    }
+    return i
+}
+
+// 把 body[0..blen) 反转互补后按 60 列打印
+fn flushBody(body: char*, blen: i64) {
+    if blen == 0 {
+        return
+    }
+    char out[64]
+    i64 written = 0
+    i64 src = blen - 1
+    while src >= 0 {
+        i64 col = 0
+        while col < 60 && written < blen {
+            out[col] = as<char>(tbl[as<u8>(body[src])])
+            src = src - 1
+            col = col + 1
+            written = written + 1
+        }
+        out[col] = '\n'
+        out[col + 1] = 0
+        std.io.print(out)
+    }
+}
+
+fn main() {
+    buildTable()
+
+    // 可增长的序列体缓冲（revcomp 输入可能数 MB）
+    i64 cap = 1 << 20
+    char* body = as<char*>(std.memory.kmm_v4_alloc(cap))
+    i64 blen = 0
+
+    while true {
+        char* line = std.io.read_line()
+        if line[0] == 0 {
+            break
+        }
+        if line[0] == '>' {
+            // 新表头：先冲刷上一条序列体，再打印表头
+            flushBody(body, blen)
+            blen = 0
+            std.io.println(line)
+        } else {
+            i64 l = slen(line)
+            // 确保容量
+            while blen + l + 1 > cap {
+                cap = cap * 2
+                body = as<char*>(std.memory.kmm_v4_realloc(body, cap))
+            }
+            i64 i = 0
+            while i < l {
+                body[blen + i] = line[i]
+                i = i + 1
+            }
+            blen = blen + l
+        }
+    }
+    // 最后一条序列体
+    flushBody(body, blen)
+}

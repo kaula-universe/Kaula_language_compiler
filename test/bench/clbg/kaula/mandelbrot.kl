@@ -1,0 +1,74 @@
+// mandelbrot.kl — CLBG mandelbrot 标准算法的 Kaula 实现
+//
+// 算法来源：CLBG mandelbrot（Sammy Al Bahra 等 SIMD+pthread 的 C 版 /
+// Kristian Meyer 的 goroutine Go 版）。三边**输出语义完全一致**：
+//   每个像素迭代 z = z^2 + c 至多 50 次，逃逸者位清零；每 8 像素打包成
+//   一个字节（x=0 为 MSB），输出 PBM P4 二进制位图。
+// C 版用 SSE2 v2df 双像素向量化 + 8 线程，Go 版 4 goroutine 按行带并行；
+// Kaula 边这里是**同语义标量单线程实现**（SIMD/线程是并行度与向量化变量，
+// 本套件隔离掉，只比算法正确性与标量代码生成质量）。
+// 参数：N 由 runner 编译前注入（CLBG 官方标准值 16000，8 的倍数）。
+import std.io
+import std.format
+import std.memory
+
+type Size = adopt size_t
+type FileP = adopt FILE*
+
+extern stdout: FileP
+extern fn fwrite(ptr: const void(), size: Size, nmemb: Size, stream: FileP) -> Size
+
+fn main() {
+    i64 w = N_PLACEHOLDER
+    f64 inv = 2.0 / as<f64>(w)
+    i64 rowbytes = w / 8
+
+    // 位掩码：dx=0 -> 0x80 (MSB) ... dx=7 -> 0x01
+    u8 bit[8]
+    bit[0] = 128
+    bit[1] = 64
+    bit[2] = 32
+    bit[3] = 16
+    bit[4] = 8
+    bit[5] = 4
+    bit[6] = 2
+    bit[7] = 1
+
+    char* pixels = as<char*>(std.memory.kmm_v4_alloc(w * rowbytes))
+
+    i64 y = 0
+    while y < w {
+        f64 ci = inv * as<f64>(y) - 1.0
+        i64 x = 0
+        while x < w {
+            u8 byte = 255
+            i64 dx = 0
+            while dx < 8 {
+                f64 cr = inv * as<f64>(x + dx) - 1.5
+                f64 zr = 0.0
+                f64 zi = 0.0
+                i64 k = 0
+                while k < 50 {
+                    f64 nzr = zr * zr - zi * zi + cr
+                    f64 nzi = 2.0 * zr * zi + ci
+                    zr = nzr
+                    zi = nzi
+                    if zr * zr + zi * zi > 4.0 {
+                        byte = byte ^ bit[dx]
+                        break
+                    }
+                    k = k + 1
+                }
+                dx = dx + 1
+            }
+            pixels[y * rowbytes + x / 8] = as<char>(byte)
+            x = x + 8
+        }
+        y = y + 1
+    }
+
+    char* hdr = as<char*>(std.memory.kmm_v4_alloc(64))
+    std.format.format_printf(hdr, 64, "P4\n%d %d\n", w, w)
+    std.io.print(hdr)
+    fwrite(pixels, 1, w * rowbytes, stdout)
+}
