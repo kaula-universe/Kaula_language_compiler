@@ -12,8 +12,10 @@
 #   build/     编译输出与中间文件（gitignore）
 #   REPORT.md  本次运行的报告（checksum 校验结果 + 计时 + 峰值内存）
 #
-# 计时口径：/usr/bin/time -v 的 wall clock 与 Maximum resident set size，
-# 每边重复 --rounds 次取中位数；第 1 轮 stdout 同时用于三边 checksum 校验。
+# 计时口径：wall clock 与 peak RSS。优先 `/usr/bin/time -v`；环境无 GNU time
+# 时回退 Python perf_counter + resource.getrusage(RUSAGE_CHILDREN)（Linux 下
+# ru_maxrss 单位即 KiB，与 GNU time 同口径）。每边重复 --rounds 次取中位数；
+# 第 1 轮 stdout 同时用于三边 checksum 校验。
 
 import argparse
 import os
@@ -236,18 +238,48 @@ def parse_elapsed(stderr: str):
 
 
 def timed_run(exe: Path, args) -> tuple:
-    """返回 (stdout, wall_seconds, peak_rss_kb)。"""
-    r = subprocess.run(
-        ["/usr/bin/time", "-v", str(exe)] + [str(a) for a in args],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        sys.exit(f"运行失败 (exit {r.returncode}): {exe}\n{r.stderr[-2000:]}")
-    wall = parse_elapsed(r.stderr)
-    if wall is None:
-        sys.exit(f"无法解析 time 输出: {exe}\n{r.stderr[-2000:]}")
-    rss = int(RSS_RE.search(r.stderr).group(1))
-    return r.stdout, wall, rss
+    """返回 (stdout, wall_seconds, peak_rss_kb)。
+
+    优先用 GNU `/usr/bin/time -v`（与历史口径完全一致）；环境里没有时
+    （如精简 CI/容器镜像）回退到 Python 自计时 + ``resource.getrusage``，
+    wall clock 用 perf_counter 包住子进程，peak RSS 取 RUSAGE_CHILDREN
+    的 ru_maxrss（Linux 单位即 KiB，与 /usr/bin/time 输出同口径）。
+    """
+    argv = [str(exe)] + [str(a) for a in args]
+    if Path("/usr/bin/time").exists():
+        r = subprocess.run(
+            ["/usr/bin/time", "-v"] + argv,
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            sys.exit(f"运行失败 (exit {r.returncode}): {exe}\n{r.stderr[-2000:]}")
+        wall = parse_elapsed(r.stderr)
+        if wall is None:
+            sys.exit(f"无法解析 time 输出: {exe}\n{r.stderr[-2000:]}")
+        rss = int(RSS_RE.search(r.stderr).group(1))
+        return r.stdout, wall, rss
+
+    # 回退：无 GNU time。用 Popen + 轮询 /proc/<pid>/status 的 VmHWM 取
+    # 本进程真实 peak RSS（ru_maxrss 是进程树历史峰值，会被前面的大题目污染，
+    # 不能用于单题口径）。
+    t0 = time.perf_counter()
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    peak_kb = 0
+    while proc.poll() is None:
+        try:
+            for line in Path(f"/proc/{proc.pid}/status").read_text().splitlines():
+                if line.startswith("VmHWM:"):
+                    peak_kb = max(peak_kb, int(line.split()[1]))
+                    break
+        except OSError:
+            pass
+        time.sleep(0.02)
+    stdout, stderr = proc.communicate()
+    wall = time.perf_counter() - t0
+    if proc.returncode != 0:
+        sys.exit(f"运行失败 (exit {proc.returncode}): {exe}\n{stderr[-2000:]}")
+    return stdout, wall, peak_kb
 
 
 def verify_outputs(bench: dict, outs: dict) -> tuple:
