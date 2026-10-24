@@ -373,6 +373,8 @@ probe 用**一个共享 state** 递归全部顶层文件：每个 `.kl` 只解�
 **注意 `-` 本身以 `-` 开头却是输入**（stdin 占位符），不能用"是否以 `-`
 开头"判断选项；漏掉它会得到
 `clang: error: -E or -x required when input is from standard input`。
+（gcc 侧没有 `-include-pch` 可剥——它的 PCH 消费是 `-I <gch 目录>`，与
+其余 `-I` 无异，见 [PCH 家族适配](core-runtime.md#pch-的编译器家族适配clang--gcc)。）
 
 ### 落盘与并行
 

@@ -218,7 +218,9 @@ kaulac --no-cache --release test/foo.kl && ./build/bin/kaulac.exe --cache-stats
 注意：
 
 - 构建缓存 `build/hash` + `build/obj` 若可跨流水线保留，增量构建从分钟级降至秒级
-- 编译器工作目录缓存 `cache/`（PCH 与 std `.o`）建议在 CI 中保留以加速首次编译
+- 编译器工作目录缓存 `cache/`（PCH 与 std `.o`）建议在 CI 中保留以加速首次编译；
+  PCH 缓存按编译器身份（路径 + 版本 + clang/gcc 家族）与优化级判活，混用
+  `-cc` 或升级编译器后首次构建会各自重编一次，不会误用错格式的 `.gch`
 - 多目标平台需在对应平台上分别执行构建（见 [交叉编译](#5-交叉编译)）
 
 ## 8. 故障排查
@@ -230,6 +232,7 @@ kaulac --no-cache --release test/foo.kl && ./build/bin/kaulac.exe --cache-stats
 | `stdlib.json` 找不到 | kaulac 二进制与其同级目录缺少 `stdlib.json`（`--install-dir` 输出时若 bin 被单独拷贝会丢失，需连同 stdlib.json 一起分发） |
 | 头文件解析到错误的同名模块 | freestanding 与 std 存在同名头（如 `memory/memory.h`）：保持安装布局 `include/{std,freestanding}` 分离，勿合并目录 |
 | 构建产物是旧版本 | `--clean` 后重新构建；Go 侧改动会自动触发重编，C 侧由 SHA256 指纹保证 |
+| `file ... is not a valid precompiled PCH file` | 缓存里的 `.gch` 与当前编译器家族/版本不匹配（clang 与 gcc 的 `.gch` 格式互不兼容）。kaulac 已按编译器身份 + `.gch` 内容身份双重判活，正常不会出现；若使用旧版 kaulac 写入的缓存，`kaulac --purge-cache` 清一次即可 |
 
 ## 相关文档
 

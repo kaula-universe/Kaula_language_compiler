@@ -715,6 +715,40 @@ error: signed integer overflow handling differs in PCH file vs. current file
 反过来说，看到这个报错**不要**去关 `-include-pch`：那只是把症状按下去，
 真正该做的是让两侧参数同源。
 
+#### PCH 的编译器家族适配（clang / gcc）
+
+PCH 的生成/消费语法是**编译器私有**的，两侧完全不兼容：
+
+| | clang | gcc |
+|---|---|---|
+| 生成 | `clang -x c-header -c kaula.h -o kaula.h.gch <flags>` | 同左（`.gch` 格式各自私有） |
+| 消费 | `-include-pch <file>` 显式点名 | 无此选项；`.gch` 必须躺在 `#include` 的搜索路径里，每目录先找 `<name>.h.gch` |
+| 失效方向 | 语义不符 / mtime 不符 / 格式不符都是**硬错误** | 语义不符静默跳过按普通头继续编；格式不符同样跳过 |
+
+kaulac 的做法（`cmd/kaulac/pch.go`）：
+
+- **消费侧按家族分派**。clang 走 `-include-pch`；gcc 把 `.gch` 所在目录用
+  `-I` 插到**最前**——生成 TU 的 C 来自 stdin，没有"文件所在目录"可言，
+  quoted include 只能靠 `-I` 顺序命中。这个方向天然安全：`.gch` 无效时
+  gcc 只是跳过它按普通头文件编，不会把构建打挂。
+- **判活用 `.stamp` sidecar**（与 `.o` 同一传统），输入六类：编译器路径、
+  `--version` 摘要、家族、优化级别、PCH 生成参数里的语义项、以及全部 `.h`
+  的**内容摘要 + mtime**。两条都要：内容防 checkout 洗 mtime，mtime 满足
+  clang 的硬检查。递归扫描（`src` → `std` → `freestanding`）并按"首个根
+  命中"去重，与预处理器的搜索顺序一致。
+- **stamp 还绑定 `.gch` 自身身份**（内容摘要 + size + mtime）。缓存目录是
+  跨进程共享的（并行构建），两个进程可能交错发布出"gcc 格式的 `.gch` 配
+  clang 指纹的 stamp"，光比输入指纹会放行 → clang 硬失败。绑定身份后这种
+  交错必然失配重编。
+- **编译器身份探测**（`detectCCInfo`）：先跑 `--version` 判定家族并记录
+  版本摘要；名字含 `clang` 优先于探测输出（覆盖 `clang2gcc` 这类"吃 clang
+  命令行、翻译给 gcc"的 wrapper）；探测失败按名字兜底；落空默认 clang
+  （历史路径不被换到未验证语法上）。
+
+升级注意：旧版 kaulac 写的 `.gch` 没有 stamp（或只有输入指纹），新版首次
+构建会整体重编一次 PCH；反向（新版写的缓存给旧版用）不保证——升级编译器
+或 kaulac 后若混用旧版，先 `kaulac --purge-cache`。
+
 用 `-DKMM_V4_PRINT_CONFIG` 可以把某个 TU 实际生效的配置打出来核对：
 `Thread Safety: Level N` 与 `Opt Level: M` 应与你期望的一致。
 
