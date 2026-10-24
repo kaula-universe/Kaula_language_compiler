@@ -47,8 +47,14 @@ static void test_steal_is_fifo(void) {
 
 /* ========== 批量 steal（P0） ========== */
 
-static void test_steal_batch_half(void) {
-    TEST_CASE("批量 steal 拿最老一半，剩余归 owner");
+/*
+ * 批量 steal 的契约（见 kaula_conc_ws_deque.h 的 v1.3 重写说明）：
+ *   - 一次调用最多拿 max_n 个最老任务（FIFO），不做「一半」启发式；
+ *   - 永远给 owner 留至少 1 个：不足两项时返回 0，已拿到 ≥1 个后遇末元素也停。
+ * 这两条让批量偷不会把队列清空，末元素仍走单偷/owner pop 的 CAS 仲裁。
+ */
+static void test_steal_batch_takes_oldest_leaves_one(void) {
+    TEST_CASE("批量 steal 拿最老 N-1 个，末元素留给 owner");
     KaulaWSDeque q;
     kaula_ws_deque_init(&q);
 
@@ -62,20 +68,20 @@ static void test_steal_batch_half(void) {
 
     struct KaulaTask* batch[KAULA_STEAL_BATCH_MAX];
     int nb = kaula_ws_deque_steal_batch(&q, batch, KAULA_STEAL_BATCH_MAX);
-    ASSERT_EQ(nb, 3, "6 个偷一半 = 3");
+    ASSERT_EQ(nb, 5, "6 个最多偷 5 个，留 1 个给 owner");
     ASSERT_TRUE(batch[0] == (struct KaulaTask*)&a &&
                 batch[1] == (struct KaulaTask*)&b &&
-                batch[2] == (struct KaulaTask*)&c, "FIFO 拿最老 a b c");
+                batch[2] == (struct KaulaTask*)&c &&
+                batch[3] == (struct KaulaTask*)&d &&
+                batch[4] == (struct KaulaTask*)&e, "FIFO 拿最老 a b c d e");
 
-    /* 剩余 [mid, bottom) 归 owner：pop 仍是 LIFO（f e d） */
+    /* 剩余末元素 f 归 owner：pop 仍是 LIFO */
     ASSERT_TRUE(kaula_ws_deque_pop(&q) == (struct KaulaTask*)&f, "owner 剩 f（LIFO）");
-    ASSERT_TRUE(kaula_ws_deque_pop(&q) == (struct KaulaTask*)&e, "再弹 e");
-    ASSERT_TRUE(kaula_ws_deque_pop(&q) == (struct KaulaTask*)&d, "再弹 d");
     ASSERT_NULL(kaula_ws_deque_pop(&q), "空队列 pop 返回 NULL");
 }
 
-static void test_steal_batch_single_fallback(void) {
-    TEST_CASE("只剩 1 个时批量退化为单偷");
+static void test_steal_batch_leaves_last_for_single_steal(void) {
+    TEST_CASE("只剩 1 个时批量返回 0，末元素留给单偷");
     KaulaWSDeque q;
     kaula_ws_deque_init(&q);
 
@@ -84,8 +90,9 @@ static void test_steal_batch_single_fallback(void) {
 
     struct KaulaTask* batch[KAULA_STEAL_BATCH_MAX];
     int nb = kaula_ws_deque_steal_batch(&q, batch, KAULA_STEAL_BATCH_MAX);
-    ASSERT_EQ(nb, 1, "n==1 时偷 1 个");
-    ASSERT_TRUE(batch[0] == (struct KaulaTask*)&a, "拿到 a");
+    ASSERT_EQ(nb, 0, "不足两项时批量不偷，返回 0");
+    ASSERT_TRUE(kaula_ws_deque_steal(&q) == (struct KaulaTask*)&a,
+                "单偷走末元素 CAS 仲裁，拿到 a");
     ASSERT_EQ(kaula_ws_deque_steal_batch(&q, batch, KAULA_STEAL_BATCH_MAX), 0,
               "空队列返回 0");
 }
@@ -343,8 +350,8 @@ int main(void) {
     TEST_SECTION("WSDeque 单线程语义");
     test_push_pop_lifo();
     test_steal_is_fifo();
-    test_steal_batch_half();
-    test_steal_batch_single_fallback();
+    test_steal_batch_takes_oldest_leaves_one();
+    test_steal_batch_leaves_last_for_single_steal();
     test_steal_batch_cap();
     TEST_SECTION("WSDeque 背压");
     test_push_returns_false_when_full();

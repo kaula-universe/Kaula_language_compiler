@@ -189,6 +189,18 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **并发内核测试与实现契约脱节（Linux `Test` 工作流长期红）**：两条契约在
+  实现侧已演进，测试侧没跟上，CI 因此每 push 必红，release 前置校验形同虚设。
+  - `test_ws_deque.c` 仍按早期「批量窃取拿一半」断言，而实现已于
+    `3899d71`（F14）重写为「逐槽 CAS、至多 `max_n` 个、永远给 owner 留 ≥1 个」。
+    改为断言现行契约：6 项 `max_n=32` 取最老 5 项、末元素归 owner；
+    只剩 1 项时批量返回 0，由单偷的 CAS 仲裁取走。
+  - `test_task.c` 仍假设 `kaula_handle_from_task` 会加一个 pin，而 pin 已改为
+    spawn 在投递 READY **之前**预取（`kaula_conc_scheduler.c`），`from_task`
+    不再额外 pin。用例绕过 spawn 直接 alloc/init/complete，故新增
+    `test_prepin_like_spawn()` 补等价预 pin；否则 `pin_refs` 恒为 0，
+    `release` 只是对 0 做减法再夹回，「归还 pin」的断言会假通过。
+  - 验证：`test_ws_deque` 33 passed、`test_task` 全通过（各 `--stress 5`）。
 - **Windows 上 `TestDetectCCFamilyCachesResult` 误报**：该用例用 `#!/bin/sh`
   脚本伪造编译器来统计 `--version` 调用次数，Windows 无 `sh`，cmd 执行脚本
   失败后 `detectCCFamily` 回退到 clang，与被测的进程内缓存行为无关。现按

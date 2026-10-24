@@ -155,12 +155,27 @@ static void test_try_await_timeout(void) {
 /* ========== Handle 的 drop 语义：pin 归还 ========== */
 
 /*
- * 回归：句柄持有 epoch pin，而 pin 只由 await_into 归还。于是「句柄被丢弃且
- * 从不 await」时那个 pin 永远不还，g_ext_pins 一直 > 0，回收器一律判定
- * 「不可回收」—— 内存留到 shutdown。
+ * pin 的所有权：spawn 在把任务投递成 READY **之前**就预 pin
+ * （kaula_conc_scheduler.c 的 spawn_to_flags / spawn_simple），
+ * kaula_handle_from_task 本身不再额外 pin —— 见该函数注释。
+ *
+ * 本文件的用例绕过 spawn 直接 alloc/init/complete，因此必须自己补一次
+ * 与 spawn 等价的预 pin，才能观察到「release / await_into 归还 pin」的契约。
+ * 不补的话 pin_refs 恒为 0，release 只是对 0 做减法再夹回来，
+ * 「还 pin」的断言会假通过。
+ */
+static void test_prepin_like_spawn(KaulaTask* t) {
+    atomic_fetch_add_explicit(&t->pin_refs, 1, memory_order_acq_rel);
+    kaula_epoch_pin();
+}
+
+/*
+ * 回归：句柄持有 epoch pin，而 pin 只由 await_into / release 归还。于是
+ * 「句柄被丢弃且从不 await」时那个 pin 永远不还，g_ext_pins 一直 > 0，
+ * 回收器一律判定「不可回收」—— 内存留到 shutdown。
  *
  * 这里断言三件事：
- *   1. 句柄一产生就欠一个 pin（那是有意的：spawn 到 await 之间有窗口）
+ *   1. spawn 预 pin 之后句柄欠一个 pin（spawn 到 await 之间有窗口）
  *   2. 释放之后债务归零
  *   3. 重复释放不会把 pin 放成负数（幂等）—— 编译器会在 await_into 之后再发一次
  */
@@ -177,9 +192,10 @@ static void test_handle_release_returns_pin(void) {
     f->pc = 0; f->input = 1; f->result = 0;
     kaula_task_init(t, simple_resume, NULL, f, sizeof(SimpleFrame));
     kaula_task_complete(t, (void*)(intptr_t)5);
+    test_prepin_like_spawn(t);   /* 等价于 spawn 的预 pin */
 
     KaulaHandle h = kaula_handle_from_task(t);
-    ASSERT_EQ(kaula_handle_pin_debt(h), 1, "句柄产生时就持有一个 pin（spawn→await 有窗口）");
+    ASSERT_EQ(kaula_handle_pin_debt(h), 1, "spawn 预 pin 后句柄欠一个 pin（spawn→await 有窗口）");
 
     kaula_handle_release(h);
     ASSERT_EQ(kaula_handle_pin_debt(h), 0, "drop 之后债务应归零");
@@ -217,6 +233,7 @@ static void test_await_into_releases_pin(void) {
      * 拿假指针去拷就是段错误。
      */
     kaula_task_complete(t, &f->result);
+    test_prepin_like_spawn(t);   /* 等价于 spawn 的预 pin */
 
     KaulaHandle h = kaula_handle_from_task(t);
     int out = 0;
@@ -245,6 +262,7 @@ static void test_await_expr_defers_release(void) {
     f->pc = 0; f->input = 9; f->result = 0;
     kaula_task_init(t, simple_resume, NULL, f, sizeof(SimpleFrame));
     kaula_task_complete(t, (void*)(intptr_t)28);
+    test_prepin_like_spawn(t);   /* 等价于 spawn 的预 pin */
 
     KaulaHandle h = kaula_handle_from_task(t);
     void* r = kaula_handle_await(h);

@@ -98,6 +98,18 @@ python scripts/version.py --snapshot --from-file  # 从版本文件读取 → 26
 4. **Build and Release** 三平台构建 → 校验 tag 名与版本文件一致
    → 创建 Release，标题为 `Kaula <版本文件中的版本号>`。
 
+### Release 产物
+
+| 平台 | 产物 | 构建脚本 |
+|------|------|----------|
+| Windows x64 | `kaula-<ver>-windows-x64.exe`（NSIS 安装包） | `scripts/installers/kaula.nsi` |
+| Debian/Ubuntu | `kaula_<ver>_amd64.deb` | `scripts/installers/build_deb.py` |
+| Fedora/RHEL | `kaula-<ver>-1.x86_64.rpm` | `scripts/installers/build_rpm.py` |
+| macOS x64 | `kaula-<ver>-macos-x64.dmg` | `scripts/installers/build_dmg.py` |
+
+Release 正文与 `files:` 只列上述**实际产出**的四类；不再宣称未构建的 `.zip` / `.tar.gz`。
+产物由 `sync-gitee.yml` 在 GitHub Release 就绪后同步到 Gitee（见 `docs/gitee-sync.md`）。
+
 ### 版本文件缺失时的行为
 
 `--from-file` 在版本文件缺失、JSON 损坏或缺少 `version` 字段时**硬失败退出 1**
