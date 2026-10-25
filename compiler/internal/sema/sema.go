@@ -66,6 +66,13 @@ type SemanticAnalyzer struct {
 	// 结构宏（前缀模板）改写栈：自内向外查找 $参数 与「跨层 $""直引」绑定。
 	// 顶层分析某个 @调用时压入一层，嵌套展开（前缀体内再 @另一个前缀）自然叠加。
 	macroBindings []*MacroScope
+
+	// 顶层 struct 声明索引：struct 字段存在性校验（no_such_field）查表用。
+	// 旧实现没有这张表，访问 p.zzz 时 sema 不报错，漏到 clang 才报
+	// "'Point' has no member named 'zzz'"。
+	structDecls map[string]*ast.StructStatement
+	// 顶层 class 声明索引：与 classFieldType 配合，集中避免重复扫 AST。
+	classDecls map[string]*ast.ClassStatement
 }
 
 // MacroScope 前缀展开期的一层绑定环境（语义分析侧）。
@@ -1563,6 +1570,10 @@ func (sa *SemanticAnalyzer) analyzeClassStatement(stmt *ast.ClassStatement) {
 		)
 		return
 	}
+	if sa.classDecls == nil {
+		sa.classDecls = make(map[string]*ast.ClassStatement)
+	}
+	sa.classDecls[stmt.Name] = stmt
 	sa.symbolTable.AddSymbol(stmt.Name, "class", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 	// 注册成员字段（scope=field_<类名>，供方法体 self.xxx / 裸字段名引用）
 	for _, field := range stmt.Fields {
@@ -1597,6 +1608,10 @@ func (sa *SemanticAnalyzer) analyzeStructStatement(stmt *ast.StructStatement) {
 		)
 		return
 	}
+	if sa.structDecls == nil {
+		sa.structDecls = make(map[string]*ast.StructStatement)
+	}
+	sa.structDecls[stmt.Name] = stmt
 	sa.symbolTable.AddSymbol(stmt.Name, "struct", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 
 	// 注册 #[derive] 自动生成的方法，避免 sema 报"未定义变量"
@@ -1826,6 +1841,17 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	}
 
 	// 2. 添加变量到符号表
+	// 前端严格化：同作用域重复声明是错误（不是 shadow 警告）。
+	// 旧实现只在 checkVariableShadow 里警告"内层 shadow 外层"，但同层重复声明
+	// i32 x = 1; i32 x = 2; 完全放行，漏到 clang 才报 redefinition of 'x'。
+	if existing := sa.symbolTable.GetLocalSymbol(stmt.Name); existing != nil {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("变量 '%s' 在同一作用域重复声明（上一次声明在第 %d 行）", stmt.Name, existing.Line),
+			stmt.Pos.Line, stmt.Pos.Column,
+			"redeclaration",
+			"改用不同的变量名，或删除其中一个声明",
+		)
+	}
 	sa.checkVariableShadow(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, sa.variableDeclScope(), stmt.Pos.Line, stmt.Pos.Column)
 
@@ -2897,6 +2923,30 @@ func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 		if sa.currentFunction != nil && sa.currentFunction.ReturnType != "" {
 			sa.checkAdoptConversion(sa.currentFunction.ReturnType, stmt.Value, stmt.Pos, "函数返回")
 		}
+		// 前端严格化：返回值类型 vs 函数声明返回类型
+		if sa.currentFunction != nil {
+			declaredRet := sa.currentFunction.ReturnType
+			// void 函数不允许返回值
+			if declaredRet == "" || declaredRet == "void" {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("函数 '%s' 声明为无返回值(void)，但 return 带了表达式", sa.currentFunction.Name),
+					stmt.Pos.Line, stmt.Pos.Column,
+					"return_value_in_void_fn",
+					"去掉 return 后的表达式，或将函数返回类型改为对应类型",
+				)
+			} else {
+				actualT := sa.inferExpressionType(stmt.Value)
+				_, isAdopt := isAdoptBuiltinCall(stmt.Value)
+				if actualT != "" && !isAdopt && !typesAssignable(declaredRet, actualT) {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("函数 '%s' 声明返回 '%s'，但 return 表达式类型为 '%s'", sa.currentFunction.Name, declaredRet, actualT),
+						stmt.Pos.Line, stmt.Pos.Column,
+						"return_type_mismatch",
+						fmt.Sprintf("考虑显式转换 as<%s>(...)", declaredRet),
+					)
+				}
+			}
+		}
 		// 空指针安全: 可空值从非可空返回类型的函数返回
 		if id, ok := stmt.Value.(*ast.Identifier); ok {
 			if sym := sa.symbolTable.GetSymbol(id.Name); sym != nil && sym.Nullable && !sym.NullChecked {
@@ -2941,6 +2991,10 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 		if e.Object != nil {
 			sa.analyzeExpression(e.Object)
 		}
+		// 前端严格化：struct/class 字段存在性校验。
+		// 历史问题：p.zzz 这种写法 sema 不报错，漏到 clang 才报
+		// "'Point' has no member named 'zzz'"。
+		sa.checkFieldExists(e.Object, e.Member, e.Pos)
 	case *ast.LiteralExpression:
 		// 字面量不需要额外分析
 	case *ast.ParenExpression:
@@ -3606,6 +3660,17 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		if isAssignmentOperator(expr.Operator) && leftType != "" {
 			sa.checkAdoptConversion(leftType, expr.Right, expr.Pos, "赋值")
 		}
+		// 前端严格化：赋值左右类型兼容（= 直接赋值；复合赋值 += 等仍要求同数值家族）
+		if isAssignmentOperator(expr.Operator) && leftType != "" && rightType != "" {
+			if !typesAssignable(leftType, rightType) {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("不能把 '%s' 类型的值赋给 '%s' 类型的变量", rightType, leftType),
+					expr.Pos.Line, expr.Pos.Column,
+					"assign_type_mismatch",
+					fmt.Sprintf("考虑显式转换 as<%s>(...)", leftType),
+				)
+			}
+		}
 		// 套用类型守卫：非 #[transparent] 的套用类型禁止算术和比较
 		if leftType != "" && leftType == rightType && sa.adoptTypes[leftType] && !sa.transparentAdopt[leftType] {
 			switch expr.Operator {
@@ -3970,14 +4035,65 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 				}
 				return
 			}
+			// 前端严格化：调用一个非函数类型的标识符（i32 n = 42; n(1,2)）
+			if ident.Name != "range" && sym != nil &&
+				sym.Type != "" && sym.Type != "function" &&
+				!strings.HasPrefix(sym.Type, "function") &&
+				!strings.HasPrefix(sym.Type, "closure") &&
+				!strings.HasPrefix(sym.Type, "fn ") {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("'%s' 的类型是 '%s'，不是函数，不能调用", ident.Name, sym.Type),
+					ident.Pos.Line, ident.Pos.Column,
+					"calling_non_callable",
+					"确认是否拼写错误，或确认该标识符确实是函数/函数指针",
+				)
+			}
 		}
 		sa.analyzeExpression(expr.Function)
 	}
+
+	// 前端严格化：本地函数/类方法调用的参数数量与类型校验。
+	// 历史问题：sema 对 stdlib 调用做了 arity 校验，但对本地用户函数完全没做，
+	// 错误一路漏到 clang（too few arguments / incompatible type for argument）。
+	localParamTypes, _, localDispName, localOK := sa.localFuncSignatureForCall(expr)
+	if localOK {
+		arityPos := expr.Pos
+		if ma, isMA := expr.Function.(*ast.MemberAccessExpression); isMA {
+			arityPos = ma.Pos
+		} else if ident, isId := expr.Function.(*ast.Identifier); isId {
+			arityPos = ident.Pos
+		}
+		expectedN := len(localParamTypes)
+		if len(expr.Args) != expectedN {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("函数 '%s' 接受 %d 个参数，实际传了 %d 个", localDispName, expectedN, len(expr.Args)),
+				arityPos.Line, arityPos.Column,
+				"wrong_arg_count_local",
+				fmt.Sprintf("形参签名: %s", strings.Join(localParamTypes, ", ")),
+			)
+		}
+	}
+
 	for i, arg := range expr.Args {
 		sa.analyzeExpression(arg)
 		// 套用类型显式转换边界：实参类型必须与形参匹配，跨边界需 adopt/unwrap
 		if pt := sa.paramTypeAt(expr, i); pt != "" {
 			sa.checkAdoptConversion(pt, arg, arg.GetPosition(), "函数实参传递")
+		}
+		// 前端严格化：实参类型 vs 形参类型
+		if localOK && i < len(localParamTypes) {
+			expectedT := localParamTypes[i]
+			actualT := sa.inferExpressionType(arg)
+			// 实参已是 adopt/unwrap 内建调用时，类型由 checkAdoptConversion 接管
+			_, isAdoptBuiltin := isAdoptBuiltinCall(arg)
+			if !isAdoptBuiltin && actualT != "" && !typesAssignable(expectedT, actualT) {
+				sa.errorCollector.AddSemanticError(
+					fmt.Sprintf("函数 '%s' 的第 %d 个参数期望 '%s'，实际传入 '%s'", localDispName, i+1, expectedT, actualT),
+					arg.GetPosition().Line, arg.GetPosition().Column,
+					"arg_type_mismatch",
+					fmt.Sprintf("考虑显式转换 as<%s>(...)", expectedT),
+				)
+			}
 		}
 		// 空指针安全: 可空实参未判空即传给非可空形参
 		if id, ok := arg.(*ast.Identifier); ok {
@@ -4398,6 +4514,127 @@ func (sa *SemanticAnalyzer) analyzeMemberExpression(expr *ast.MemberExpression) 
 	// 空指针安全：对 Nullable 类型解引用时发出警告
 	sa.checkNullableDereference(expr.Object, expr.Pos.Line, expr.Pos.Column)
 	sa.analyzeExpression(expr.Object)
+	sa.checkFieldExists(expr.Object, expr.Member, expr.Pos)
+}
+
+// checkFieldExists 校验 obj.member 中 member 是否是 obj 类型上存在的字段/方法。
+// 仅对本文件 struct / class 做校验；无法确定 obj 类型时放行（保守不报错）。
+func (sa *SemanticAnalyzer) checkFieldExists(obj ast.Expression, member string, pos ast.Position) {
+	if obj == nil || member == "" {
+		return
+	}
+	// std.<mod>.<fn> 链 / 跨文件 import 模块：已有独立分支处理，放行
+	if ma, ok := obj.(*ast.MemberAccessExpression); ok {
+		// 嵌套 obj.a.b：只对最后一段查本地 struct/class；中间段交给 stdlib/import 分支
+		_ = ma
+		return
+	}
+	ident, ok := obj.(*ast.Identifier)
+	if !ok {
+		return
+	}
+	sym := sa.symbolTable.GetSymbol(ident.Name)
+	if sym == nil {
+		return
+	}
+	typeName := strings.TrimSuffix(sym.Type, "*")
+	// struct
+	if sd, ok := sa.structDecls[typeName]; ok {
+		for _, f := range sd.Fields {
+			if f != nil && f.Name == member {
+				return
+			}
+		}
+		// 没找到：报 no_such_field，并给相似字段提示
+		suggestion := ""
+		for _, f := range sd.Fields {
+			if f == nil {
+				continue
+			}
+			if levenshteinClose(member, f.Name) {
+				suggestion = fmt.Sprintf("是否想写 '%s'？", f.Name)
+				break
+			}
+		}
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("类型 '%s' 上没有字段 '%s'", typeName, member),
+			pos.Line, pos.Column,
+			"no_such_field",
+			suggestion,
+		)
+		return
+	}
+	// class（字段 + 方法都算合法成员）
+	if cd, ok := sa.classDecls[typeName]; ok {
+		for _, f := range cd.Fields {
+			if f != nil && f.Name == member {
+				return
+			}
+		}
+		for _, m := range cd.Methods {
+			if m.Name == member {
+				return
+			}
+		}
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("类型 '%s' 上没有成员 '%s'", typeName, member),
+			pos.Line, pos.Column,
+			"no_such_field",
+			"",
+		)
+	}
+}
+
+// levenshteinClose 粗略判断两个名字是否"接近"（编辑距离 ≤ 2 或互为前缀/后缀）。
+func levenshteinClose(a, b string) bool {
+	if a == b {
+		return true
+	}
+	la, lb := len(a), len(b)
+	if abs(la-lb) > 2 {
+		return false
+	}
+	// 简单 DP
+	dp := make([][]int, la+1)
+	for i := range dp {
+		dp[i] = make([]int, lb+1)
+		dp[i][0] = i
+	}
+	for j := range dp[0] {
+		dp[0][j] = j
+	}
+	for i := 1; i <= la; i++ {
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			dp[i][j] = min3(
+				dp[i-1][j]+1,
+				dp[i][j-1]+1,
+				dp[i-1][j-1]+cost,
+			)
+		}
+	}
+	return dp[la][lb] <= 2
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func min3(a, b, c int) int {
+	m := a
+	if b < m {
+		m = b
+	}
+	if c < m {
+		m = c
+	}
+	return m
 }
 
 // checkNullableDereference 检查是否对 Nullable 类型的值进行了解引用
@@ -4469,6 +4706,48 @@ func (sa *SemanticAnalyzer) isNonNullExpression(expr ast.Expression) bool {
 		return sa.isNonNullExpression(e.Inner)
 	}
 	return false
+}
+
+// localFuncSignatureForCall 解析被调用方的本地签名（仅当被调用方是本文件
+// 顶层函数或本文件 class 方法时返回 ok=true）。
+//
+// 用于前端严格化：对 stdlib 调用已有独立分支校验参数数量；对跨文件 import
+// 的函数签名暂时拿不到（TU 边界在 Phase 3 处理），放行；对内建
+// range/adopt/unwrap 也放行（调用方已提前 return）。
+//
+// 返回 (paramTypes, retType, displayName, ok)。
+func (sa *SemanticAnalyzer) localFuncSignatureForCall(expr *ast.CallExpression) (paramTypes []string, retType string, displayName string, ok bool) {
+	if sa.program == nil {
+		return nil, "", "", false
+	}
+	switch f := expr.Function.(type) {
+	case *ast.Identifier:
+		for _, stmt := range sa.program.Statements {
+			if fn, isFn := stmt.(*ast.FunctionStatement); isFn && fn.Name == f.Name {
+				return append([]string{}, fn.ParamTypes...), fn.ReturnType, fn.Name, true
+			}
+		}
+	case *ast.MemberAccessExpression:
+		// obj.method(...) —— 仅当 obj 的类型是本文件 class 时校验
+		className := sa.memberObjectClassName(f.Object)
+		if className == "" {
+			return nil, "", "", false
+		}
+		cls := sa.program.FindClass(className)
+		if cls == nil {
+			return nil, "", "", false
+		}
+		for _, m := range cls.Methods {
+			if m.Name == f.Member {
+				pts := make([]string, 0, len(m.Params))
+				for _, p := range m.Params {
+					pts = append(pts, p.Type)
+				}
+				return pts, m.ReturnType, className + "." + m.Name, true
+			}
+		}
+	}
+	return nil, "", "", false
 }
 
 // paramTypeAt 返回被调用函数第 i 个参数的类型; 顶层函数用 ParamTypes, 类方法用 Params[i].Type。
@@ -4884,6 +5163,41 @@ func isNumericType(typeName string) bool {
 		typeName == "i32" || typeName == "i16" || typeName == "i8" ||
 		typeName == "u64" || typeName == "u32" || typeName == "u16" ||
 		typeName == "u8" || typeName == "f64" || typeName == "f32"
+}
+
+// typesAssignable 判断 actual 类型是否可以赋值给 expected 类型（宽化、整数/浮点家族互通）。
+// 无法判断时（任一侧为空 / auto / 自定义类型）保守返回 true，避免误报；
+// 真正不兼容的标量组合（如 string → i32）返回 false。
+func typesAssignable(expected, actual string) bool {
+	e := strings.TrimSpace(expected)
+	a := strings.TrimSpace(actual)
+	if e == "" || a == "" || e == "auto" || a == "auto" {
+		return true
+	}
+	// 去可空后缀做裸类型比较
+	e = strings.TrimSuffix(e, "?")
+	a = strings.TrimSuffix(a, "?")
+	if e == a {
+		return true
+	}
+	// 两边都是整数家族
+	if isIntegerType(e) && isIntegerType(a) {
+		return true
+	}
+	// 两边都是浮点家族
+	if isFloatType(e) && isFloatType(a) {
+		return true
+	}
+	// 整数 → 浮点（宽化，C 语义允许）
+	if isFloatType(e) && isIntegerType(a) {
+		return true
+	}
+	// 指针：同形式（先放宽，不校验指向类型）
+	if strings.HasSuffix(e, "*") && strings.HasSuffix(a, "*") {
+		return true
+	}
+	// 其余情况（string → i32、struct A → struct B 等）保守拒绝
+	return false
 }
 
 // isCScalarType 检查外部 C 类型名是否为已知标量整数类型

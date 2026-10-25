@@ -10,6 +10,24 @@
 ## [Unreleased]
 
 ### Added
+- **前端严格化（sema 前置拦截）**：把原本漏到 codegen/clang 才报的错误，提前到
+  语义分析阶段报错并 fail-fast，codegen 不再在错误 AST 上白跑。
+  - 新增 fail-fast gate：`cmd/kaulac/main.go` 在 sema 结束后、codegen 之前检查
+    `errorCollector.HasErrors()`，有错直接打印诊断并 `os.Exit(1)`。
+  - 新增 8 个前端错误码：
+    - `wrong_arg_count_local`：本地函数/类方法调用实参数量 ≠ 形参数量；
+    - `arg_type_mismatch`：实参类型不兼容形参（整数/浮点家族互通，其余报错）；
+    - `return_type_mismatch`：return 表达式类型 ≠ 函数声明返回类型；
+    - `return_value_in_void_fn`：void 函数 return 带表达式；
+    - `no_such_field`：访问 struct/class 不存在的字段/成员（带相似字段提示）；
+    - `assign_type_mismatch`：赋值左右类型不兼容；
+    - `redeclaration`：同作用域重复声明同名变量（错误，不再是 warning）；
+    - `calling_non_callable`：调用一个非函数类型的标识符。
+  - 新增 `typesAssignable` 整数/浮点家族宽化规则、`localFuncSignatureForCall`
+    本地函数签名查询、`checkFieldExists` struct/class 字段校验、Levenshtein
+    相似字段提示。
+  - 回归用例：`test/errors/p*.kl`（8 个负向用例，全部前端拦截）。
+  - 方案文档：`docs/frontend-strictness-plan.md`。
 - **返回链「去逐对象提升」（P3）**：新增返回链逃逸预扫描
   （`compiler/internal/codegen/return_escape_scan.go`），识别
   `bottomUpTree` 这类「整条返回值就是一条新对象链」的构造器。命中后整条链

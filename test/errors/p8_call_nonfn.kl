@@ -1,0 +1,7 @@
+import std.io
+
+fn main() {
+    i32 n = 42
+    i32 r = n(1, 2)
+    std.io.println(r)
+}

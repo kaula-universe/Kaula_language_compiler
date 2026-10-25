@@ -2038,6 +2038,42 @@ func main() {
 		}
 	}
 
+	// Frontend fail-fast gate: 前端（lex/parse/sema）一旦有错，立即打印诊断并
+	// 退出，不再进入 codegen。
+	//
+	// 历史问题：旧流程不区分"前端有错"和"codegen 有错"，codegen 会在错误 AST
+	// 上白跑一遍，再由下游跳过 clang。这既浪费，又让 codegen 兜底诊断与前端
+	// 错误混在一份输出里，用户分不清根因。本 gate 把"前端错误"变成硬阻断，
+	// 后续新增的 sema 检查因此天然就是 error 级别。
+	if errorCollector.HasErrors() {
+		gateStage1Errs, gateStage1Warns := splitErrorsWarnings(errorCollector.Errors()[:stage1ErrorCount])
+		gateStage2Errs, gateStage2Warns := splitErrorsWarnings(errorCollector.Errors()[stage1ErrorCount:])
+		gateWarns := append(append([]*errors.Error{}, gateStage1Warns...), gateStage2Warns...)
+		gateErrCount := len(gateStage1Errs) + len(gateStage2Errs)
+
+		fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgCompilationErrorsWarnings), errors.ColorReset)
+		if len(gateStage1Errs) > 0 {
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgLexParseErrors, len(gateStage1Errs)), errors.ColorReset)
+			for _, err := range gateStage1Errs {
+				fmt.Print(errors.FormatErrorWithContext(err))
+			}
+		}
+		if len(gateStage2Errs) > 0 {
+			fmt.Printf("\n%s%s%s\n", errors.ColorRed, i18n.T(i18n.MsgSemanticAnalysisErrors, len(gateStage2Errs)), errors.ColorReset)
+			for _, err := range gateStage2Errs {
+				fmt.Print(errors.FormatErrorWithContext(err))
+			}
+		}
+		if len(gateWarns) > 0 {
+			fmt.Printf("\n%s%s%s\n", errors.ColorYellow, i18n.T(i18n.MsgWarningsHeader, len(gateWarns)), errors.ColorReset)
+			for _, err := range gateWarns {
+				fmt.Print(errors.FormatErrorWithContext(err))
+			}
+		}
+		fmt.Printf("\n%s错误: 前端 %d 个错误，已中止代码生成%s\n", errors.ColorRed, gateErrCount, errors.ColorReset)
+		os.Exit(1)
+	}
+
 	// Stage 3: Code Gen + C Compile (concurrent)
 	if verbose {
 		fmt.Println(i18n.T(i18n.MsgStage3))
