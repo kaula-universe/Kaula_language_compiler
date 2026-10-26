@@ -1841,15 +1841,17 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	}
 
 	// 2. 添加变量到符号表
-	// 前端严格化：同作用域重复声明是错误（不是 shadow 警告）。
-	// 旧实现只在 checkVariableShadow 里警告"内层 shadow 外层"，但同层重复声明
-	// i32 x = 1; i32 x = 2; 完全放行，漏到 clang 才报 redefinition of 'x'。
-	if existing := sa.symbolTable.GetLocalSymbol(stmt.Name); existing != nil {
-		sa.errorCollector.AddSemanticError(
-			fmt.Sprintf("变量 '%s' 在同一作用域重复声明（上一次声明在第 %d 行）", stmt.Name, existing.Line),
+	// 前端严格化：同作用域重复声明。
+	// 注意：Kaula 的 if/while/for 体不创建新符号表作用域（变量在函数内全程可见），
+	// 所以顺序两个 while 块里同名变量会命中这里。历史代码大量依赖这种写法
+	// （两个循环各自声明 i/a），因此这里只警告不报错——真正的"同一行附近重复声明"
+	// 由用户肉眼识别，codegen 生成 C 时两个变量落在不同 { } 块里，C 本身允许。
+	if existing := sa.symbolTable.GetLocalSymbol(stmt.Name); existing != nil && existing.Line != stmt.Pos.Line {
+		sa.errorCollector.AddSemanticWarning(
+			fmt.Sprintf("变量 '%s' 在同一作用域重复声明（上一次在第 %d 行）", stmt.Name, existing.Line),
 			stmt.Pos.Line, stmt.Pos.Column,
 			"redeclaration",
-			"改用不同的变量名，或删除其中一个声明",
+			"在控制流块之间重用变量名虽合法，但可读性差；建议改名",
 		)
 	}
 	sa.checkVariableShadow(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
@@ -4038,20 +4040,22 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 			// 前端严格化：调用一个非函数类型的标识符（i32 n = 42; n(1,2)）
 			// 豁免：sym.Type 是 class/struct/enum/interface 时，这是构造器调用
 			// （如 Counter("tick")），不是把变量当函数调。
-			isCtor := sym.Type == "class" || sym.Type == "struct" ||
-				sym.Type == "enum" || sym.Type == "interface" ||
-				strings.HasPrefix(sym.Type, "enum_variant:")
-			if ident.Name != "range" && sym != nil && !isCtor &&
-				sym.Type != "" && sym.Type != "function" &&
-				!strings.HasPrefix(sym.Type, "function") &&
-				!strings.HasPrefix(sym.Type, "closure") &&
-				!strings.HasPrefix(sym.Type, "fn ") {
-				sa.errorCollector.AddSemanticError(
-					fmt.Sprintf("'%s' 的类型是 '%s'，不是函数，不能调用", ident.Name, sym.Type),
-					ident.Pos.Line, ident.Pos.Column,
-					"calling_non_callable",
-					"确认是否拼写错误，或确认该标识符确实是函数/函数指针",
-				)
+			if ident.Name != "range" && sym != nil && sym.Type != "" {
+				isCtor := sym.Type == "class" || sym.Type == "struct" ||
+					sym.Type == "enum" || sym.Type == "interface" ||
+					strings.HasPrefix(sym.Type, "enum_variant:")
+				if !isCtor &&
+					sym.Type != "function" &&
+					!strings.HasPrefix(sym.Type, "function") &&
+					!strings.HasPrefix(sym.Type, "closure") &&
+					!strings.HasPrefix(sym.Type, "fn ") {
+					sa.errorCollector.AddSemanticError(
+						fmt.Sprintf("'%s' 的类型是 '%s'，不是函数，不能调用", ident.Name, sym.Type),
+						ident.Pos.Line, ident.Pos.Column,
+						"calling_non_callable",
+						"确认是否拼写错误，或确认该标识符确实是函数/函数指针",
+					)
+				}
 			}
 		}
 		sa.analyzeExpression(expr.Function)
