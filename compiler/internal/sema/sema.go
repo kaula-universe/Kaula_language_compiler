@@ -4036,7 +4036,12 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 				return
 			}
 			// 前端严格化：调用一个非函数类型的标识符（i32 n = 42; n(1,2)）
-			if ident.Name != "range" && sym != nil &&
+			// 豁免：sym.Type 是 class/struct/enum/interface 时，这是构造器调用
+			// （如 Counter("tick")），不是把变量当函数调。
+			isCtor := sym.Type == "class" || sym.Type == "struct" ||
+				sym.Type == "enum" || sym.Type == "interface" ||
+				strings.HasPrefix(sym.Type, "enum_variant:")
+			if ident.Name != "range" && sym != nil && !isCtor &&
 				sym.Type != "" && sym.Type != "function" &&
 				!strings.HasPrefix(sym.Type, "function") &&
 				!strings.HasPrefix(sym.Type, "closure") &&
@@ -5168,6 +5173,20 @@ func isNumericType(typeName string) bool {
 // typesAssignable 判断 actual 类型是否可以赋值给 expected 类型（宽化、整数/浮点家族互通）。
 // 无法判断时（任一侧为空 / auto / 自定义类型）保守返回 true，避免误报；
 // 真正不兼容的标量组合（如 string → i32）返回 false。
+// isTypeParameterName 判断类型名是否是泛型类型参数（单大写字母，如 T/K/V/E/R）。
+// 这类形参在泛型函数签名里出现，sema 不做实例级约束检查，放行所有实参。
+func isTypeParameterName(name string) bool {
+	if len(name) == 0 || len(name) > 3 {
+		return false
+	}
+	for _, r := range name {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
 func typesAssignable(expected, actual string) bool {
 	e := strings.TrimSpace(expected)
 	a := strings.TrimSpace(actual)
@@ -5178,6 +5197,11 @@ func typesAssignable(expected, actual string) bool {
 	e = strings.TrimSuffix(e, "?")
 	a = strings.TrimSuffix(a, "?")
 	if e == a {
+		return true
+	}
+	// 形参是泛型类型参数（T/K/V/E/R 等单大写字母）时，任何实参都兼容
+	// （泛型实例化由后续泛型单态化处理，sema 不做实例级约束检查）。
+	if isTypeParameterName(e) {
 		return true
 	}
 	// 两边都是整数家族
