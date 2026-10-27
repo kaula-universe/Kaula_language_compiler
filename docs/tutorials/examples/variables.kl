@@ -1,0 +1,16 @@
+import std.io
+
+fn main() {
+    i32 x = 42
+    f32 y = 3.14
+    string name = "Kaula"
+    bool flag = true
+
+    std.io.println("x = ", x)
+    std.io.println("y = ", y)
+    std.io.println("name = ", name)
+    std.io.println("flag = ", flag)
+
+    auto z = x + 8
+    std.io.println("z = ", z)
+}

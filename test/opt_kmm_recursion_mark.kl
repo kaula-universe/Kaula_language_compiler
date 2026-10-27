@@ -1,0 +1,52 @@
+import std.io;
+
+// 回归产物：递归深度不再受 KMM_V4_MAX_SCOPE_DEPTH（默认 1024）约束。
+//
+// 原理：处于递归环且启用 KMM 作用域的函数，改用 base 感知的
+// kmm_v4_mark_save/restore 替代 kmm_v4_scope_push/pop。mark 存在 C 栈局部
+// 变量里，不占用作用域栈的定长槽位；语义等价——退出区间即回卷 thread heap
+// offset 回收区间内分配，每层仍然回收（内存行为不变）。
+//
+// 三个用例在改造前都会在 1024 层 abort（rc=134 SIGABRT）：
+//   [A] 非尾递归        —— 尾调用改写覆盖不到
+//   [B] 互递归          —— 尾调用改写只处理直接自递归
+//   [C] 递归 + 块级分配 —— 每层除函数级外还有块级作用域，槽位消耗更快
+
+fn deep(i32 n) i32 {
+    string s = "abc"
+    if (n <= 0) { return 0 }
+    return 1 + deep(n - 1)
+}
+
+fn even(i32 n) bool {
+    if (n == 0) { return true }
+    return odd(n - 1)
+}
+fn odd(i32 n) bool {
+    string s = "odd"
+    if (n == 0) { return false }
+    return even(n - 1)
+}
+
+fn recBlock(i32 n) i32 {
+    string s = "abc"
+    if (n <= 0) { return 0 }
+    i32 t = 0
+    while (t < 3) {
+        string w = "w"
+        t = t + 1
+    }
+    if (n % 2 == 0) {
+        string q = "q"
+        return 1 + recBlock(n - 1)
+    }
+    return 1 + recBlock(n - 1)
+}
+
+fn main() i32 {
+    println(deep(5000))
+    println(odd(5000))
+    println(even(5000))
+    println(recBlock(5000))
+    return 0
+}

@@ -1,0 +1,27 @@
+# 高并发 spawn/join 压力测试（零计算任务，测纯内核编排吞吐）
+# main 每轮 spawn 4 个空任务，join 校验；共 50000 轮 = 200000 任务
+
+import std.io
+
+conc fn ping() -> i32 {
+    return 1
+}
+
+fn main() -> i32 {
+    for round in range(0, 50000) {
+        Handle h1 = spawn ping()
+        Handle h2 = spawn ping()
+        Handle h3 = spawn ping()
+        Handle h4 = spawn ping()
+        i32 r1 = h1.await
+        i32 r2 = h2.await
+        i32 r3 = h3.await
+        i32 r4 = h4.await
+        if r1 != 1 || r2 != 1 || r3 != 1 || r4 != 1 {
+            std.io.println("FAIL at round ", round)
+            return 1
+        }
+    }
+    std.io.println("stress concurrent spawn OK: 200000 tasks")
+    return 0
+}

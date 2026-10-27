@@ -1,0 +1,96 @@
+// 前端优化回归：if 链转跳转表
+//
+// 预期（KAULA_OPT_DISABLE=1 关闭前端优化时应完全一致）：
+//   148 / 200 / 22 / 7 / 3
+//
+// 关键点：
+//   - dispatch / dispatchNeg / dispatchNoElse 的等值链被折叠成 C switch（跳转表）
+//   - breakGuard 分支内含 break，必须保持 if 链形态：
+//     若被误改成 switch，break 会从"跳出外层 while"变成"跳出 switch"，
+//     结果会从 3 变成 30（跑满 10 轮）。
+
+import std.io;
+
+fn dispatch(i32 code) i32 {
+    i32 r = 0;
+    if (code == 1) {
+        r = 10;
+    } else if (code == 2) {
+        r = 20;
+    } else if (code == 3) {
+        r = 30;
+    } else if (code == 4) {
+        r = 40;
+    } else if (code == 5) {
+        r = 50;
+    } else {
+        r = -1;
+    }
+    return r;
+}
+
+fn dispatchNeg(i32 code) i32 {
+    i32 r = 0;
+    if (code == -1) {
+        r = 100;
+    } else if (code == -2) {
+        r = 200;
+    } else if (code == -3) {
+        r = 300;
+    } else {
+        r = -1;
+    }
+    return r;
+}
+
+// 无 else 的链：未命中时向下继续执行
+fn dispatchNoElse(i32 code) i32 {
+    i32 r = 7;
+    if (code == 1) {
+        r = 11;
+    } else if (code == 2) {
+        r = 22;
+    } else if (code == 3) {
+        r = 33;
+    }
+    return r;
+}
+
+// 分支内的 break 必须跳出外层 while，不能被 switch 吃掉
+fn breakGuard(i32 n) i32 {
+    i32 acc = 0;
+    i32 i = 0;
+    while (i < 10) {
+        if (n == 1) {
+            acc = acc + 1;
+            break;
+        } else if (n == 2) {
+            acc = acc + 2;
+            break;
+        } else if (n == 3) {
+            acc = acc + 3;
+            break;
+        } else {
+            acc = acc + 100;
+            break;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn main() i32 {
+    i32 sum = 0;
+    i32 i = 0;
+    while (i <= 6) {
+        sum = sum + dispatch(i);
+        i = i + 1;
+    }
+    println(sum);              // 148
+
+    println(dispatchNeg(-2));  // 200
+    println(dispatchNoElse(2)); // 22
+    println(dispatchNoElse(9)); // 7
+    println(breakGuard(3));     // 3
+    return 0;
+}

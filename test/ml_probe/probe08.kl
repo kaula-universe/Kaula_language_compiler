@@ -1,0 +1,9 @@
+import "libab.kl"
+import std.io
+
+fn main() {
+    A a = A(1.0, 2.0)
+    B b = B(4)
+    std.io.println("a = (", a.x, ", ", a.y, ") b.cnt = ", b.cnt)
+    std.io.println("b.items[0] = (", b.items[0].x, ", ", b.items[0].y, ")")
+}
