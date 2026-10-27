@@ -1,0 +1,132 @@
+// fs_math.kl — freestanding.math 全部 35 个函数（Kaula 层）
+//
+// 覆盖: 浮点基础(11) / 整数数学(10) / 位运算(8) / 随机数(4) / 角度(2)
+
+import freestanding.math
+import freestanding.io
+
+fn check(bool cond, string label) {
+    if (!cond) {
+        println("FAIL ", label)
+    }
+}
+
+fn close(f64 a, f64 b) -> bool {
+    f64 d = a - b
+    if (d < 0.0) {
+        d = -d
+    }
+    return d < 0.000001
+}
+
+fn main() -> i32 {
+    // ---------- 浮点基础 ----------
+    check(freestanding.math.math_abs(-3.5) == 3.5, "math_abs(-3.5)")
+    check(freestanding.math.math_abs(3.5) == 3.5, "math_abs(3.5)")
+    check(freestanding.math.math_fabs(-2.25) == 2.25, "math_fabs(-2.25)")
+    check(freestanding.math.math_min(1.0, 2.0) == 1.0, "math_min(1,2)")
+    check(freestanding.math.math_min(2.0, 1.0) == 1.0, "math_min(2,1)")
+    check(freestanding.math.math_min(-5.0, 5.0) == -5.0, "math_min(-5,5)")
+    check(freestanding.math.math_max(1.0, 2.0) == 2.0, "math_max(1,2)")
+    check(freestanding.math.math_max(2.0, 1.0) == 2.0, "math_max(2,1)")
+    check(freestanding.math.math_max(-5.0, 5.0) == 5.0, "math_max(-5,5)")
+
+    check(freestanding.math.math_signbit(-1.0) == 1, "math_signbit(-1.0) == 1")
+    check(freestanding.math.math_signbit(1.0) == 0, "math_signbit(1.0) == 0")
+    check(freestanding.math.math_signbit(-0.0) == 1, "math_signbit(-0.0) == 1")
+
+    // NaN / Inf: 用 0.0/0.0 与 1e308*10 构造
+    f64 zero = 0.0
+    f64 nan = zero / zero
+    f64 pinf = 1e308 * 10.0
+    check(freestanding.math.math_isnan(nan) == true, "math_isnan(NaN)")
+    check(freestanding.math.math_isnan(1.0) == false, "math_isnan(1.0) == false")
+    check(freestanding.math.math_isinf(pinf) == true, "math_isinf(+inf)")
+    check(freestanding.math.math_isinf(1.0) == false, "math_isinf(1.0) == false")
+    check(freestanding.math.math_isfinite(1.0) == true, "math_isfinite(1.0)")
+    check(freestanding.math.math_isfinite(pinf) == false, "math_isfinite(inf) == false")
+    check(freestanding.math.math_isfinite(nan) == false, "math_isfinite(NaN) == false")
+
+    check(freestanding.math.math_floor(1.5) == 1.0, "math_floor(1.5)")
+    check(freestanding.math.math_floor(-1.5) == -2.0, "math_floor(-1.5)")
+    check(freestanding.math.math_floor(2.0) == 2.0, "math_floor(2.0)")
+    check(freestanding.math.math_floor(0.5) == 0.0, "math_floor(0.5)")
+    check(freestanding.math.math_ceil(1.5) == 2.0, "math_ceil(1.5)")
+    check(freestanding.math.math_ceil(-1.5) == -1.0, "math_ceil(-1.5)")
+    check(freestanding.math.math_ceil(0.5) == 1.0, "math_ceil(0.5)")
+    check(freestanding.math.math_trunc(1.9) == 1.0, "math_trunc(1.9)")
+    check(freestanding.math.math_trunc(-1.9) == -1.0, "math_trunc(-1.9)")
+    check(freestanding.math.math_trunc(2.0) == 2.0, "math_trunc(2.0)")
+    // 超出 int64 范围（曾经的 UB 点）
+    check(freestanding.math.math_floor(1e19) == 1e19, "math_floor(1e19)")
+    check(freestanding.math.math_ceil(-1e19) == -1e19, "math_ceil(-1e19)")
+    check(freestanding.math.math_trunc(1e19) == 1e19, "math_trunc(1e19)")
+
+    // ---------- 整数数学 ----------
+    check(freestanding.math.math_abs_i64(-5) == 5, "math_abs_i64(-5)")
+    check(freestanding.math.math_abs_i64(0) == 0, "math_abs_i64(0)")
+    check(freestanding.math.math_abs_i32(-5) == 5, "math_abs_i32(-5)")
+    check(freestanding.math.math_min_i64(1, 2) == 1, "math_min_i64(1,2)")
+    check(freestanding.math.math_max_i64(1, 2) == 2, "math_max_i64(1,2)")
+    check(freestanding.math.math_min_i32(1, 2) == 1, "math_min_i32(1,2)")
+    check(freestanding.math.math_max_i32(1, 2) == 2, "math_max_i32(1,2)")
+    check(freestanding.math.math_min_u64(1, 2) == 1, "math_min_u64(1,2)")
+    check(freestanding.math.math_max_u64(1, 2) == 2, "math_max_u64(1,2)")
+    check(freestanding.math.math_min_u32(1, 2) == 1, "math_min_u32(1,2)")
+    check(freestanding.math.math_max_u32(1, 2) == 2, "math_max_u32(1,2)")
+
+    // ---------- 位运算 ----------
+    check(as<u64>(freestanding.math.math_clz(0)) == 64, "math_clz(0) == 64")
+    check(as<u64>(freestanding.math.math_clz(1)) == 63, "math_clz(1) == 63")
+    check(as<u64>(freestanding.math.math_clz(255)) == 56, "math_clz(0xFF) == 56")
+    check(as<u64>(freestanding.math.math_ctz(0)) == 64, "math_ctz(0) == 64")
+    check(as<u64>(freestanding.math.math_ctz(1)) == 0, "math_ctz(1) == 0")
+    check(as<u64>(freestanding.math.math_ctz(256)) == 8, "math_ctz(0x100) == 8")
+    check(as<u64>(freestanding.math.math_popcount(0)) == 0, "math_popcount(0)")
+    check(as<u64>(freestanding.math.math_popcount(255)) == 8, "math_popcount(0xFF) == 8")
+    check(as<u64>(freestanding.math.math_popcount(18446744073709551615)) == 64, "math_popcount(U64_MAX)")
+    check(freestanding.math.math_is_pow2(1) == true, "math_is_pow2(1)")
+    check(freestanding.math.math_is_pow2(256) == true, "math_is_pow2(256)")
+    check(freestanding.math.math_is_pow2(0) == false, "math_is_pow2(0) == false")
+    check(freestanding.math.math_is_pow2(3) == false, "math_is_pow2(3) == false")
+
+    check(freestanding.math.math_round_up(0, 8) == 0, "math_round_up(0,8)")
+    check(freestanding.math.math_round_up(1, 8) == 8, "math_round_up(1,8)")
+    check(freestanding.math.math_round_up(8, 8) == 8, "math_round_up(8,8)")
+    check(freestanding.math.math_round_up(9, 16) == 16, "math_round_up(9,16)")
+    check(freestanding.math.math_round_down(1, 8) == 0, "math_round_down(1,8)")
+    check(freestanding.math.math_round_down(17, 16) == 16, "math_round_down(17,16)")
+    check(freestanding.math.math_div_round_up(10, 3) == 4, "math_div_round_up(10,3)")
+    check(freestanding.math.math_div_round_up(9, 3) == 3, "math_div_round_up(9,3)")
+    check(freestanding.math.math_div_round_up(7, 0) == 0, "math_div_round_up(7,0) == 0")
+    check(freestanding.math.math_gcd(48, 36) == 12, "math_gcd(48,36)")
+    check(freestanding.math.math_gcd(36, 48) == 12, "math_gcd(36,48)")
+    check(freestanding.math.math_gcd(17, 5) == 1, "math_gcd(17,5)")
+    check(freestanding.math.math_gcd(0, 5) == 5, "math_gcd(0,5)")
+
+    // ---------- 随机数 ----------
+    freestanding.math.math_srand(12345)
+    i32 r1 = freestanding.math.math_rand()
+    i32 r2 = freestanding.math.math_rand()
+    freestanding.math.math_srand(12345)
+    i32 r3 = freestanding.math.math_rand()
+    i32 r4 = freestanding.math.math_rand()
+    check(r1 == r3 && r2 == r4, "math_srand makes math_rand deterministic")
+    check(r1 != r2, "math_rand sequence varies")
+    check(r1 >= 0, "math_rand >= 0")
+
+    f64 f1 = freestanding.math.math_randf()
+    check(f1 >= 0.0 && f1 < 1.0, "math_randf in [0,1)")
+    f64 f2 = freestanding.math.math_rand_range(-5.0, 5.0)
+    check(f2 >= -5.0 && f2 <= 5.0, "math_rand_range in [min,max]")
+
+    // ---------- 角度 ----------
+    check(close(freestanding.math.math_deg_to_rad(180.0), 3.14159265358979323846), "math_deg_to_rad(180)")
+    check(close(freestanding.math.math_deg_to_rad(90.0), 1.5707963267948966), "math_deg_to_rad(90)")
+    check(close(freestanding.math.math_rad_to_deg(3.14159265358979323846), 180.0), "math_rad_to_deg(PI)")
+    check(close(freestanding.math.math_rad_to_deg(freestanding.math.math_deg_to_rad(37.0)), 37.0),
+          "deg->rad->deg roundtrip 37")
+
+    println("fs_math: math module OK")
+    return 0
+}

@@ -1,0 +1,53 @@
+// Kaula 并发内核 · 阶段四测试：conc fn + spawn + await
+//
+// 覆盖两种 lowering 形态：
+//   1. 无挂起点的 conc fn → 单一形态（Frame 无 pc，resume 无 switch）
+//   2. 含挂起点的 conc fn → 双形态（pc + Frame 字段 + 状态机）
+//   3. 顺序调用 conc fn → coercion shim，零调度零堆分配
+//   4. spawn + await → 走内核
+
+import std.io
+import std.time
+
+// ---------- 形态 1：单一形态 ----------
+
+// 无可插桩调用，因此无挂起点。
+// 生成的 Frame 不含 pc 字段，resume 只是一次转发。
+conc fn compute_sum(i64 a, i64 b) -> i64 {
+    return a + b
+}
+
+// ---------- 形态 2：双形态 ----------
+
+// time_sleep 在 lowering 的可插桩表里（SuspendSleep），
+// 因此这里会成为 suspend 点，Frame 需要 pc 字段。
+conc fn fetch_after_delay(string url, i64 delay_ms) -> string {
+    std.time.time_sleep(delay_ms)
+    return url
+}
+
+// ---------- 顺序调用 conc fn（coercion shim） ----------
+
+fn main() -> i32 {
+    // 顺序调用 conc fn：等价于普通函数调用
+    i64 s = compute_sum(3, 4)
+    std.io.println("sum = ", s)
+
+    // spawn 提交到内核，await 取回结果
+    Handle h = spawn compute_sum(10, 20)
+    i64 sum2 = h.await
+    std.io.println("spawned sum = ", sum2)
+
+    // 含挂起点的 conc fn，顺序调用（shim 内就地等 IO）
+    string r = fetch_after_delay("done", 1)
+    std.io.println("delayed = ", r)
+
+    // 并发提交多个，再依次 await
+    Handle h1 = spawn compute_sum(1, 1)
+    Handle h2 = spawn compute_sum(2, 2)
+    Handle h3 = spawn compute_sum(3, 3)
+    std.io.println("batch = ", h1.await + h2.await + h3.await)
+
+    std.io.println("phase4 ok")
+    return 0
+}

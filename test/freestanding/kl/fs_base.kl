@@ -1,0 +1,90 @@
+// fs_base.kl — freestanding.base 全部 29 个函数（Kaula 层）
+//
+// 覆盖: 饱和转换 to_* / 类型比较 compare_* / 类型检查 is_*
+// 运行: 托管模式（真实执行）与 freestanding 模式（-nostdlib 编译）都应通过
+// 断言: 任一不符即打印 FAIL, 进程返回非零
+//
+// 注意: Kaula 只支持"模块限定"调用（freestanding.base.to_i8(...)）,
+//       裸函数名仅 println 等内建可用 —— 见 docs/stdlib-integration.md
+
+import freestanding.base
+import freestanding.io
+
+fn check(cond: bool, label: string) {
+    if (!cond) {
+        println("FAIL ", label)
+    }
+}
+
+fn main() -> i32 {
+    // ---------- 饱和转换 ----------
+    check(freestanding.base.to_i8(0) == 0, "to_i8(0)")
+    check(freestanding.base.to_i8(127) == 127, "to_i8(127)")
+    check(freestanding.base.to_i8(128) == 127, "to_i8(128) saturates")
+    check(freestanding.base.to_i8(-128) == -128, "to_i8(-128)")
+    check(freestanding.base.to_i8(-129) == -128, "to_i8(-129) saturates")
+    check(freestanding.base.to_i8(100000) == 127, "to_i8(100000) saturates")
+
+    check(freestanding.base.to_i16(32767) == 32767, "to_i16(32767)")
+    check(freestanding.base.to_i16(32768) == 32767, "to_i16(32768) saturates")
+    check(freestanding.base.to_i16(-32768) == -32768, "to_i16(-32768)")
+    check(freestanding.base.to_i16(-32769) == -32768, "to_i16(-32769) saturates")
+
+    check(freestanding.base.to_i32(2147483647) == 2147483647, "to_i32(INT32_MAX)")
+    check(freestanding.base.to_i32(2147483648) == 2147483647, "to_i32(INT32_MAX+1) saturates")
+    check(freestanding.base.to_i32(-2147483648) == -2147483648, "to_i32(INT32_MIN)")
+    check(freestanding.base.to_i32(-2147483649) == -2147483648, "to_i32(INT32_MIN-1) saturates")
+
+    check(freestanding.base.to_i64(9223372036854775807) == 9223372036854775807, "to_i64(INT64_MAX)")
+    check(freestanding.base.to_i64(-9223372036854775807) == -9223372036854775807, "to_i64(INT64_MIN+1)")
+
+    check(freestanding.base.to_u8(255) == 255, "to_u8(255)")
+    check(freestanding.base.to_u8(256) == 255, "to_u8(256) saturates")
+    check(freestanding.base.to_u16(65535) == 65535, "to_u16(65535)")
+    check(freestanding.base.to_u16(65536) == 65535, "to_u16(65536) saturates")
+    check(freestanding.base.to_u32(4294967295) == 4294967295, "to_u32(U32_MAX)")
+    check(freestanding.base.to_u32(4294967296) == 4294967295, "to_u32(U32_MAX+1) saturates")
+    check(freestanding.base.to_u64(12345678901234567890) == 12345678901234567890, "to_u64(U64) identity")
+
+    check(freestanding.base.to_f32(1.5) == 1.5, "to_f32(1.5)")
+    check(freestanding.base.to_f32(-0.25) == -0.25, "to_f32(-0.25)")
+    check(freestanding.base.to_f64(-12345.678) == -12345.678, "to_f64 identity")
+    check(freestanding.base.to_bool(0) == false, "to_bool(0) == false")
+    check(freestanding.base.to_bool(1) == true, "to_bool(1) == true")
+    check(freestanding.base.to_bool(-5) == true, "to_bool(-5) == true")
+    check(as<i64>(freestanding.base.to_char(65)) == 65, "to_char(65)")
+    check(as<i64>(freestanding.base.to_char(321)) == 65, "to_char(321) truncates")
+
+    // ---------- 类型比较 ----------
+    check(freestanding.base.compare_i8(1, 2) < 0, "compare_i8(1,2) < 0")
+    check(freestanding.base.compare_i8(2, 1) > 0, "compare_i8(2,1) > 0")
+    check(freestanding.base.compare_i8(-5, -5) == 0, "compare_i8(-5,-5) == 0")
+    check(freestanding.base.compare_i16(-32768, 32767) < 0, "compare_i16(-32768,32767)")
+    check(freestanding.base.compare_i32(2147483647, -2147483648) > 0, "compare_i32(MAX,MIN)")
+    check(freestanding.base.compare_i64(9223372036854775807, -9223372036854775807) > 0, "compare_i64(MAX,MIN+1)")
+    check(freestanding.base.compare_u8(1, 255) < 0, "compare_u8(1,255)")
+    check(freestanding.base.compare_u16(65535, 65535) == 0, "compare_u16 equal")
+    check(freestanding.base.compare_u32(1, 4294967295) < 0, "compare_u32(1,MAX)")
+    check(freestanding.base.compare_u64(18446744073709551615, 0) > 0, "compare_u64(MAX,0)")
+    check(freestanding.base.compare_f32(1.0, 2.0) < 0, "compare_f32(1,2)")
+    check(freestanding.base.compare_f64(2.0, 1.0) > 0, "compare_f64(2,1)")
+    check(freestanding.base.compare_f64(0.1, 0.1) == 0, "compare_f64 equal")
+    check(freestanding.base.compare_bool(false, true) < 0, "compare_bool(false,true)")
+    check(freestanding.base.compare_char(97, 98) < 0, "compare_char('a','b')")
+    check(freestanding.base.compare_char(65, 65) == 0, "compare_char equal")
+
+    // ---------- 类型检查 ----------
+    check(freestanding.base.is_integer(0) == true, "is_integer(0)")
+    check(freestanding.base.is_integer(-1) == true, "is_integer(-1)")
+    check(freestanding.base.is_unsigned(0) == true, "is_unsigned(0)")
+    check(freestanding.base.is_unsigned(123456789) == true, "is_unsigned(123456789)")
+    check(freestanding.base.is_float(0.0) == true, "is_float(0.0)")
+    check(freestanding.base.is_float(-1.5e300) == true, "is_float(-1.5e300)")
+    check(freestanding.base.is_bool(false) == true, "is_bool(false)")
+    check(freestanding.base.is_bool(true) == true, "is_bool(true)")
+    check(freestanding.base.is_char(0) == true, "is_char(0)")
+    check(freestanding.base.is_char(120) == true, "is_char('x')")
+
+    println("fs_base: base module OK")
+    return 0
+}

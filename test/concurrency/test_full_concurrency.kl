@@ -1,0 +1,76 @@
+// Kaula 并发内核 · 全量并发压测（kl 侧 Handle 数组形态）
+//
+// 修复前：编译器不支持 Handle 数组，kl 侧只能 8 变量并发窗口逐批
+// spawn/await —— 内核大部分时间空转，吞吐被批间气泡锁死（A 纯计算
+// 30k/s vs Go GMP 2.8M/s，95 倍差距的根因）。
+// 修复后：Handle hs[n] + 循环 spawn/await —— 复现 C 侧 bench_mixed
+// 的全量模型：n 个任务一次全部提交，内核饱和执行。
+//
+// 与 Go 全量场景（gmp_vs_kaula 的 [C]/[D]）同口径：
+//   - n=100000、pct=10
+//   - task(i,pct)：i%100<pct → slow（2ms 挂起）else compute（i+1）
+//   - 校验：返回值精确匹配（err 计数，不依赖内核调试钩子）
+
+import std.io
+import std.time
+
+conc fn compute(i64 input) -> i64 {
+    return input + 1
+}
+
+conc fn slow(i64 input) -> i64 {
+    std.time.time_sleep(2)
+    return input + 1000
+}
+
+conc fn task(i64 input, i64 pct) -> i64 {
+    if input % 100 < pct {
+        return slow(input)
+    }
+    return compute(input)
+}
+
+// 全量提交：n 个任务一次 spawn 完，再逐个 await 校验。
+// Handle 数组是 kl 侧全量并发形态的载体。
+fn run_all(i64 n, i64 pct) -> i64 {
+    Handle hs[n]
+    i64 t0 = std.time.time_now_ms()
+    for i in range(n) {
+        hs[i] = spawn task(i, pct)
+    }
+    i64 t1 = std.time.time_now_ms()
+
+    i64 err = 0
+    for i in range(n) {
+        i64 r = hs[i].await
+        if i % 100 < pct {
+            if r != i + 1000 {
+                err += 1
+                std.io.println("ERR slow ", i, " got=", r)
+            }
+        } else {
+            if r != i + 1 {
+                err += 1
+                std.io.println("ERR comp ", i, " got=", r)
+            }
+        }
+    }
+    i64 t2 = std.time.time_now_ms()
+    std.io.println("  spawn ", n, " tasks: ", (t1 - t0), " ms")
+    std.io.println("  await+check ", n, " tasks: ", (t2 - t1), " ms")
+    std.io.println("  total: ", (t2 - t0), " ms  (", (n * 1000 / (t2 - t0)), " tasks/s)")
+    return err
+}
+
+fn main() -> i32 {
+    i64 n = 100000
+    i64 pct = 10
+
+    std.io.println("[C] compute-only  n=", n)
+    i64 errC = run_all(n, 0)
+    std.io.println("[D] mixed(10% io) n=", n)
+    i64 errD = run_all(n, pct)
+
+    std.io.println("full_concurrency ok err=", (errC + errD))
+    return 0
+}

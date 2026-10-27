@@ -1,0 +1,238 @@
+// fs_memory.kl — freestanding.memory 全部 11 个函数（Kaula 层）
+//
+// 覆盖: memset / memcpy / memmove / memcmp /
+//       fs_alloc / fs_calloc / fs_free / fs_alloc_reset /
+//       fs_alloc_usage / fs_alloc_available / fs_alloc_capacity
+//
+// 注: Kaula 不支持指针 + 偏移, 偏移指针用 &arr[n] 表达;
+//     返回 size_t/int 的 C 函数用 as<u64>/as<i32> 显式桥接。
+
+import freestanding.memory
+import freestanding.io
+
+fn check(bool cond, string label) {
+    if (!cond) {
+        println("FAIL ", label)
+    }
+}
+
+fn main() -> i32 {
+    // ---------- 池容量 ----------
+    u64 cap = freestanding.memory.fs_alloc_capacity()
+    check(cap == 65536, "fs_alloc_capacity == 64KB")
+
+    freestanding.memory.fs_alloc_reset()
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == 0, "usage 0 after reset")
+    check(as<u64>(freestanding.memory.fs_alloc_available()) == cap, "available == capacity at start")
+
+    // ---------- fs_alloc ----------
+    u8* p0 = as<u8*>(freestanding.memory.fs_alloc(1))
+    check(p0 != as<u8*>(0), "fs_alloc(1) non-null")
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == 8, "fs_alloc(1) rounds up to 8")
+
+    u8* p1 = as<u8*>(freestanding.memory.fs_alloc(8))
+    check(p1 != as<u8*>(0), "fs_alloc(8) non-null")
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == 16, "usage 16 after two allocs")
+
+    u8* p2 = as<u8*>(freestanding.memory.fs_alloc(0))
+    check(p2 != as<u8*>(0), "fs_alloc(0) non-null (min 8 bytes)")
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == 24, "fs_alloc(0) consumes 8")
+
+    u8* p3 = as<u8*>(freestanding.memory.fs_alloc(9))
+    check(p3 != as<u8*>(0), "fs_alloc(9) non-null")
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == 40, "fs_alloc(9) rounds to 16")
+    u64 avail = as<u64>(freestanding.memory.fs_alloc_available())
+    u64 used = as<u64>(freestanding.memory.fs_alloc_usage())
+    check(avail + used == cap, "available + usage == capacity")
+
+    // 分配区域互不重叠
+    p0[0] = 11
+    p1[0] = 22
+    p2[0] = 33
+    p3[0] = 44
+    check(p0[0] == 11 && p1[0] == 22 && p2[0] == 33 && p3[0] == 44,
+          "separate allocations do not overlap")
+
+    // ---------- memset ----------
+    u8 buf[64]
+    // 预置非零, 便于观察保护区
+    i32 i = 0
+    while i < 64 {
+        buf[i] = 0
+        i = i + 1
+    }
+
+    freestanding.memory.memset(as<void*>(&buf[0]), 65, 32)
+    i32 filled = 1
+    i = 0
+    while i < 32 {
+        if (buf[i] != 65) {
+            filled = 0
+        }
+        i = i + 1
+    }
+    check(filled == 1, "memset fills 32 bytes with 0x41")
+    check(buf[32] == 0 && buf[63] == 0, "memset leaves surrounding bytes untouched")
+
+    // n = 0 不写任何字节
+    buf[40] = 7
+    freestanding.memory.memset(as<void*>(&buf[40]), 99, 0)
+    check(buf[40] == 7, "memset with n=0 writes nothing")
+
+    // 跨字长边界的填充: 17 字节（覆盖 8 字节字长与尾部）
+    freestanding.memory.memset(as<void*>(&buf[0]), 0xAB, 17)
+    filled = 1
+    i = 0
+    while i < 17 {
+        if (buf[i] != 0xAB) {
+            filled = 0
+        }
+        i = i + 1
+    }
+    check(filled == 1, "memset 17 bytes across word boundary")
+    // 第 17 字节保留上一次 memset(65, 32) 写入的值, 证明没有越界写
+    check(buf[17] == 65, "memset 17 bytes stops at 17 (byte 17 keeps previous value)")
+
+    // ---------- memcpy ----------
+    u8 src[40]
+    i = 0
+    while i < 40 {
+        src[i] = as<u8>(i)
+        i = i + 1
+    }
+    u8 dst[40]
+    freestanding.memory.memcpy(as<void*>(&dst[0]), as<void*>(&src[0]), 40)
+    i32 copied = 1
+    i = 0
+    while i < 40 {
+        if (dst[i] != src[i]) {
+            copied = 0
+        }
+        i = i + 1
+    }
+    check(copied == 1, "memcpy copies 40 bytes")
+
+    // 非对齐源/目的
+    u8 unaligned[48]
+    freestanding.memory.memcpy(as<void*>(&unaligned[1]), as<void*>(&src[0]), 33)
+    copied = 1
+    i = 0
+    while i < 33 {
+        if (unaligned[1 + i] != src[i]) {
+            copied = 0
+        }
+        i = i + 1
+    }
+    check(copied == 1, "memcpy with unaligned dst/src offsets")
+
+    // ---------- memcmp ----------
+    check(as<i32>(freestanding.memory.memcmp(as<void*>(&dst[0]), as<void*>(&src[0]), 40)) == 0,
+          "memcmp equal == 0")
+    check(as<i32>(freestanding.memory.memcmp(as<void*>(&dst[0]), as<void*>(&src[0]), 0)) == 0,
+          "memcmp n=0 == 0")
+    dst[39] = as<u8>(200)
+    check(as<i32>(freestanding.memory.memcmp(as<void*>(&dst[0]), as<void*>(&src[0]), 40)) > 0,
+          "memcmp greater > 0")
+    check(as<i32>(freestanding.memory.memcmp(as<void*>(&src[0]), as<void*>(&dst[0]), 40)) < 0,
+          "memcmp less < 0")
+    dst[39] = src[39]
+    check(as<i32>(freestanding.memory.memcmp(as<void*>(&dst[0]), as<void*>(&src[0]), 40)) == 0,
+          "memcmp equal again after restore")
+
+    // ---------- memmove ----------
+    u8 mv[64]
+    i = 0
+    while i < 32 {
+        mv[i] = as<u8>(i)
+        i = i + 1
+    }
+    // 重叠: dst > src（实现必须从尾部拷贝）
+    freestanding.memory.memmove(as<void*>(&mv[4]), as<void*>(&mv[0]), 24)
+    i32 overlap_ok = 1
+    i = 0
+    while i < 24 {
+        if (mv[4 + i] != as<u8>(i)) {
+            overlap_ok = 0
+        }
+        i = i + 1
+    }
+    check(overlap_ok == 1, "memmove overlapping dst>src")
+
+    // 重叠: dst < src（正向拷贝安全）
+    i = 0
+    while i < 32 {
+        mv[i] = as<u8>(i)
+        i = i + 1
+    }
+    freestanding.memory.memmove(as<void*>(&mv[0]), as<void*>(&mv[4]), 24)
+    overlap_ok = 1
+    i = 0
+    while i < 24 {
+        if (mv[i] != as<u8>(i + 4)) {
+            overlap_ok = 0
+        }
+        i = i + 1
+    }
+    check(overlap_ok == 1, "memmove overlapping dst<src")
+
+    // 不重叠
+    i = 0
+    while i < 32 {
+        mv[i] = as<u8>(i)
+        mv[32 + i] = 0
+        i = i + 1
+    }
+    freestanding.memory.memmove(as<void*>(&mv[32]), as<void*>(&mv[0]), 32)
+    overlap_ok = 1
+    i = 0
+    while i < 32 {
+        if (mv[32 + i] != as<u8>(i)) {
+            overlap_ok = 0
+        }
+        i = i + 1
+    }
+    check(overlap_ok == 1, "memmove non-overlapping")
+
+    // ---------- fs_calloc ----------
+    freestanding.memory.fs_alloc_reset()
+    u32* zeroed = as<u32*>(freestanding.memory.fs_calloc(16, 4))
+    check(zeroed != as<u32*>(0), "fs_calloc(16,4) non-null")
+    i32 all_zero = 1
+    i = 0
+    while i < 16 {
+        if (zeroed[i] != 0) {
+            all_zero = 0
+        }
+        i = i + 1
+    }
+    check(all_zero == 1, "fs_calloc zeroes memory")
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == 64, "fs_calloc(16,4) uses 64 bytes")
+
+    // ---------- fs_free (空操作) ----------
+    u64 before = as<u64>(freestanding.memory.fs_alloc_usage())
+    freestanding.memory.fs_free(as<void*>(zeroed))
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == before, "fs_free is a no-op (bump allocator)")
+
+    // ---------- 池耗尽 ----------
+    freestanding.memory.fs_alloc_reset()
+    i32 rounds = 0
+    while rounds < 200 {
+        u8* tmp = as<u8*>(freestanding.memory.fs_alloc(1024))
+        if (tmp == as<u8*>(0)) {
+            break
+        }
+        rounds = rounds + 1
+    }
+    check(rounds == 64, "pool serves exactly 64 x 1KB allocations")
+    check(as<u64>(freestanding.memory.fs_alloc_available()) == 0, "available == 0 when exhausted")
+    check(as<u8*>(freestanding.memory.fs_alloc(1)) == as<u8*>(0), "fs_alloc returns NULL when full")
+
+    // ---------- reset ----------
+    freestanding.memory.fs_alloc_reset()
+    check(as<u64>(freestanding.memory.fs_alloc_usage()) == 0, "reset zeroes usage")
+    u8* after = as<u8*>(freestanding.memory.fs_alloc(16))
+    check(after != as<u8*>(0), "allocation works after reset")
+
+    println("fs_memory: memory module OK")
+    return 0
+}

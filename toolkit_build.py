@@ -1,0 +1,1041 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Kaula Toolkit 一键编译脚本
+编译所有组件：标准库 (std.lib)、运行时、编译器 (kaulac)
+
+代码格式化已并入 `kaulac fmt` 子命令（见 docs/tools/formatter.md），
+不再单独构建 kaulafmt 二进制。
+
+默认使用 clang 作为 C 编译器（跨平台一致），可通过 --cc 覆盖。
+
+Usage:
+  python toolkit_build.py                  # 默认构建所有组件 (Debug, clang)
+  python toolkit_build.py --release        # Release 模式构建所有组件
+  python toolkit_build.py --target std     # 只构建标准库
+  python toolkit_build.py --target freestanding  # 只构建 freestanding 无依赖标准库
+  python toolkit_build.py --target compiler  # 只构建编译器
+  python toolkit_build.py --cc gcc         # 指定使用 gcc 而非默认的 clang
+  python toolkit_build.py --clean          # 清理所有构建产物
+  python toolkit_build.py --install-dir D:/kaula  # 自定义输出目录
+"""
+
+import os
+import sys
+import platform
+import subprocess
+import argparse
+import hashlib
+import os
+import shutil
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+
+#
+# 子进程输出解码策略
+#
+# 不能用 text=True 的默认行为：Windows 中文环境下 locale 编码是 GBK，
+# 而 clang 的告警里会带 UTF-8 的中文字符（源码注释），
+# 于是 subprocess 的读取线程抛 UnicodeDecodeError —— 构建日志被截断，
+# 真正的错误信息反而看不到（实测 kaula_conc_*.c 只要有告警就会触发）。
+#
+# 统一按 UTF-8 解码 + 替换非法字节：编译器输出里没有需要严格保真的内容。
+_TEXT_MODE = dict(text=True, encoding="utf-8", errors="replace")
+
+
+def _detect_worker_count():
+    """自动检测并行编译 worker 数。
+
+    优先用 os.cpu_count()，但至少 2（避免 1 核机器空跑线程开销），
+    最多 16（>16 收益边际递减 + I/O 瓶颈）。
+    """
+    n = os.cpu_count() or 2
+    return max(2, min(n, 16))
+
+
+class BuildConfig:
+    """构建配置"""
+    def __init__(self):
+        self.project_root = Path(__file__).parent.resolve()
+        self.std_dir = self.project_root / "std"
+        self.src_dir = self.project_root / "src"
+        self.freestanding_dir = self.project_root / "freestanding"
+        self.compiler_dir = self.project_root / "compiler"
+        self.pkglib_dir = self.project_root / "pkglib"
+        self.runtime_dir = self.compiler_dir / "runtime"
+
+        self.build_dir = self.project_root / "build"
+        self.obj_dir = self.build_dir / "obj"
+        self.hash_dir = self.build_dir / "hash"  # 增量编译缓存(每个 .c 一个 .sha256)
+        self.bin_dir = self.build_dir / "bin"
+        self.lib_dir = self.build_dir / "lib"
+        self.include_dir = self.build_dir / "include"
+
+        self.include_dirs = [
+            str(self.std_dir),
+            str(self.src_dir),
+            str(self.runtime_dir),
+        ]
+        # freestanding runtime 专用 include 路径（顺序敏感）：
+        # kaula_freestanding_runtime.c 通过 #include "memory/memory.c" 等
+        # unity-include freestanding 库，必须让 freestanding 目录优先于 std 解析，
+        # 否则会错误地包含 std/memory/memory.c（依赖 libc <string.h>）。
+        # 该文件不需要 std 头，故不包含 std_dir。
+        self.freestanding_runtime_include_dirs = [
+            str(self.freestanding_dir),
+            str(self.src_dir),
+        ]
+
+        self.c_standard = "c11"
+        # macOS（Darwin）的头文件在严格 ANSI 方言下会把 POSIX/BSD 声明整片藏起来：
+        # -std=c11 会让 clang 定义 __STRICT_ANSI__，Darwin 的 <unistd.h> 随即以
+        # _ANSI_SOURCE 保护掉 _SC_NPROCESSORS_ONLN 等符号（Linux 头文件不这么干，
+        # 所以三平台里只有 macOS 编译不过）。改用 GNU 方言即可正常可见。
+        if platform.system() == "Darwin":
+            self.c_standard = "gnu11"
+
+        self.debug_flags = ["-g", "-O0", "-DKMM_V4_DEBUG"]
+        self.release_flags = ["-O2", "-DNDEBUG"]
+        self.common_flags = [
+            f"-std={self.c_standard}",
+            "-Wall",
+            "-Wextra",
+            "-Wno-unused-parameter",
+            "-DKMM_THREAD_SAFETY_LEVEL=1",
+            # 服务并发场景 survivor 池 16MB 默认偏小：800+ 连接风暴耗尽后
+            # kmm_v4_alloc 返回 NULL，kl 生成代码不检查 → 野写崩溃。
+            # 256MB 为 RESERVE 懒映射（物理按需提交），对裸机/小程序无实质成本。
+            "-DKMM_V4_POOL_SIZE=268435456",
+        ]
+        if not sys.platform.startswith("win"):
+            self.common_flags.append("-fPIC")
+            self.common_flags.append("-D_POSIX_C_SOURCE=200809L")
+            # macOS：_POSIX_C_SOURCE 会把 Darwin 的 BSD 扩展整片藏起来
+            # （sys/ucred.h 的 u_int 是最典型的受害者，并发内核要用的头文件
+            #  一拉就报 "unknown type name 'u_int'"）。_DARWIN_C_SOURCE 在
+            # _POSIX_C_SOURCE 之上重新打开完整 Darwin C 层级。
+            if sys.platform == "darwin":
+                self.common_flags.append("-D_DARWIN_C_SOURCE")
+        else:
+            self.common_flags.append("-D_CRT_SECURE_NO_WARNINGS")
+
+        # v4 旧全局定义 TU kmm_scoped_allocator.c 已删除；v4.h 自供全部全局。
+        self.skip_files = set()
+
+        self.is_windows = sys.platform.startswith("win")
+        self.is_macos = sys.platform == "darwin"
+        self.is_linux = sys.platform.startswith("linux")
+
+
+class ProgressBar:
+    """跨平台进度条，支持终端宽度自适应，无外部依赖"""
+
+    def __init__(self, total, prefix="", width=40, stream=None):
+        self.total = max(1, total)
+        self.prefix = prefix
+        self.width = width
+        self.stream = stream or sys.stdout
+        self.current = 0
+        self.current_label = ""  # ninja style: current task name
+        self.current_label = ""  # ninja 风格: 当前正在编译的任务名
+        self.start_time = time.time()
+        self.last_update = 0
+        self._lock = threading.Lock()
+        self._visible = False
+        self._last_line = ""
+        self._term_width = self._get_term_width()
+
+    def set_label(self, label):
+        """设置当前任务名 (ninja 风格: 只显示当前正在编译的文件)"""
+        with self._lock:
+            self.current_label = label
+            self._draw()
+
+    def set_label(self, label):
+        """Set current task name (ninja style: only the file being compiled shows)"""
+        with self._lock:
+            self.current_label = label
+            self._draw()
+
+    def _get_term_width(self):
+        try:
+            return shutil.get_terminal_size().columns
+        except Exception:
+            return 80
+
+    def _format_time(self, seconds):
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        m, s = divmod(seconds, 60)
+        return f"{m:.0f}m{s:.0f}s"
+
+    def _eta(self):
+        if self.current == 0:
+            return "?s"
+        elapsed = time.time() - self.start_time
+        # 全缓存秒完时 elapsed 可能为 0 (除零崩溃, 见 freestanding 5 文件全 cached)
+        if elapsed <= 0:
+            return "0s"
+        rate = self.current / elapsed
+        remaining = (self.total - self.current) / rate
+        return self._format_time(remaining)
+
+    def _render(self):
+        if self.total <= 0:
+            return ""
+        CR = chr(13)
+        pct = self.current / self.total
+        filled = int(self.width * pct)
+        # Use ASCII characters for cross-platform compatibility (Windows GBK, etc.)
+        bar = "#" * filled + "-" * (self.width - filled)
+        elapsed = time.time() - self.start_time
+        eta_str = self._eta()
+        # ninja style: [n/total] current task name
+        if self.current_label:
+            label = self.current_label
+            max_len = max(20, self._term_width - 30)
+            if len(label) > max_len:
+                label = label[: max_len - 3] + "..."
+            return CR + "[{}/{}] compile {} | {} elapsed".format(self.current, self.total, label, self._format_time(elapsed))
+        return CR + "{}{} [{}{}] {}/{} ({}%) | {} elapsed | ETA: {}".format(
+            self.prefix, " ", "#" * filled, "-" * (self.width - filled),
+            self.current, self.total, int(pct * 100), self._format_time(elapsed), eta_str)
+
+    def update(self, n=1):
+        with self._lock:
+            self.current = min(self.current + n, self.total)
+            now = time.time()
+            if now - self.last_update >= 0.1 or self.current == self.total:
+                self._draw()
+
+    def _draw(self):
+        line = self._render()
+        if self._visible:
+            self.stream.write("\r" + " " * len(self._last_line) + "\r")
+        self.stream.write(line)
+        self.stream.flush()
+        self._last_line = line.strip()
+        self._visible = True
+        self.last_update = time.time()
+
+    def finish(self, message=None):
+        with self._lock:
+            self.current = self.total
+            if self._visible:
+                self.stream.write("\r" + " " * len(self._last_line) + "\r")
+            if message:
+                self.stream.write(message + "\n")
+            else:
+                self.stream.write(self._render() + "\n")
+            self.stream.flush()
+            self._visible = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.finish()
+
+
+class ToolDetector:
+    """工具链检测器"""
+
+    @staticmethod
+    def detect_c_compiler(preferred="clang"):
+        """检测 C 编译器，默认使用 clang（跨平台一致）。
+
+        preferred: 用户指定的编译器名称（默认 "clang"）。
+                   若该编译器可用则直接使用；不可用时回退到自动检测。
+        """
+        # 1) 优先验证用户指定 / 默认的编译器
+        if preferred:
+            try:
+                result = subprocess.run(
+                    [preferred, "--version"],
+                    capture_output=True, **_TEXT_MODE, timeout=5
+                )
+                if result.returncode == 0:
+                    version_line = result.stdout.split('\n')[0]
+                    print(f"[+] C 编译器: {preferred} ({version_line})")
+                    return preferred
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                print(f"[-] 警告: 编译器 '{preferred}' 不可用，回退到自动检测")
+
+        # 2) 回退检测链：clang -> gcc -> cc（跨平台一致）
+        for compiler in ["clang", "gcc", "cc"]:
+            try:
+                result = subprocess.run(
+                    [compiler, "--version"],
+                    capture_output=True, **_TEXT_MODE, timeout=5
+                )
+                if result.returncode == 0:
+                    version_line = result.stdout.split('\n')[0]
+                    print(f"[+] C 编译器: {compiler} ({version_line})")
+                    return compiler
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+
+        # 3) Windows 最后回退：MSVC cl.exe
+        try:
+            result = subprocess.run(
+                ["cl", "/nologo"],
+                capture_output=True, **_TEXT_MODE, timeout=5
+            )
+            output = (result.stderr if result.stderr else result.stdout).strip()
+            if "error D8003" in output or "Compiler Version" in output:
+                print(f"[+] C 编译器: MSVC cl.exe")
+                return "cl"
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+        print("[-] 错误: 未找到可用的 C 编译器 (clang/gcc/cc/msvc)")
+        print("    建议: 安装 LLVM/Clang 以获得跨平台一致的构建体验")
+        return None
+
+    @staticmethod
+    def detect_archiver(is_windows):
+        if is_windows:
+            for archiver in ["llvm-lib", "lib"]:
+                try:
+                    subprocess.run([archiver, "/?"],
+                                   capture_output=True, **_TEXT_MODE, timeout=5)
+                    print(f"[+] 归档工具: {archiver} (COFF)")
+                    return archiver
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
+
+            print("[-] 错误: Windows 构建需要 llvm-lib 或 lib.exe")
+            return None
+
+        for ar in ["llvm-ar", "gcc-ar", "ar"]:
+            try:
+                result = subprocess.run(
+                    [ar, "--version"],
+                    capture_output=True, **_TEXT_MODE, timeout=5
+                )
+                if result.returncode == 0:
+                    print(f"[+] 归档工具: {ar}")
+                    return ar
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        return "ar"
+
+    @staticmethod
+    def detect_go():
+        try:
+            result = subprocess.run(
+                ["go", "version"],
+                capture_output=True, **_TEXT_MODE, timeout=5
+            )
+            if result.returncode == 0:
+                version_line = result.stdout.strip()
+                print(f"[+] Go 编译器: {version_line}")
+                return "go"
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        print("[-] 警告: 未找到 Go 编译器，将跳过 Go 组件构建")
+        return None
+
+
+class CBuilder:
+    """C 代码构建器"""
+
+    def __init__(self, config, compiler, archiver, release=False):
+        self.config = config
+        self.compiler = compiler
+        self.archiver = archiver
+        self.release = release
+        self.is_msvc = (compiler == "cl")
+
+        if self.is_msvc:
+            self.common_flags = [
+                "/nologo", "/std:c11", "/W3", "/utf-8",
+                "/D_CRT_SECURE_NO_WARNINGS", "/DKMM_THREAD_SAFETY_LEVEL=1",
+            ]
+            self.debug_flags = ["/Od", "/Zi", "/DKMM_V4_DEBUG"]
+            self.release_flags = ["/O2", "/DNDEBUG"]
+            self.flags = self.common_flags + (
+                self.release_flags if release else self.debug_flags
+            )
+            self.obj_ext = ".obj"
+        else:
+            self.flags = self.config.common_flags + (
+                self.config.release_flags if release else self.config.debug_flags
+            )
+            self.obj_ext = ".o"
+
+        self.obj_files = []
+        self._obj_lock = threading.Lock()
+        # include_dirs -> 头文件指纹缓存（并发编译线程共享，只 stat 不重复 rglob）
+        self._header_stamp_cache = {}
+
+    def _find_c_files(self, root_dir, skip_dirs=None):
+        if skip_dirs is None:
+            skip_dirs = {"build"}
+        sources = []
+        for root, dirs, files in os.walk(root_dir):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for f in sorted(files):
+                if f.endswith(".c") and f not in self.config.skip_files:
+                    sources.append(Path(root) / f)
+        return sources
+
+    def _parallel_compile(self, sources_or_pairs, label, include_dirs=None):
+        """并行编译 .c 源文件列表 (ninja 风格进度条 + 自动 worker 数)。
+
+        自动检测 os.cpu_count() 决定 worker 数;最多 16,最少 2。
+        不接受额外参数;worker 数和 include_dirs 自动决定。
+
+        支持两种入参形态:
+          - list[Path]: 所有 source 用同一个 include_dirs
+          - list[(Path, dirs)]: 每个 source 用各自的 include_dirs (runtime 库)
+        """
+        if not sources_or_pairs:
+            return 0, 0
+        # 统一转成 (src, dirs) 列表
+        if isinstance(sources_or_pairs[0], tuple):
+            items = list(sources_or_pairs)
+        else:
+            items = [(src, include_dirs) for src in sources_or_pairs]
+
+        workers = _detect_worker_count()
+        ok, fail = 0, 0
+        with ProgressBar(len(items), label, width=40) as pbar:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(self._compile_one, src, None, dirs): src
+                    for src, dirs in items
+                }
+                for fut in as_completed(futures):
+                    src = futures[fut]
+                    pbar.set_label(src.name)
+                    try:
+                        if fut.result():
+                            ok += 1
+                        else:
+                            fail += 1
+                    except Exception as e:
+                        print(f"\n  [-] 异常 {src.name}: {e}")
+                        fail += 1
+                    pbar.update()
+        return ok, fail
+
+    def _header_stamp(self, include_dirs):
+        """include 目录下全部头文件的指纹（相对路径|mtime_ns|size），按 include_dirs 缓存。
+
+        参与增量编译哈希，使头文件改动能触发 .o 重建——否则改头文件后
+        仍链接旧对象，结构体/TLS 布局变化会在运行期表现为越界写与段错误。
+        """
+        key = tuple(str(d) for d in include_dirs)
+        cached = self._header_stamp_cache.get(key)
+        if cached is not None:
+            return cached
+        parts = []
+        for d in include_dirs:
+            root = Path(d)
+            if not root.is_dir():
+                continue
+            for h in sorted(root.rglob("*.h")):
+                try:
+                    st = h.stat()
+                except OSError:
+                    continue
+                try:
+                    rel = h.relative_to(self.config.project_root)
+                except ValueError:
+                    rel = h
+                parts.append(f"{rel}|{st.st_mtime_ns}|{st.st_size}")
+        stamp = "\n".join(parts)
+        self._header_stamp_cache[key] = stamp
+        return stamp
+
+    def _compile_one(self, src_file, out_obj=None, include_dirs=None):
+        """编译单个 .c 文件。
+
+        include_dirs: 自定义 -I 路径列表（用于 kaula_freestanding_runtime.c 等
+        顺序敏感的特殊文件）。None 时使用 self.config.include_dirs。
+        """
+        rel = src_file.relative_to(self.config.project_root)
+        rel_key = str(rel).replace(os.sep, "_")
+        if out_obj is None:
+            out_obj = self.config.obj_dir / (rel_key + self.obj_ext)
+        out_obj.parent.mkdir(parents=True, exist_ok=True)
+
+        if include_dirs is None:
+            include_dirs = self.config.include_dirs
+
+        # 增量编译:hash = sha256(src | flags | include_dirs | 头文件指纹)
+        # 命中且 .o 存在则跳过。
+        # 注意:include_dirs 参与哈希,保证更换 -I 顺序时会触发重建;
+        # 头文件指纹参与哈希,保证**改头文件也会让 .o 失效**。
+        # (只哈希 .c 内容时,kmm_scoped_allocator_v4.h 里 TLS 结构体尺寸变了而
+        #  .o 仍是旧尺寸 → 程序侧按新尺寸越界写 TLS → 运行期段错误。)
+        hash_path = self.config.hash_dir / (rel_key + ".sha256")
+        hash_input = (
+            "\n".join(self.flags)
+            + "\n-I\n"
+            + "\n-I ".join(include_dirs)
+            + "\n-H\n"
+            + self._header_stamp(include_dirs)
+        )
+        try:
+            digest = hashlib.sha256(
+                src_file.read_bytes() + b"\0" + hash_input.encode()
+            ).hexdigest()
+        except OSError:
+            digest = None
+
+        if digest and out_obj.exists() and hash_path.exists():
+            if hash_path.read_text(encoding="ascii").strip() == digest:
+                with self._obj_lock:
+                    self.obj_files.append(out_obj)
+                # ninja style: cached is silent (progress line shows current task)
+                return True
+
+        if self.is_msvc:
+            cmd = [self.compiler] + self.flags
+            for inc in include_dirs:
+                cmd.extend(["/I", inc])
+            cmd.extend(["/c", str(src_file), f"/Fo{out_obj}"])
+        else:
+            cmd = [self.compiler] + self.flags
+            for inc in include_dirs:
+                cmd.extend(["-I", inc])
+            cmd.extend(["-c", str(src_file), "-o", str(out_obj)])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, **_TEXT_MODE, timeout=120)
+            if result.returncode != 0:
+                err = result.stderr if result.stderr else result.stdout
+                print(chr(10) + "  [-] 失败: " + src_file.name)
+                for line in err.strip().split("\n")[:5]:
+                    print("      " + line)
+                return False
+            with self._obj_lock:
+                self.obj_files.append(out_obj)
+            # ninja style: success is silent
+            if digest:
+                hash_path.write_text(digest, encoding="ascii")
+            return True
+        except subprocess.TimeoutExpired:
+            print(chr(10) + "  [-] 超时: " + src_file.name)
+            return False
+
+    def _make_static_lib(self, output_lib, obj_files):
+        output_lib.parent.mkdir(parents=True, exist_ok=True)
+        if output_lib.exists():
+            output_lib.unlink()
+
+        if self.config.is_windows:
+            cmd = [self.archiver, "/nologo", f"/OUT:{output_lib}"] + [
+                str(f) for f in obj_files
+            ]
+        else:
+            cmd = [self.archiver, "rcs", str(output_lib)] + [
+                str(f) for f in obj_files
+            ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, **_TEXT_MODE, timeout=60)
+            if result.returncode != 0:
+                err = result.stderr if result.stderr else result.stdout
+                print(f"[-] 创建静态库失败: {err}")
+                return False
+            sz = output_lib.stat().st_size
+            print(f"[成功] 静态库: {output_lib} ({sz / 1024:.1f} KB)")
+            return True
+        except subprocess.TimeoutExpired:
+            print("[-] 创建静态库超时")
+            return False
+
+    def build_std_lib(self):
+        """构建标准库静态库"""
+        print("\n=== 构建 Kaula 标准库 ===")
+        sources = self._find_c_files(self.config.std_dir)
+        if not sources:
+            print("[-] 未找到标准库源文件")
+            return False
+
+        print(f"[*] 找到 {len(sources)} 个标准库源文件")
+
+        old_objs = list(self.obj_files)
+        self.obj_files = []
+        ok, fail = self._parallel_compile(sources, "编译标准库")
+
+        if fail > 0:
+            print(f"[-] 标准库编译失败: {fail} 个文件")
+            self.obj_files = old_objs
+            return False
+
+        lib_name = "kaula_std.lib" if self.config.is_windows else "libkaula_std.a"
+        out_lib = self.config.lib_dir / lib_name
+        result = self._make_static_lib(out_lib, self.obj_files)
+        self.obj_files = old_objs + self.obj_files
+        return result
+
+    def build_freestanding_lib(self):
+        """构建 freestanding 无依赖标准库静态库。
+
+        纯 freestanding 实现，不依赖 std/ 或 src/，include 路径仅含 freestanding/。
+        不定义 KAULA_FREESTANDING 宏，故 memset/memcpy/memmove/memcmp 不参与编译
+        （托管安全：弱符号不会被从静态库中提取遮蔽 libc 强符号）；
+        fs_alloc/fs_strdup/... 等无冲突函数始终编译。
+        裸机用户链接本库后，可通过 -DKAULA_FREESTANDING 重编或覆写弱钩子使用。
+        """
+        print("\n=== 构建 Kaula freestanding 库 ===")
+        sources = self._find_c_files(self.config.freestanding_dir)
+        if not sources:
+            print("[-] 未找到 freestanding 库源文件")
+            return False
+
+        print(f"[*] 找到 {len(sources)} 个 freestanding 源文件")
+
+        old_objs = list(self.obj_files)
+        self.obj_files = []
+        # freestanding 库自包含：仅 -I freestanding/ 即可解析所有 "base/types.h" 等
+        freestanding_include_dirs = [str(self.config.freestanding_dir)]
+        ok, fail = self._parallel_compile(
+            sources, "编译 freestanding", include_dirs=freestanding_include_dirs
+        )
+
+        if fail > 0:
+            print(f"[-] freestanding 库编译失败: {fail} 个文件")
+            self.obj_files = old_objs
+            return False
+
+        lib_name = "kaula_freestanding.lib" if self.config.is_windows else "libkaula_freestanding.a"
+        out_lib = self.config.lib_dir / lib_name
+        result = self._make_static_lib(out_lib, self.obj_files)
+        self.obj_files = old_objs + self.obj_files
+        return result
+
+    def build_runtime_lib(self):
+        """构建运行时库 (src/ + SOR runtime)"""
+        print("\n=== 构建运行时库 ===")
+        sources = []
+
+        src_c_files = self._find_c_files(self.config.src_dir)
+        sources.extend(src_c_files)
+
+        rt_c_files = self._find_c_files(self.config.runtime_dir)
+        sources.extend(rt_c_files)
+
+        # kaula_freestanding_runtime.c 是"裸机专用"TU: 它 unity-include 了整个
+        # freestanding 库, 只在 -nostdlib 的裸机流水线里由 kaulac 现场编译链接。
+        # 若把它归档进托管模式的 kaula_runtime.lib, 托管程序同时链接
+        # kaula_freestanding.lib 时, is_alpha/to_upper 等弱符号会在两个归档里
+        # 各有一份定义 —— COFF/lld-link 视之为 duplicate symbol 直接链接失败。
+        # 托管模式下这些符号本就由 kaula_freestanding.lib(弱, libc 优先) 提供。
+        sources = [s for s in sources if s.name != "kaula_freestanding_runtime.c"]
+
+        if not sources:
+            print("[-] 未找到运行时源文件")
+            return False
+
+        print(f"[*] 找到 {len(sources)} 个运行时源文件（已排除裸机专用 kaula_freestanding_runtime.c）")
+
+        old_objs = list(self.obj_files)
+        self.obj_files = []
+        # 所有托管运行时源文件用默认 include_dirs(None → _compile_one 用
+        # self.config.include_dirs)。kaula_freestanding_runtime.c 已在上面排除:
+        # 裸机流水线由 kaulac 用 -I freestanding 现场编译它, 不进托管归档。
+        ok, fail = self._parallel_compile(sources, "编译运行时")
+
+        if fail > 0:
+            print(f"[-] 运行时编译失败: {fail} 个文件")
+            self.obj_files = old_objs
+            return False
+
+        lib_name = "kaula_runtime.lib" if self.config.is_windows else "libkaula_runtime.a"
+        out_lib = self.config.lib_dir / lib_name
+        result = self._make_static_lib(out_lib, self.obj_files)
+        self.obj_files = old_objs + self.obj_files
+        return result
+
+    def install_headers(self):
+        """安装头文件到输出目录"""
+        print("\n=== 安装头文件 ===")
+        self.config.include_dir.mkdir(parents=True, exist_ok=True)
+
+        targets = [
+            (self.config.src_dir, "kaula"),
+            (self.config.std_dir, "std"),
+            (self.config.freestanding_dir, "freestanding"),
+            (self.config.runtime_dir, "runtime"),
+        ]
+
+        # headers 是纯 I/O,适合 ThreadPoolExecutor 并行 copytree
+        with ProgressBar(len(targets), "安装头文件", width=40) as pbar:
+            with ThreadPoolExecutor(max_workers=_detect_worker_count()) as pool:
+                futures = {
+                    pool.submit(self._copy_headers, src, dest_name): (src, dest_name)
+                    for src, dest_name in targets
+                }
+                for fut in as_completed(futures):
+                    fut.result()  # propagate exceptions
+                    pbar.update()
+
+        return True
+
+    def _copy_headers(self, src, dest_name):
+        """单组头文件复制 (供 ThreadPoolExecutor 调用)。"""
+        if not src.exists():
+            return
+        dest = self.config.include_dir / dest_name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*.c", "build"))
+
+class GoBuilder:
+    """Go 代码构建器"""
+
+    def __init__(self, config, go_cmd, release=False):
+        self.config = config
+        self.go_cmd = go_cmd
+        self.release = release
+
+    def _go_source_digest(self, cmd_dir):
+        """计算 Go 二进制的增量 hash。
+
+        覆盖: cmd/<name>/*.go + internal/**/*.go + go.mod/go.sum + release 标志。
+        任何一个 .go 源码变化都会触发该二进制重建;各 cmd 目标之间
+        互不影响(各自独立 digest)。
+        """
+        files = []
+        cmd_path = self.config.compiler_dir / "cmd" / cmd_dir
+        if cmd_path.exists():
+            for root, _dirs, fs in os.walk(cmd_path):
+                for f in sorted(fs):
+                    if f.endswith(".go"):
+                        files.append(Path(root) / f)
+        internal_path = self.config.compiler_dir / "internal"
+        if internal_path.exists():
+            for root, _dirs, fs in os.walk(internal_path):
+                for f in sorted(fs):
+                    if f.endswith(".go"):
+                        files.append(Path(root) / f)
+        for name in ("go.mod", "go.sum"):
+            p = self.config.compiler_dir / name
+            if p.exists():
+                files.append(p)
+
+        files.sort(key=lambda p: str(p))
+        h = hashlib.sha256()
+        for f in files:
+            try:
+                h.update(f.read_bytes())
+            except OSError:
+                continue
+            h.update(b"\0")
+        h.update(("release" if self.release else "debug").encode())
+        return h.hexdigest()
+
+    def _build_go_binary(self, cmd_dir, output_name):
+        cmd_path = self.config.compiler_dir / "cmd" / cmd_dir
+        if not cmd_path.exists():
+            print(f"[-] 未找到: {cmd_path}")
+            return False
+
+        print(f"\n=== 构建 {output_name} ===")
+        self.config.bin_dir.mkdir(parents=True, exist_ok=True)
+
+        ext = ".exe" if self.config.is_windows else ""
+        out_file = self.config.bin_dir / (output_name + ext)
+
+        # 增量编译:hash = sha256(源码 | release 标志),命中且 exe 存在则跳过
+        digest = self._go_source_digest(cmd_dir)
+        hash_path = self.config.hash_dir / f"go_{output_name}.sha256"
+        if digest and out_file.exists() and hash_path.exists():
+            if hash_path.read_text(encoding="ascii").strip() == digest:
+                sz = out_file.stat().st_size
+                print(f"  [cached]  {output_name}.exe (源码未变化, 跳过, {sz / 1024:.1f} KB)")
+                return True
+
+        ldflags = ""
+        if self.release:
+            ldflags = "-s -w"
+
+        env = os.environ.copy()
+        env["CGO_ENABLED"] = "0"
+        env["GOFLAGS"] = "-mod=mod"
+        env["GONOSUMCHECK"] = "*"
+        env["GONOSUMDB"] = "*"
+        env["GOWORK"] = "off"
+
+        cmd = [self.go_cmd, "build"]
+        if ldflags:
+            cmd.extend(["-ldflags", ldflags])
+        cmd.extend(["-o", str(out_file), f"./cmd/{cmd_dir}"])
+
+        # 简单的进度指示器 (Go 编译是单步完成的)
+        with ProgressBar(1, f"Go 编译 {output_name}", width=30) as pbar:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, **_TEXT_MODE, timeout=300,
+                    cwd=str(self.config.compiler_dir), env=env
+                )
+                pbar.update()
+                if result.returncode != 0:
+                    err = result.stderr if result.stderr else result.stdout
+                    print(f"[-] 构建 {output_name} 失败:")
+                    print(err)
+                    return False
+                sz = out_file.stat().st_size
+                print(f"[成功] {output_name}: {out_file} ({sz / 1024:.1f} KB)")
+                if digest:
+                    self.config.hash_dir.mkdir(parents=True, exist_ok=True)
+                    hash_path.write_text(digest, encoding="ascii")
+                return True
+            except subprocess.TimeoutExpired:
+                print(f"[-] 构建 {output_name} 超时")
+                return False
+
+    def build_kaulac(self):
+        return self._build_go_binary("kaulac", "kaulac")
+
+    def install_stdlib_json(self):
+        """复制 stdlib.json 到输出目录"""
+        src = self.config.compiler_dir / "stdlib.json"
+        if not src.exists():
+            print("[-] 未找到 stdlib.json")
+            return False
+        self.config.bin_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.config.bin_dir / "stdlib.json"
+        shutil.copy2(src, dest)
+        print(f"[成功] stdlib.json -> {dest}")
+        return True
+
+
+def build_all(config, c_compiler, archiver, go_cmd, release=False):
+    """构建所有组件"""
+    print("=" * 60)
+    print("  Kaula Toolkit 一键构建系统")
+    print("=" * 60)
+    print(f"  模式: {'Release' if release else 'Debug'}")
+    print(f"  平台: {'Windows' if config.is_windows else 'macOS' if config.is_macos else 'Linux'}")
+    print(f"  输出目录: {config.build_dir}")
+    print("=" * 60)
+
+    config.build_dir.mkdir(parents=True, exist_ok=True)
+    config.obj_dir.mkdir(parents=True, exist_ok=True)
+    config.hash_dir.mkdir(parents=True, exist_ok=True)
+    config.bin_dir.mkdir(parents=True, exist_ok=True)
+    config.lib_dir.mkdir(parents=True, exist_ok=True)
+
+    results = {}
+
+    c_builder = CBuilder(config, c_compiler, archiver, release)
+
+    results["std_lib"] = c_builder.build_std_lib()
+    results["freestanding_lib"] = c_builder.build_freestanding_lib()
+    results["runtime_lib"] = c_builder.build_runtime_lib()
+    results["headers"] = c_builder.install_headers()
+
+    if go_cmd:
+        go_builder = GoBuilder(config, go_cmd, release)
+        results["kaulac"] = go_builder.build_kaulac()
+        results["stdlib_json"] = go_builder.install_stdlib_json()
+    else:
+        results["kaulac"] = None
+        results["stdlib_json"] = None
+
+    print("\n" + "=" * 60)
+    print("  构建结果汇总")
+    print("=" * 60)
+    for name, ok in results.items():
+        if ok is None:
+            status = "跳过"
+        elif ok:
+            status = "成功"
+        else:
+            status = "失败"
+        print(f"  {name:20s}: {status}")
+    print("=" * 60)
+
+    failed_components = [name for name, ok in results.items() if ok is False]
+    all_ok = not failed_components
+    if all_ok:
+        print("\n[成功] 构建完成!")
+        print(f"   可执行文件: {config.bin_dir}")
+        print(f"   静态库:     {config.lib_dir}")
+        print(f"   头文件:     {config.include_dir}")
+    else:
+        print("\n[失败] 部分组件构建失败")
+        print(f"   失败组件: {', '.join(failed_components)}")
+
+    return all_ok
+
+
+def clean_all(config):
+    """清理所有构建产物"""
+    print("=" * 60)
+    print("  清理构建产物")
+    print("=" * 60)
+
+    if config.build_dir.exists():
+        shutil.rmtree(config.build_dir)
+        print(f"[成功] 已删除: {config.build_dir}")
+
+    std_lib_a = config.std_dir / "libkaula_std.a"
+    std_lib_lib = config.std_dir / "kaula_std.lib"
+    for p in [std_lib_a, std_lib_lib]:
+        if p.exists():
+            p.unlink()
+            print(f"[成功] 已删除: {p}")
+
+    obj_dir_old = config.project_root / "build"
+    if obj_dir_old.exists() and obj_dir_old != config.build_dir:
+        shutil.rmtree(obj_dir_old)
+        print(f"[成功] 已删除: {obj_dir_old}")
+
+    print("\n[成功] 清理完成!")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Kaula Toolkit 一键编译脚本",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python toolkit_build.py               # 构建所有组件 (Debug, 默认 clang)
+  python toolkit_build.py --release     # Release 模式
+  python toolkit_build.py --target std  # 只构建标准库
+  python toolkit_build.py --target freestanding  # 只构建 freestanding 无依赖标准库
+  python toolkit_build.py --target compiler  # 只构建 Go 编译器和格式化工具
+  python toolkit_build.py --cc gcc      # 使用 gcc 替代默认 clang
+  python toolkit_build.py --clean       # 清理所有构建产物
+        """
+    )
+    parser.add_argument("--release", action="store_true",
+                        help="Release 模式 (默认 Debug)")
+    parser.add_argument("--clean", action="store_true",
+                        help="清理所有构建产物")
+    parser.add_argument("--target",
+                        choices=["all", "std", "freestanding", "runtime", "compiler", "headers", "package"],
+                        default="all",
+                        help="指定构建目标 (默认: all)")
+    parser.add_argument("--install-dir", type=str, default=None,
+                        help="自定义输出目录 (默认: build/)")
+    parser.add_argument("--cc", type=str, default="clang",
+                        help="指定 C 编译器 (默认: clang，跨平台一致)")
+    args = parser.parse_args()
+
+    # 更新版本号（构建前自动从 git 生成）
+    version_script = Path(__file__).parent / "scripts" / "version.py"
+    if version_script.exists():
+        try:
+            result = subprocess.run(
+                [sys.executable, str(version_script), "--update"],
+                capture_output=True, **_TEXT_MODE, cwd=str(Path(__file__).parent)
+            )
+            if result.returncode == 0:
+                print(f"[+] {result.stdout.strip()}")
+        except Exception:
+            pass  # 版本更新失败不阻断构建
+
+    config = BuildConfig()
+    if args.install_dir:
+        config.build_dir = Path(args.install_dir).resolve()
+        config.obj_dir = config.build_dir / "obj"
+        config.bin_dir = config.build_dir / "bin"
+        config.lib_dir = config.build_dir / "lib"
+        config.include_dir = config.build_dir / "include"
+        config.hash_dir = config.build_dir / "hash"
+
+    if args.clean:
+        clean_all(config)
+        return
+
+    c_compiler = ToolDetector.detect_c_compiler(args.cc)
+    if not c_compiler:
+        if args.target in ("all", "std", "freestanding", "runtime", "headers"):
+            print("[-] 错误: 构建 C 组件需要 C 编译器")
+            sys.exit(1)
+
+    archiver = ToolDetector.detect_archiver(config.is_windows) if c_compiler else None
+    go_cmd = ToolDetector.detect_go()
+
+    if args.target == "all":
+        success = build_all(config, c_compiler, archiver, go_cmd, args.release)
+        sys.exit(0 if success else 1)
+
+    config.build_dir.mkdir(parents=True, exist_ok=True)
+    config.obj_dir.mkdir(parents=True, exist_ok=True)
+    config.hash_dir.mkdir(parents=True, exist_ok=True)
+    config.bin_dir.mkdir(parents=True, exist_ok=True)
+    config.lib_dir.mkdir(parents=True, exist_ok=True)
+
+    c_builder = CBuilder(config, c_compiler, archiver, args.release) if c_compiler else None
+    go_builder = GoBuilder(config, go_cmd, args.release) if go_cmd else None
+
+    success = True
+
+    if args.target == "std":
+        if c_builder:
+            success = c_builder.build_std_lib()
+        else:
+            print("[-] 错误: 构建 std 需要 C 编译器")
+            success = False
+
+    elif args.target == "freestanding":
+        if c_builder:
+            success = c_builder.build_freestanding_lib()
+        else:
+            print("[-] 错误: 构建 freestanding 需要 C 编译器")
+            success = False
+
+    elif args.target == "runtime":
+        if c_builder:
+            success = c_builder.build_runtime_lib()
+        else:
+            print("[-] 错误: 构建 runtime 需要 C 编译器")
+            success = False
+
+    elif args.target == "compiler":
+        if go_builder:
+            ok1 = go_builder.build_kaulac()
+            ok2 = go_builder.install_stdlib_json()
+            success = ok1 and ok2
+        else:
+            print("[-] 错误: 构建 compiler 需要 Go 编译器")
+            success = False
+
+    elif args.target == "headers":
+        if c_builder:
+            success = c_builder.install_headers()
+        else:
+            print("[-] 错误: 安装头文件需要 C 构建器")
+            success = False
+
+    elif args.target == "package":
+        # 先构建编译器
+        if go_builder:
+            ok1 = go_builder.build_kaulac()
+            ok2 = go_builder.install_stdlib_json()
+            if not (ok1 and ok2):
+                print("[-] 错误: 编译器构建失败")
+                success = False
+            else:
+                # 调用打包脚本
+                package_script = Path(__file__).parent / "scripts" / "package_release.py"
+                if package_script.exists():
+                    result = subprocess.run(
+                        [sys.executable, str(package_script)],
+                        cwd=str(Path(__file__).parent)
+                    )
+                    success = result.returncode == 0
+                else:
+                    print(f"[-] 错误: {package_script} 不存在")
+                    success = False
+        else:
+            print("[-] 错误: 打包需要 Go 编译器")
+            success = False
+
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()

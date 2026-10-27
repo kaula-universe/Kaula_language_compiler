@@ -1,0 +1,56 @@
+// Kaula 并发内核 · I4 验收：可插桩 IO 不占线程
+//
+// 设计说明书 §1.2 I4：「能被 IoDriver 接管的 IO，提交后 Worker 立即转做别的事」。
+//
+// 这个用例的判据很硬：如果 sleep 是原地阻塞的，那么第二个任务的
+// 完成时刻必然 >= 第一个的 sleep 时长；如果 sleep 走了 IoDriver，
+// 两个任务都挂在定时器上，主线程可以先算完第二个再一起 await。
+//
+// 期望输出：
+//   fast = 42
+//   slow = ok
+//   elapsed < 300   （两个 200ms 的 sleep 并发，总耗时接近 200 而非 400）
+
+import std.io
+import std.time
+
+// 无挂起点的 conc fn：单一形态
+conc fn compute_sum(i64 a, i64 b) -> i64 {
+    return a + b
+}
+
+// 含挂起点的 conc fn：sleep 被 lowering 改写成 IoDriver 定时器，
+// 而不是原地 Sleep。resume 分两段：
+//   case 0：算 timeout_ns → 提交请求 → 归还 Worker
+//   case 1：从 TLS 取回结果 → 继续函数体
+conc fn slow_ok(string tag, i64 delay_ms) -> string {
+    std.time.time_sleep(delay_ms)
+    return tag
+}
+
+fn main() -> i32 {
+    // 先提交两个含挂起点的任务，不立即 await ——
+    // 这段时间里它们各自挂在 IoDriver 的定时器上，Worker 是空的
+    Handle slow = spawn slow_ok("ok", 200)
+
+    // 期间主线程可以正常算东西（说明 Worker 没被 sleep 占住）
+    i64 fast = compute_sum(20, 22)
+    std.io.println("fast = ", fast)
+
+    i64 t0 = std.time.time_now_ms()
+    string s = slow.await
+    i64 t1 = std.time.time_now_ms()
+    std.io.println("slow = ", s)
+
+    // 睡眠是真实等待的，只是没占住 Worker。
+    // 这里只做上界断言：串行执行会是 400+，并发不会。
+    i64 elapsed = t1 - t0
+    if (elapsed < 300) {
+        std.io.println("elapsed < 300")
+    } else {
+        std.io.println("elapsed >= 300")
+    }
+
+    std.io.println("i4 ok")
+    return 0
+}

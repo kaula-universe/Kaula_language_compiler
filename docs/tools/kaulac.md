@@ -1,0 +1,342 @@
+# kaulac — Kaula 编译器
+
+Kaula 编译器命令行工具，负责词法/语法/语义分析、C 代码生成，并调用 Clang 编译链接为原生可执行文件。
+
+```
+用法: kaulac [选项] <input.kl>
+      kaulac pkg <子命令>
+      kaulac workspace <子命令>
+      kaulac fmt <子命令>
+```
+
+## 一、快速开始
+
+```bash
+# 最简单的编译（在当前目录生成 main.exe/main）
+kaulac main.kl
+
+# 生成默认配置文件 kaula.json
+kaulac --init
+
+# Release 模式
+kaulac --release main.kl
+
+# 启用 SOR 所有权分析
+kaulac --sor main.kl
+```
+
+编译流程：`源代码 .kl → 词法分析 → 语法分析 → 语义分析 → C 代码生成 → Clang 编译 → 可执行文件`。
+
+## 二、输出与命名
+
+| 选项 | 说明 |
+|------|------|
+| `--output-dir <dir>` | 指定输出目录（默认与源文件同目录） |
+| `--output-format <fmt>` | 输出格式：`elf`（默认）/ `bin` / `obj` |
+
+- 输入文件必须为 `.kl` 扩展名
+- 默认输出名与源文件名相同（`foo.kl` → `foo.exe` / `foo`，按平台）
+- 输出文件名由源码决定，**不支持 `-o` / `--output` 指定**（该 flag 未注册，传入会报 `flag provided but not defined`，仅改目录可用 `--output-dir`）
+- 支持子命令名 `compile` / `run` / `build` / `check`（仅用于区分参数，不改变行为）
+
+## 三、优化
+
+| 选项 | 说明 |
+|------|------|
+| `--opt <level>` | 优化级别 `O0`/`O1`/`O2`/`O3` |
+| `--release` | Release 模式（`-O3`） |
+| `--sor` | 启用 SOR 编译时所有权分析（默认 `-O3`） |
+
+**优化级别优先级**：`--opt 手动指定 > --sor > --release > 默认 O2`。
+
+## 四、缓存管理
+
+缓存目录位于当前目录 `cache/`，基于 SHA256 增量缓存，未变更的源文件秒级跳过。
+
+| 选项 | 说明 |
+|------|------|
+| `--clean-cache` | 清理过期缓存（7 天以上且超过 1 GB） |
+| `--purge-cache` | 清空所有缓存 |
+| `--cache-stats` | 显示缓存统计信息（条数、大小、最旧/最新条目） |
+| `--no-cache` | 禁用增量编译缓存（即时编译，不写缓存） |
+
+```bash
+kaulac --cache-stats
+kaulac --purge-cache
+kaulac --no-cache main.kl
+```
+
+## 五、资源配置
+
+| 选项 | 说明 |
+|------|------|
+| `--memory-limit <MB>` | 编译器内存限制（默认 4096 MB） |
+| `--timeout <sec>` | 编译超时限制（默认 120 秒） |
+| `--queue <n>` | 任务队列大小（默认 100） |
+| `--spendable <n>` | 可花费组件大小（默认 10） |
+
+超时会终止编译进程；内存超限会触发 FATAL 退出。
+
+## 六、标准库与路径
+
+| 选项 | 说明 |
+|------|------|
+| `--include <path>` | C 头文件包含路径（默认 `../std`） |
+| `--stdlib <path>` | 标准库路径（默认自动检测） |
+| `--template <path>` | 代码生成模板路径（默认 `templates`） |
+| `--source-dir <dir>` | 源文件目录 |
+| `--target <lang>` | 目标语言（默认 `c`） |
+| `--sourcemap` | 生成源码映射文件（`<文件>.map.json`） |
+
+**路径解析**：`kaula.h`、freestanding 源码、`pkglib/` 的查找优先级均为
+`KAULA_HOME` 环境变量 > 可执行文件所在目录 > 相对路径。设置方式：
+
+```bash
+export KAULA_HOME=/path/to/kaula        # Linux/macOS
+set KAULA_HOME=D:\path\to\kaula         # Windows cmd
+$env:KAULA_HOME = "D:\path\to\kaula"    # PowerShell
+```
+
+## 七、pkglib 第三方库管理
+
+放库即用：库目录放入 `pkglib/`，`import` 即自动分析 → 桥接 → 构建 → 链接。
+
+| 选项 | 说明 |
+|------|------|
+| `--pkglib <dir>` | 指定第三方库目录（优先于自动检测） |
+| `--build-pkglib <name>` | 构建指定库后退出（`all` = 全部）；幂等：无配置先分析、过期自动重分析、再构建归档 |
+| `--analyze-pkg <name>` | 强制手动重新解析指定库并重写配置（不合并人工链接项） |
+| `--analyze-pkg-all` | 重新解析 pkglib 下全部库 |
+| `--force-pkg` | 强制重新构建/重新分析 pkglib 库（配合 `--build-pkglib`） |
+| `--skip-auto-pkg` | 禁用使用库时的自动构建/自愈 |
+| `--auto-analyze-pkg` | **已废弃**（过期配置默认自动重新分析） |
+
+```bash
+kaulac --build-pkglib all
+kaulac --build-pkglib cjson --force-pkg
+kaulac --analyze-pkg <库名>
+kaulac --pkglib D:/mylibs main.kl
+```
+
+> 注意：`--analyze-pkg` 直接重写配置、不走 `MergeLibrariesInto`，会把旧配置人工补充的
+> 链接库丢掉；配置含人工链接项时建议用
+> `--build-pkglib <name>`（自愈合并保留人工项）。
+
+## 八、裸机/交叉编译
+
+| 选项 | 说明 |
+|------|------|
+| `--freestanding` | 裸机模式（`-ffreestanding -nostdlib -nostartfiles`），自动链接 freestanding 库 |
+| `--boot <mode>` | 引导方式：`pvh` / `multiboot` / `custom` / `none`（默认 `none`，需配合 `--freestanding`） |
+| `--boot-file <path>` | 自定义引导汇编文件（`boot=custom` 时使用） |
+| `--boot-arch <arch>` | 引导架构：`x86_64` / `i386` / `riscv64` / `aarch64`（默认从 `--target-triple` 推断） |
+| `--target-triple <triple>` | 目标三元组（如 `x86_64-unknown-elf`、`aarch64-none-elf`） |
+| `--link-script <path>` | 链接脚本路径（`.lds`） |
+| `--entry <name>` | 入口函数名（默认 `main`，裸机可为 `_start`） |
+
+```bash
+# 编译引导裸机内核（ELF 输出）
+kaulac --freestanding --boot pvh --boot-arch x86_64 kernel.kl
+
+# 自定义引导
+kaulac --freestanding --boot custom --boot-file myboot.S --output-format elf kernel.kl
+
+# 无自动引导（none），仅链接用户程序
+kaulac --freestanding --boot none main.kl
+```
+
+`--boot-file` 优先级高于内置模板 `<templates>/boot/<arch>-<boot>.S`；`boot=custom` 必须提供 `--boot-file`。
+
+## 九、C 编译器透传
+
+| 选项 | 说明 |
+|------|------|
+| `--cflags <flags>` | 额外的 C 编译器参数（空格分隔） |
+| `--defines <macros>` | 额外的 C 宏定义（逗号分隔） |
+| `--libs <libs>` | 额外的链接库（逗号分隔） |
+
+Windows 平台自动附加 `ws2_32/wininet/gdi32/user32/advapi32`；非 Windows 附加 `-lm`。
+
+## 十、配置文件 kaula.json
+
+命令行参数优先级高于配置文件。选项与 `kaula.json` 字段一一对应：
+
+| 命令行 | 配置文件字段 |
+|--------|--------------|
+| `--template` | `template_path` |
+| `--include` | `include_path` |
+| `--stdlib` | `stdlib_path` |
+| `--pkglib` | `pkglib_path` |
+| `--source-dir` | `source_dir` |
+| `--output-dir` | `output_dir` |
+| `--target` | `target_language` |
+| `--opt` / `--release` | `opt_level` / `release` |
+| `--sor` | `sor` |
+| `--no-cache` | `no_cache` |
+| `--queue` / `--spendable` | `queue_size` / `spendable_size` |
+| `--memory-limit` / `--timeout` | `memory_limit_mb` / `timeout_sec` |
+| `--cflags` / `--defines` / `--libs` | `c_flags` / `c_defines` / `c_libs` |
+| `--freestanding` | `freestanding` |
+| `--target-triple` | `target_triple` |
+| `--link-script` | `link_script` |
+| `--entry` | `entry` |
+| `--output-format` | `output_format` |
+| `--sourcemap` | `sourcemap` |
+| `--build-pkglib` / `--analyze-pkg` 等 | 同名小写字段 |
+
+完整配置说明见 [../build-config.md](../build-config.md)。
+
+## 十一、退出行为
+
+- `--init`、`--build-pkglib`、`--analyze-pkg(-all)`、缓存管理命令执行完即退出，无需输入文件
+- 无输入文件且无上述命令 → 打印 Usage 并退出
+- 输入文件非 `.kl` → 报错退出
+- 编译失败 → 打印错误、退出码非零
+
+## 十二、调试支持
+
+| 选项 | 说明 |
+|------|------|
+| `--debug` | 生成 DWARF 调试符号（`-g`） |
+| `--debug-level <level>` | 调试级别：`line-tables`（默认）/ `full` |
+
+```bash
+# 生成调试符号
+kaulac --debug main.kl
+
+# 完整调试（含类型信息）
+kaulac --debug --debug-level full main.kl
+
+# 配合 GDB 调试
+gdb ./main
+(gdb) source tools/debug/kaula_pretty_printers.py
+(gdb) break main.kl:10
+(gdb) run
+```
+
+详见 [debugging.md](debugging.md)。
+
+## 十三、离线/在线模式
+
+| 选项 | 说明 |
+|------|------|
+| `--offline` | 强制离线模式（缓存未命中则报错） |
+| `--online` | 强制在线模式（忽略锁缓存） |
+
+```bash
+# CI/CD 中使用离线模式
+kaulac --offline main.kl
+
+# 强制刷新依赖
+kaulac --online main.kl
+```
+
+## 十四、包管理 (pkg)
+
+详见 [package-management.md](package-management.md)。
+
+```bash
+kaulac pkg add <url-or-path> [--name <name>] [--ref <branch>] [-j <n>]  # 添加包
+kaulac pkg build <name> [--force]                                # 构建包
+kaulac pkg analyze <name>                                        # 分析包
+kaulac pkg remove <name>                                         # 移除包
+kaulac pkg list                                                  # 列出包
+kaulac pkg fetch                                                 # 拉取依赖
+kaulac pkg update [name]                                         # 更新依赖
+kaulac pkg lock                                                  # 查看锁状态
+kaulac pkg publish [<dir>] [选项]                                 # 一键发布库到注册源
+```
+
+### 发布库 `kaulac pkg publish`
+
+把本地库一键上传到 kaula-universe 双注册源（Gitee / GitHub 组织仓库），
+自动建仓 → 推送代码 → 打版本 tag → 远端复核。
+
+```bash
+kaulac pkg publish                          # 发布 ./ 到 gitee + github（默认）
+kaulac pkg publish ../mylib --tag 0.2.0     # 发布指定库与版本
+kaulac pkg publish --target github          # 只发 github
+kaulac pkg publish --org zhe116             # 发到指定命名空间（个人账号/组织）
+kaulac pkg publish --dry-run                # 只打印计划，零写入
+kaulac pkg publish --force                  # 覆盖已存在但指向别处的同版本 tag
+```
+
+发布流程与约定：
+
+1. 读取包目录 `kaula.json` 的 `name` / `version` / `description`；
+2. 版本确定顺序：`--tag` > `kaula.json "version"` > 仓库最近一次 `git describe --tags`；
+3. 对每个目标源：探测仓库 → 不存在则经平台 API 建仓（组织或个人命名空间）→
+   `git push` 代码与 `v<version>` tag → `git ls-remote` 复核；
+4. 幂等：远端已有同版本 tag 且指向当前 HEAD → 跳过该源（`up-to-date`）；
+5. 冲突：同版本 tag 已指向别的 commit → 报错，须 `--force` 覆盖；
+6. 鉴权：`--gitee-token` / `--github-token` > 环境变量
+   `KAULA_GITEE_TOKEN` / `KAULA_GITHUB_TOKEN` > `~/.kaula/config.json` 的
+   `gitee_token` / `github_token`；
+7. token 在日志/输出中一律打码（`***`），不落盘到远端 URL。
+
+发包版本约定：库通过 git tag `v<major.minor.patch>` 发布版本，消费者用
+`kaulac pkg add` 或 `kaula.json dependencies` 按 semver 约束拉取。
+
+### 添加归档 `kaulac pkg add <url>`
+
+`pkg add` 的 `<url-or-path>` 支持三种来源：
+
+| 来源 | 判定规则 | 行为 |
+|------|----------|------|
+| Git 仓库 | `.git` 结尾或非归档 URL | `git clone --depth 1`（双源测速择优） |
+| **HTTP(S) 归档** | `http(s)://` + `.tar.gz`/`.tgz`/`.tar`/`.zip` 扩展名 | **多线程分片并发下载** + 安全解压 + 自动分析/构建 |
+| 本地路径 | 其他 | 引用本地目录（符号链接/直接引用） |
+
+`-j <n>` 指定 HTTP 归档的分片下载并发数（默认 `min(16, CPU 核数)`，上限 64；
+也可用环境变量 `KAULAC_DL_CONCURRENCY` 覆盖）。`pkg fetch` / `pkg update`
+的多依赖拉取并发默认 8（上限 32），可用 `KAULAC_FETCH_CONCURRENCY` 调整。
+
+HTTP 归档下载特性：
+- **Range 分片**：探测服务器能力后按并发度切分，worker 池并发下载后按序合并
+- **自动降级**：服务器不支持 Range/长度未知 → 单连接流式下载
+- **数据收敛**：分片独立重试（指数退避），失败清理临时文件，绝不留半成品
+- **内容校验**：期望大小 + sha256 双重校验，不匹配即失败
+- **安全解压**：拒绝 `../` 穿越、绝对路径与符号链接逃逸；单一目录包裹自动上移
+
+## 十五、工作空间 (workspace)
+
+```bash
+kaulac workspace init <members...>              # 初始化工作空间
+kaulac workspace list                           # 列出成员
+kaulac workspace build [--release] [--debug]    # 构建所有成员
+kaulac workspace test                           # 运行测试
+```
+
+在 `kaula.json` 中配置工作空间：
+
+```json
+{
+  "workspace": {
+    "members": ["packages/core", "packages/utils", "app"],
+    "shared_deps": {
+      "testing": "^1.0"
+    }
+  }
+}
+```
+
+## 十六、格式化 (fmt)
+
+详见 [formatter.md](formatter.md)。
+
+```bash
+# 格式化文件（输出到 stdout）
+kaulac fmt file main.kl
+
+# 格式化文件（写回原文件）
+kaulac fmt file main.kl --write
+
+# 批量格式化
+kaulac fmt file main.kl utils.kl --write
+
+# 从 stdin 格式化
+echo 'code' | kaulac fmt stdin
+
+# 检查文件是否已格式化
+kaulac fmt check main.kl
+```

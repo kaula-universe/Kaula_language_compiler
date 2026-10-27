@@ -1,0 +1,88 @@
+name: Org sync GitHub <-> Gitee
+
+# 目标：kaula-universe 组织仓库在 GitHub 与 Gitee 之间的双向互同步（完全自动）。
+#   - 新增仓库：一端新建，另一端自动创建同名仓库并镜像（保留完整历史）
+#   - 内容变更：分支/标签双向收敛（保留完整 git 历史），冲突自动合并，合并不了的只报告不覆盖
+#   - 删除仓库：以 Gitee 为权威仓库侧。GitHub 侧存在而 Gitee 侧不存在 -> 备份后从 GitHub 删除。
+#     受保护仓库(Kaula_language_compiler/kaula/termus/kaulaweb)永不删除。
+# 部署：本文件放到组织任意一个可写 workflow 的仓库(推荐 Kaula_language_compiler)的
+#       .github/workflows/org-sync.yml，并在仓库 Secrets 配置：
+#         GH_TOKEN    GitHub PAT（repo / admin:org / delete_repo / workflow）
+#         GITEE_TOKEN Gitee PAT（projects 权限）
+#       GITEE_USER 用 env 配置（默认 zhe116）。
+# 说明：定时(schedule)会执行真实同步 --apply；手动触发时可输入 apply=true 执行、
+#       apply=false(空) 则仅 dry-run 预览。
+
+on:
+  schedule:
+    # 每 6 小时跑一次（UTC）：0,6,12,18
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: '手动执行：true=真实同步并推送；false/空=仅 dry-run 预览'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: org-sync
+  cancel-in-progress: false
+
+env:
+  GH_ORG: kaula-universe
+  GITEE_ORG: kaula-universe
+  GITEE_USER: zhe116
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout (含 scripts/org_sync.py)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Decide apply flag
+        id: flags
+        env:
+          MANUAL_APPLY: ${{ github.event.inputs.apply }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # 定时任务 -> 真实同步；手动触发 -> 由输入 apply 决定
+          if [ "$EVENT" = "schedule" ]; then
+            echo "APPLY=true" >> "$GITHUB_ENV"
+            echo "MODE=schedule-apply (完全自动)" >> "$GITHUB_ENV"
+          elif [ "$MANUAL_APPLY" = "true" ]; then
+            echo "APPLY=true" >> "$GITHUB_ENV"
+            echo "MODE=manual-apply" >> "$GITHUB_ENV"
+          else
+            echo "APPLY=false" >> "$GITHUB_ENV"
+            echo "MODE=manual-dryrun" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run org sync
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          APPLY: ${{ env.APPLY }}
+        run: |
+          if [ "$APPLY" = "true" ]; then
+            python3 scripts/org_sync.py --apply 2>&1 | tee /tmp/org-sync.log
+          else
+            python3 scripts/org_sync.py 2>&1 | tee /tmp/org-sync.log
+          fi
+
+      - name: Upload sync log + backups artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: org-sync-artifacts
+          path: |
+            /tmp/org-sync.log
+            /tmp/org-sync-artifacts/**
