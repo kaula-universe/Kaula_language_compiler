@@ -207,6 +207,17 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **仓库分支卫生**：GitHub/Gitee 远程从 43 个分支收敛到仅 `master`。
+  - 用 `git cherry`（patch-id）逐一核对：所有 `feat/*`、`fix/*`、`trae/agent-*`、
+    `backup/legacy-master`、`develop`、`revert-merge-5-master` 的主体工作
+    已全部进入 master，直接删除远程分支。
+  - 唯一未合入的 `diag/conc`：cherry-pick 其中 `fix(build): 删除遗留 KMM TU`
+    （删除 `src/kmm_scoped_allocator.c`，与 v4 重复定义全局符号，Linux ld 报
+    multiple definition）；诊断 workflow commit 不合并。
+  - `trae/agent-8DTKQF` 的 8 月老 commit 路径已过时（`kaula-compiler/` →
+    现 `compiler/`），不合并。
+  - 验证：`toolkit_build` 全绿；memA/recursive_ptr_tree/binary_trees/stress_generics
+    2/2 通过。
 - **并发内核测试与实现契约脱节（Linux `Test` 工作流长期红）**：两条契约在
   实现侧已演进，测试侧没跟上，CI 因此每 push 必红，release 前置校验形同虚设。
   - `test_ws_deque.c` 仍按早期「批量窃取拿一半」断言，而实现已于
