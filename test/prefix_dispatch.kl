@@ -4,30 +4,31 @@
 // 实参结构；展开时按声明顺序选择第一条所有约束都命中的规则。
 // 这个文件同时验证多规则不会生成同名 C 函数（否则 clang: conflicting types）。
 
+import std.io
 #[prefix]
 fn Shape(tree(identifier), x) {
-    println("identifier: ", $x)
+    std.io.println("identifier: ", $x)
 }
 
 #[prefix]
 fn Shape(tree(literal), x) {
-    println("literal: ", $x)
+    std.io.println("literal: ", $x)
 }
 
 #[prefix]
 fn Shape(tree(binary), x) {
-    println("binary: ", $x)
+    std.io.println("binary: ", $x)
 }
 
 #[prefix]
 fn Shape(tree(call), x) {
-    println("call: ", $x)
+    std.io.println("call: ", $x)
 }
 
 // 无约束规则作兜底：带约束的规则都不命中时才选中它
 #[prefix]
 fn Shape(x) {
-    println("fallback: ", $x)
+    std.io.println("fallback: ", $x)
 }
 
 // 普通函数：作为 call 类实参，验证按结构分派能识别调用形态
@@ -42,5 +43,5 @@ fn main() {
     @Shape(x = a + 1)
     @Shape(x = twice(a))
     @Shape(x = "str")
-    println("shape dispatch ok")
+    std.io.println("shape dispatch ok")
 }

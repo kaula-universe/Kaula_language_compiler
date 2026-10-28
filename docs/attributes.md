@@ -115,12 +115,13 @@ fn test_addition() {
 
 使用 `#[ignore]` 属性可以暂时跳过某个测试：
 
+import std.io
 ```kaula
 #[test]
 #[ignore]
 fn test_not_ready() {
     // 这个测试不会被执行
-    println("this will not run")
+    std.io.println("this will not run")
 }
 ```
 
@@ -205,6 +206,7 @@ Point* p2 = Point_clone(&p)
 
 自动生成逐字段比较方法：
 
+import std.io
 ```kaula
 Point a
 a.x = 5
@@ -214,12 +216,12 @@ b.x = 5
 b.y = 5
 
 if Point_equals(&a, &b) == 1 {
-    println("a == b")
+    std.io.println("a == b")
 }
 
 b.x = 6
 if Point_equals(&a, &b) == 0 {
-    println("a != b")
+    std.io.println("a != b")
 }
 ```
 
@@ -273,19 +275,20 @@ struct Config {
 
 ### 使用示例
 
+import std.io
 ```kaula
 fn main(i32 argc, char** argv) {
     Config* cfg = Config_parse(argc, argv)
     if cfg == null {
-        println("参数解析失败")
+        std.io.println("参数解析失败")
         return
     }
 
     if cfg.verbose == 1 {
-        println("详细模式已启用")
+        std.io.println("详细模式已启用")
     }
-    println("输出文件: ")
-    println(cfg.output)
+    std.io.println("输出文件: ")
+    std.io.println(cfg.output)
 }
 ```
 
@@ -324,14 +327,15 @@ fn main(i32 argc, char** argv) {
 
 ### 基本用法
 
+import std.io
 ```kaula
 #[prefix]
 pub fn trace(msg: string) {
-    println("[T] ", $msg)
+    std.io.println("[T] ", $msg)
 }
 
 fn main() {
-    @trace(msg = "direct")     // 展开为 println("[T] ", "direct")
+    @trace(msg = "direct")     // 展开为 std.io.println("[T] ", "direct")
 }
 ```
 
@@ -369,6 +373,7 @@ fn main() {
 
 多个属性可以组合使用，发挥更大威力：
 
+import std.io
 ```kaula
 #[derive(Debug, Clone, Eq)]
 #[command]
@@ -384,7 +389,7 @@ struct AppConfig {
 fn test_config_defaults() {
     AppConfig* cfg = AppConfig_parse(1, null)
     if cfg.verbose != 0 {
-        println("FAIL: verbose should default to false")
+        std.io.println("FAIL: verbose should default to false")
     }
     AppConfig_debug(cfg)
 }

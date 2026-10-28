@@ -237,13 +237,17 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 			globalSymbolTable.AddSymbol(moduleName, "module", false, "global", 0, 0)
 		}
 	} else {
-		// 如果 stdlib.json 加载失败，至少添加 println
-		globalSymbolTable.AddSymbol("println", "any", false, "global", 0, 0)
+		// stdlib.json 加载失败：不注册任何裸名。语言没有内置裸名——
+		// println/print 一律要求限定形式 std.io.println / std.io.print，
+		// 裸名调用会得到 undefined_function + 限定名建议（libQualifiedHint）。
+		// 加载失败属于环境错误，留待调用方报告，而不是用 any 兜底掩盖。
 	}
 
 	// 编译器内置（F12）：assert(cond) 由 codegen 直接生成——测试模式绑定
 	// 测试 runner 的失败记录，普通模式失败即 exit(1)；两种模式均无需 import
-	globalSymbolTable.AddSymbol("assert", "any", false, "global", 0, 0)
+	// 类型注册为 "function"（而非历史 any 兜底），使 assert(...) 的调用合法
+	// 化（codegen 特判生成），同时确保它不是一个可用于赋值的 any 值。
+	globalSymbolTable.AddSymbol("assert", "function", false, "global", 0, 0)
 
 	return &SemanticAnalyzer{
 		symbolTable:        globalSymbolTable,
@@ -1089,6 +1093,11 @@ func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
 //  3. 在调用方作用域分析实参，校验未知/缺失参数；
 //  4. 切换到前缀符号表后分析剩余调用体（$var 解析到前缀参数）。
 func (sa *SemanticAnalyzer) analyzePrefixCallExpression(expr *ast.PrefixCallExpression) {
+	// @Name(...) 引用即使用：登记进 usedFunctions，避免 #[prefix] fn
+	// 只在表达式级宏调用里被引用却误报 unused_function。
+	if sa.usedFunctions != nil && expr.Name != "" {
+		sa.usedFunctions[expr.Name] = true
+	}
 	// 查找前缀定义（与 codegen 一致：前缀函数优先，其次 prefix 语句）
 	funcDecl := sa.findFunctionDeclaration(expr.Name)
 	if funcDecl != nil {
@@ -4025,11 +4034,17 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 				(sa.localModuleFuncs != nil && sa.localModuleFuncs[ident.Name]) ||
 				(sa.localPubVars != nil && sa.localPubVars[ident.Name])
 			if !isKnown {
+				// 库函数必须使用限定名调用（如 std.io.println）；裸名调用
+				// 报 undefined_function 并附限定名建议，引导用户改写法。
+				suggestion := "请检查函数名拼写，或确认函数已声明/导入"
+				if hint := sa.libQualifiedHint(ident.Name); hint != "" {
+					suggestion = fmt.Sprintf("%s 是库函数，必须使用限定形式调用, 例如: %s(...)", ident.Name, hint)
+				}
 				sa.errorCollector.AddSemanticError(
 					fmt.Sprintf("未定义的函数: '%s'", ident.Name),
 					ident.Pos.Line, ident.Pos.Column,
 					"undefined_function",
-					"请检查函数名拼写，或确认函数已声明/导入",
+					suggestion,
 				)
 				// 仍然分析参数，但不再分析函数名（避免重复报错）
 				for _, arg := range expr.Args {
@@ -5197,10 +5212,31 @@ func typesAssignable(expected, actual string) bool {
 	if e == "" || a == "" || e == "auto" || a == "auto" {
 		return true
 	}
+	// null 字面量：兼容所有指针类型、函数（回调）类型与可空类型。
+	// `return null`（void* 返回）、`f(cb, null)`（回调形参）等都是合法
+	// C 语义，前端不得误报 return_type_mismatch / arg_type_mismatch。
+	if a == "null" {
+		if strings.HasSuffix(e, "*") {
+			return true
+		}
+		if strings.HasSuffix(e, "?") {
+			return true
+		}
+		// 函数/回调类型形如 void()、void(void())void() 等：含括号且不含赋值
+		if strings.Contains(e, "(") && strings.Contains(e, ")") {
+			return true
+		}
+		return false
+	}
 	// 去可空后缀做裸类型比较
 	e = strings.TrimSuffix(e, "?")
 	a = strings.TrimSuffix(a, "?")
 	if e == a {
+		return true
+	}
+	// Kaula 内建 string 关键字与 std.string.String 结构互为别名
+	// （string 就是 String 的语言别名，C 端同构，互传合法）。
+	if (e == "string" && a == "String") || (e == "String" && a == "string") {
 		return true
 	}
 	// 形参是泛型类型参数（T/K/V/E/R 等单大写字母）时，任何实参都兼容

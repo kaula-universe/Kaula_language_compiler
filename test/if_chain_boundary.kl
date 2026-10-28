@@ -6,45 +6,45 @@ fn main() i32 {
 
     # 1. 不同变量的链: 不警告
     if (x == 1) {
-        println("a");
+        std.io.println("a");
     } else if (y == 2) {
-        println("b");
+        std.io.println("b");
     }
 
     # 2. 非 == 比较: 不警告
     if (x > 1) {
-        println("c");
+        std.io.println("c");
     } else if (x < 5) {
-        println("d");
+        std.io.println("d");
     }
 
     # 3. 只有 if 无 else if: 不警告
     if (x == 1) {
-        println("e");
+        std.io.println("e");
     }
 
     # 4. 链中途换变量: 不警告 (x, y, x)
     if (x == 1) {
-        println("f");
+        std.io.println("f");
     } else if (y == 2) {
-        println("g");
+        std.io.println("g");
     } else if (x == 3) {
-        println("h");
+        std.io.println("h");
     }
 
     # 5. 连续单变量 == 链: 警告
     if (x == 1) {
-        println("i");
+        std.io.println("i");
     } else if (x == 2) {
-        println("j");
+        std.io.println("j");
     }
 
     # 6. 嵌套在函数内更深层: 警告
     if (x == 1) {
         if (y == 2) {
-            println("k");
+            std.io.println("k");
         } else if (y == 3) {
-            println("l");
+            std.io.println("l");
         }
     }
 

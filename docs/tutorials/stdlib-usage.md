@@ -39,7 +39,7 @@ import std.string
 fn main() {
     string s = std.string.create("hello")
     i64 n = std.string.length(s)
-    println("len = ", n)   # len = 5
+    std.io.println("len = ", n)   # len = 5
     # Kaula 自动内存管理：无需手动 free，作用域结束自动回收
 }
 ```

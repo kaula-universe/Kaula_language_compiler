@@ -28,7 +28,7 @@ fn main() {
     h.version = 1
     h.flags = 0
     h.length = 16
-    println(h.version, h.flags, h.length, fast_path())
+    std.io.println(h.version, h.flags, h.length, fast_path())
 }
 ```
 
@@ -61,6 +61,7 @@ systems / freestanding 场景，需要平台特定指令，不在通用教程展
 ### 类型度量：`sizeof` / `alignof` / `offsetof`
 
 ```kaula
+import std.io
 struct Packet {
     header: i64
     length: i64
@@ -71,7 +72,7 @@ fn main() {
     auto sz = sizeof(Packet)             # 类型大小
     auto al = alignof(Packet)            # 类型对齐
     auto off = offsetof(Packet, length)  # 字段偏移（字节）
-    println(sz, al, off)                 # 24 8 8（多参数以空格分隔）
+    std.io.println(sz, al, off)                 # 24 8 8（多参数以空格分隔）
 }
 ```
 
@@ -88,6 +89,7 @@ fn main() {
 | `field_type(T, i)` | 结构体名 + 索引 | `string` | 第 `i` 个字段类型名；越界返回空串 |
 
 ```kaula
+import std.io
 struct Point {
     x: i64
     y: i64
@@ -95,16 +97,16 @@ struct Point {
 }
 
 fn main() {
-    println(type_name(Point))        # Point
-    println(type_kind(Point))        # struct
-    println(field_count(Point))      # 3
-    println(field_name(Point, 0))    # x
-    println(field_type(Point, 2))    # string
+    std.io.println(type_name(Point))        # Point
+    std.io.println(type_kind(Point))        # struct
+    std.io.println(field_count(Point))      # 3
+    std.io.println(field_name(Point, 0))    # x
+    std.io.println(field_type(Point, 2))    # string
 
     # 内建类型同样适用
-    println(type_name(i32))          # i32
-    println(type_kind(i32))          # int
-    println(type_kind(string))       # string
+    std.io.println(type_name(i32))          # i32
+    std.io.println(type_kind(i32))          # int
+    std.io.println(type_kind(string))       # string
 }
 ```
 
@@ -134,8 +136,8 @@ import std.io
 fn main() {
     i64 a = 1
     i64 b = 2
-    println(comptime(shape_of(123)))    # int
-    println(comptime(shape_of(a + b)))  # binary
+    std.io.println(comptime(shape_of(123)))    # int
+    std.io.println(comptime(shape_of(a + b)))  # binary
 }
 ```
 
@@ -149,10 +151,11 @@ fn main() {
 `comptime` 是一个**表达式包装**，语义是"在编译期把里面的常量表达式算出来"：
 
 ```kaula
+import std.io
 fn main() {
     auto n = comptime(1 + 2 * 3)        # 编译期算出 7
     auto s = comptime(type_name(i32))   # 与 type_name(i32) 等价
-    println(n, s)                       # 7 i32
+    std.io.println(n, s)                       # 7 i32
 }
 ```
 
@@ -182,7 +185,7 @@ fn test_add() {
 
 fn main() {
     test_add()
-    println("tests ran")
+    std.io.println("tests ran")
 }
 ```
 
@@ -213,7 +216,7 @@ fn main() {
     Point a = Point { x = 10, y = 20 }
     Point b = Point { x = 10, y = 20 }
     if Point_equals(&a, &b) == 1 {
-        println("a == b")
+        std.io.println("a == b")
     }
 }
 ```

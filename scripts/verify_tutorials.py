@@ -66,19 +66,39 @@ def find_kaulac() -> Path:
 
 
 def extract_blocks(md_path: Path):
-    """返回 [(block_index, code_str)]。"""
+    """返回 [(block_index, code_str)]。
+
+    兼容两种围栏写法：
+      - 标准：围栏独立成行（```kaula 换行后才是代码）
+      - 同行：```kaulafn main() {（围栏与代码首行同行），此时去掉
+        ```kaula 前缀，剩余内容作为块首行；否则会丢掉 fn/struct 首行，
+        包装出的程序残缺无法编译。
+    闭块同样兼容同行形式（}``` 或 // 注释``` ），剥离围栏取代码末行。
+    """
     text = md_path.read_text(encoding="utf-8")
     blocks = []
     in_block = False
     buf = []
     for line in text.splitlines():
-        if line.strip().startswith("```kaula"):
-            in_block = True
-            buf = []
+        s = line.strip()
+        if not in_block:
+            if s.startswith("```kaula"):
+                in_block = True
+                buf = []
+                rest = s[len("```kaula"):]
+                if rest.strip():
+                    buf.append(rest.strip())  # 同行代码首行（如 fn main() {）
+                continue
             continue
-        if in_block and line.strip().startswith("```"):
-            blocks.append(("\n".join(buf)))
-            in_block = False
+        close = s.rfind("```")
+        if close >= 0:
+            if close == 0:
+                blocks.append("\n".join(buf))
+                in_block = False
+            else:
+                buf.append(s[:close].rstrip())
+                blocks.append("\n".join(buf))
+                in_block = False
             continue
         if in_block:
             buf.append(line)

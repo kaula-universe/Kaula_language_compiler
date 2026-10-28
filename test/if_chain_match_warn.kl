@@ -3,13 +3,13 @@ import std.io;
 fn main() i32 {
     i32 x = 2;
     if (x == 1) {
-        println("one");
+        std.io.println("one");
     } else if (x == 2) {
-        println("two");
+        std.io.println("two");
     } else if (x == 3) {
-        println("three");
+        std.io.println("three");
     } else {
-        println("other");
+        std.io.println("other");
     }
     return 0;
 }

@@ -22,8 +22,8 @@ fn dirLabel(Direction d) string {
 }
 
 fn main() {
-    println(dirLabel(Direction.North))   # north
-    println(dirLabel(Direction.West))    # west
+    std.io.println(dirLabel(Direction.North))   # north
+    std.io.println(dirLabel(Direction.West))    # west
 }
 ```
 
@@ -45,7 +45,7 @@ fn main() {
         2 => { r = "two" },
         _ => { r = "many" }
     }
-    println(r)   # two
+    std.io.println(r)   # two
 
     string cmd = "start"
     string action = ""
@@ -54,7 +54,7 @@ fn main() {
         "stop"  => { action = "end" },
         _       => { action = "unknown" }
     }
-    println(action)   # begin
+    std.io.println(action)   # begin
 }
 ```
 
@@ -73,9 +73,9 @@ enum Shape {
 
 fn describe(Shape s) {
     match s {
-        Circle(r) => { println("circle r = ", r) },
-        Rect(w, h) => { println("rect ", w, " x ", h) },
-        _ => { println("unknown") }
+        Circle(r) => { std.io.println("circle r = ", r) },
+        Rect(w, h) => { std.io.println("rect ", w, " x ", h) },
+        _ => { std.io.println("unknown") }
     }
 }
 

@@ -53,7 +53,7 @@ fn main() {
     # 4. start/stop 后再 destroy（两次）
     LightAsyncLoop* d = std.async.light_async_loop_create()
     std.async.light_async_loop_start(d)
-    check(std.async.light_async_loop_is_running(d), "running after start")
+    check(std.async.light_async_loop_is_running(d) != 0, "running after start")
     std.async.light_async_loop_stop(d)
     check(!std.async.light_async_loop_is_running(d), "not running after stop")
     std.async.light_async_loop_destroy(d)

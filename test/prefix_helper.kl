@@ -6,16 +6,17 @@
 // 定义 TU 缺少 std 头会在链接期变成 undefined symbol: println_multi。
 
 // 形态一：prefix 语句（模板体用 $param 引用参数）
+import std.io
 prefix Trace {
     $msg
-    println("[TRACE] ", $msg)
+    std.io.println("[TRACE] ", $msg)
 }
 
 // 形态二：带默认值的 prefix 语句
 prefix Retry {
     $times = 3
     $body
-    println("[RETRY] budget=", $times)
+    std.io.println("[RETRY] budget=", $times)
     $body
 }
 

@@ -12,7 +12,7 @@ import freestanding.io
 
 fn check(cond: bool, label: string) {
     if (!cond) {
-        println("FAIL ", label)
+        freestanding.io.println("FAIL ", label)
     }
 }
 
@@ -85,6 +85,6 @@ fn main() -> i32 {
     check(freestanding.base.is_char(0) == true, "is_char(0)")
     check(freestanding.base.is_char(120) == true, "is_char('x')")
 
-    println("fs_base: base module OK")
+    freestanding.io.println("fs_base: base module OK")
     return 0
 }

@@ -30,9 +30,10 @@ fn handle_request(req: HttpRequest*, res: HttpResponse*) {
 ## 3. 条件与比较
 
 - 条件语句**推荐带括号包裹条件**:
+import std.io
   ```kaula
   if (x > 0) {
-      println("positive")
+      std.io.println("positive")
   }
   while (i < 10) {
       i = i + 1

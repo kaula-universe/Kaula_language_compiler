@@ -29,7 +29,7 @@ fn main() {
     string old = std.string.string_create("old style")
     std.io.println("old style = ", old)
 
-    # std.io 链式: print().int() → print_int
+    # std.io 链式: std.io.print().int() → print_int
     std.io.print().int(42)
     std.io.println("")
 

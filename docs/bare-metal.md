@@ -569,8 +569,8 @@ fn kaula_main() -> void {
     math_is_pow2(1024)
     
     // 输出（串口/控制台）
-    println("Hello from freestanding!")
-    print("Value: %d, Hex: %x\n", 42, 0xCAFE)
+    freestanding.io.println("Hello from freestanding!")
+    freestanding.io.print("Value: %d, Hex: %x\n", 42, 0xCAFE)
 }
 ```
 
@@ -590,10 +590,10 @@ fn fs_output_putchar(c: char) {
 }
 
 fn main() {
-    println("--- freestanding hosted test ---")
+    freestanding.io.println("--- freestanding hosted test ---")
     print_int(2026)
     print_hex(0xDEADBEEF)
-    println("done")
+    freestanding.io.println("done")
 }
 ```
 

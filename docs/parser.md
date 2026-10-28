@@ -359,3 +359,10 @@ if p.curTok.Type == lexer.TOKEN_COLON {
 - 跳过当前 Token，尝试下一个
 - 记录错误位置和上下文
 - 收集所有错误后统一报告
+
+### stdlib.json 候选路径（2026-10 增补）
+
+解析器加载 `stdlib.json` 判定模块是否有效时，候选路径与 `findStdlib` 对齐，
+并在 cwd 相对候选中新增 `compiler/stdlib.json`：仓库根直接运行
+`build/bin/kaulac test/xxx.kl`（未设 `KAULA_HOME`）时也能解析
+`import std.*` 模块，不再报「导入的模块不存在」。

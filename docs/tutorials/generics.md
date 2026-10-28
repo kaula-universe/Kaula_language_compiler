@@ -33,7 +33,7 @@ fn main() {
     i64 a = identity<i64>(42)
     f64 b = identity<f64>(3.14)
     string c = identity<string>("gen")
-    println(a, b, c)
+    std.io.println(a, b, c)
 }
 ```
 
@@ -53,7 +53,7 @@ fn main() {
     Pair<i64> pi
     pi.first = 1
     pi.second = 2
-    println(pi.first, pi.second)
+    std.io.println(pi.first, pi.second)
 }
 ```
 
@@ -84,8 +84,8 @@ fn boxValue(Box<i64> b) i64 {
 fn main() {
     Box<i64> full = Box.Value(7)
     Box<i64> empty = Box.Empty
-    println(boxValue(full))    # 7
-    println(boxValue(empty))   # -1
+    std.io.println(boxValue(full))    # 7
+    std.io.println(boxValue(empty))   # -1
 }
 ```
 

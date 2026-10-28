@@ -1,3 +1,4 @@
+import std.io
 # prefix_let_bind.kl — 「实参只求值一次」（let 绑定）回归
 #
 # Task #4：模板骨架里右值引用 ≥2 次、且从未作为赋值左值的 $参数，
@@ -9,9 +10,9 @@
 
 fn check(bool cond, string label) {
     if cond {
-        println("PASS ", label)
+        std.io.println("PASS ", label)
     } else {
-        println("FAIL ", label)
+        std.io.println("FAIL ", label)
     }
 }
 
@@ -25,7 +26,7 @@ fn bump() -> i64 {
 # 形态一：$x 右值引用两次（$x + $x）→ 实参只求值一次
 prefix Twice {
     $x
-    println("sum=", $x + $x, " count=", g_count)
+    std.io.println("sum=", $x + $x, " count=", g_count)
 }
 
 # 形态二：$target 是赋值左值 → 绝不绑定，赋值仍作用于调用点变量

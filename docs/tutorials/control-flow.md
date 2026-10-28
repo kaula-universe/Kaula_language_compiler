@@ -11,11 +11,11 @@ fn main() {
     i64 score = 85
 
     if (score >= 90) {
-        println("Grade: A")
+        std.io.println("Grade: A")
     } else if (score >= 80) {
-        println("Grade: B")
+        std.io.println("Grade: B")
     } else {
-        println("Grade: C")
+        std.io.println("Grade: C")
     }
 }
 ```
@@ -30,7 +30,7 @@ import std.io
 fn main() {
     i64 i = 0
     while (i < 5) {
-        println("i = ", i)
+        std.io.println("i = ", i)
         i = i + 1
     }
 }
@@ -49,7 +49,7 @@ import std.io
 
 fn main() {
     for j in range(3) {
-        println("j = ", j)
+        std.io.println("j = ", j)
     }
     // 输出: j = 0, j = 1, j = 2
 }
@@ -64,7 +64,7 @@ import std.io
 
 fn main() {
     for j in range(2, 6) {
-        println("j = ", j)
+        std.io.println("j = ", j)
     }
     // 输出: j = 2, j = 3, j = 4, j = 5
 }
@@ -79,12 +79,12 @@ import std.io
 
 fn main() {
     for j in range(0, 10, 2) {
-        println("j = ", j)
+        std.io.println("j = ", j)
     }
     // 输出: j = 0, j = 2, j = 4, j = 6, j = 8
 
     for j in range(5, 0, -1) {
-        println("j = ", j)
+        std.io.println("j = ", j)
     }
     // 输出: j = 5, j = 4, j = 3, j = 2, j = 1
 }
@@ -98,7 +98,7 @@ import std.io
 fn main() {
     i64 arr[5] = [10, 20, 30, 40, 50]
     for x in arr {
-        println("x = ", x)
+        std.io.println("x = ", x)
     }
 }
 ```
@@ -118,7 +118,7 @@ fn main() {
         if (i > 5) {
             break       # 退出循环
         }
-        println("i = ", i)
+        std.io.println("i = ", i)
     }
 }
 ```

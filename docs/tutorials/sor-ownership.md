@@ -21,7 +21,7 @@ fn main() {
     i64* p = as<i64*>(std.memory.kmm_v4_alloc(64))
     p[0] = 100
     p[1] = 200
-    println("sum = ", p[0] + p[1])
+    std.io.println("sum = ", p[0] + p[1])
 }
 ```
 
@@ -52,10 +52,11 @@ SOR 的分析模型基于三个概念（详见 [SOR 系统实现](../sor-system.
 
 这是所有权模型里最容易混淆的一处，单独说明：
 
-```kaula
+```text
 Node* l = mk(depth - 1)   // l：局部变量，Owned
 Node* n = as<Node*>(std.memory.kmm_v4_alloc(16))
 n.left = l                // 字段写穿——不是 yield(l)
+// 说明：Node/mk 为示意符号，仅展示"字段写穿 ≠ yield"的语义对比。
 ```
 
 `yield` 是**用户显式**的所有权转移：交出所有权，原变量失效。

@@ -1,3 +1,4 @@
+import std.io
 # reflect_builtins.kl — 编译期反射内建回归
 #
 # 覆盖：type_name / type_kind / field_count / field_name / field_type
@@ -6,7 +7,7 @@
 # 回归背景：反射内建此前直接返回裸 C 字符串 "..."，与 Kaula 的 String（SSO 结构体）
 # 不兼容，生成的 C 无法编译：
 #   - `String s = type_name(T)` → initializing 'String' with 'char[6]'
-#   - `println(type_name(T))`   → string_cdata("...") 报 member reference base type
+#   - `std.io.println(type_name(T))`   → string_cdata("...") 报 member reference base type
 # 同时 sizeof/alignof/offsetof/field_count 的 u64 结果被按 %d 打印（-Wformat）。
 #
 # 本文件刻意**不** import std.string / std.io：
@@ -23,9 +24,9 @@ struct Empty {
 
 fn check(bool cond, string label) {
     if cond {
-        println("PASS ", label)
+        std.io.println("PASS ", label)
     } else {
-        println("FAIL ", label)
+        std.io.println("FAIL ", label)
     }
 }
 
@@ -71,12 +72,12 @@ fn main() {
     check(comptime(type_name(i32)) == "i32", "comptime wraps reflection")
 
     # ---------- 反射结果可直接打印（String 类型贯通） ----------
-    println(type_name(Point))
-    println(type_kind(Point))
-    println(field_count(Point))
-    println(field_name(Point, 1))
-    println(field_type(Point, 1))
-    println(sizeof(Point), alignof(Point), offsetof(Point, tag))
+    std.io.println(type_name(Point))
+    std.io.println(type_kind(Point))
+    std.io.println(field_count(Point))
+    std.io.println(field_name(Point, 1))
+    std.io.println(field_type(Point, 1))
+    std.io.println(sizeof(Point), alignof(Point), offsetof(Point, tag))
 
-    println("DONE reflect_builtins")
+    std.io.println("DONE reflect_builtins")
 }

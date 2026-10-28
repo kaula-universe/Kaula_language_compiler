@@ -274,3 +274,36 @@ simpleAnalyzer.Analyze(program)
 - 返回类型
 - 模块依赖关系
 - 第三方库函数签名
+
+## 内置裸名与限定名强制（2026-10）
+
+Kaula 语言**没有内置裸名**（bare names）：`println` / `print` 这类标准库函数
+不存在裸名版本，一律必须使用限定形式调用：
+
+- 标准库：`import std.io; std.io.println(...)`
+- 独立（freestanding）：`import freestanding.io; freestanding.io.println(...)`
+
+### 裸名调用的报错行为
+
+`NewSemanticAnalyzerWithConfig` 在 `stdlib.json` 加载失败时**不再注册
+`println=any` 兜底**：加载失败属于环境错误，留待调用方报告，而不是用 `any`
+掩盖。语言层面，裸名调用标准库函数（如裸 `println(...)`）报：
+
+```
+undefined_function: 'println'
+建议: println 是库函数，必须使用限定形式调用, 例如: std.io.println(...)
+```
+
+建议由 `libQualifiedHint` 生成，覆盖四条查找路径：`std.` / `freestanding.` /
+裸前缀 / ThirdParty 库函数名。
+
+### 类型系统补强
+
+- `assert(cond)` 类型注册为 `function`（而非历史 `any` 兜底），调用合法化由
+  codegen 特判生成，同时确保它不是可用于赋值的 `any` 值。
+- `typesAssignable` 新增规则：
+  - `null` 字面量兼容所有指针类型、函数（回调）类型与可空类型
+    （`return null` 于 `void*` 返回函数、`f(cb, null)` 回调形参合法）。
+  - Kaula 内建 `string` 与 `std.string.String` 互为别名，互传合法。
+- `#[prefix] fn` 被 `@Name(...)` 表达式级宏调用时登记进 `usedFunctions`，
+  不再误报 `unused_function`。

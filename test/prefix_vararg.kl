@@ -1,3 +1,4 @@
+import std.io
 # prefix_vararg.kl — 结构宏变参 `$( ... ),*` 匹配与重复展开（Task #3）
 #
 # 模板 `$( $x ),*` 声明接受零个或多个位置实参；`$( <语句> ),*` /
@@ -6,9 +7,9 @@
 
 fn check(bool cond, string label) {
     if cond {
-        println("PASS ", label)
+        std.io.println("PASS ", label)
     } else {
-        println("FAIL ", label)
+        std.io.println("FAIL ", label)
     }
 }
 
@@ -19,28 +20,28 @@ fn counter() -> i64 {
     return g_calls
 }
 
-# 表达式重复：println($( $x ),*) → println(实参, 实参, ...)
+# 表达式重复：std.io.println($( $x ),*) → std.io.println(实参, 实参, ...)
 prefix PrintAll {
     $( $x ),*
-    println($( $x ),*)
+    std.io.println($( $x ),*)
 }
 
-# 语句重复：$( println($x) ),* → 每个实参一条 println
+# 语句重复：$( std.io.println($x) ),* → 每个实参一条 println
 prefix EmitAll {
     $( $x ),*
-    $( println("v=", $x) ),*
+    $( std.io.println("v=", $x) ),*
 }
 
 # 零个实参：重复占位展开为空，宏体只留模板其余部分
 prefix Maybe {
     $( $x ),*
-    println("no-args")
+    std.io.println("no-args")
 }
 
 # 实参只求值一次：$( $x + $x ),* 中 counter() 不应被调两遍
 prefix Once {
     $( $x ),*
-    println("sum=", $( $x + $x ),*)
+    std.io.println("sum=", $( $x + $x ),*)
 }
 
 fn main() {

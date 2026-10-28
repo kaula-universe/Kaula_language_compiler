@@ -308,7 +308,7 @@ import std.math
 import std.container
 
 fn main() {
-    println("Hello, World!")
+    std.io.println("Hello, World!")
     float x = math_sqrt(2.0)
     Vector<int> v = vector_create()
 }
@@ -345,7 +345,7 @@ fn main() {
     freestanding.math.math_is_pow2(256)
 
     // I/O（托管模式需覆写 fs_output_putchar）
-    println("Hello freestanding!")
+    freestanding.io.println("Hello freestanding!")
     freestanding.io.print_int(2026)
     freestanding.io.print("printf: %d %s\n", 42, as<char*>(&numbuf[0]))
 }
@@ -356,6 +356,7 @@ fn main() {
 
 ### 使用第三方库
 
+import std.io
 ```kaula
 import stb_image
 import imgui   // C++ 库：自动生成 kbridge_* 桥接
@@ -364,7 +365,7 @@ fn main() {
     void* img = stbi_load("texture.png", &width, &height, &channels, 4)
     stbi_image_free(img)
 
-    println(kbridge_GetVersion())         // 1.92.9
+    std.io.println(kbridge_GetVersion())         // 1.92.9
 }
 ```
 

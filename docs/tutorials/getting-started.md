@@ -18,7 +18,7 @@ Kaula 是一门编译到 C 的系统编程语言，支持现代语言特性（�
 import std.io
 
 fn main() {
-    println("Hello, Kaula!")
+    std.io.println("Hello, Kaula!")
 }
 ```
 
@@ -60,7 +60,7 @@ fn main() {
     i32* buf = as<i32*>(std.memory.kmm_v4_alloc(64))
     buf[0] = 42
 
-    println("buf[0] = ", buf[0])   # buf[0] = 42
+    std.io.println("buf[0] = ", buf[0])   # buf[0] = 42
     // 函数退出时自动回收，无需 free
 }
 ```

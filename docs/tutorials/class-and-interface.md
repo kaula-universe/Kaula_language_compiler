@@ -55,10 +55,10 @@ class Vec2 {
 fn main() {
     Vec2 v = Vec2(3.0, 4.0)
     f64 len = v.length()
-    println("length: ", len)    # length: 5
+    std.io.println("length: ", len)    # length: 5
 
     v.scale(2.0)
-    println("scaled: (", v.x, ", ", v.y, ")")
+    std.io.println("scaled: (", v.x, ", ", v.y, ")")
 }
 ```
 
@@ -94,8 +94,8 @@ class Circle implements Shape {
 
 fn main() {
     Shape s = Circle(2.0, "my-circle")
-    println("area = ", s.area())
-    println("name = ", s.describe())
+    std.io.println("area = ", s.area())
+    std.io.println("name = ", s.describe())
 }
 ```
 

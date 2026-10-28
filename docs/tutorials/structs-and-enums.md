@@ -46,7 +46,7 @@ fn main() {
         tl: Point { x: 0, y: 0 },
         br: Point { x: 3, y: 4 }
     }
-    println("area = ", area(rect))   # area = 12
+    std.io.println("area = ", area(rect))   # area = 12
 }
 ```
 
@@ -64,7 +64,7 @@ struct Point {
 
 fn main() {
     Point p = Point { x: 3, y: 4 }
-    println(p.x, p.y)
+    std.io.println(p.x, p.y)
 }
 ```
 
@@ -83,7 +83,7 @@ enum Color {
 
 fn main() {
     Color c = Color.Red
-    println("color = ", c)
+    std.io.println("color = ", c)
 }
 ```
 

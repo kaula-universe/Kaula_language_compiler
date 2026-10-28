@@ -86,11 +86,11 @@ fn main() i32 {
         sum = sum + dispatch(i);
         i = i + 1;
     }
-    println(sum);              // 148
+    std.io.println(sum);              // 148
 
-    println(dispatchNeg(-2));  // 200
-    println(dispatchNoElse(2)); // 22
-    println(dispatchNoElse(9)); // 7
-    println(breakGuard(3));     // 3
+    std.io.println(dispatchNeg(-2));  // 200
+    std.io.println(dispatchNoElse(2)); // 22
+    std.io.println(dispatchNoElse(9)); // 7
+    std.io.println(breakGuard(3));     // 3
     return 0;
 }

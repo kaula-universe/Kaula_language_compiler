@@ -176,7 +176,7 @@ fn kaula_main() -> i32 {
     freestanding.io.fs_putchar(10)
     freestanding.io.print("fmt %d %s %x\n", 42, as<char*>(&text[0]), 255)
     freestanding.io.println("greeting: ", as<char*>(&text[0]))
-    println("println_multi ", 1, 2.5, as<char*>(&text[0]))
+    freestanding.io.println("println_multi ", 1, 2.5, as<char*>(&text[0]))
     freestanding.io.print_char(75)
     freestanding.io.print_int(r)
     freestanding.io.print_float(1.5)

@@ -1,3 +1,4 @@
+import std.io
 # spend_and_call.kl — spend / call 强制消费流回归
 #
 # 覆盖：数组模式（含 call(default) 兜底）、枚举模式穷尽消费、
@@ -10,9 +11,9 @@
 
 fn check(bool cond, string label) {
     if cond {
-        println("PASS ", label)
+        std.io.println("PASS ", label)
     } else {
-        println("FAIL ", label)
+        std.io.println("FAIL ", label)
     }
 }
 
@@ -144,5 +145,5 @@ fn main() {
     }
     check(a == 32, "two sequential spend blocks")
 
-    println("DONE spend_and_call")
+    std.io.println("DONE spend_and_call")
 }

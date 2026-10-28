@@ -35,14 +35,16 @@ type Size = adopt size_t
 
 // ❌ 变参语法未实现，暂不能写：
 // extern fn printf(fmt: *u8, ...) -> i32
-extern fn memset(dst: *u8, c: i32, n: Size) -> *u8
-extern fn malloc(size: Size) -> void()
-extern fn free(ptr: void()) void
+// 注意：示例用自定义符号名（ext_memset/ext_malloc/ext_free），
+// 避免与 glibc 同名内置函数的头文件声明冲突（签名不一致）。
+extern fn ext_memset(dst: *u8, c: i32, n: Size) -> *u8
+extern fn ext_malloc(size: Size) -> void()
+extern fn ext_free(ptr: void()) void
 ```
 
 调用方式与普通 Kaula 函数相同（**当前不可用**，存在以下实测缺陷）：
 
-```kaula
+```text
 fn main() {
     auto msg = cstring("Hello from C!")   // ❌ cstring 内置未实现
     printf(msg)                            // ❌ 变参未实现
@@ -53,6 +55,7 @@ fn main() {
     // 结束时由编译器自动释放（libc_malloc 来源追踪）。手写 free 属
     // 非法写法，会与自动回收重复释放导致崩溃。
 }
+// 说明：本示例刻意不可编译（cstring / 变参 printf 未实现），保留作现状标注。
 ```
 
 > ⚠️ 当前所有 `extern fn` 调用都无法编译：codegen 生成调用时误加用户函数前缀（如声明 `abs` 却调用 `kaula_abs`），与声明的 C 符号不一致。修复见分支 fix/extern-call-mangling（附回归测试），合并前 FFI 出向调用请改用 pkglib 库桥接路径。
@@ -128,7 +131,7 @@ void qsort(void *base, size_t nmemb, size_t size,
 
 在 Kaula 中写成（⚠️ 端到端当前不可运行，两处阻断见文首状态速览：回调签名记法无法解析、extern 调用符号名 mangling（修复分支待合并）。示例遵循语言自动内存管理契约：只分配、不手写释放；`as<T>(expr)`、`sizeof(T)`、`adopt(expr)`、`i32*` 声明等语法均已单独实测正确）：
 
-```kaula
+```text
 type Size = adopt size_t
 type CInt = adopt int
 
@@ -145,16 +148,19 @@ fn cmp_int(a: const void(), b: const void()) -> CInt {
 }
 
 fn main() {
-    i32* arr = as<i32*>(malloc(adopt(sizeof(i32) * 5)))
+    i32* arr = as<i32*>(ext_malloc(adopt(sizeof(i32) * 5)))
     arr[0] = 3
     arr[1] = 1
     arr[2] = 4
     arr[3] = 1
     arr[4] = 5
     qsort(arr, adopt(5), adopt(sizeof(i32)), cmp_int)
-    println("sorted: ", arr[0], arr[1], arr[2], arr[3], arr[4])
+    std.io.println("sorted: ", arr[0], arr[1], arr[2], arr[3], arr[4])
     // 不写 free(arr)：自动内存管理，生命周期结束由编译器释放
 }
+// 说明：compar 回调签名式记法（void(T...)R）当前无法解析，且 extern 出向
+// 调用存在符号名 mangling 缺陷，本示例刻意不可编译，保留作端到端现状标注。
+// 各语法点（adopt/as/sizeof/i32* 声明）均已单独实测可用。
 ```
 
 对比旧版文档示例中的错误语法（均已在 2026-09 修正）：`cast<*i32>(...)` → `as<i32*>(...)`；`sizeof<i32>` → `sizeof(i32)`；`*i32 arr = ...` → `i32* arr = ...`；`*(i32*)a` 裸强转 → `as<i32*>(a)`；extern 参数一律 `名: 类型`。
@@ -164,7 +170,7 @@ fn main() {
 Kaula 函数默认生成标准 C ABI，可直接被 C 代码调用：
 
 ```kaula
-fn add(int a, int b) int {
+fn add(i32 a, i32 b) i32 {
     return a + b
 }
 ```
@@ -175,7 +181,7 @@ fn add(int a, int b) int {
 
 在 `--freestanding` 模式下，extern 用于访问硬件地址和中断向量：
 
-```kaula
+```text
 extern fn boot_main() -> void
 
 #[naked] #[section(".isr_vector")]
@@ -184,6 +190,8 @@ fn reset_handler() void {
     bl boot_main
     b .
 }
+// 说明：汇编指令（ldr/bl/b）属裸机 .isr_vector 段内容，非 Kaula 语法，
+// 仅展示 extern + #[naked] 的声明形态；完整可编译示例见 docs/bare-metal.md。
 ```
 
 ## 完整示例

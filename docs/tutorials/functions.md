@@ -10,7 +10,7 @@ Kaula 使用 `fn` 关键字定义函数，采用类似 Go 的语法风格。
 import std.io
 
 fn greet(string name) {
-    println("Hello, ", name)
+    std.io.println("Hello, ", name)
 }
 
 fn main() {
@@ -28,7 +28,7 @@ fn add(i64 a, i64 b) i64 {
 }
 
 fn main() {
-    println("2 + 3 = ", add(2, 3))
+    std.io.println("2 + 3 = ", add(2, 3))
 }
 ```
 
@@ -42,7 +42,7 @@ fn main() {
 import std.io
 
 fn calculate(i64 x, i64 y, string label) i64 {
-    println(label)
+    std.io.println(label)
     return x + y
 }
 
@@ -70,7 +70,7 @@ fn factorial(i64 n) i64 {
 }
 
 fn main() {
-    println("5! = ", factorial(5))
+    std.io.println("5! = ", factorial(5))
 }
 ```
 
@@ -89,8 +89,8 @@ fn counter() {
         count = count + 1    # 读+写外层局部变量（自动捕获）
         return count
     }
-    println("count = ", increment())   # count = 1
-    println("count = ", increment())   # count = 2
+    std.io.println("count = ", increment())   # count = 1
+    std.io.println("count = ", increment())   # count = 2
 }
 
 fn main() {
@@ -113,7 +113,7 @@ fn outer() {
         x = x + 1
     }
     inner()
-    println("x = ", x)
+    std.io.println("x = ", x)
 }
 
 fn main() {

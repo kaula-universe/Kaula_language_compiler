@@ -48,7 +48,7 @@ type Size = adopt size_t      # 平台相关宽度
 fn main() {
     # 跨越套用类型边界必须显式 adopt(...) 转换
     CInt x = adopt(42)
-    println(x)
+    std.io.println(x)
 }
 ```
 
@@ -67,7 +67,7 @@ fn main() {
     f64 y = 3.14
     string name = "Kaula"
     bool flag = true
-    println(x, y, name, flag)
+    std.io.println(x, y, name, flag)
 }
 ```
 
@@ -81,7 +81,7 @@ fn main() {
     auto n = -1        # n 类型推导为 i64，负数同样是 i64
     auto pi = 3.14     # pi 类型推导为 f64
     auto s = "Kaula"   # s 类型推导为 string
-    println(z, n, pi, s)
+    std.io.println(z, n, pi, s)
 }
 ```
 
@@ -95,7 +95,7 @@ import std.io
 fn main() {
     auto acc = 0
     acc = acc + 1000   # 1000，而不是 232
-    println(acc)
+    std.io.println(acc)
 }
 ```
 
@@ -111,7 +111,7 @@ const max_retries = 3
 const app_name = "Kaula"
 
 fn main() {
-    println(app_name, " will retry up to ", max_retries, " times")
+    std.io.println(app_name, " will retry up to ", max_retries, " times")
 }
 ```
 
@@ -127,7 +127,7 @@ fn main() {
     i64 buf[4] = [10, 20, 30, 40]
     c = a + b
     d = a - b
-    println(a, b, c, d, p, q, buf[0], buf[3])
+    std.io.println(a, b, c, d, p, q, buf[0], buf[3])
 }
 ```
 
@@ -152,7 +152,7 @@ fn outer() {
     }
     add(5)
     add(7)
-    println("total = ", total)   # total = 12
+    std.io.println("total = ", total)   # total = 12
 }
 
 fn main() {
@@ -178,7 +178,7 @@ fn main() {
 
     u8 b = 255
     i64 big = as<i64>(b)    # u8 -> i64
-    println(x, y, z, f, b, big)
+    std.io.println(x, y, z, f, b, big)
 }
 ```
 

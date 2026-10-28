@@ -1962,7 +1962,7 @@ func main() {
 
 	localPrefixStmts, localPrefixFuncs := collectLocalPrefixDefs(program, inputDir)
 
-	concurrentSemanticAnalysisWithConfig(program, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes, localPrefixStmts, localPrefixFuncs)
+	concurrentSemanticAnalysisWithConfig(program, stdlibPath, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes, localPrefixStmts, localPrefixFuncs)
 	stage2Time := time.Since(stage2Start)
 	if verbose {
 		fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time)
@@ -3590,10 +3590,15 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 
 // concurrentSemanticAnalysisWithConfig 执行语义分析（使用已加载的配置）
 // 注：原实现为假并发（单 goroutine + 立即 Wait），已改为直接同步调用。
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo, localPrefixStmts map[string]*ast.PrefixStatement, localPrefixFuncs map[string]*ast.FunctionStatement) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibPath string, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo, localPrefixStmts map[string]*ast.PrefixStatement, localPrefixFuncs map[string]*ast.FunctionStatement) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
-	sa := sema.NewSemanticAnalyzerWithConfig("kaula/stdlib.json", errorCollector)
+	// stdlibPath 由调用方解析（findStdlib），避免 cwd 不在仓库根时
+	// 硬编码相对路径 "kaula/stdlib.json" 加载失败走任何兜底。
+	if stdlibPath == "" {
+		stdlibPath = findStdlib("")
+	}
+	sa := sema.NewSemanticAnalyzerWithConfig(stdlibPath, errorCollector)
 	if stdlibConfig != nil {
 		sa.SetStdlibConfig(stdlibConfig)
 	}

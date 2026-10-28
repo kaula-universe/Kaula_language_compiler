@@ -7,18 +7,19 @@ Prefix 是 Kaula 独有的声明式代码复用机制，类似带参数的代码
 使用 `prefix` 关键字定义模板，`$` 前缀引用参数：
 
 ```kaula
+import std.io
 prefix Logger {
     $message
     $level
     auto log = $level + ": " + $message
-    println(log)
+    std.io.println(log)
 }
 
 prefix Validate {
     $value
     $min
     if $value < $min {
-        println("validation failed")
+        std.io.println("validation failed")
     }
 }
 ```
@@ -27,26 +28,29 @@ prefix Validate {
 
 使用 `@PrefixName(params)` 语法：
 
-```kaula
+```text
 fn main() {
-    int age = -1
+    i32 age = -1
 
     @Logger(message = "server started", level = "INFO")
     @Validate(value = age, min = 0)
 }
+// 说明：依赖本页首个代码块中的 Logger / Validate 前缀定义，
+// 单独成文件运行请连同定义一起复制；完整版本见 examples/prefix.kl。
 ```
 
 等价于手动展开：
 
 ```kaula
+import std.io
 fn main() {
-    int age = -1
+    i32 age = -1
     # 展开 Logger
     auto log = "INFO" + ": " + "server started"
-    println(log)
+    std.io.println(log)
     # 展开 Validate
     if age < 0 {
-        println("validation failed")
+        std.io.println("validation failed")
     }
 }
 ```
@@ -55,7 +59,7 @@ fn main() {
 
 ### 资源管理
 
-```kaula
+```text
 prefix with_lock {
     lock($lock)
     $body
@@ -65,13 +69,16 @@ prefix with_lock {
 @with_lock(lock = my_mutex) {
     critical_section()
 }
+// 说明：lock/unlock/critical_section 均为示意符号；展示前缀模板的
+// 参数声明（$lock）、调用体拼接点（$body）与参数替换形态。
 ```
 
 ### 日志包装
 
 ```kaula
+import std.io
 prefix trace {
-    println("[TRACE] ", $msg)
+    std.io.println("[TRACE] ", $msg)
 }
 
 @trace(msg = "entering function")
@@ -92,15 +99,20 @@ prefix trace {
 多次展开不会重定义。
 
 ```kaula
+import std.io
 prefix Retry {
     $times = 3      // 带默认值：调用方不传就是 3
     $body           // 裸占位符：调用体拼在这里
-    println("[RETRY] budget=", $times)
+    std.io.println("[RETRY] budget=", $times)
     $body           // 已经拼过一次，此处不再重复
 }
 
-@Retry {            // 不传 times → 用默认值 3
-    do_work()
+fn do_work() { std.io.println("work done") }
+
+fn main() {
+    @Retry {            // 不传 times → 用默认值 3
+        do_work()
+    }
 }
 ```
 
@@ -114,13 +126,20 @@ prefix Retry {
 代码。展开时才按需生成，因此同一个宏在不同上下文中可以正确地使用实参的语法结构。
 
 ```kaula
+import std.io
+
 #[prefix]
 fn Twice(x: i64) {
     i64 r = $x + $x     // 两次引用 $x：实参求值一次，绑到 __auto_type 临时变量
     r
 }
 
-@Twice(x = n + 1)       // → __auto_type __kaula_b1_x = n + 1; int64_t r = __kaula_b1_x + __kaula_b1_x
+fn main() {
+    i64 n = 5
+    i64 r = @Twice(x = n + 1)   // → __auto_type __kaula_b1_x = n + 1;
+                                //   int64_t r = __kaula_b1_x + __kaula_b1_x
+    std.io.println(r)           // 12
+}
 ```
 
 默认值同样是 AST：`$times = 3` 里的 `3` 是字面量节点，只有调用方确实不传时才求值。
@@ -130,6 +149,7 @@ fn Twice(x: i64) {
 同一个写法有两种用途，判据是**调用点有没有为 `p` 传实参**：
 
 ```kaula
+import std.io
 #[prefix]
 fn AddTo(target: i64, value: i64) {
     $target = $target + $value      // $target 有实参 → 这是普通赋值
@@ -138,7 +158,14 @@ fn AddTo(target: i64, value: i64) {
 #[prefix]
 fn WithDefault(x: i64) {
     $limit = 10                     // $limit 没有实参 → 这是默认值声明，不生成代码
-    println($x + $limit)
+    std.io.println($x + $limit)
+}
+
+fn main() {
+    i64 acc = 1
+    @AddTo(target = acc, value = 41)     // acc = 42
+    std.io.println(acc)                   // 42
+    @WithDefault(x = 9)                   // 11
 }
 ```
 
@@ -151,9 +178,17 @@ fn WithDefault(x: i64) {
 所以 `@AddTo(target = acc, value = 42)` 展开后 `acc` 真的会变：
 
 ```kaula
-i64 acc = 100
-@AddTo(target = acc, value = 42)
-println(acc)          // 142
+import std.io
+#[prefix]
+fn AddTo(target: i64, value: i64) {
+    $target = $target + $value
+}
+
+fn main() {
+    i64 acc = 100
+    @AddTo(target = acc, value = 42)
+    std.io.println(acc)          // 142
+}
 ```
 
 `$limit = 10` 则不会在展开结果里留下一条无用赋值，`$limit` 直接以 `10` 内联。
@@ -165,17 +200,20 @@ println(acc)          // 142
 临时变量（名为 `__kaula_b{seq}_{param}`），骨架里的引用改指临时变量：
 
 ```kaula
+import std.io
 prefix TwiceEval {
     $x
-    println($x + $x)    // $x 引用两次 → 实参只求值一次
+    std.io.println($x + $x)    // $x 引用两次 → 实参只求值一次
 }
 
 i64 calls = 0
 fn counter() -> i64 { calls = calls + 1; return calls }
 
-@TwiceEval(x = counter())   // → __auto_type __kaula_b1_x = counter();
-                            //   println(__kaula_b1_x + __kaula_b1_x)
-println(calls)              // 1，而不是 2
+fn main() {
+    @TwiceEval(x = counter())   // → __auto_type __kaula_b1_x = counter();
+                                //   std.io.println(__kaula_b1_x + __kaula_b1_x)
+    std.io.println(calls)              // 1，而不是 2
+}
 ```
 
 **触发条件**（缺一不可）：
@@ -204,16 +242,17 @@ println(calls)              // 1，而不是 2
 模板体内 `$( ... ),*` 是**重复占位**，按位置实参个数重复展开：
 
 ```kaula
+import std.io
 # 表达式重复：出现在调用实参列表里，重复并以逗号连接
 prefix PrintAll {
     $( $x ),*
-    println($( $x ),*)      // @PrintAll(10, 20, 30) → println(10, 20, 30)
+    std.io.println($( $x ),*)      // @PrintAll(10, 20, 30) → std.io.println(10, 20, 30)
 }
 
 # 语句重复：重复整条语句（可嵌套在 if/for/块内；多条语句用 { } 包住）
 prefix EmitAll {
     $( $x ),*
-    $( println("v=", $x) ),*    // @EmitAll(1, 2) → println("v=", 1); println("v=", 2)
+    $( std.io.println("v=", $x) ),*    // @EmitAll(1, 2) → std.io.println("v=", 1); std.io.println("v=", 2)
 }
 ```
 
@@ -268,13 +307,18 @@ fn main() {
 clang 阶段炸掉。
 
 ```kaula
+import std.io
 #[prefix]
 fn AddTo(target: i64, tree(i64) value: i64) {
     $target = $target + $value
 }
 
-@AddTo(target = acc, value = 42)          // OK
-// @AddTo(target = acc, value = "text")   // 报错：结构/类型不匹配
+fn main() {
+    i64 acc = 100
+    @AddTo(target = acc, value = 42)          // OK
+    // @AddTo(target = acc, value = "text")   // 报错：结构/类型不匹配
+    std.io.println(acc)
+}
 ```
 
 可用的结构类型名：
@@ -298,12 +342,13 @@ fn AddTo(target: i64, tree(i64) value: i64) {
 冒号前缀 `:value` 是**值约束**——与结构约束并列，分派时用 comptime 求值实参，
 字符串结果相等才命中。这让 `comptime(shape_of(v))` 算出的形状字符串直接决定宏走哪条骨架：
 
-```kaula
+```text
 #[prefix] fn Gen(tree(mode = :int), mode)    { /* int 分支 */ }
 #[prefix] fn Gen(tree(mode = :string), mode) { /* string 分支 */ }
 #[prefix] fn Gen(mode)                       { /* 兜底 */ }
 
 @Gen(mode = comptime(shape_of(v)))   # 按 shape_of 算出的字符串选规则
+// 说明：函数体为注释占位，仅为展示同名多规则签名分派。
 ```
 
 值约束不限实参结构本身（NodeType 为 generic），只比 comptime 求值结果；与结构约束
@@ -317,6 +362,7 @@ fn AddTo(target: i64, tree(i64) value: i64) {
 模板体的**最后一条语句**如果是表达式，宏就有值：
 
 ```kaula
+import std.io
 #[prefix]
 fn Lower(c: char) -> i64 {
     i64 base = $c - 'A'
@@ -325,7 +371,7 @@ fn Lower(c: char) -> i64 {
 
 fn main() {
     i64 v = @Lower(c = 'C') + 1     // 可以参与算术、作实参、作返回值
-    println(v)                       // 100
+    std.io.println(v)                       // 100
 }
 ```
 
@@ -351,19 +397,20 @@ int64_t v = ({ int64_t __kaula_m1_base = 67; __kaula_m1_base + 97; }) + 1;
 从「断言」变成「分支」：
 
 ```kaula
+import std.io
 #[prefix]
 fn Show(tree(identifier), x) {
-    println("identifier: ", $x)
+    std.io.println("identifier: ", $x)
 }
 
 #[prefix]
 fn Show(tree(literal), x) {
-    println("literal: ", $x)
+    std.io.println("literal: ", $x)
 }
 
 #[prefix]
 fn Show(tree(binary), x) {
-    println("binary: ", $x)
+    std.io.println("binary: ", $x)
 }
 
 fn main() {
@@ -399,20 +446,24 @@ fn main() {
 `prefix` 语句与 `#[prefix]` 函数都能在导入方展开。
 
 ```kaula
+import std.io
 // helper.kl
 prefix Trace {
     $msg
-    println("[TRACE] ", $msg)
+    std.io.println("[TRACE] ", $msg)
 }
 ```
 
-```kaula
+```text
 // main.kl
+import std.io
 import "helper.kl"
 
 fn main() {
-    @Trace(msg = "cross-file works")   // 展开为 println("[TRACE] ", "cross-file works")
+    @Trace(msg = "cross-file works")   // 展开为 std.io.println("[TRACE] ", "cross-file works")
 }
+// 说明：跨文件前缀展开需多文件工程（helper.kl 在上一个代码块），
+// 无法作为单文件独立编译；自动化验证见 test/prefix_xfile.kl。
 ```
 
 > **历史缺陷（已修复）**：早期版本的语义分析与代码生成只在**本文件 AST** 里查找
@@ -426,12 +477,15 @@ fn main() {
 `#[prefix]` 函数是"函数形态的前缀模板"，它的形参在模板体里同样要按 `$param`
 引用：
 
-```kaula
+```text
+import std.io
 #[prefix]
 pub fn trace(msg: string) {
-    println("[T] ", $msg)     // 正确：$msg 会被替换为实参
-    // println("[T] ", msg)   // 错误：msg 不是模板参数，生成出未声明的标识符
+    std.io.println("[T] ", $msg)     // 正确：$msg 会被替换为实参
+    // std.io.println("[T] ", msg)   // 错误：msg 不是模板参数，生成出未声明的标识符
 }
+// 说明：$msg 与 msg 的对比教学片段；单独编译会因形参未使用而告警，
+// 完整可运行版本见上一节 WithDefault 示例。
 ```
 
 这与 `prefix Name { ... }` 语句的约定一致——模板参数一律用 `$` 标记，不加 `$`
@@ -448,10 +502,11 @@ pub fn trace(msg: string) {
 | 自声明了 `$参数`（`$limit = 10`） | 不生成函数体，只保留声明 |
 
 ```kaula
+import std.io
 #[prefix]
 fn WithDefault(x: i64) {
     $limit = 10              // 模板自声明的 $limit，在 C 里没有对应变量
-    println($x + $limit)
+    std.io.println($x + $limit)
 }
 
 fn main() {
@@ -491,16 +546,21 @@ prefix Loop {
 合法的嵌套（宏里调宏）不受影响：
 
 ```kaula
+import std.io
 #[prefix]
 fn Depth2(v: i64) {
     i64 u = $v
-    println(u)
+    std.io.println(u)
 }
 
 #[prefix]
 fn Depth3(v: i64) {
     i64 t = $v
     @Depth2(v = t)         // OK：展开 1 层
+}
+
+fn main() {
+    @Depth3(v = 41)        // 合法嵌套：展开 Depth3 → 展开 Depth2 → 打印 41
 }
 ```
 

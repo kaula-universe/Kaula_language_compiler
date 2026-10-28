@@ -21,7 +21,7 @@ fn main() {
         call(2) { sum = sum + 20 }
         call(3) { sum = sum + 30 }
     }
-    println("sum = ", sum)   # sum = 60
+    std.io.println("sum = ", sum)   # sum = 60
 }
 ```
 
@@ -40,6 +40,7 @@ fn main() {
 要么逐个 `call(i)` 覆盖 `1..N`，要么用一个 `call(default)` 兜底。
 
 ```kaula
+import std.io
 fn main() {
     auto items = [10, 20, 30]
     auto sum = 0
@@ -54,7 +55,7 @@ fn main() {
             sum = sum + 100
         }
     }
-    println(sum)   # 130
+    std.io.println(sum)   # 130
 }
 ```
 
@@ -67,6 +68,7 @@ fn main() {
 `call(Variant)`，不允许 `call(default)`。
 
 ```kaula
+import std.io
 enum Color {
     Red
     Green
@@ -81,7 +83,7 @@ fn main() {
         call(Green) { tag = 2 }
         call(Blue)  { tag = 3 }
     }
-    println(tag)   # 2
+    std.io.println(tag)   # 2
 }
 ```
 

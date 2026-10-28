@@ -4,6 +4,7 @@
 // `import "prefix_helper.kl"` 之后 `@Trace(...)` 既不报错也不展开——
 // 编译状态 Success，main 里却只剩 `return 0`。改动见
 // SetLocalExternalPrefixes（sema / codegen）+ collectLocalPrefixDefs（CLI）。
+import std.io
 import "prefix_helper.kl"
 
 fn main() {
@@ -15,8 +16,8 @@ fn main() {
     @Retry {
         hits += 1
     }
-    println("[CHECK] retry expansions = ", hits)
+    std.io.println("[CHECK] retry expansions = ", hits)
 
     // 同一个定义 TU 里的普通函数照常可见、可调用
-    println("[CHECK] util_version = ", util_version())
+    std.io.println("[CHECK] util_version = ", util_version())
 }

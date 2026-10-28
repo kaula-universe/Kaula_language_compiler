@@ -12,7 +12,7 @@ import freestanding.io
 
 fn check(bool cond, string label) {
     if (!cond) {
-        println("FAIL ", label)
+        freestanding.io.println("FAIL ", label)
     }
 }
 
@@ -233,6 +233,6 @@ fn main() -> i32 {
     u8* after = as<u8*>(freestanding.memory.fs_alloc(16))
     check(after != as<u8*>(0), "allocation works after reset")
 
-    println("fs_memory: memory module OK")
+    freestanding.io.println("fs_memory: memory module OK")
     return 0
 }

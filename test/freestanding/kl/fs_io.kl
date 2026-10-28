@@ -33,8 +33,8 @@ fn main() -> i32 {
 
     // ---------- 与 std.io 同名的输出 ----------
     freestanding.io.print("print: ", 42, " ", 1.5, " ", "str", 10)
-    println("println: ", -7, " ", 2.5)
-    println("println_multi: ", 1, 2.5, "x", 9)
+    freestanding.io.println("println: ", -7, " ", 2.5)
+    freestanding.io.println("println_multi: ", 1, 2.5, "x", 9)
 
     freestanding.io.print_char(65)
     freestanding.io.print_char(10)
@@ -59,8 +59,8 @@ fn main() -> i32 {
     // ---------- 与 freestanding.string 混用（跨模块链路） ----------
     char num[32]
     freestanding.string.fs_itoa(20260927, as<char*>(&num[0]))
-    println("cross-module: ", as<char*>(&num[0]), " len=", as<u64>(freestanding.string.strlen(as<char*>(&num[0]))))
+    freestanding.io.println("cross-module: ", as<char*>(&num[0]), " len=", as<u64>(freestanding.string.strlen(as<char*>(&num[0]))))
 
-    println("fs_io: io module OK")
+    freestanding.io.println("fs_io: io module OK")
     return 0
 }

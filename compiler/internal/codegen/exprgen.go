@@ -1433,9 +1433,14 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		if fn, cName, resolved := eg.codegen.stdlibConfig.ResolveChainedFunction(modKey, segs); resolved {
 			lastSeg := segs[len(segs)-1]
 
-			// 特殊处理 println：多参数使用类型推导版本（与平铺路径行为一致）
-			if lastSeg == "println" && len(args) > 1 {
+			// 特殊处理 println：多参数使用类型推导版本（与平铺路径行为一致）。
+			// 单参非字符串字面量同样必须走类型推导——否则生成裸 println(i64) 把
+			// 整数当 const char* 传入，运行时段错误（限定名调用无内置裸名兜底）。
+			if lastSeg == "println" && (len(args) > 1 || eg.inferType(args[0]) != "s") {
 				return eg.generatePrintlnMulti(args)
+			}
+			if lastSeg == "print" && (len(args) > 1 || eg.inferType(args[0]) != "s") {
+				return eg.generatePrintCall(args)
 			}
 
 			// 追踪第三方库使用（若链段名命中第三方库函数）
@@ -1500,9 +1505,14 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 		}
 
 		if module, exists := eg.codegen.stdlibConfig.Modules[stdlibKey]; exists {
-			// 特殊处理 println：使用类型推导版本
-			if methodName == "println" && len(args) > 1 {
+			// 特殊处理 println：使用类型推导版本。
+			// 单参非字符串字面量同样必须走类型推导——否则生成裸 println(i64) 把
+			// 整数当 const char* 传入，运行时段错误（限定名调用无内置裸名兜底）。
+			if methodName == "println" && (len(args) > 1 || eg.inferType(args[0]) != "s") {
 				return eg.generatePrintlnMulti(args)
+			}
+			if methodName == "print" && (len(args) > 1 || eg.inferType(args[0]) != "s") {
+				return eg.generatePrintCall(args)
 			}
 
 			// 检查 stdlib.json 中是否有这个函数
@@ -2325,6 +2335,12 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 	case *ast.TypeKindExpression:
 		// type_kind(T) 返回 String（kinds: int/float/bool/char/string/void/struct/unknown）
 		return "s"
+	case *ast.ComptimeExpression:
+		// comptime(x) 是编译器内建求值：类型与实参 x 相同（求值不改变类型）。
+		// 没有这一支，comptime(shape_of(123)) 推断落空 fallback 到 "d"，
+		// println 生成 (int64_t)(String) 强转，clang 报 aggregate value used
+		// where an integer was expected。
+		return eg.inferType(e.Inner)
 	case *ast.ShapeOfExpression:
 		// shape_of(expr) 返回 String（语法形状类别）
 		return "s"

@@ -367,6 +367,7 @@ func (scg *SORCodegen) generateAlloc(kind AllocKind, size int) string {
 
 SOR 的活跃性分析精确计算每个变量的最后使用点，指导代码生成器在正确位置插入 `kmm_v4_scope_pop`：
 
+import std.io
 ```kaula
 #[sor]
 fn process() {
@@ -376,7 +377,7 @@ fn process() {
     
     extract owner[0] -> first  // 提取子结构
     
-    println(first)             // 最后使用点
+    std.io.println(first)             // 最后使用点
     
     release owner -> [a, b]    // 释放所有权
     // ↑ SOR 分析在此插入 kmm_v4_scope_pop()

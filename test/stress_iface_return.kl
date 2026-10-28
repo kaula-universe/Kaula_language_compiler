@@ -73,7 +73,7 @@ fn main() {
     check(sh.area() == 4.0, "iface var decl + box")
 
     # 2. 具体类直接调用（不装箱路径）
-    Square sq = Square(3.0, "sq3")
+    Shape sq = Square(3.0, "sq3")   # 接口句柄变量：具体类自动装箱（接口参数提升回归护栏）
     check(sq.area() == 9.0, "concrete method direct")
 
     # 3. 方法返回接口 → 接口变量（经过一次装箱）

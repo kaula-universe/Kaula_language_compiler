@@ -44,9 +44,9 @@ fn recBlock(i32 n) i32 {
 }
 
 fn main() i32 {
-    println(deep(5000))
-    println(odd(5000))
-    println(even(5000))
-    println(recBlock(5000))
+    std.io.println(deep(5000))
+    std.io.println(odd(5000))
+    std.io.println(even(5000))
+    std.io.println(recBlock(5000))
     return 0
 }

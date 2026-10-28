@@ -13,7 +13,7 @@ fn main() {
     i64 x = 42
     i64* ptr = &x       # ptr 指向 x
     *ptr = 100          # 解引用并修改 x 的值
-    println(x)          # 输出: 100
+    std.io.println(x)          # 输出: 100
 }
 ```
 
@@ -26,7 +26,7 @@ fn main() {
     i64 x = 1
     i64* p1 = &x        # 类型前置写法
     i64 *p2 = &x        # 类型后置写法（等价）
-    println(*p1, *p2)
+    std.io.println(*p1, *p2)
 }
 ```
 
@@ -41,7 +41,7 @@ fn main() {
     i64 x = 42
     i64* ptr = &x
     if (ptr != null) {
-        println(*ptr)
+        std.io.println(*ptr)
     }
 }
 ```
@@ -60,10 +60,10 @@ fn main() {
 
     if (std.option.option_is_some(&some)) {
         i64 v = std.option.option_unwrap_i64(&some)
-        println("some = ", v)              # some = 42
+        std.io.println("some = ", v)              # some = 42
     }
     i64 d = std.option.option_unwrap_or_i64(&none, 7)
-    println("none fallback = ", d)         # none fallback = 7
+    std.io.println("none fallback = ", d)         # none fallback = 7
 }
 ```
 
@@ -86,7 +86,7 @@ fn swap(i64* a, i64* b) {
 fn main() {
     i64 x = 1, y = 2
     swap(&x, &y)
-    println("x = ", x, ", y = ", y)   # x = 2, y = 1
+    std.io.println("x = ", x, ", y = ", y)   # x = 2, y = 1
 }
 ```
 
@@ -103,7 +103,7 @@ fn main() {
     void() buf = std.memory.kmm_v4_alloc(64)
     i64* p = as<i64*>(buf)
     p[0] = 1
-    println(p[0])
+    std.io.println(p[0])
 }
 ```
 

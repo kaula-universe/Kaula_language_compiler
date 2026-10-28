@@ -13,7 +13,7 @@ import freestanding.io
 
 fn check(bool cond, string label) {
     if (!cond) {
-        println("FAIL ", label)
+        freestanding.io.println("FAIL ", label)
     }
 }
 
@@ -182,6 +182,6 @@ fn main() -> i32 {
     check(as<i32>(freestanding.string.strcmp(dup, "hello world")) == 0, "fs_strdup content")
     check(freestanding.string.fs_strdup("") != as<char*>(0), "fs_strdup(\"\") non-null")
 
-    println("fs_string: string module OK")
+    freestanding.io.println("fs_string: string module OK")
     return 0
 }
