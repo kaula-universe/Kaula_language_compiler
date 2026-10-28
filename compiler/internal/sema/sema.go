@@ -1749,10 +1749,15 @@ func (sa *SemanticAnalyzer) analyzeLambdaExpression(e *ast.LambdaExpression) {
 		sa.symbolTable.AddSymbol(param, paramType, false, "lambda_param", e.Pos.Line, e.Pos.Column)
 	}
 
-	// 分析函数体
+	// 分析函数体：lambda 拥有自己的返回类型上下文——lambda 内的 return
+	// 属于 lambda 而不是外层函数，否则 `fn main() {... fn(...)->i64{ return x } }`
+	// 会被误报 return_value_in_void_fn（main 是 void）。
+	oldFunc := sa.currentFunction
+	sa.currentFunction = &ast.FunctionStatement{Name: "", ReturnType: e.ReturnType}
 	for _, bodyStmt := range e.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.currentFunction = oldFunc
 
 	// 捕获检测：引用的外层函数局部变量（非全局、非参数遮蔽）
 	collected := astutil.CollectIdentifiers(e.Body)
@@ -2948,7 +2953,7 @@ func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 			} else {
 				actualT := sa.inferExpressionType(stmt.Value)
 				_, isAdopt := isAdoptBuiltinCall(stmt.Value)
-				if actualT != "" && !isAdopt && !typesAssignable(declaredRet, actualT) {
+				if actualT != "" && !isAdopt && !sa.typesCompatible(declaredRet, actualT) {
 					sa.errorCollector.AddSemanticError(
 						fmt.Sprintf("函数 '%s' 声明返回 '%s'，但 return 表达式类型为 '%s'", sa.currentFunction.Name, declaredRet, actualT),
 						stmt.Pos.Line, stmt.Pos.Column,
@@ -4110,7 +4115,7 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 			actualT := sa.inferExpressionType(arg)
 			// 实参已是 adopt/unwrap 内建调用时，类型由 checkAdoptConversion 接管
 			_, isAdoptBuiltin := isAdoptBuiltinCall(arg)
-			if !isAdoptBuiltin && actualT != "" && !typesAssignable(expectedT, actualT) {
+			if !isAdoptBuiltin && actualT != "" && !sa.typesCompatible(expectedT, actualT) {
 				sa.errorCollector.AddSemanticError(
 					fmt.Sprintf("函数 '%s' 的第 %d 个参数期望 '%s'，实际传入 '%s'", localDispName, i+1, expectedT, actualT),
 					arg.GetPosition().Line, arg.GetPosition().Column,
@@ -5204,6 +5209,34 @@ func isTypeParameterName(name string) bool {
 		}
 	}
 	return true
+}
+
+// typesCompatible 是 sema 上下文的类型兼容判定：在 typesAssignable 的
+// 字面规则之外，还承认"具体类值 → 接口"的隐式装箱——类声明了
+// `class X implements I`（或等效写法）时，X 的值可传给 I 形参/返回。
+func (sa *SemanticAnalyzer) typesCompatible(expected, actual string) bool {
+	if typesAssignable(expected, actual) {
+		return true
+	}
+	e := strings.TrimSpace(expected)
+	a := strings.TrimSpace(actual)
+	if e == "" || a == "" {
+		return false
+	}
+	sym := sa.symbolTable.GetSymbol(e)
+	if sym == nil || sym.Type != "interface" {
+		return false
+	}
+	cd, ok := sa.classDecls[a]
+	if !ok {
+		return false
+	}
+	for _, impl := range cd.Implements {
+		if strings.TrimSpace(impl) == e {
+			return true
+		}
+	}
+	return false
 }
 
 func typesAssignable(expected, actual string) bool {
