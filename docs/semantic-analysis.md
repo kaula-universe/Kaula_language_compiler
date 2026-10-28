@@ -307,3 +307,9 @@ undefined_function: 'println'
   - Kaula 内建 `string` 与 `std.string.String` 互为别名，互传合法。
 - `#[prefix] fn` 被 `@Name(...)` 表达式级宏调用时登记进 `usedFunctions`，
   不再误报 `unused_function`。
+- lambda 拥有自己的返回类型上下文：lambda 内的 `return` 归属 lambda 而非
+  外层函数（`fn main() { fn(x) -> T { return v } }` 合法，不再误报
+  return_value_in_void_fn）。
+- 具体类值 → 接口的隐式装箱：类声明 `class X implements I` 时，`X` 的值
+  可传给 `I` 形参 / `I` 返回（`typesCompatible` 在 `typesAssignable`
+  基础上承认该关系）。
