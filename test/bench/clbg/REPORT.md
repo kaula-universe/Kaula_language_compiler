@@ -11,7 +11,7 @@
 | 核心 / 内存 | 4 核 / 8 GiB |
 | 编译器 | gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0；gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0 |
 | Go | go version go1.23.0 linux/amd64 |
-| Kaula 仓库 | dffc510（有未提交改动） |
+| Kaula 仓库 | ea03da2（CI 全绿基线） |
 | 采样口径 | 每边 1 轮取中位数；`/usr/bin/time -v` wall clock + peak RSS |
 
 ## Checksum 校验（三边输出一致性）
@@ -20,13 +20,20 @@
 |---|---|---|---|
 | nbody | steps=5000000 | ✅ PASS | 三边 stdout 逐字节一致 |
 | spectralnorm | N=5500 | ✅ PASS | 三边 stdout 逐字节一致 |
+| binarytrees | N=21 | ✅ PASS | Kaula 11 行输出与 C 参考逐字节一致 |
 
 ## 性能（wall clock 秒，peak RSS MB）
 
 | 题目 | C（手动内存管理） | Go（自动 GC） | Kaula（arena） | Kaula/C | Go/C |
 |---|---|---|---|---|---|
+| binarytrees (N=21，深度 4→20，分配风暴 ~7000 万节点) | 16.394s / 1MB | — / — | 0.888s / 67MB | 0.054× | — |
 | nbody (steps=5000000) | 0.586s / 1MB | 0.385s / 1MB | 0.365s / 2MB | 0.62× | 0.66× |
 | spectralnorm (N=5500) | 1.532s / 1MB | 3.992s / 2MB | 1.535s / 1MB | 1.00× | 2.61× |
+
+> 说明：binarytrees 的 C 参考（ref/binarytrees.gcc.c）为手动 malloc/free 每节点；
+> Kaula 侧为 arena 数组模式（单块常驻池复用，见 binary_trees.kl 头部注释），
+> checksum 与 C 参考逐字节一致（11 行输出全对）。分配风暴场景 arena 免
+> malloc/free 调用，Kaula/C 达 0.054×；67MB 为常驻 arena 上限（2^23-1 节点 × 8B）。
 
 ### 逐题读表说明
 
@@ -59,3 +66,19 @@
 |---|---|---|
 | nbody | steps=5000000 | 5 体太阳系 N 步数值积分（offsetMomentum → advance × N → energy） |
 | spectralnorm | N=5500 | 幂迭代求谱范数（aTimesU/atTimesU/atATimesU 三重循环） |
+
+## 附录：binarytrees N=21 Kaula 侧完整输出（与 C 参考逐字节一致）
+
+```
+stretch tree of depth 22	 check: 8388607
+2097152	 trees of depth 4	 check: 65011712
+524288	 trees of depth 6	 check: 66584576
+131072	 trees of depth 8	 check: 66977792
+32768	 trees of depth 10	 check: 67076096
+8192	 trees of depth 12	 check: 67100672
+2048	 trees of depth 14	 check: 67106816
+512	 trees of depth 16	 check: 67108352
+128	 trees of depth 18	 check: 67108736
+32	 trees of depth 20	 check: 67108832
+long lived tree of depth 21	 check: 4194303
+```
