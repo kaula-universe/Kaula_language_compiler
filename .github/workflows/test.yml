@@ -71,8 +71,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install Clang (toolchain + cross targets)
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm qemu-system-x86 qemu-system-arm qemu-system-riscv64
 
       - name: Build toolchain
         run: |
