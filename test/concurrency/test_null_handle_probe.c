@@ -8,12 +8,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-typedef struct { int input; int result; } NF;
+typedef struct { int input; int result; int64_t out; } NF;
 
 static KaulaResumeResult n_resume(void* fp) {
     NF* f = (NF*)fp;
+    /*
+     * result.value 的契约是「指向返回数据的指针」（await 复制的是它
+     * 指向的内容，见 kaula_task_complete / await_copy_out）。把标量
+     * 直接强转成指针会令 await memcpy 去读地址 5 —— 确定性 SIGSEGV。
+     * 与 test_completion_stamp 一致：先落进帧字段，再交地址。
+     */
+    f->out = f->input;
     return (KaulaResumeResult){ .status = KAULA_RESUME_DONE,
-                                .value = (void*)(intptr_t)f->input };
+                                .value = &f->out };
 }
 
 int main(void) {
