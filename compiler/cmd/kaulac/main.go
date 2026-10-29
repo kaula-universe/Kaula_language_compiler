@@ -3043,7 +3043,9 @@ func moduleObjectStamp(cc string, prefix []string, optLevel, srcPath string, def
 	flags := append([]string{}, prefix...)
 	if freestanding {
 		// 这些不是"用户可选项"，而是本分支写死的编译语义，必须计入指纹。
-		flags = append(flags, "-ffreestanding", "-fno-pic")
+		// -nostdlibinc：隔离 glibc 头链（clang 资源 stdint.h 在裸机目标下
+		// include_next 到 /usr/include，ubuntu-24.04/llvm-18 必炸）。
+		flags = append(flags, "-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic")
 	}
 	flags = append(flags, archArgs...)
 	return semanticFingerprint(cc, optLevel, srcPath, defines, cflags, flags)
@@ -3054,7 +3056,7 @@ func moduleObjectStamp(cc string, prefix []string, optLevel, srcPath string, def
 func runtimeObjectStamp(cc string, prefix []string, optLevel, srcPath string, defines, cflags []string, freestanding bool, archArgs ...string) string {
 	flags := append([]string{}, prefix...)
 	if freestanding {
-		flags = append(flags, "-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic")
+		flags = append(flags, "-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic")
 	}
 	flags = append(flags, archArgs...)
 	return semanticFingerprint(cc, optLevel, srcPath, defines, cflags, flags)
@@ -3197,7 +3199,7 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 
 	// 1. 编译 C 代码
 	kernelArgs := append(append([]string{}, baseArgs...),
-		"-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic",
+		"-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic",
 		"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL",
 	)
 	kernelArgs = append(kernelArgs, archCodeModel(arch)...)
@@ -3256,7 +3258,7 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 		runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
 		if _, err := os.Stat(runtimeSrc); err == nil {
 			runtimeArgs := append(append([]string{}, baseArgs...),
-				"-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic",
+				"-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic",
 				// -DKMM_V4_STATIC_POOL 必须与 KMM 分配器 TU（步骤 3.5）一致：
 				// runtime 现在也 include kmm_scoped_allocator_v4.h（为 std.memory
 				// 转发 kmm_v4_alloc 等符号），KMM 配置不一致时头里的内联路径会
@@ -3292,7 +3294,7 @@ func compileBootKernel(cacheFile, outputFile, workDir string, optLevel string, c
 		allocSrc := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c")
 		if _, err := os.Stat(allocSrc); err == nil {
 			allocArgs := append(append([]string{}, baseArgs...),
-				"-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic",
+				"-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic",
 				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
 			)
 			if kaulaFreePath != "" {
@@ -3377,7 +3379,7 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 	}
 
 	progArgs := append(append([]string{}, baseArgs...),
-		"-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic",
+		"-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic",
 		"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL",
 	)
 	progArgs = append(progArgs, archCodeModel(arch)...)
@@ -3413,7 +3415,7 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 		runtimeSrc := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c")
 		if _, err := os.Stat(runtimeSrc); err == nil {
 			runtimeArgs := append(append([]string{}, baseArgs...),
-				"-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic",
+				"-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic",
 				// -DKMM_V4_STATIC_POOL 必须与 KMM 分配器 TU（步骤 3.5）一致：
 				// runtime 现在也 include kmm_scoped_allocator_v4.h（为 std.memory
 				// 转发 kmm_v4_alloc 等符号），KMM 配置不一致时头里的内联路径会
@@ -3444,7 +3446,7 @@ func compileUserProgram(cacheFile, outputFile, workDir string, optLevel string, 
 		allocSrc := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c")
 		if _, err := os.Stat(allocSrc); err == nil {
 			allocArgs := append(append([]string{}, baseArgs...),
-				"-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic",
+				"-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic",
 				"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL", "-I", kaulaSrcPath,
 			)
 			if kaulaFreePath != "" {
@@ -5030,7 +5032,7 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		if _, err := os.Stat(runtimeSrc); err == nil {
 			rtObj := filepath.Join(objectCacheDir, "kaula_fs_runtime.o")
 			rtArgs := append([]string{}, compilerPrefix...)
-			rtArgs = append(rtArgs, "-c", optLevel, "-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic")
+			rtArgs = append(rtArgs, "-c", optLevel, "-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic")
 			// 与最终链接同目标：机器类型 / 浮点 ABI 必须一致（-target 在 bootArchArgs 内）
 			rtArgs = append(rtArgs, bootArchArgs(cfg)...)
 			for _, p := range validSrcPaths {
@@ -5164,7 +5166,7 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 					// 静态池 + 无 libc + 同目标：与 boot 路径 (compileBootKernel 3.5) 保持一致。
 					// bootArchArgs 含 -target：漏掉它，kmm_v4_fs.o 会按宿主默认三元组
 					// （x86_64-linux-gnu）编，链接 aarch64/riscv64 时直接 incompatible。
-					rsCmd.Args = append(rsCmd.Args, "-ffreestanding", "-nostdlib", "-nostdinc", "-fno-pic")
+					rsCmd.Args = append(rsCmd.Args, "-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic")
 					rsCmd.Args = append(rsCmd.Args, bootArchArgs(cfg)...)
 				}
 				for _, flag := range cfgCFlags(cfg) {
