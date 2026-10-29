@@ -156,11 +156,11 @@ python scripts/run_freestanding_tests.py --only L7 --qemu-timeout 120   # 调 QE
 | **L2** | 交叉编译零依赖 | 20 | 4 架构各自：编译通过、未定义符号审计（只允许白名单 libcall）、引用确实是本库对象、`-nostdlib` 独立 `ld.lld` 出 ELF、ELF 头合法 |
 | **L3** | Kaula 层全函数 | 6 | `test/freestanding/kl/*.kl` 托管模式**编译并运行**（校验行为 + 退出码），`--freestanding` 模式编译链接出裸机 ELF |
 | **L4** | boot 全链路 | 6 | 5 种引导配置出可引导 ELF + 静态校验（机器类型、LOAD 段、零未定义符号） |
-| **L5** | 语言全功能 | 53 | `test/*.kl` 全量语料逐个 `--freestanding`：前端 + 代码生成 + C 编译必须全过 |
+| **L5** | 语言全功能 | 66 | `test/*.kl` 全量语料（排除 `HOSTED_ONLY_TESTS` 两个托管用例）逐个 `--freestanding`：前端 + 代码生成 + C 编译必须全过 |
 | **L6** | 配置一致性 | 15 | `compiler/stdlib.json` ↔ 头文件 `extern` ↔ 归档符号三方一致，依赖声明对齐 |
 | **L7** | QEMU 实机引导 | 4+3 | 4 架构真机启动 + 串口断言 `SELFTEST-RESULT=0`；3 项为已定位未修的 boot stub 缺口（见 §6） |
 
-当前：**103 项全过 + 3 项已知缺口**。L7 需要本机装 QEMU（缺省会整层跳过并提示）。
+当前：**114 项全过 + 2 项已知缺口**（含 L7 四架构实机引导）。L7 需要本机装 QEMU（缺省会整层跳过并提示）。
 
 源码位置：
 
@@ -177,7 +177,7 @@ python scripts/run_freestanding_tests.py --only L7 --qemu-timeout 120   # 调 QE
 这是预期内的（裸机没有 libc），不是 freestanding 的缺陷。
 
 所以 L5 的**闸门是"生成 + C 编译"必须 100% 通过**：这才是语言特性在 freestanding
-代码生成路径下是否完好的判据。链接结果另外统计：当前 53 个程序里 10 个能完整链接
+代码生成路径下是否完好的判据。链接结果另外统计：当前 66 个程序里 18 个能完整链接
 （只用 freestanding 能力的那些），其余记为 `compile-only` 并列出缺失的 OS 依赖符号；
 只要缺失符号落在 `OS_ONLY_SYMBOLS` 白名单之外，就判为**真 bug**。
 
@@ -199,6 +199,17 @@ python scripts/run_freestanding_tests.py --only L7 --qemu-timeout 120   # 调 QE
   文件、`std.string` / `std.math` / `std.testing` 等托管模块的符号在链接期保持未定义，
   这就是"裸机没有这个能力"的如实反馈。`std.memory` 的分配器转发（`kmm_v4_alloc`
   等）已由 freestanding runtime 补齐。
+- **spend 强制消费流与极端并发压测不参与裸机编译（L5 排除）**。
+  `spend_and_call` 依赖托管运行时 `src/spend_call.c`（裸机无
+  `Spendable`/`spendable_create` 符号）；`stress_concurrent_spawn` 的
+  50000 轮高并发 spawn 依赖宿主 pthread 内核（`kaula_conc_platform.h`
+  在 `none-elf` 交叉目标下把 glibc 头拉进 include 链）。两者在
+  `scripts/run_freestanding_tests.py` 的 `HOSTED_ONLY_TESTS` 中说明跳过；
+  轻量 conc 用例（`full_concurrency` / `conc_paths`）仍全量覆盖裸机编译。
+- **`#[derive(Debug)]` 在裸机用 `print` 而非 `printf`**。托管模式生成
+  `printf`（libc），freestanding 模式生成 `freestanding.io` 的 `print`
+  （变参、`%d/%s/%f` 同语义）——两者格式串完全一致，裸机链接期不出现
+  未定义符号 `printf`。
 
 ---
 

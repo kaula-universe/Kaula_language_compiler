@@ -283,30 +283,38 @@ func (af *AttributeFeatures) generateDebugImpl(typeName string, program *ast.Pro
 	cName := typeName
 	fnName := typeName + "_debug"
 
+	// freestanding 模式下没有 libc 的 printf，只有 freestanding.io 的
+	// print（变参、同 %d/%s/%f 语义）——#[derive(Debug)] 必须跟着切，
+	// 否则裸机链接期出现未定义符号 printf。
+	pf := "printf"
+	if af.cg != nil && af.cg.config != nil && af.cg.config.Freestanding {
+		pf = "print"
+	}
+
 	sb.WriteString(fmt.Sprintf("\n/* #[derive(Debug)] for %s */\n", typeName))
 	sb.WriteString(fmt.Sprintf("void %s(%s* self) {\n", fnName, cName))
-	sb.WriteString(fmt.Sprintf("    printf(\"%s { \");\n", typeName))
+	sb.WriteString(fmt.Sprintf("    %s(\"%s { \");\n", pf, typeName))
 
 	for i, field := range fields {
 		if i > 0 {
-			sb.WriteString("    printf(\", \");\n")
+			sb.WriteString(fmt.Sprintf("    %s(\", \");\n", pf))
 		}
-		sb.WriteString(fmt.Sprintf("    printf(\"%s: \", \"%s\");\n", field.Name, field.Name))
+		sb.WriteString(fmt.Sprintf("    %s(\"%s: \", \"%s\");\n", pf, field.Name, field.Name))
 		// 根据字段类型选择打印方式
 		if af.isIntegerType(field.Type) {
-			sb.WriteString(fmt.Sprintf("    printf(\"%%lld\", (long long)self->%s);\n", field.Name))
+			sb.WriteString(fmt.Sprintf("    %s(\"%%lld\", (long long)self->%s);\n", pf, field.Name))
 		} else if af.isFloatType(field.Type) {
-			sb.WriteString(fmt.Sprintf("    printf(\"%%f\", (double)self->%s);\n", field.Name))
+			sb.WriteString(fmt.Sprintf("    %s(\"%%f\", (double)self->%s);\n", pf, field.Name))
 		} else if field.Type == "bool" || field.Type == "bool_t" {
-			sb.WriteString(fmt.Sprintf("    printf(\"%%s\", self->%s ? \"true\" : \"false\");\n", field.Name))
+			sb.WriteString(fmt.Sprintf("    %s(\"%%s\", self->%s ? \"true\" : \"false\");\n", pf, field.Name))
 		} else if strings.Contains(field.Type, "char*") || field.Type == "string" || field.Type == "String" {
-			sb.WriteString(fmt.Sprintf("    printf(\"\\\"%%s\\\"\", self->%s ? self->%s : \"(null)\");\n", field.Name, field.Name))
+			sb.WriteString(fmt.Sprintf("    %s(\"\\\"%%s\\\"\", self->%s ? self->%s : \"(null)\");\n", pf, field.Name, field.Name))
 		} else {
-			sb.WriteString(fmt.Sprintf("    printf(\"<%%s>\", \"%s\");\n", field.Type))
+			sb.WriteString(fmt.Sprintf("    %s(\"<%%s>\", \"%s\");\n", pf, field.Type))
 		}
 	}
 
-	sb.WriteString("    printf(\" }\\n\");\n")
+	sb.WriteString(fmt.Sprintf("    %s(\" }\\n\");\n", pf))
 	sb.WriteString("}\n")
 
 	return sb.String()

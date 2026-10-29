@@ -736,6 +736,17 @@ SLOW_TESTS = {
     "mem_bench", "alloc_bench", "btree_bench",
 }
 
+# 依赖托管运行时、不适用于裸机编译的语料（L5 跳过并说明）：
+# - spend_and_call: spend 强制消费流由 src/spend_call.c（托管运行时）实现，
+#   裸机没有 Spendable/spendable_create 等符号，编译期即失败；
+# - stress_concurrent_spawn: 50000 轮高并发 spawn 依赖宿主 pthread 内核
+#   （kaula_conc_platform.h 在 none-elf 交叉目标下会把 pthread/glibc 头
+#   拉进 include 链导致 bits/wordsize.h 缺失）。轻量 conc 用例
+#   （full_concurrency / conc_paths 等）仍保留在裸机编译里。
+HOSTED_ONLY_TESTS = {
+    "spend_and_call", "stress_concurrent_spawn",
+}
+
 
 def is_module(path: Path) -> bool:
     src = path.read_text(encoding="utf-8-sig", errors="replace")
@@ -761,6 +772,7 @@ def layer_corpus(rep: Report, kaulac: Path, jobs: int, quick: bool, filt: str):
     progs = [p for p in sorted(test_dir.glob("*.kl")) if not is_module(p)]
     if filt:
         progs = [p for p in progs if filt in p.stem]
+    progs = [p for p in progs if p.stem not in HOSTED_ONLY_TESTS]
     if quick:
         progs = [p for p in progs if p.stem not in SLOW_TESTS]
     if not progs:
