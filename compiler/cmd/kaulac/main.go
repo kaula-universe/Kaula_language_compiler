@@ -4973,6 +4973,13 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 						for _, p := range validFreePaths {
 							cmd.Args = append(cmd.Args, "-I", p)
 						}
+						// 裸机 libc 头替身（freestanding/include/）：与 clangArgs 组装处
+						// 同一契约。缺了这一组，模块 .o 的 <stdint.h> / <stdio.h> 会
+						// include 到 clang 资源头再 include_next 到宿主 glibc 头，
+						// 裸机目标下必报 bits/libc-header-start.h not found。
+						for _, p := range validCompatPaths {
+							cmd.Args = append(cmd.Args, "-I", p)
+						}
 						if kaulaSrcPath != "" {
 							cmd.Args = append(cmd.Args, "-I", objectCacheDir)
 						}
