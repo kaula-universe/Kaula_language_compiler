@@ -107,6 +107,17 @@ typedef __UINTMAX_TYPE__ uintmax_t;
 #define INTMAX_MAX  __INTMAX_MAX__
 #define UINTMAX_MAX __UINTMAX_MAX__
 
+/* size_t 上限（C11 规定定义于 stdint.h，memory.c 的溢出检查依赖它） */
+#ifndef SIZE_MAX
+#define SIZE_MAX __SIZE_MAX__
+#endif
+#ifndef PTRDIFF_MIN
+#define PTRDIFF_MIN (-__PTRDIFF_MAX__ - 1)
+#endif
+#ifndef PTRDIFF_MAX
+#define PTRDIFF_MAX __PTRDIFF_MAX__
+#endif
+
 #define INT8_C(x)    x
 #define INT16_C(x)   x
 #define INT32_C(x)   x
