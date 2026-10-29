@@ -207,6 +207,20 @@
   新布局把管理字段与 `loop_*` 全部收进第 0 行。
 
 ### Fixed
+- **lambda 返回上下文归属与接口隐式装箱（sema）**：
+  - `analyzeLambdaExpression` 分析 body 时切换函数上下文为 lambda 自身
+    （返回类型取 `lambda.ReturnType`），`fn main() { fn(x)->T { return v } }`
+    不再误报 `return_value_in_void_fn`；
+  - 新增 `typesCompatible`：在 `typesAssignable` 基础上承认
+    `class X implements I` 的具体类值 → 接口形参/返回隐式装箱；
+  - 修复 codegen 单测 `TestClosureReturnedStoredAndNested`、
+    `TestIfaceMethodReturnTypeDrivesFloatArithmetic`、`TestIfaceMethodReturnTypeString`；
+    `go test ./internal/codegen/ ./internal/sema/` 全绿。
+- **C 并发测试 `test_null_handle_probe` 确定性 SIGSEGV（Linux `Test` 工作流
+  最后一块红）**：resume 返回 `value=(void*)(intptr_t)input` 把标量强转成
+  指针，而契约是 `value` 必须指向返回数据存储（`await_copy_out` 复制它指向
+  的内容）——await `memcpy` 读地址 5。改为先落帧字段再交地址
+  （与 `test_completion_stamp` 一致）。修复后本机 **32/32 并发用例全过**。
 - **仓库分支卫生**：GitHub/Gitee 远程从 43 个分支收敛到仅 `master`。
   - 用 `git cherry`（patch-id）逐一核对：所有 `feat/*`、`fix/*`、`trae/agent-*`、
     `backup/legacy-master`、`develop`、`revert-merge-5-master` 的主体工作
