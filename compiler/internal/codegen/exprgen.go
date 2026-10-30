@@ -1991,7 +1991,11 @@ func (eg *ExpressionGenerator) generatePrintCall(args []ast.Expression) string {
 	if len(args) == 1 {
 		argCode := eg.GenerateExpression(args[0])
 		argType := eg.inferType(args[0])
-		return printfName + "(\"%" + argType + "\", " + eg.maybeUnwrapString(argCode, argType) + ")"
+		formatSpec := argType
+		if formatSpec == "cstr" {
+			formatSpec = "s"
+		}
+		return printfName + "(\"%" + formatSpec + "\", " + eg.maybeUnwrapString(argCode, argType) + ")"
 	}
 
 	// 多个参数
@@ -2243,6 +2247,20 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 					return "s"
 				}
 				if normalizePtrType(t) == "char*" || t == "cstring" {
+					return "cstr"
+				}
+				// char 数组（[N]char / [N]char[]）：C 侧按 char* 传参，printf %s 约定。
+				// 此前缺这一支会让 `char buf[64]; std.io.print(buf)` 被推成 "d"，
+				// print 生成 printf("%d", buf) —— fasta 基准第二段输出
+				// -875404416 垃圾数字即此根因。
+				if strings.HasPrefix(t, "[") {
+					if cb := strings.Index(t, "]"); cb > 0 {
+						if strings.TrimSpace(t[cb+1:]) == "char" {
+							return "cstr"
+						}
+					}
+				}
+				if strings.HasPrefix(t, "char[") || t == "char []" || t == "char[]" {
 					return "cstr"
 				}
 				// 其它指针类型（u8*/u32*/void*/...）按整数语义处理：

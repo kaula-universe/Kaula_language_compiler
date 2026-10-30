@@ -225,6 +225,10 @@ size_t file_read(File file, void* buffer, size_t size) {
     return fread(buffer, 1, size, file);
 }
 
+size_t write_stdout(const void* buffer, size_t size) {
+    return fwrite(buffer, 1, size, stdout);
+}
+
 size_t file_write(File file, const void* buffer, size_t size) {
     if (!file || !buffer) {
         return 0;

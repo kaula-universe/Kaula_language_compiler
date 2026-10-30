@@ -29,6 +29,7 @@ extern File file_open(const char* path, const char* mode);
 extern void file_close(File file);
 extern size_t file_read(File file, void* buffer, size_t size);
 extern size_t file_write(File file, const void* buffer, size_t size);
+extern size_t write_stdout(const void* buffer, size_t size);
 extern size_t file_read_line(File file, char* buffer, size_t size);
 extern int file_seek(File file, long offset, int whence);
 extern long file_tell(File file);

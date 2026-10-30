@@ -194,6 +194,13 @@
     },
     "io_clear_error": {
       "args": []
+    },
+    "write_stdout": {
+      "args": [
+        "const void()",
+        "size_t"
+      ],
+      "return": "size_t"
     }
   },
   "std.string": {

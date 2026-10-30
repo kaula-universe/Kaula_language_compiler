@@ -292,7 +292,7 @@ def timed_run(exe: Path, args, stdin_file: Path = None) -> tuple:
         if Path("/usr/bin/time").exists():
             r = subprocess.run(
                 ["/usr/bin/time", "-v"] + argv,
-                capture_output=True, text=True, stdin=stdin_fd,
+                capture_output=True, stdin=stdin_fd,
             )
             if r.returncode != 0:
                 sys.exit(f"运行失败 (exit {r.returncode}): {exe}\n{r.stderr[-2000:]}")
@@ -304,10 +304,25 @@ def timed_run(exe: Path, args, stdin_file: Path = None) -> tuple:
 
         # 回退：无 GNU time。用 Popen + 轮询 /proc/<pid>/status 的 VmHWM 取
         # 本进程真实 peak RSS（ru_maxrss 是进程树历史峰值，会被前面的大题目污染，
-        # 不能用于单题口径）。
+        # 不能用于单题口径）。注意：轮询期间必须同时 drain stdout/stderr——
+        # fasta 等题输出 > pipe buffer（64KB）时，不 drain 会让子进程阻塞在
+        # write 上，poll() 永远非 None，整轮死锁。
+        import threading
         t0 = time.perf_counter()
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, stdin=stdin_fd)
+                                stdin=stdin_fd)
+        chunks, err_chunks = [], []
+
+        def _drain():
+            for ch in proc.stdout:
+                chunks.append(ch)
+            proc.stdout.close()
+            for ch in proc.stderr:
+                err_chunks.append(ch)
+            proc.stderr.close()
+
+        drain_th = threading.Thread(target=_drain, daemon=True)
+        drain_th.start()
         peak_kb = 0
         while proc.poll() is None:
             try:
@@ -318,7 +333,9 @@ def timed_run(exe: Path, args, stdin_file: Path = None) -> tuple:
             except OSError:
                 pass
             time.sleep(0.02)
-        stdout, stderr = proc.communicate()
+        drain_th.join(timeout=10)
+        stdout = b"".join(chunks)
+        stderr = b"".join(err_chunks).decode("utf-8", "replace")
         wall = time.perf_counter() - t0
         if proc.returncode != 0:
             sys.exit(f"运行失败 (exit {proc.returncode}): {exe}\n{stderr[-2000:]}")
@@ -421,7 +438,7 @@ def main() -> None:
                     if impl == "c":
                         # C 边输出存档：fasta 的输出同时是 revcomp（stdin_from=fasta_c）
                         # 的串联输入；普通题存档供 diff 排障。
-                        (BUILD / name / f"{name}_{impl}.out").write_text(out)
+                        (BUILD / name / f"{name}_{impl}.out").write_bytes(out)
             log(f"[round {rnd}/{rounds}] " + "  ".join(
                 f"{i}={fmt_s(walls[i][-1])}s/{rsss[i][-1] // 1024}MB" for i in IMPLS if i in exes))
 

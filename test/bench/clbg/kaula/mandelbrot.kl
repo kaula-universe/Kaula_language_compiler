@@ -12,12 +12,6 @@ import std.io
 import std.format
 import std.memory
 
-type Size = adopt size_t
-type FileP = adopt FILE*
-
-extern stdout: FileP
-extern fn fwrite(ptr: const void(), size: Size, nmemb: Size, stream: FileP) -> Size
-
 fn main() {
     i64 w = N_PLACEHOLDER
     f64 inv = 2.0 / as<f64>(w)
@@ -70,5 +64,5 @@ fn main() {
     char* hdr = as<char*>(std.memory.kmm_v4_alloc(64))
     std.format.format_printf(hdr, 64, "P4\n%d %d\n", w, w)
     std.io.print(hdr)
-    fwrite(pixels, 1, w * rowbytes, stdout)
+    std.io.write_stdout(as<const void*>(pixels), w * rowbytes)
 }
