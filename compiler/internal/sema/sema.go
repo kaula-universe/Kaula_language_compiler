@@ -5218,6 +5218,12 @@ func (sa *SemanticAnalyzer) typesCompatible(expected, actual string) bool {
 	if typesAssignable(expected, actual) {
 		return true
 	}
+	// C 语义的数组→指针衰减：T[N] 可传给 T* 形参（数组名退化为首元素
+	// 地址）。nbody 等 CLBG 基准（Planet bodies[5] → advance(Planet* ...)）
+	// 与大量 C 移植代码依赖此规则，前端不得误报 arg_type_mismatch。
+	if typesCompatibleArrayToPointer(expected, actual) {
+		return true
+	}
 	e := strings.TrimSpace(expected)
 	a := strings.TrimSpace(actual)
 	if e == "" || a == "" {
@@ -5237,6 +5243,28 @@ func (sa *SemanticAnalyzer) typesCompatible(expected, actual string) bool {
 		}
 	}
 	return false
+}
+
+// typesCompatibleArrayToPointer 判断 expected 是否为指针、actual 是否为
+// 同元素类型数组：C 语义下 T[N] 可传给 T* 形参（数组名退化为首元素地址）。
+func typesCompatibleArrayToPointer(expected, actual string) bool {
+	e := strings.TrimSpace(expected)
+	a := strings.TrimSpace(actual)
+	// 数组类型形如 [N]Elem：以元素类型结尾（不是 ']' 结尾），
+	// ']' 在中间。指针形如 T*（以 '*' 结尾）。
+	if !strings.HasSuffix(e, "*") || !strings.HasPrefix(a, "[") {
+		return false
+	}
+	closeB := strings.Index(a, "]")
+	if closeB < 1 || closeB >= len(a)-1 {
+		return false
+	}
+	aElem := strings.TrimSpace(a[closeB+1:])
+	eElem := strings.TrimSpace(strings.TrimSuffix(e, "*"))
+	if eElem == "" || aElem == "" {
+		return false
+	}
+	return typesAssignable(eElem, aElem) || eElem == aElem
 }
 
 func typesAssignable(expected, actual string) bool {

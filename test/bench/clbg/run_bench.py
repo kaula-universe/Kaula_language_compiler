@@ -88,6 +88,40 @@ BENCHES = [
         "verify": "subset",
         "algo": "Mazurov 进位式递推逐排列计算最大翻转数",
     },
+    {
+        "name": "fasta",
+        "param": 250000,
+        "param_flag": "n",
+        "c_src": "ref/fasta.gcc.c",
+        "go_src": "ref/fasta.go",
+        "kaula_src": "kaula/fasta.kl",
+        "kaula_placeholder": "N_PLACEHOLDER",
+        "verify": "exact",
+        "algo": "伪随机 DNA 序列生成（LCG + 概率表，三条序列区段输出）",
+    },
+    {
+        "name": "mandelbrot",
+        "param": 16000,
+        "param_flag": "N",
+        "c_src": "ref/mandelbrot.gcc.c",
+        "go_src": "ref/mandelbrot.go",
+        "kaula_src": "kaula/mandelbrot.kl",
+        "kaula_placeholder": "N_PLACEHOLDER",
+        "verify": "exact",
+        "algo": "Mandelbrot 集合逐像素迭代（16000×16000，P4 PBM 输出，CLBG 官方标准参数）",
+    },
+    {
+        "name": "revcomp",
+        "param": None,
+        "param_flag": "",
+        "c_src": "ref/revcomp.gcc.c",
+        "go_src": "ref/revcomp.go",
+        "kaula_src": "kaula/revcomp.kl",
+        "kaula_placeholder": None,
+        "verify": "exact",
+        "algo": "FASTA 反向互补（stdin 输入 = fasta N=250000 的 C 边输出，CLBG 官方串联口径）",
+        "stdin_from": "fasta_c",
+    },
 ]
 
 IMPLS = ["c", "go", "kaula"]  # 报告列顺序
@@ -191,7 +225,9 @@ def build_impls(bench: dict, kaulac: Path) -> dict:
     # Kaula：参数注入后 kaulac -release（内部 clang -O3）
     kl_src = bdir / f"{name}.kl"
     src = (ROOT / bench["kaula_src"]).read_text()
-    kl_src.write_text(src.replace(bench["kaula_placeholder"], str(bench["param"])))
+    if bench.get("kaula_placeholder"):
+        src = src.replace(bench["kaula_placeholder"], str(bench["param"]))
+    kl_src.write_text(src)
     kl_out = bdir / f"{name}_kl"
     r = run([str(kaulac), "-release", "-output-dir", str(kl_out), str(kl_src)],
             cwd=REPO, env={**os.environ, "KAULA_HOME": str(REPO)})
@@ -237,49 +273,59 @@ def parse_elapsed(stderr: str):
     return None
 
 
-def timed_run(exe: Path, args) -> tuple:
+def timed_run(exe: Path, args, stdin_file: Path = None) -> tuple:
     """返回 (stdout, wall_seconds, peak_rss_kb)。
 
     优先用 GNU `/usr/bin/time -v`（与历史口径完全一致）；环境里没有时
     （如精简 CI/容器镜像）回退到 Python 自计时 + ``resource.getrusage``，
     wall clock 用 perf_counter 包住子进程，peak RSS 取 RUSAGE_CHILDREN
     的 ru_maxrss（Linux 单位即 KiB，与 /usr/bin/time 输出同口径）。
+
+    ``stdin_file`` 非空时把该文件重定向为子进程 stdin（revcomp 等
+    读 stdin 的题目：CLBG 官方口径为 fasta 输出串联输入）。
     """
     argv = [str(exe)] + [str(a) for a in args]
-    if Path("/usr/bin/time").exists():
-        r = subprocess.run(
-            ["/usr/bin/time", "-v"] + argv,
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            sys.exit(f"运行失败 (exit {r.returncode}): {exe}\n{r.stderr[-2000:]}")
-        wall = parse_elapsed(r.stderr)
-        if wall is None:
-            sys.exit(f"无法解析 time 输出: {exe}\n{r.stderr[-2000:]}")
-        rss = int(RSS_RE.search(r.stderr).group(1))
-        return r.stdout, wall, rss
+    stdin_fd = None
+    if stdin_file is not None:
+        stdin_fd = open(stdin_file, "rb")
+    try:
+        if Path("/usr/bin/time").exists():
+            r = subprocess.run(
+                ["/usr/bin/time", "-v"] + argv,
+                capture_output=True, text=True, stdin=stdin_fd,
+            )
+            if r.returncode != 0:
+                sys.exit(f"运行失败 (exit {r.returncode}): {exe}\n{r.stderr[-2000:]}")
+            wall = parse_elapsed(r.stderr)
+            if wall is None:
+                sys.exit(f"无法解析 time 输出: {exe}\n{r.stderr[-2000:]}")
+            rss = int(RSS_RE.search(r.stderr).group(1))
+            return r.stdout, wall, rss
 
-    # 回退：无 GNU time。用 Popen + 轮询 /proc/<pid>/status 的 VmHWM 取
-    # 本进程真实 peak RSS（ru_maxrss 是进程树历史峰值，会被前面的大题目污染，
-    # 不能用于单题口径）。
-    t0 = time.perf_counter()
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True)
-    peak_kb = 0
-    while proc.poll() is None:
-        try:
-            for line in Path(f"/proc/{proc.pid}/status").read_text().splitlines():
-                if line.startswith("VmHWM:"):
-                    peak_kb = max(peak_kb, int(line.split()[1]))
-                    break
-        except OSError:
-            pass
-        time.sleep(0.02)
-    stdout, stderr = proc.communicate()
-    wall = time.perf_counter() - t0
-    if proc.returncode != 0:
-        sys.exit(f"运行失败 (exit {proc.returncode}): {exe}\n{stderr[-2000:]}")
-    return stdout, wall, peak_kb
+        # 回退：无 GNU time。用 Popen + 轮询 /proc/<pid>/status 的 VmHWM 取
+        # 本进程真实 peak RSS（ru_maxrss 是进程树历史峰值，会被前面的大题目污染，
+        # 不能用于单题口径）。
+        t0 = time.perf_counter()
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, stdin=stdin_fd)
+        peak_kb = 0
+        while proc.poll() is None:
+            try:
+                for line in Path(f"/proc/{proc.pid}/status").read_text().splitlines():
+                    if line.startswith("VmHWM:"):
+                        peak_kb = max(peak_kb, int(line.split()[1]))
+                        break
+            except OSError:
+                pass
+            time.sleep(0.02)
+        stdout, stderr = proc.communicate()
+        wall = time.perf_counter() - t0
+        if proc.returncode != 0:
+            sys.exit(f"运行失败 (exit {proc.returncode}): {exe}\n{stderr[-2000:]}")
+        return stdout, wall, peak_kb
+    finally:
+        if stdin_fd is not None:
+            stdin_fd.close()
 
 
 def verify_outputs(bench: dict, outs: dict) -> tuple:
@@ -352,15 +398,30 @@ def main() -> None:
         walls = {i: [] for i in IMPLS}
         rsss = {i: [] for i in IMPLS}
         outs = {}
+        stdin_map = {}
+        if bench.get("stdin_from"):
+            # revcomp 等：输入 = 先前题目（fasta）C 边输出，CLBG 官方串联口径
+            src_name, src_impl = bench["stdin_from"].rsplit("_", 1)
+            src_key = f"{src_name}_{src_impl}.out"
+            src_path = BUILD / src_name / src_key
+            if not src_path.exists():
+                sys.exit(f"[{name}] 缺少串联输入 {src_path}：请确认 {src_name} 先于 {name} 运行")
+            stdin_map = {i: src_path for i in IMPLS}
         for rnd in range(1, rounds + 1):
             for impl in IMPLS:
                 if impl not in exes:
                     continue
-                out, w, rss = timed_run(exes[impl], [bench["param"]])
+                run_args = [bench["param"]] if bench["param"] is not None else []
+                out, w, rss = timed_run(exes[impl], run_args,
+                                        stdin_file=stdin_map.get(impl))
                 walls[impl].append(w)
                 rsss[impl].append(rss)
                 if rnd == 1:
                     outs[impl] = out
+                    if impl == "c":
+                        # C 边输出存档：fasta 的输出同时是 revcomp（stdin_from=fasta_c）
+                        # 的串联输入；普通题存档供 diff 排障。
+                        (BUILD / name / f"{name}_{impl}.out").write_text(out)
             log(f"[round {rnd}/{rounds}] " + "  ".join(
                 f"{i}={fmt_s(walls[i][-1])}s/{rsss[i][-1] // 1024}MB" for i in IMPLS if i in exes))
 
