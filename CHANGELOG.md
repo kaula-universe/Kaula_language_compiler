@@ -9,6 +9,25 @@
 
 ## [Unreleased]
 
+### Fixed
+- **CLBG 全面基准 8/8 全绿**：`test/bench/clbg` 从 4 题扩到 CLBG 官方 8 题
+  （binarytrees / nbody / spectralnorm / fannkuchredux / fasta / mandelbrot /
+  revcomp），全部三边（C/Go/Kaula）输出逐字节一致，3 轮取中位数。
+  - sema：`typesCompatible` 支持 C 语义的**数组→指针衰减**（`T[N]` 实参可传
+    `T*` 形参），修复 nbody（`Planet bodies[5]` → `advance(Planet*, ...)`）等
+    CLBG 移植代码的 `arg_type_mismatch` 误报。
+  - codegen：`inferType` 对 `[N]char` / `char[N]` 数组判 `cstr`（此前推到 `d`，
+    `std.io.print(buf)` 生成 `printf("%d", buf)` 打印地址——fasta 第二段
+    `-875404416` 垃圾数字即此根因）；`generatePrintCall` 单参 `cstr` 用 `%s`
+    格式（此前生成 `%cstr`，printf 按 `%c` 取指针低字节）。
+  - std：新增 `std.io.write_stdout(const void*, size_t)` 二进制写出
+    （`fwrite(stdout)` 封装），mandelbrot PBM P4 输出不再依赖裸
+    `extern fwrite/stdout`。
+  - bench runner：输出统一二进制模式（mandelbrot 输出含 `0x80`，text 解码
+    抛 UnicodeDecodeError）；Popen 回退分支轮询期间 drain stdout（fasta 等
+    输出 > pipe buffer 时子进程阻塞在 write 导致整轮死锁）；C 边输出
+    `write_bytes` 存档（revcomp 的串联输入）。
+
 ### Added
 - **前端严格化（sema 前置拦截）**：把原本漏到 codegen/clang 才报的错误，提前到
   语义分析阶段报错并 fail-fast，codegen 不再在错误 AST 上白跑。

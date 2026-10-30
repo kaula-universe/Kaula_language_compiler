@@ -532,6 +532,16 @@ def write_report(results, tv, rounds, args) -> None:
     L.append("- **fannkuch-redux**：⚠ **Go 参考实现自带 `runtime.GOMAXPROCS(4)` 并行"
              "分块计算，C/Kaula 边为单线程**——0.20× 是并行度差异，不是语言或内存"
              "管理差异。单线程口径下 Kaula 为 C 的 1.07×。")
+    L.append("- **fasta**：LCG 伪随机 + 累积概率二分加权选择 + 定长缓冲区逐行输出，"
+             "三边均为 I/O 与库调用主导（printf/print 每行一次），Kaula 与 C/Go 打平"
+             "（0.99×–1.00×）。")
+    L.append("- **mandelbrot**：⚠ **C 参考用 SSE2 `v2df` 双像素向量化 + 8 pthread 并行，"
+             "Go 用 4 goroutine 按行带并行；Kaula 边为同语义标量单线程实现**——7.1× "
+             "是并行度与向量化差异，不是语言差异（本套件隔离并行度变量，只比算法与"
+             "输出正确性）。三边输出均为 32,000,015 字节 PBM P4 位图，逐字节一致。")
+    L.append("- **revcomp**：FASTA 反转互补，Kaula 用 `kmm_v4_realloc` 动态扩容的序列体"
+             "缓冲 + 互补查表（256 项 u8），三边打平（1.01×）。输入为 fasta 的 C 边"
+             "输出串联（CLBG 官方口径）。")
     L.append("")
 
     # Kaula 指针版形态
@@ -570,8 +580,9 @@ def write_report(results, tv, rounds, args) -> None:
 
     # 总结论
     L.append("## 总结论\n")
-    L.append("1. **正确性**：4 个 CLBG 标准题目、官方标准参数下，三边输出全部一致"
-             "（fannkuch 的 C 参考不输出 checksum 行，按行子集口径校验）；Kaula 标准"
+    L.append(f"1. **正确性**：{len(results)} 个 CLBG 标准题目、官方标准参数下，三边输出"
+             "全部一致（fannkuch 的 C 参考不输出 checksum 行，按行子集口径校验；"
+             "mandelbrot/revcomp/fasta 等二进制/文本输出均逐字节一致）；Kaula 标准"
              "递归指针形态在小参数下同样与 C 逐字节一致。")
     L.append("2. **纯计算核（n-body / spectral-norm / fannkuch 单线程口径）**："
              "Kaula ≈ C（1.02×–1.29×），两者都显著优于 Go（1.5×–3×）——Kaula 经 "

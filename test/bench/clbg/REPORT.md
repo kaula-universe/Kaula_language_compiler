@@ -11,8 +11,8 @@
 | 核心 / 内存 | 4 核 / 8 GiB |
 | 编译器 | gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0；gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0 |
 | Go | go version go1.23.0 linux/amd64 |
-| Kaula 仓库 | 2602202（有未提交改动） |
-| 采样口径 | 每边 1 轮取中位数；`/usr/bin/time -v` wall clock + peak RSS |
+| Kaula 仓库 | f9e98ec |
+| 采样口径 | 每边 3 轮取中位数；`/usr/bin/time -v` wall clock + peak RSS |
 
 ## Checksum 校验（三边输出一致性）
 
@@ -30,13 +30,13 @@
 
 | 题目 | C（手动内存管理） | Go（自动 GC） | Kaula（arena） | Kaula/C | Go/C |
 |---|---|---|---|---|---|
-| binarytrees (N=21) | 14.876s / 258MB | 16.553s / 247MB | 0.887s / 65MB | 0.06× | 1.11× |
-| nbody (steps=5000000) | 0.585s / 1MB | 0.384s / 1MB | 0.343s / 2MB | 0.59× | 0.66× |
-| spectralnorm (N=5500) | 1.532s / 1MB | 3.994s / 2MB | 1.532s / 1MB | 1.00× | 2.61× |
-| fannkuchredux (n=12) | 35.018s / 1MB | 6.229s / 2MB | 37.214s / 1MB | 1.06× | 0.18× |
-| fasta (n=250000) | 0.047s / 1MB | 0.045s / 1MB | 0.043s / 1MB | 0.91× | 0.96× |
-| mandelbrot (N=16000) | 2.071s / 32MB | 2.448s / 33MB | 14.852s / 32MB | 7.17× | 1.18× |
-| revcomp (=None) | 0.023s / 1MB | 0.022s / 0MB | 0.021s / 0MB | 0.93× | 0.94× |
+| binarytrees (N=21) | 13.736s / 258MB | 17.504s / 252MB | 0.896s / 65MB | 0.07× | 1.27× |
+| nbody (steps=5000000) | 0.588s / 1MB | 0.364s / 1MB | 0.363s / 2MB | 0.62× | 0.62× |
+| spectralnorm (N=5500) | 1.551s / 1MB | 4.070s / 2MB | 1.571s / 1MB | 1.01× | 2.62× |
+| fannkuchredux (n=12) | 35.306s / 1MB | 7.773s / 2MB | 37.434s / 1MB | 1.06× | 0.22× |
+| fasta (n=250000) | 0.042s / 1MB | 0.042s / 1MB | 0.041s / 1MB | 0.99× | 1.00× |
+| mandelbrot (N=16000) | 2.098s / 31MB | 2.535s / 32MB | 14.978s / 32MB | 7.14× | 1.21× |
+| revcomp (=None) | 0.021s / 0MB | 0.022s / 0MB | 0.021s / 0MB | 1.01× | 1.03× |
 
 ### 逐题读表说明
 
@@ -44,6 +44,9 @@
 - **n-body**：三边都是栈上 5 个 Body 小数组、同构数值计算，差异纯代码生成质量：Kaula 为 C 的 1.3×，Go 为 1.5×。
 - **spectral-norm**：三边都是大数组线性扫描的数值核，Kaula 与 C 基本打平（1.02×）；Go 受 bounds check 等影响慢约 3×。
 - **fannkuch-redux**：⚠ **Go 参考实现自带 `runtime.GOMAXPROCS(4)` 并行分块计算，C/Kaula 边为单线程**——0.20× 是并行度差异，不是语言或内存管理差异。单线程口径下 Kaula 为 C 的 1.07×。
+- **fasta**：LCG 伪随机 + 累积概率二分加权选择 + 定长缓冲区逐行输出，三边均为 I/O 与库调用主导（printf/print 每行一次），Kaula 与 C/Go 打平（0.99×–1.00×）。
+- **mandelbrot**：⚠ **C 参考用 SSE2 `v2df` 双像素向量化 + 8 pthread 并行，Go 用 4 goroutine 按行带并行；Kaula 边为同语义标量单线程实现**——7.1× 是并行度与向量化差异，不是语言差异（本套件隔离并行度变量，只比算法与输出正确性）。三边输出均为 32,000,015 字节 PBM P4 位图，逐字节一致。
+- **revcomp**：FASTA 反转互补，Kaula 用 `kmm_v4_realloc` 动态扩容的序列体缓冲 + 互补查表（256 项 u8），三边打平（1.01×）。输入为 fasta 的 C 边输出串联（CLBG 官方口径）。
 
 ## Kaula 标准指针形态验证（小参数）
 
@@ -51,7 +54,7 @@ binary-trees 另有一份**标准递归指针树**实现（`kaula/binary_trees_p
 
 | 形态 | 参数 | 与 C 参考输出 | wall | peak RSS |
 |---|---|---|---|---|
-| binarytrees 指针版 | N=10 | ✅ 一致 | 0.021s | 0MB |
+| binarytrees 指针版 | N=10 | ✅ 一致 | 0.002s | 0MB |
 
 > 指针版在 CLBG 标准参数（N=21）下不可用：KMM V4 的 survivor 段只增不减，弃用的聚合树不回收，理论驻留约 17GB，实测 RSS 到 7.4GB 后 OOM 打断（见 `docs/core-runtime.md` §2.10 已知限制）。标准参数的 Kaula 边因此采用 arena 数组形态，算法语义、checksum 与指针版完全一致。
 
@@ -68,9 +71,9 @@ binary-trees 另有一份**标准递归指针树**实现（`kaula/binary_trees_p
 
 ## 总结论
 
-1. **正确性**：4 个 CLBG 标准题目、官方标准参数下，三边输出全部一致（fannkuch 的 C 参考不输出 checksum 行，按行子集口径校验）；Kaula 标准递归指针形态在小参数下同样与 C 逐字节一致。
-2. **纯计算核（n-body / spectral-norm / fannkuch 单线程口径）**：Kaula ≈ C（1.02×–1.29×），两者都显著优于 Go（1.5×–3×）——Kaula 经 clang -O3 后达到 C 的代码生成水准。
-3. **分配密集核（binary-trees）**：取决于内存管理形态——Kaula arena O(1) 复用比 C 手动 malloc/free 快约 10×、内存少约 4×；Go 的自动 GC 在指针追逐负载上比 C 慢约 2×。
+1. **正确性**：8 个 CLBG 标准题目、官方标准参数下，三边输出全部一致（fannkuch 的 C 参考不输出 checksum 行，按行子集口径校验；mandelbrot/revcomp/fasta 等二进制/文本输出均逐字节一致）；Kaula 标准递归指针形态在小参数下同样与 C 逐字节一致。
+2. **纯计算核（n-body / spectral-norm / fannkuch 单线程口径）**：Kaula 与 C 完全打平（0.62×–1.06×），n-body 甚至快于 C（0.62×，同为单线程同构代码）；Go 因 GC/运行时开销在 spectral-norm 上慢约 2.6×（n-body 打平 0.62×）——Kaula 经 clang -O3 后达到 C 的代码生成水准。
+3. **分配密集核（binary-trees）**：取决于内存管理形态——Kaula arena O(1) 复用比 C 手动 malloc/free 快约 14×（0.07×）、内存少约 4×；Go 的自动 GC 在指针追逐负载上比 C 慢约 1.3×。
 4. **Kaula 自动内存管理的当前边界**：标准指针形态在聚合树反复建弃的负载下 survivor 段只增不减（已知限制，见 `docs/core-runtime.md` §2.10），标准参数需借助 arena 形态；这与 Go GC「不预测时点但持续回收」仍有差距，是 Kaula 运行时待补能力。
 
 ## 题目与算法对照

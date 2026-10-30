@@ -314,6 +314,24 @@ fn main() {
 }
 ```
 
+### std.io 二进制写出（`write_stdout`）
+
+`std.io.write_stdout(data, len)` 把任意字节块原样写到 stdout（`fwrite(stdout)` 封装），
+用于二进制输出（如 CLBG mandelbrot 的 PBM P4 位图），不受 `print` 的 `%s` 截断影响：
+
+```kaula
+import std.io
+import std.memory
+
+fn main() {
+    char* pixels = as<char*>(std.memory.kmm_v4_alloc(64))
+    // ... 填充像素位 ...
+    std.io.write_stdout(as<const void*>(pixels), 64)
+}
+```
+
+> 形参为 `const void*`：`char*`/`u8*` 实参需经 `as<const void*>(...)` 显式转换。
+
 ### 导入 freestanding 无依赖库（`--freestanding` 模式）
 
 > 注意：库函数必须写**模块限定名**（`freestanding.memory.fs_alloc(...)`）。
