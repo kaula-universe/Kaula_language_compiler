@@ -419,7 +419,14 @@ def layer_cross_arch(rep: Report):
 def compile_kl(kaulac: Path, src: Path, outdir: Path, extra_flags, timeout=900):
     outdir.mkdir(parents=True, exist_ok=True)
     cmd = [kaulac, "-output-dir", outdir, *extra_flags, src]
-    return run(cmd, timeout=timeout, cwd=PROJECT_ROOT)
+    # 编译器按 LANGUAGE/LC_ALL/LANG 自动切中英文；本脚本各处按字面匹配英文
+    # "Status: Success"。强制 C locale 使输出稳定为英文，与 CI 口径一致，避免
+    # 中文宿主环境下把成功编译误判失败。
+    env = os.environ.copy()
+    env["LANGUAGE"] = "C"
+    env["LC_ALL"] = "C.UTF-8"
+    env["LANG"] = "C.UTF-8"
+    return run(cmd, timeout=timeout, cwd=PROJECT_ROOT, env=env)
 
 
 def layer_kl_functions(rep: Report, kaulac: Path, jobs: int):

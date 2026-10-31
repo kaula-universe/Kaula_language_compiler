@@ -148,6 +148,14 @@ def compile_one(kaulac: Path, src: Path, mode: str, outdir: Path, timeout: int) 
     #     KAULA_HOME 下的 src/ std/ 增量编译运行时对象再链接。KAULA_HOME 未设时
     #     指向仓库根，否则只带 bin/ 的工具链会因为找不到源码而全线链接失败。
     env = dict(os.environ)
+    # 编译器按 LANGUAGE > LC_ALL > LC_MESSAGES > LANG 自动切中英文；本测试器按
+    # 字面匹配状态行判成功。宿主若是中文 locale（如 LANGUAGE=zh_CN:zh），编译器
+    # 会输出「状态: 成功」而非英文「Status: Success」，导致所有成功编译被误判失败。
+    # 这里强制 C 语言环境，使输出稳定为英文，判定口径与 CI（ubuntu 默认 C/POSIX
+    # → en）一致、可重复；下方判定再额外兼容中文，双保险。
+    env["LANGUAGE"] = "C"
+    env["LC_ALL"] = "C.UTF-8"
+    env["LANG"] = "C.UTF-8"
     if not env.get("KAULA_SOURCE_MODE"):
         src_root = env.get("KAULA_HOME") or str(PROJECT_ROOT)
         if (Path(src_root) / "src" / "kaula.h").is_file():
@@ -166,7 +174,11 @@ def compile_one(kaulac: Path, src: Path, mode: str, outdir: Path, timeout: int) 
     except subprocess.TimeoutExpired:
         return False, f"compile timed out after {timeout}s"
     out = strip_ansi((r.stdout or "") + (r.stderr or ""))
-    if r.returncode != 0 or "Status: Failed" in out or "Status: Success" not in out:
+    # 双语兼容：env 已尽量强制英文，但仍识别中文状态行，避免 locale 边缘配置下
+    # 再次把「状态: 成功」的成功编译整片误判为失败。
+    compiled_ok = ("Status: Success" in out) or ("状态: 成功" in out)
+    compiled_fail = ("Status: Failed" in out) or ("状态: 失败" in out)
+    if r.returncode != 0 or compiled_fail or not compiled_ok:
         lines = [ln.strip() for ln in out.splitlines() if "error" in ln.lower()]
         detail = "\n      ".join(lines[:6]) or out.strip()[-400:]
         return False, f"compile failed (exit {r.returncode})\n      {detail}"

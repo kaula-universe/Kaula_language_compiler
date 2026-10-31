@@ -755,8 +755,14 @@ kaulac 的做法（`cmd/kaulac/pch.go`）：
 - **判活用 `.stamp` sidecar**（与 `.o` 同一传统），输入六类：编译器路径、
   `--version` 摘要、家族、优化级别、PCH 生成参数里的语义项、以及全部 `.h`
   的**内容摘要 + mtime**。两条都要：内容防 checkout 洗 mtime，mtime 满足
-  clang 的硬检查。递归扫描（`src` → `std` → `freestanding`）并按"首个根
-  命中"去重，与预处理器的搜索顺序一致。
+  clang 的硬检查。递归扫描（`src` → `std` → `freestanding` 的**库内容根**）
+  并按"首个根命中"去重，与预处理器的搜索顺序一致。扫描根必须只用真实存在的
+  库目录：`freestanding` 为 clang `-I` 前缀解析会额外加入 `filepath.Dir`
+  逐级上溯的父目录（这些祖先仅供 `-I` 搜索，**不得进入指纹扫描**）；祖先链
+  末端可能落到文件系统根 `/`，对其 `WalkDir` 会遍历整盘（含 `/proc`、`/sys`）
+  导致编译卡在指纹阶段挂死，因此 `pchHeadersFingerprint` 对
+  `filepath.Abs(root)=="/"` 直接跳过（回归测试
+  `TestPchHeadersFingerprintSkipsFilesystemRoot` 固化该护栏）。
 - **stamp 还绑定 `.gch` 自身身份**（内容摘要 + size + mtime）。缓存目录是
   跨进程共享的（并行构建），两个进程可能交错发布出"gcc 格式的 `.gch` 配
   clang 指纹的 stamp"，光比输入指纹会放行 → clang 硬失败。绑定身份后这种

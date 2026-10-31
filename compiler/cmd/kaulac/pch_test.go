@@ -393,3 +393,31 @@ func TestPchStampDetectsGchSwap(t *testing.T) {
 		t.Fatal(".gch 不存在时必须失配")
 	}
 }
+
+// 回归（PCH 指纹挂死）：freestanding 搜索路径的 parent 上溯链末端可能是文件
+// 系统根 "/"。一旦把它喂给 WalkDir 全量递归，会遍历整盘（含 /proc、/sys 与
+// 海量宿主文件），表现为编译卡在 PCH 指纹阶段、CPU 极低且长时间无产物。
+// 护栏必须直接跳过 "/"；根目录本就不含 Kaula 库头，跳过不改变指纹。
+func TestPchHeadersFingerprintSkipsFilesystemRoot(t *testing.T) {
+	roots := pchStampTestTree(t)
+	base := pchHeadersFingerprint(roots)
+
+	// 用 goroutine + 超时兜底：护栏若失效，WalkDir("/") 会挂住，测试必须在此
+	// 暴露为失败而不是把整个 go test 卡住。
+	withRootCh := make(chan string, 1)
+	go func() {
+		withRootCh <- pchHeadersFingerprint(append(append([]string{}, roots...), "/"))
+	}()
+	select {
+	case withRoot := <-withRootCh:
+		if withRoot != base {
+			t.Fatal("文件系统根 / 不含 Kaula 头，加入它不应改变指纹")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("指纹遍历到了文件系统根 /（护栏失效），5s 内未返回")
+	}
+
+	if got := pchHeadersFingerprint(append(append([]string{}, roots...), "/")); got != base {
+		t.Fatal("显式传入文件系统根 / 不应改变指纹")
+	}
+}

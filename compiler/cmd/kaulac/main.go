@@ -4465,6 +4465,16 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		filepath.Join(workDir, "..", "freestanding"),
 		filepath.Join(workDir, "..", "..", "freestanding"),
 	)
+	// PCH 指纹专用的 freestanding 内容根：必须在下面 parent 上溯之前快照。
+	// 下面的 parent 祖先目录仅供 clang -I 前缀解析（freestanding/xxx/xxx.h），
+	// 绝不能进入指纹的 WalkDir 全量递归——祖先链会一直上溯到仓库根、/workspace
+	// 甚至文件系统根 "/"，后者会遍历整盘（含 /proc、/sys）导致编译挂死。
+	var validFreeContentRoots []string
+	for _, p := range freePaths {
+		if _, err := os.Stat(p); err == nil {
+			validFreeContentRoots = append(validFreeContentRoots, p)
+		}
+	}
 	// 代码生成中的 freestanding 模块头保留完整前缀（freestanding/xxx/xxx.h），
 	// 需要把 freestanding/ 的父目录也加入搜索路径，否则 std 目录下的同名头
 	// 文件（如 string/string.h）会被错误解析到 std 版本
@@ -4601,7 +4611,9 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 	}
 	pchSemanticArgs = append(pchSemanticArgs, moduleSemanticDefines...)
 	// PCH 的全部 .h 源头 = 生成命令的 -I 根（顺序固定 src → std → free）。
-	pchHeaderRoots := append(append(append([]string{}, validSrcPaths...), validStdPaths...), validFreePaths...)
+	// 指纹只扫库内容根；validFreePaths 在此处必须让位给 validFreeContentRoots：
+	// 前者已混入 parent 上溯祖先（含仓库根 / 上层目录 / 文件系统根），全量递归会挂死。
+	pchHeaderRoots := append(append(append([]string{}, validSrcPaths...), validStdPaths...), validFreeContentRoots...)
 	// 判活输入构造一次，判活与生成两处共用（防止两侧漂移）。
 	// mtime 与内容都进指纹的理由见 pchStampInputs：clang 对 -include-pch 有
 	// mtime 硬检查（bare touch 都会致命），gcc 则要求 .gch 不旧于 .h。

@@ -286,6 +286,13 @@ func pchHeadersFingerprint(roots []string) string {
 		if root == "" {
 			continue
 		}
+		// 纵深护栏：绝不递归文件系统根 "/"。调用方若把 parent 上溯出来的祖先
+		// 目录误传入指纹，链最末端就是 "/"；WalkDir 它会遍历整盘（含 /proc、
+		// /sys 与海量宿主文件），表现为编译在 PCH 指纹阶段挂死。这里直接跳过，
+		// 根目录本来也不含任何 Kaula 库头，跳过不影响判活正确性。
+		if abs, aerr := filepath.Abs(root); aerr == nil && abs == "/" {
+			continue
+		}
 		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(path), ".h") {
 				return nil

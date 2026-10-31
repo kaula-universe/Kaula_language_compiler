@@ -114,13 +114,20 @@ def compile_one(kaulac: Path, src: Path, outdir: Path, timeout: int, sor: bool) 
     if sor:
         cmd.append("--sor")
     cmd.append(str(src))
+    # 编译器按 LANGUAGE/LC_ALL/LANG 自动切中英文；此处字面匹配状态行，强制 C
+    # locale 保证输出英文「Status: Success」，与 CI 口径一致；判定再兼容中文。
+    env = os.environ.copy()
+    env["LANGUAGE"] = "C"
+    env["LC_ALL"] = "C.UTF-8"
+    env["LANG"] = "C.UTF-8"
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout, cwd=str(PROJECT_ROOT))
+                           errors="replace", timeout=timeout, cwd=str(PROJECT_ROOT), env=env)
     except subprocess.TimeoutExpired:
         return False, f"compile timed out after {timeout}s"
     out = strip_ansi((r.stdout or "") + (r.stderr or ""))
-    if "Status: Success" not in out:
+    compiled_ok = ("Status: Success" in out) or ("状态: 成功" in out)
+    if not compiled_ok:
         lines = [ln.strip() for ln in out.splitlines() if "error" in ln.lower()]
         return False, "compile failed: " + ("\n      ".join(lines[:6]) or out[-400:])
     return True, ""

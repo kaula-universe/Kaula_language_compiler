@@ -10,6 +10,39 @@
 ## [Unreleased]
 
 ### Fixed
+- **修复 PCH 指纹阶段把文件系统根 `/` 纳入递归导致编译挂死（阻塞性）**：
+  freestanding 搜索路径为 clang `-I` 前缀解析会经 `filepath.Dir` 逐级上溯父目录，
+  该膨胀后的 `validFreePaths` 原先被整体喂给 `pchHeadersFingerprint` 的
+  `filepath.WalkDir`；祖先链末端落到 `/` 时会递归遍历整盘（含 `/proc`、`/sys`
+  与海量宿主文件），表现为编译卡在 PCH 指纹阶段、CPU 极低且长时间无产物——
+  连 `test/binary_trees.kl` 这类 75 行单文件都无法完成编译。
+  - `cmd/kaulac/main.go`：在 parent 上溯循环之前先 `os.Stat` 快照
+    `validFreeContentRoots`（仅真实存在的库内容根）；`validFreePaths`（含祖先
+    目录）保持原样，继续专供 `-I` 搜索与模块解析，语义不变；PCH 指纹根改用
+    `validFreeContentRoots`，不再携带祖先链。
+  - `cmd/kaulac/pch.go`：`pchHeadersFingerprint` 增加纵深护栏，
+    `filepath.Abs(root) == "/"` 直接跳过，作为调用方误用祖先目录时的双保险
+    （根目录本就不含 Kaula 库头，跳过不改变指纹判活正确性）。
+  - 回归测试：新增 `TestPchHeadersFingerprintSkipsFilesystemRoot`，以 goroutine +
+    5s 超时兜底（护栏失效时 `WalkDir("/")` 会挂住，测试必须报失败而非卡住整个
+    `go test`），断言显式传入 `/` 不改变指纹。
+  - 验证：修复前 `binary_trees` 编译挂死数分钟无产物；修复后 default / sor 两
+    模式均约 1s 编译成功，运行 checksum `247 / 416 / 912 / 1920` 一致、退出码 0。
+- **测试器仅按英文 `Status: Success` 硬匹配，中文 locale 下把成功编译整片误判失败**：
+  编译器按 `LANGUAGE > LC_ALL > LC_MESSAGES > LANG` 自动切中英文；中文宿主
+  （如 `LANGUAGE=zh_CN:zh`）输出「状态: 成功」，而 `scripts/run_tests.py` 的
+  `compile_one()` 只识别英文标记，导致 quick 122 个运行全部被误标 `COMPILE`
+  失败、根本没进入真实运行阶段（产物实际已生成、错误 0）。
+  - `scripts/run_tests.py`：编译子进程强制 `LANGUAGE=C`、`LC_ALL=C.UTF-8`、
+    `LANG=C.UTF-8`，使输出稳定为英文、判定口径与 CI（ubuntu 默认 C/POSIX → en）
+    一致且可重复；成功/失败判定改为双语兼容（`Status: Success` / `状态: 成功`，
+    失败同理），作为 locale 边缘配置下的双保险。
+  - `test/perf/run_perf.py` 的 `compile_one()`、`scripts/run_freestanding_tests.py`
+    的 `compile_kl()` 同步强制 C locale（freestanding 判定维持英文，由 env 保证），
+    消除同类隐式依赖宿主语言环境的脆弱点。
+  - 验证：quick `122/122 passed`、全量 `136/136 passed`（含 7 个慢压测用例）、
+    perf 内存回归 `6/6 passed`（峰值 == 稳态、无单调爬升）、C 内核并发
+    `32/32` 通过、`go test ./...` 全绿（含新回归用例）。
 - **CLBG 全面基准 8/8 全绿**：`test/bench/clbg` 从 4 题扩到 CLBG 官方 8 题
   （binarytrees / nbody / spectralnorm / fannkuchredux / fasta / mandelbrot /
   revcomp），全部三边（C/Go/Kaula）输出逐字节一致，3 轮取中位数。
