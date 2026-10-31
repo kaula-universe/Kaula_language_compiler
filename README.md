@@ -383,16 +383,16 @@ kaulac --init
 | **I/O**          | io、fs、path、cli                                                                                               |
 | **并发**           | concurrent（线程/锁/原子/线程池/Channel/Future）、async、parallel、task                                               |
 | **网络**           | net、web、ssh、tls、ipaddress                                                                                   |
-| **序列化**          | json、toml、toml.ext、xml、xml.ext、protobuf、msgpack、serialize（已实现，函数签名待登记）                                  |
+| **序列化**          | json、toml、toml.ext、xml、xml.ext、protobuf、msgpack、serialize                                              |
 | **数学**           | math、cmath、decimal、random                                                                                     |
 | **编码与安全**       | encoding、crypto、hash、hash.ext、compress、archive                                                              |
 | **系统**           | system、subprocess、time、datetime、calendar                                                                     |
 | **数据**           | db（SQLite/MySQL/PostgreSQL 统一接口）                                                                            |
 | **类型与错误**       | option、traits、base、error、panic、limit、obj                                                                   |
-| **运行时**          | format、logging（接口占位，尚未实现）、testing、testing.ext                                                         |
+| **运行时**          | format、logging、testing、testing.ext                                                                                |
 | **Freestanding** | freestanding.base、freestanding.memory、freestanding.string、freestanding.math、freestanding.io（无依赖，弱符号，裸机/托管双环境） |
 
-> 统计口径：模块键与函数签名以 `compiler/stdlib.json` 为准（`python scripts/stdlib_stats.py` 可复核）。`std/` 共 60 个物理目录，其中 57 个目录登记了 62 个 `std.*` 模块（部分目录拆出 `.ext` 子模块）；`gui`、`i18n` 已有实现目录但尚未登记进 `stdlib.json`，`prefix` 为编译器内部模块。
+> 统计口径：模块键与函数签名以 `compiler/stdlib.json` 为准（`python scripts/stdlib_stats.py` 可复核）。`std/` 共 60 个物理目录，其中 57 个目录登记了 62 个 `std.*` 模块（部分目录拆出 `.ext` 子模块）；`prefix` 为编译器内部模块。尚未完整登记 / 仅占位的模块（logging、serialize、gui、i18n 等）以及语言、CLI、平台边界，统一见 [已知限制清单](docs/known-limitations.md)。
 
 ---
 

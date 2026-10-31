@@ -45,6 +45,10 @@
 - [裸机开发指南](bare-metal.md) - freestanding 模式、内联汇编、原子操作、位域、extern 声明
 - [freestanding 库与全链路验证](freestanding.md) - 零依赖模块、链接模型、含 QEMU 实机引导的 7 层验证、已知边界
 
+### 质量与边界
+
+- [已知限制与未完成能力清单](known-limitations.md) - 语言语法 / 标准库登记 / CLI / 运行时平台边界的**当前**缺口、行为与推荐替代（权威汇总）
+
 ## 工具链文档
 
 见 [tools/README.md](tools/README.md)，按用途分类收录全部命令行工具：

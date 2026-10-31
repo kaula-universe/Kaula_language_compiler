@@ -1,6 +1,7 @@
 # P0 — 写穿 + 游标推进的 survivor 段问题（泄漏 + 链损坏）
 
-状态：**调查完成，修复方案已定（方案 A），待实现**
+状态：**已修复并合入（方案 A'，精确判据 `ChainEscaping`）**；实施清单见 §7（全部完成），
+最终验证见 §9。
 基线：`c983678`
 样本：`test/perf/leak_writethrough.kl`（+ 3 个对照，见 `test/perf/`）
 数据：`cache/perf-baseline-before.json`

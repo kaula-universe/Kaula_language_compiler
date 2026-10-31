@@ -223,16 +223,16 @@ fn main() {
 
 生成 `Point_debug`（打印）与 `Point_equals`（相等比较）方法。
 
-### `#[command]` - 命令行参数解析（规划中）
+### `#[command]` — 命令行参数解析
 
-`#[command]` 计划为结构体自动生成命令行参数解析函数（类似 clap）：
-用 `#[arg(short=..., long=..., default=..., help=...)]` 标注字段，
-编译器生成 `Config_parse(argc, argv)` 入口。
+`#[command]` 为结构体自动生成命令行参数解析函数（类似 clap）：用
+`#[arg(short=..., long=..., default=..., help=...)]` 标注字段，编译器生成
+`<结构体名>_parse(argc, argv)` 入口（代码生成见 `CollectCommands` /
+`GenerateCommandParser`）。
 
-> 该属性尚未实现，编译时会报"未知的属性表达式"。完整设计见
-> [高级属性扩展](../attributes.md)。
-
-详细用法参见 [`#[]` 高级属性扩展](../attributes.md)。
+完整语法、字段属性与生成函数约定见
+[`#[]` 高级属性扩展 · `#[command]`](../attributes.md#command-命令行参数解析)，
+可运行示例见 [examples/advanced-attributes.kl](examples/advanced-attributes.kl)。
 
 ## 完整示例
 

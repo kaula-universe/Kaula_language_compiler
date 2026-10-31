@@ -9,6 +9,23 @@
 
 ## [Unreleased]
 
+### Documentation
+- **全量审计文档中的「未完成 / 不可用」声明，去伪存真并集中管理**：
+  - 剔除「代码已实现、文档仍写未完成」的过时说法：
+    CHANGELOG Known issues 中 struct literal、PCH「v1.1 暂为关闭」一条（两者均已落地，
+    struct literal 见 `test/literal_semantics.kl`，PCH 经 `pchUsable` + `-include-pch` 接线）；
+    `#[command]`「规划中 / 报未知属性」（已由 `CollectCommands`/`GenerateCommandParser`
+    接线并提供示例）；`auto x = match(...)` 表达式赋值「不支持」（`GenerateMatchAssign`
+    已实现，语料 `test/stress_enum_match.kl` 在用）；extern 调用符号名 mangling 与
+    F17 return 路径回收「修复分支待合并 / 规避写法」（F15、F17 均已修复，
+    `return_reclaim_test.go` 守护）；P0 survivor leak「待实现」（已按方案 A' 合入并验证）；
+    `docs/tools/kaulafmt.md` 整篇改写为迁移说明（独立二进制已并入 `kaulac fmt`，
+    权威文档为 `formatter.md`）。
+  - 真实成立的限制集中到新建 `docs/known-limitations.md`（语言语义 / 标准库登记缺口 /
+    CLI 工具链 / 运行时平台边界 / 测试质量共 5 节，逐条附替代写法与复核位置）；
+    根 README、`stdlib-integration.md` 等处的缺口括注改为指向该清单，教程只保留紧邻
+    示例的必要提示；并发内核缺口仍以 `core-runtime.md` 第 5 章为权威表，清单只引用不重复。
+
 ### Fixed
 - **修复 PCH 指纹阶段把文件系统根 `/` 纳入递归导致编译挂死（阻塞性）**：
   freestanding 搜索路径为 clang `-I` 前缀解析会经 `filepath.Dir` 逐级上溯父目录，
@@ -634,6 +651,5 @@
 - F11：`conc=10000` 下仍有低频死锁，成因未定。
 - F13：kl 双形态 spawn 在 Windows 上确定性堆损坏。
 - `struct KaulaTask` 完整定义仍暴露于安装头，已标注为内部/非稳定 ABI；真正的不透明化推迟到 v1.2。
-- struct literal 语法、PCH 加速在 v1.1 暂为关闭状态（见源码注释），后续版本恢复或改为明确报错。
 - LSan 在短生命周期 C 内核测试二进制退出时报 128–320B pthread 描述符小泄漏：测试进程未调用
   `kaula_runtime_shutdown` 即退出，属进程退出 teardown 的良性残留（OS 回收全部资源），非运行期泄漏。

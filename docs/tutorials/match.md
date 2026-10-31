@@ -27,8 +27,19 @@ fn main() {
 }
 ```
 
-> 注意：把 `match` 写成 `auto x = match(v) { ... }` 表达式形式当前不支持；
-> 正确做法是先声明 `string result = ""`，在分支里赋值，再在分支外使用。
+> `match` 也可作为表达式直接赋给变量。C 的 `switch` 不能作表达式值，编译器
+> 内部改写为「声明 + switch 赋值」（`GenerateMatchAssign`）：
+>
+> ```kaula
+> auto word = match(x) {
+>     1 => "one",
+>     2 => "two",
+>     3 => "three",
+>     _ => "many"
+> }
+> ```
+>
+> 整数、字符串、枚举值均支持该形式，完整可运行示例见 `test/stress_enum_match.kl`。
 
 ## 整数与字符串匹配
 

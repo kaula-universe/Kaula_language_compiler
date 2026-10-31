@@ -13,8 +13,9 @@
 > 统计口径：模块与函数签名以 `compiler/stdlib.json` 为准，运行
 > `python scripts/stdlib_stats.py` 复核。`std/` 下 60 个物理目录中，57 个目录登记了
 > 62 个 `std.*` 模块（`hash` / `container` / `testing` / `toml` / `xml` 等目录拆出
-> `.ext` 子模块）；`gui`、`i18n` 已有实现目录但尚未登记进 `stdlib.json`，`prefix` 为编译器内部模块。
-> 已知缺口：`std.logging` 仅有头文件占位（`logging.c` 为空），`std.serialize` 已实现但函数签名尚未登记。
+> `.ext` 子模块）；`prefix` 为编译器内部模块。尚未完整登记 / 仅占位的模块
+> （logging、serialize、gui、i18n 等）现状与待办统一见
+> [已知限制清单 · §2](known-limitations.md)。
 
 ## 设计
 
