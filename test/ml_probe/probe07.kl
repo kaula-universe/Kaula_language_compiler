@@ -1,0 +1,10 @@
+import "libp4.kl"
+import "libab.kl"
+import std.io
+
+fn main() {
+    P4 p = P4(1, 2, 3, 4)
+    A a = A(1.0, 2.0)
+    B b = B(3)
+    std.io.println("p = ", p.a, p.b, p.c, p.d, " a = ", a.x, " b.cnt = ", b.cnt)
+}

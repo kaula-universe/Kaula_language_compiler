@@ -1,0 +1,316 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Clang
+        run: choco install llvm -y
+
+      - name: Install NSIS
+        run: |
+          choco install nsis -y
+          # choco 只写机器级 PATH，当前进程与其后的步骤不会自动继承，
+          # 不显式追加的话下一步 makensis 报 "term is not recognized"。
+          echo "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\Program Files\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Update version
+        run: python scripts/version.py --update
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Get version from generated file
+        id: version
+        run: |
+          $version = python scripts/version.py --release --from-file
+          $snapshot = python scripts/version.py --snapshot --from-file
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "snapshot=$snapshot" >> $env:GITHUB_OUTPUT
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build
+        run: python toolkit_build.py --release
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Test
+        run: python scripts/run_tests.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build NSIS installer
+        run: |
+          # NSIS 的 OutFile 指向 release/，目录不存在时 makensis 报
+          # "Can't open output file" 并中止，这里先建好。
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $version = python scripts/version.py --release --from-file
+          $versionNoV = $version -replace "^v", ""
+          $major = ($versionNoV -split "\.")[0]
+          $minor = ($versionNoV -split "\.")[1]
+          $patch = ($versionNoV -split "\.")[2]
+          $env:KAULA_VERSION = $versionNoV
+          $env:KAULA_VERSION_MAJOR = $major
+          $env:KAULA_VERSION_MINOR = $minor
+          $env:KAULA_VERSION_PATCH = $patch
+          # PATH 兜底：choco 装完不一定进当前进程 PATH
+          $makensis = "makensis"
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            foreach ($p in @("C:\Program Files (x86)\NSIS\makensis.exe", "C:\Program Files\NSIS\makensis.exe")) {
+              if (Test-Path $p) { $makensis = $p; break }
+            }
+          }
+          & $makensis /DPRODUCT_VERSION=$versionNoV /DPRODUCT_VERSION_MAJOR=$major `
+                      /DPRODUCT_VERSION_MINOR=$minor /DPRODUCT_VERSION_PATCH=$patch `
+                      scripts/installers/kaula.nsi
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaula-windows-x64
+          path: release/*.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang dpkg-dev rpm
+
+      - name: Update version
+        run: python scripts/version.py --update
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Get version from generated file
+        id: version
+        run: |
+          echo "version=$(python scripts/version.py --release --from-file)" >> $GITHUB_OUTPUT
+          echo "snapshot=$(python scripts/version.py --snapshot --from-file)" >> $GITHUB_OUTPUT
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build
+        run: python toolkit_build.py --release
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build .deb package
+        run: python scripts/installers/build_deb.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build .rpm package
+        run: python scripts/installers/build_rpm.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaula-linux-x64
+          path: |
+            release/deb/*.deb
+            release/rpm/*.rpm
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: brew install create-dmg
+
+      - name: Update version
+        run: python scripts/version.py --update
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Get version from generated file
+        id: version
+        run: |
+          echo "version=$(python scripts/version.py --release --from-file)" >> $GITHUB_OUTPUT
+          echo "snapshot=$(python scripts/version.py --snapshot --from-file)" >> $GITHUB_OUTPUT
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build
+        run: python toolkit_build.py --release
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build .dmg
+        run: python scripts/installers/build_dmg.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaula-macos-x64
+          path: release/dmg/*.dmg
+
+  release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 完整历史：版本文件必须由真实提交数生成，浅克隆会让版本号退化为 v<minor>.0
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find . -maxdepth 3 \( -name "*.exe" -o -name "*.deb" -o -name "*.rpm" -o -name "*.dmg" \) | while read f; do
+            mv "$f" release/
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate version file
+        run: python scripts/version.py --update
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Get version from generated file
+        id: version
+        run: |
+          VERSION="$(python scripts/version.py --release --from-file)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # 安装包文件名一律不带 v 前缀（build_deb/rpm/dmg 与 NSIS OutFile 都 lstrip('v')），
+          # Release 正文必须与实际产物同名，否则下载链接指向不存在的文件。
+          echo "ver=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "snapshot=$(python scripts/version.py --snapshot --from-file)" >> "$GITHUB_OUTPUT"
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Verify tag matches generated version file
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          FILE_VERSION="$(python scripts/version.py --release --from-file)"
+          echo "tag 名:       $TAG"
+          echo "版本文件版本: $FILE_VERSION"
+          if [ "$TAG" != "$FILE_VERSION" ]; then
+            echo "::error::tag 名($TAG) 与构建生成的版本文件($FILE_VERSION) 不一致，拒绝发布错误版本号的 Release"
+            exit 1
+          fi
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Kaula ${{ steps.version.outputs.version }}
+          body: |
+            ## Kaula ${{ steps.version.outputs.version }}
+
+            **Snapshot:** ${{ steps.version.outputs.snapshot }}
+
+            ### Downloads
+
+            #### Windows
+            - **Installer (recommended):** `kaula-${{ steps.version.outputs.ver }}-windows-x64.exe`
+
+            #### Linux
+            - **Debian/Ubuntu:** `kaula_${{ steps.version.outputs.ver }}_amd64.deb`
+            - **Fedora/RHEL:** `kaula-${{ steps.version.outputs.ver }}-1.x86_64.rpm`
+
+            #### macOS
+            - **DMG (recommended):** `kaula-${{ steps.version.outputs.ver }}-macos-x64.dmg`
+
+            ### Installation
+
+            #### Windows
+            Run the `.exe` installer and follow the prompts. The installer adds Kaula to your PATH.
+
+            #### Linux (Debian/Ubuntu)
+            ```bash
+            sudo dpkg -i kaula_*.deb
+            sudo apt-get install -f  # if needed
+            ```
+
+            #### Linux (Fedora/RHEL)
+            ```bash
+            sudo rpm -i kaula-*.rpm
+            ```
+
+            #### macOS
+            Open the `.dmg` and drag Kaula to Applications. Add `/Applications/Kaula.app/Contents/MacOS/bin` to your PATH.
+
+            ### Verification
+            ```bash
+            kaulac --version
+            ```
+          files: |
+            release/*.exe
+            release/*.deb
+            release/*.rpm
+            release/*.dmg
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

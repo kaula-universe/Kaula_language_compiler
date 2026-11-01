@@ -1,0 +1,49 @@
+// 事务一致性探针：验证 Kaula 与 Go/Tokio 的 parse_and_checksum 逐位相同。
+//
+// 这是整个基准框架的地基。三个运行时的返回值必须完全一致，
+// 否则 TPS 差值里就混进了「算的不是同一件事」。
+//
+// 单独一个用例的原因：算错了也能跑得飞快、TPS 很好看，
+// 不会崩、不会有任何其他断言失败。只有把期望值写死才抓得住。
+//
+// 注意：常量一律内联成字面量，不写 const。
+// Kaula 对无类型标注的 const 推断不稳（`const N = 1000` 会被推成 struct），
+// 而基准的每一个字节都必须是已验证的东西。
+
+import std.io
+
+// Kaula 的整数乘法是**检查溢出并陷阱**，不是静默环绕。
+// 所以每个乘法的左操作数都必须先压到安全区间，否则运行时 abort。
+//   状态机：state % 2^20 (2^20) * 2^30 = 2^50，安全
+//   散列：  checksum % 2^30 (2^30) * 31  = 2^35，安全
+//
+// 另外：Kaula 的解析器只认 // 行注释，不支持 /* */ 块注释。
+conc fn parse_and_checksum() -> i64 {
+    i64 state = 2545
+    i64 checksum = 0
+    i64 k = 0
+    while k < 256 {
+        state = ((state % 1048576) * 1103515245 + 12345) % 9223372036854775807
+        checksum = ((checksum % 1073741824) * 31 + (state % 256)) % 9223372036854775807
+        k = k + 1
+    }
+    return checksum
+}
+
+fn main() -> i32 {
+    // 顺序路径（coercion shim，零调度）—— 先确认事务本身
+    i64 seq = parse_and_checksum()
+    std.io.println("seq = ", seq)
+
+    // 并发路径（spawn + await）—— 确认两条路径算出同一个值
+    Handle h = spawn parse_and_checksum()
+    i64 par = h.await
+    std.io.println("par = ", par)
+
+    if seq == par {
+        std.io.println("paths agree")
+    } else {
+        std.io.println("PATHS DISAGREE")
+    }
+    return 0
+}

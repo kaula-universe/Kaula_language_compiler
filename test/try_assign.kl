@@ -1,0 +1,48 @@
+import std.io
+// try_assign.kl — := 错误传播赋值（test）
+//
+//   x := f()  右侧必须返回 Result enum：
+//    - Ok 变体：解包赋值给 x
+//    - Err 变体：自动 return 当前函数（错误向上传播）
+//
+// Result 目前为非泛型版（载荷 i64）：
+// 泛型 enum 的 codegen 实例化（K_Result<T,E> 的类型参数替换与
+// 构造点类型推断）尚未完整，泛型化待专项修复；
+// std 放置需要先打通跨文件 enum 在主分析的可见性（FindEnum）。
+enum Result {
+    Ok(i64),
+    Err(i64)
+}
+
+fn might_fail(ok: bool) -> Result {
+    if ok {
+        return Result.Ok(42)
+    }
+    return Result.Err(-1)
+}
+
+# := 在返回 Result 的函数里：Err 自动向上传播
+fn step_ok(x: i64) -> Result {
+    v := might_fail(true)
+    return Result.Ok(v + x)
+}
+
+fn step_err(x: i64) -> Result {
+    v := might_fail(false)   # Err(-1) 从这里传播出去
+    return Result.Ok(v + x)
+}
+
+fn main() {
+    Result r1 = step_ok(1)
+    match r1 {
+        Ok(v) => std.io.println("step_ok: ", v),
+        Err(e) => std.io.println("step_err: ", e),
+        _ => std.io.println("impossible")
+    }
+    Result r2 = step_err(1)
+    match r2 {
+        Ok(v) => std.io.println("step_ok: ", v),
+        Err(e) => std.io.println("step_err: ", e),
+        _ => std.io.println("impossible")
+    }
+}

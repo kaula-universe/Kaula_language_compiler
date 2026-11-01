@@ -1,0 +1,86 @@
+// p1_rss_reclaim.kl — P1 削峰平谷护栏：峰值过后的内存必须能被回收。
+//
+// 现象（修复前）：分配 12×4MB 大块、touch、全部释放后，RSS 稳定停在
+// 14.1MB 一动不动，显式 kmm_v4_reset() 也降不下来。根因是页式大对象池
+// 把块收进 Treiber 栈后只做 madvise(MADV_FREE)（惰性标记，内核不施压就
+// 永不回收），RSS 峰值被"焊"在高位。
+//
+// 修复后：kmm_v4_idle_reclaim() 清掉池中的冷块（保留最近释放的一小部分
+// 热块，故复用快路径不受影响），RSS 从 14.1MB 回落到 2.8MB。
+//
+// 断言：
+//   1. 首次 idle_reclaim 因迟滞返回 0（防抖护栏，避免刚清完又要回来）
+//   2. 第二次真正回收，且回收量 > 0
+//   3. 回收后仍能正常分配/写入/读回（热池保留与复用路径未被破坏）
+//
+// 注意：峰值块放在 peak() 内、由函数出口的结构化回收归还到页式池，
+// **不要**再显式调用 global_free —— 编译器已在 return 路径插入
+// kmm_v4_survivor_free，重复释放会 double free 崩溃。
+import std.io
+import std.memory
+
+fn peak(i64 chunk) i64 {
+    // 8 块同时存活并写入，避免被 liveness 提前回收
+    i32* a0 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* a1 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* a2 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* a3 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* a4 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* a5 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* a6 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* a7 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+
+    a0[0] = 100
+    a1[0] = 101
+    a2[0] = 102
+    a3[0] = 103
+    a4[0] = 104
+    a5[0] = 105
+    a6[0] = 106
+    a7[0] = 107
+
+    // 末尾统一读取：保证 8 块在 return 前全部存活（峰值真实存在）
+    return as<i64>(a0[0]) + as<i64>(a1[0]) + as<i64>(a2[0]) + as<i64>(a3[0]) +
+           as<i64>(a4[0]) + as<i64>(a5[0]) + as<i64>(a6[0]) + as<i64>(a7[0])
+}
+
+fn main() {
+    i64 chunk = 2097152      // 2MB，走页式大对象路径
+    // 峰值：8 × 2MB = 16MB，超过稳态热池预算 4MB
+    i64 sum = peak(chunk)
+    std.io.println("[P1] peak sum=", sum)
+
+    // 谷：块已随 peak() 返回进入页式池（此时 RSS 仍停在高位）
+    // 断言 1：首次调用因迟滞不动作
+    i64 first = as<i64>(std.memory.kmm_v4_idle_reclaim())
+    // 断言 2：第二次真正回收
+    i64 second = as<i64>(std.memory.kmm_v4_idle_reclaim())
+
+    std.io.println("[P1] first=", first, " second=", second)
+
+    if first != 0 {
+        std.io.println("[P1] FAIL: 首次 idle_reclaim 应因迟滞返回 0，实际=", first)
+        return
+    }
+    if second <= 0 {
+        std.io.println("[P1] FAIL: 第二次 idle_reclaim 未回收到内存（RSS 无法回落）")
+        return
+    }
+
+    // 断言 3：回收后分配/写入/读回仍正确（热池保留 + 复用路径完好）
+    i32* b0 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    i32* b1 = as<i32*>(std.memory.kmm_v4_alloc(chunk))
+    b0[0] = 555
+    b1[0] = 777
+    if b0[0] != 555 {
+        std.io.println("[P1] FAIL: 回收后写入/读回不一致 b0=", b0[0])
+        return
+    }
+    if b1[0] != 777 {
+        std.io.println("[P1] FAIL: 回收后写入/读回不一致 b1=", b1[0])
+        return
+    }
+
+    std.io.println("[P1] reclaimed ", second, " bytes, reuse verified")
+    std.io.println("PASS p1_rss_reclaim")
+}

@@ -1,0 +1,75 @@
+// Kaula 并发内核 · for..in(range) 循环体内挂起（守卫模式）
+//
+// 修复前：编译器拒绝（"迭代下标不在 Frame 里，恢复后会从头再数一遍"）。
+// 修复后：迭代下标/上下界提升到 Frame（loop_i[d]/loop_end[d]/loop_step[d]），
+// 恢复从 Frame 继续，循环体只执行正确轮次。
+//
+// 判据（外部记录）：acc 必须精确等于每轮累加值。若循环体被重复执行
+// （从头再数一遍），acc 会指数增长；若下标恢复错误，acc 会错位。
+
+import std.io
+import std.time
+
+// 每轮：acc += i，然后挂起 2ms —— 共 5 轮
+// 期望 acc = 0+1+2+3+4 = 10
+conc fn loop_suspend(i64 rounds) -> i64 {
+    i64 acc = 0
+    for i in range(rounds) {
+        acc += i
+        std.time.time_sleep(2)
+    }
+    return acc
+}
+
+// 挂起中带计算：acc = acc*2 + i 每轮
+// 期望：从 1 开始，5 轮：1*2+0=2, 2*2+1=5, 5*2+2=12, 12*2+3=27, 27*2+4=58
+conc fn loop_compute(i64 rounds) -> i64 {
+    i64 acc = 1
+    for i in range(rounds) {
+        acc = acc * 2 + i
+        std.time.time_sleep(1)
+    }
+    return acc
+}
+
+// 嵌套：外层 for..in 内嵌含挂起的 conc fn 调用
+conc fn inner(i64 x) -> i64 {
+    std.time.time_sleep(1)
+    return x + 10
+}
+
+conc fn loop_nested(i64 rounds) -> i64 {
+    i64 acc = 0
+    for i in range(rounds) {
+        i64 v = inner(i)
+        acc += v
+    }
+    return acc
+}
+
+fn main() -> i32 {
+    i64 err = 0
+
+    // 顺序调用（coercion shim 就地等待）
+    i64 r0 = loop_suspend(5)
+    if r0 != 10 { err += 1; std.io.println("ERR seq loop_suspend got=", r0) }
+
+    // spawn + await（并发路径）
+    Handle h1 = spawn loop_suspend(5)
+    i64 r1 = h1.await
+    if r1 != 10 { err += 1; std.io.println("ERR spawn loop_suspend got=", r1) }
+
+    // 挂起中带计算
+    Handle h2 = spawn loop_compute(5)
+    i64 r2 = h2.await
+    if r2 != 58 { err += 1; std.io.println("ERR loop_compute got=", r2) }
+
+    // 嵌套：内层 conc fn 含挂起
+    Handle h3 = spawn loop_nested(5)
+    i64 r3 = h3.await
+    // inner(i)=i+10, 5 轮和 = (0+10)+(1+10)+(2+10)+(3+10)+(4+10) = 10+50 = 60
+    if r3 != 60 { err += 1; std.io.println("ERR loop_nested got=", r3) }
+
+    std.io.println("for_range_suspend ok err=", err)
+    return 0
+}

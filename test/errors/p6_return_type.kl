@@ -1,0 +1,7 @@
+import std.io
+
+fn f() i32 { return "not an int" }
+
+fn main() {
+    std.io.println(f())
+}

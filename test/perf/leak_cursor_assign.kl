@@ -1,0 +1,57 @@
+# leak_cursor_assign.kl —— 上一轮已修场景的回归护栏（keep = p 普通赋值游标）
+#
+# 上一轮（c983678）修复的就是这个形态：普通赋值把新对象挂到外层游标，
+# 每个新副本挂上之前先 survivor_free 旧副本。本用例把它固化成护栏，
+# 防止后续 P0/P1 改动把它改回去。
+
+import std.io
+import std.memory
+
+struct Node {
+    value: i64
+    next: i64
+}
+
+# 游标推进：keep = p（无写穿）
+fn cursor_advance(i64 n) i64 {
+    Node* keep = std.memory.kmm_v4_alloc(16)
+    keep.value = -1
+    keep.next = -1
+    i64 i = 0
+    while i < n {
+        Node* p = std.memory.kmm_v4_alloc(16)
+        p.value = i
+        p.next = -1
+        keep = p
+        i += 1
+    }
+    return keep.value
+}
+
+fn check(bool cond, string label) {
+    if !cond {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    i64 n = 2000
+    i64 rounds = 50
+
+    i64 v0 = cursor_advance(n)
+    check(v0 == n - 1, "cursor advance last value")
+    i64 after1 = std.memory.kmm_v4_total_usage()
+
+    i64 r = 1
+    while r < rounds {
+        cursor_advance(n)
+        r += 1
+    }
+    i64 afterN = std.memory.kmm_v4_total_usage()
+
+    i64 growth = afterN - after1
+    std.io.println("[leak_cursor_assign] after1=", after1, " afterN=", afterN, " growth=", growth)
+    check(growth < 65536, "cursor assign watermark does not grow with rounds")
+
+    std.io.println("PASS leak_cursor_assign")
+}

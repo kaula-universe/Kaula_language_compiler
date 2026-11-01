@@ -1,0 +1,11 @@
+import std.io
+
+struct Point {
+    x: i32,
+    y: i32
+}
+
+fn main() {
+    Point p = Point { x: 1, y: 2 }
+    std.io.println(p.zzz)
+}

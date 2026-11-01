@@ -1,0 +1,76 @@
+# stress_generics.kl — 泛型特性压力测试
+# 验证: 泛型函数 / 泛型 struct / 泛型 enum / 多类型实例化
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+# 泛型函数：同一实现用于多种类型
+fn identity<T>(x: T) T {
+    return x
+}
+
+# 泛型 struct
+struct Pair<T> {
+    first: T,
+    second: T
+}
+
+# 泛型 enum（ADT 带载荷）
+enum Box<T> {
+    Value(T),
+    Empty
+}
+
+fn boxValue(Box<i32> b) i32 {
+    match b {
+        Value(v) => {
+            return v
+        },
+        Empty => {
+            return -1
+        },
+        _ => {
+            return -2
+        }
+    }
+}
+
+fn main() {
+    # 泛型函数多类型实例化
+    i32 a = identity<i32>(42)
+    f64 b = identity<f64>(3.14)
+    string c = identity<string>("gen")
+    check(a == 42, "identity<i32>")
+    check(b > 3.13 && b < 3.15, "identity<f64>")
+    check(std.string.string_equals(c, std.string.string_create("gen")), "identity<string>")
+
+    # 泛型 struct 实例化
+    Pair<i32> pi
+    pi.first = 1
+    pi.second = 2
+    check(pi.first + pi.second == 3, "Pair<i32> sum")
+
+    Pair<string> ps
+    ps.first = "hello"
+    ps.second = "world"
+    check(std.string.string_equals(std.string.string_concat(ps.first, ps.second), std.string.string_create("helloworld")), "Pair<string> concat")
+
+    # 泛型 enum + match 解构
+    Box<i32> full = Box.Value(7)
+    Box<i32> empty = Box.Empty
+    check(boxValue(full) == 7, "Box<i32> value=7")
+    check(boxValue(empty) == -1, "Box<i32> empty=-1")
+
+    # 泛型函数在表达式中的传递
+    i32 indirect = identity<i32>(identity<i32>(99))
+    check(indirect == 99, "nested generic calls")
+
+    std.io.println("--- stress_generics done ---")
+}
