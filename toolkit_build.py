@@ -26,7 +26,7 @@ import platform
 import subprocess
 import argparse
 import hashlib
-import os
+import json
 import shutil
 import time
 import threading
@@ -817,6 +817,37 @@ class GoBuilder:
         print(f"[成功] stdlib.json -> {dest}")
         return True
 
+    def install_version_json(self):
+        """把构建生成的 version.json 放进 bin/，与 kaulac 同目录。
+
+        为什么必须放这里：kaulac 运行期按 `exeDir/version.json` 等候选路径读取
+        版本号（见 compiler/internal/version/version.go 的 LookupPaths），而
+        `build/bin` 是唯一被四类介质（NSIS 安装包 / deb / rpm / dmg）整体搬运的
+        目录。v1.1.377 及之前打包脚本没带这个文件，导致安装后
+        `kaulac --version` 一律静默降级成 `dev-local`。
+
+        缺失、JSON 损坏、version 字段为空都返回 False：宁可构建失败，也不发布
+        一个自述版本号为 dev-local 的产物。
+        """
+        src = self.config.compiler_dir / "version.json"
+        if not src.exists():
+            print(f"[-] 未找到 {src}（scripts/version.py --update 未生成版本文件）")
+            return False
+        try:
+            info = json.loads(src.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            print(f"[-] 版本文件 {src} 读取失败: {exc}")
+            return False
+        version = info.get("version") if isinstance(info, dict) else None
+        if not isinstance(version, str) or not version.strip():
+            print(f"[-] 版本文件 {src} 缺少非空 version 字段（实际: {version!r}）")
+            return False
+        self.config.bin_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.config.bin_dir / "version.json"
+        shutil.copy2(src, dest)
+        print(f"[成功] version.json -> {dest} ({version})")
+        return True
+
 
 def build_all(config, c_compiler, archiver, go_cmd, release=False):
     """构建所有组件"""
@@ -847,9 +878,11 @@ def build_all(config, c_compiler, archiver, go_cmd, release=False):
         go_builder = GoBuilder(config, go_cmd, release)
         results["kaulac"] = go_builder.build_kaulac()
         results["stdlib_json"] = go_builder.install_stdlib_json()
+        results["version_json"] = go_builder.install_version_json()
     else:
         results["kaulac"] = None
         results["stdlib_json"] = None
+        results["version_json"] = None
 
     print("\n" + "=" * 60)
     print("  构建结果汇总")
@@ -1007,7 +1040,8 @@ def main():
         if go_builder:
             ok1 = go_builder.build_kaulac()
             ok2 = go_builder.install_stdlib_json()
-            success = ok1 and ok2
+            ok3 = go_builder.install_version_json()
+            success = ok1 and ok2 and ok3
         else:
             print("[-] 错误: 构建 compiler 需要 Go 编译器")
             success = False
@@ -1024,7 +1058,8 @@ def main():
         if go_builder:
             ok1 = go_builder.build_kaulac()
             ok2 = go_builder.install_stdlib_json()
-            if not (ok1 and ok2):
+            ok3 = go_builder.install_version_json()
+            if not (ok1 and ok2 and ok3):
                 print("[-] 错误: 编译器构建失败")
                 success = False
             else:

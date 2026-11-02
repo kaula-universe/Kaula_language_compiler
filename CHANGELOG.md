@@ -27,6 +27,30 @@
     示例的必要提示；并发内核缺口仍以 `core-runtime.md` 第 5 章为权威表，清单只引用不重复。
 
 ### Fixed
+- **修复四类安装包全部缺失 `version.json`，装完后 `kaulac --version` 静默显示 `dev-local`（发布可观测性缺陷）**：
+  版本号唯一来源是构建生成的 `compiler/version.json`（生成物、已 gitignore），kaulac
+  运行期按 `LookupPaths()` 查找，找不到即降级为 `dev-local`。v1.1.377 及之前的
+  `build_deb.py / build_rpm.py / build_dmg.py / kaula.nsi / package_release.py` 只搬运
+  `bin lib include std src scripts docs tools`，没有任何一处带上该文件，导致四个平台的
+  安装包 `--version` 一律输出 `kaulac dev-local (dev-local)`——语言功能不受影响，但用户
+  无法确认已装版本，产物与源码版本不一致时也没有任何信号。
+  - `scripts/version_file.py`（新增）：统一负责版本文件落盘与出包前校验。落两处
+    （`<安装根>/bin/version.json` 命中 `exeDir/version.json`；`<安装根>/compiler/version.json`
+    命中 `exeDir/../compiler/` 与 `KAULA_HOME/compiler/`），源文件缺失、JSON 损坏、
+    `version`/`snapshot` 为空、落盘回读不一致一律抛 `VersionFileError` 拒绝出包。
+  - `toolkit_build.py`：新增 `install_version_json()`，把版本文件放进 `build/bin`；
+    `build_all`、`--target compiler`、`--target package` 三条路径全部调用，失败即构建失败。
+  - 四个打包脚本：拷完目录后调用 `stage_into()` + `verify_installed()`；
+    `kaula.nsi` 增加 `File "..\..\compiler\version.json"` 与卸载段 `RMDir /r "$INSTDIR\compiler"`。
+  - `.github/workflows/release.yml`：三平台构建后各加 `Verify shipped version string` 门禁；
+    `test.yml` linux job 新增 `Installer packaging tests` 步骤。
+  - 测试：`test/installer_version_file_test.py`（单元层 4 种硬失败 + 守门层静态断言各打包
+    入口确已接线 + 症状层把 `build/bin` 拷入临时目录模拟安装后实跑 `--version`，共 14 项）、
+    `compiler/internal/version/version_test.go`（锁定 KAULA_HOME 前两位候选路径与安装布局
+    依赖的 4 条 `exeDir` 路径，3 项）。本地实测：`go test ./...` 20 包全绿、0 失败；真实
+    产出的 `kaula_1.1.377_amd64.deb` 解包后包内 `kaulac --version` = `v1.1.377`。
+  - `.gitignore` 补 `release/`（打包产物目录，此前未忽略，`git add -A` 会误提交）。
+
 - **修复 PCH 指纹阶段把文件系统根 `/` 纳入递归导致编译挂死（阻塞性）**：
   freestanding 搜索路径为 clang `-I` 前缀解析会经 `filepath.Dir` 逐级上溯父目录，
   该膨胀后的 `validFreePaths` 原先被整体喂给 `pchHeadersFingerprint` 的

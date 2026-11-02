@@ -76,13 +76,14 @@ python scripts/version.py --snapshot --from-file  # 从版本文件读取 → 26
 算出的版本号会**静默退化成 `v1.1.0`**（v1.1 系列根本不存在 `.0`）。
 这正是历史上 Release 标题出现「Kaula」（版本号为空）的原因。
 
-### 三重防护
+### 四重防护
 
 | 防护 | 位置 | 行为 |
 |------|------|------|
 | 完整历史 | `auto-tag.yml` / `release.yml` / `build.yml` 的 `actions/checkout` | `fetch-depth: 0` |
 | 版本文件为唯一来源 | `version.py --from-file` | tag / Release 只认 `compiler/version.json` |
 | 一致性校验 | `release.yml` 的 `Verify tag matches generated version file` | tag 名 ≠ 版本文件版本 → 报错并终止发布 |
+| 介质内含版本文件 | `scripts/version_file.py` + 四类打包脚本 | 包里没有 `version.json` → 出包硬失败 |
 
 另外 `version.py` 检测到浅克隆会向 stderr 打印告警，便于本地/CI 排查。
 
@@ -110,10 +111,55 @@ python scripts/version.py --snapshot --from-file  # 从版本文件读取 → 26
 Release 正文与 `files:` 只列上述**实际产出**的四类；不再宣称未构建的 `.zip` / `.tar.gz`。
 产物由 `sync-gitee.yml` 在 GitHub Release 就绪后同步到 Gitee（见 `docs/gitee-sync.md`）。
 
+### 安装介质内的版本文件（v1.1.378 起）
+
+`compiler/version.json` 是生成物、被 `.gitignore` 忽略，只存在于构建机上。kaulac
+运行期靠 `LookupPaths()` 找它，找不到就静默降级：
+
+```
+kaulac dev-local (dev-local)
+```
+
+v1.1.377 及之前，四类打包脚本只搬 `bin / lib / include / std / src / scripts /
+docs / tools`，**没有任何一处带上 version.json**，于是所有安装包的 `--version`
+都显示 `dev-local`。语言功能没坏，但用户无法确认自己装的是哪个版本，产物与源码
+版本不一致时也没有任何信号。
+
+修复由 `scripts/version_file.py` 统一负责，两条规则：
+
+1. **落两处**，覆盖安装布局的所有命中路径：
+   - `<安装根>/bin/version.json` —— 与可执行文件同目录（NSIS `$INSTDIR\bin`、
+     macOS `Kaula.app/Contents/MacOS/bin`、`/usr/local/kaula/bin`）；
+   - `<安装根>/compiler/version.json` —— 安装根下 `compiler/`（对应
+     `exeDir/../compiler/` 与 `KAULA_HOME/compiler/` 两条候选）。
+2. **硬失败**：源版本文件缺失、JSON 损坏、`version`/`snapshot` 为空，或落盘后
+   回读与包版本不一致 → 抛 `VersionFileError` 拒绝出包。
+
+接线位置：
+
+| 环节 | 做法 |
+|------|------|
+| `toolkit_build.py` | 新增 `install_version_json()`，构建 compiler 时把版本文件放进 `build/bin`（`build_all`、`--target compiler`、`--target package` 三条路径都调用；失败即构建失败） |
+| `build_deb.py` / `build_rpm.py` / `build_dmg.py` / `package_release.py` | 拷贝完目录后调用 `stage_into()` + `verify_installed()` |
+| `kaula.nsi` | `File "..\..\compiler\version.json"` 装到 `$INSTDIR\compiler`，卸载段 `RMDir /r` 对应清理；源文件缺失时 makensis 直接报错 |
+| `release.yml` | 三平台构建后各加 `Verify shipped version string` 门禁（`test/installer_version_file_test.py --strict`） |
+| `test.yml` | linux job 新增 `Installer packaging tests` 步骤 |
+
+回归测试分三层，见 `test/installer_version_file_test.py`：单元层（落盘与四种必须
+硬失败的输入）、守门层（静态断言每个打包入口都真的接了这两步，防止重构时被人
+删掉）、症状层（把 `build/bin` 拷进临时目录模拟"安装后"，实跑 `kaulac --version`
+断言不含 `dev-local` 且版本号与 `compiler/version.json` 一致）。另有
+`compiler/internal/version/version_test.go` 锁住 Go 侧的候选路径顺序。
+
 ### 版本文件缺失时的行为
 
-`--from-file` 在版本文件缺失、JSON 损坏或缺少 `version` 字段时**硬失败退出 1**
-并给出中文错误信息，不会静默返回错误版本。
+分两层，都不允许静默：
+
+- **读取层**：`--from-file` 在版本文件缺失、JSON 损坏或缺少 `version` 字段时
+  **硬失败退出 1** 并给出中文错误信息，不会静默返回错误版本。
+- **介质层**：安装/归档介质内没有 `version.json`（或版本与包不一致）时，
+  `scripts/version_file.py` 抛 `VersionFileError`，**出包硬失败**。
+- 源码树开发环境（未执行构建脚本）仍允许降级为 `dev-local`，避免 `go run` 直接崩溃。
 
 ## 快照版本 (YY.M.DD-branch-hash)
 
@@ -201,3 +247,5 @@ kaulac v1.1.1 (26.10.5-master-8717dec)
 5. **不依赖、也不自动创建 git tag**；v1.0 历史 tag 不得改动。
 6. **CI 必须用 `fetch-depth: 0`** — 浅克隆会让减法退化，版本号错成 `v<minor>.0`。
 7. **`--update` 与 `--from-file` 互斥** — 前者生成版本文件，后者读取版本文件。
+8. **安装包必须自带 `version.json`** — 由 `scripts/version_file.py` 落盘并校验，
+   缺失即拒绝出包；`kaulac --version` 报 `dev-local` 视为发布事故。

@@ -81,6 +81,13 @@ Section "MainSection" SEC01
   File /r "..\..\scripts"
   File /r "..\..\docs"
   File /r "..\..\tools"
+  ; 版本文件：build\bin 里的 version.json 随上面的 File /r "..\..\build\bin"
+  ; 一起装到 $INSTDIR\bin，kaulac 首选命中「可执行文件同目录」；这里再补一份
+  ; 到 $INSTDIR\compiler，兼容 KAULA_HOME 指向安装根目录的用法。
+  ; 源文件缺失时 makensis 直接报错终止 —— 不允许发布 --version 显示
+  ; dev-local 的安装包。
+  SetOutPath "$INSTDIR\compiler"
+  File "..\..\compiler\version.json"
 SectionEnd
 
 Section -AddToPath
@@ -114,6 +121,7 @@ Section Uninstall
   RMDir /r "$INSTDIR\scripts"
   RMDir /r "$INSTDIR\docs"
   RMDir /r "$INSTDIR\tools"
+  RMDir /r "$INSTDIR\compiler"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\toolkit_build.py"

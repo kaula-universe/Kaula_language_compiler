@@ -89,6 +89,13 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      # 打包层的版本自述检查：介质必须带 version.json，kaulac --version 不得
+      # 降级成 dev-local（v1.1.377 及之前所有安装包都中招）。
+      - name: Installer packaging tests
+        run: python3 test/installer_version_file_test.py --strict
+        env:
+          PYTHONIOENCODING: utf-8
+
       - name: C kernel concurrency tests (27)
         run: python3 test/concurrency/run_tests.py
         env:

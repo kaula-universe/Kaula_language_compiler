@@ -58,6 +58,13 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      # 出包门禁：安装介质必须自带 version.json，且构建出的 kaulac 自述真实
+      # 版本号。v1.1.377 及之前缺这一步，四个平台的包都静默报 dev-local。
+      - name: Verify shipped version string
+        run: python test/installer_version_file_test.py --strict
+        env:
+          PYTHONIOENCODING: utf-8
+
       - name: Test
         run: python scripts/run_tests.py
         env:
@@ -136,6 +143,12 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      # 出包门禁：介质内必须有 version.json，kaulac --version 不得是 dev-local。
+      - name: Verify shipped version string
+        run: python3 test/installer_version_file_test.py --strict
+        env:
+          PYTHONIOENCODING: utf-8
+
       - name: Build .deb package
         run: python scripts/installers/build_deb.py
         env:
@@ -189,6 +202,12 @@ jobs:
 
       - name: Build
         run: python toolkit_build.py --release
+        env:
+          PYTHONIOENCODING: utf-8
+
+      # 出包门禁：介质内必须有 version.json，kaulac --version 不得是 dev-local。
+      - name: Verify shipped version string
+        run: python3 test/installer_version_file_test.py --strict
         env:
           PYTHONIOENCODING: utf-8
 

@@ -10,6 +10,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# scripts/ 里的共享模块（version.json 落盘与出包前校验）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from version_file import stage_into, verify_installed
+
 
 def get_version(project_root: Path) -> str:
     version_script = project_root / "scripts" / "version.py"
@@ -90,6 +94,12 @@ def build_dmg(project_root: Path, build_dir: Path, release_dir: Path):
         src = project_root / f
         if src.exists():
             shutil.copy2(src, app_contents / "MacOS" / f)
+
+    # 版本文件：写到 Kaula.app/Contents/MacOS/bin/version.json（与 kaulac
+    # 同目录）和 MacOS/compiler/version.json，安装后两条查找路径都能命中。
+    # 缺版本文件直接拒绝出包。
+    stage_into(project_root, app_contents / "MacOS")
+    verify_installed(app_contents / "MacOS", version)
 
     # Copy logo
     logo_src = project_root / "logo.png"

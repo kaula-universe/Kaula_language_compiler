@@ -77,7 +77,8 @@ python toolkit_build.py --clean         # 清理所有构建产物
 build/
 ├── bin/
 │   ├── kaulac.exe          # 编译器 CLI（含 fmt 子命令）
-│   └── stdlib.json         # 标准库模块注册表（编译器运行依赖）
+│   ├── stdlib.json         # 标准库模块注册表（编译器运行依赖）
+│   └── version.json        # 版本自述数据（缺失则 --version 降级为 dev-local）
 ├── include/
 │   ├── kaula/              # 运行时头（kaula.h 等）
 │   ├── runtime/            # SOR 运行时头
@@ -126,10 +127,25 @@ export KAULA_HOME=/opt/kaula
 ### 3.3 部署校验
 
 ```bash
+kaulac --version              # 必须报真实版本号（如 v1.1.378），不能是 dev-local
 kaulac --cache-stats          # 确认编译器可用
 ls $KAULA_HOME/lib            # 确认三个静态库就位
 # 试编译一个 Hello World 确认安装模式生效（日志出现 "Using installed static libraries"）
 ```
+
+`--version` 报 `dev-local` 意味着介质里没有 `version.json`（版本自述的唯一数据源）。
+`kaulac` 按以下顺序查找版本文件，四类安装包都保证至少命中前两条之一：
+
+| 查找位置 | 由谁提供 |
+|----------|----------|
+| `$KAULA_HOME/compiler/version.json` | NSIS 安装包的 `$INSTDIR\compiler\`、deb/rpm 的 `/usr/local/kaula/compiler/` |
+| `<可执行文件目录>/version.json` | 四类介质共用的 `bin/`（`build/bin` 被整体搬运） |
+| `<可执行文件目录>/../compiler/version.json` | 同上（deb/rpm/dmg 的安装根布局） |
+| 当前工作目录下的 `version.json` | 源码树开发环境 |
+
+落盘与出包前校验由 `scripts/version_file.py` 负责，缺失或版本不匹配一律硬失败；
+回归门禁见 `test/installer_version_file_test.py`。v1.1.377 及之前的所有安装包都
+没带这个文件，`--version` 一律显示 `dev-local`，自 v1.1.378 起修复。
 
 ## 4. 编译与部署 Kaula 程序
 

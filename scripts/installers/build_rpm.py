@@ -10,6 +10,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+# scripts/ 里的共享模块（version.json 落盘与出包前校验）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from version_file import stage_into, verify_installed
+
 
 def get_version(project_root: Path) -> str:
     version_script = project_root / "scripts" / "version.py"
@@ -87,6 +91,7 @@ cp -r %{{_topdir}}/BUILD/src %{{buildroot}}/usr/local/kaula/
 cp -r %{{_topdir}}/BUILD/scripts %{{buildroot}}/usr/local/kaula/
 cp -r %{{_topdir}}/BUILD/docs %{{buildroot}}/usr/local/kaula/
 cp -r %{{_topdir}}/BUILD/tools %{{buildroot}}/usr/local/kaula/
+cp -r %{{_topdir}}/BUILD/compiler %{{buildroot}}/usr/local/kaula/
 
 # Copy docs
 cp %{{_topdir}}/BUILD/README.md %{{buildroot}}/usr/share/doc/kaula/
@@ -142,6 +147,12 @@ EOF
         src = project_root / f
         if src.exists():
             shutil.copy2(src, build_dest / f)
+
+    # 版本文件：BUILD/bin/version.json（随 bin 进包）+ BUILD/compiler/
+    # version.json（随 spec 里的 cp 进包），安装后 kaulac 两条路径都能命中。
+    # 缺版本文件直接拒绝出包。
+    stage_into(project_root, build_dest)
+    verify_installed(build_dest, version)
 
     # Build .rpm
     rpm_output = release_dir / "rpm" / f"{pkg_name}.rpm"

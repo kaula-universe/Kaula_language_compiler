@@ -10,6 +10,10 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 
+# scripts/ 里的共享模块（version.json 落盘与出包前校验）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from version_file import stage_into, verify_installed
+
 
 def get_version(project_root: Path) -> str:
     version_script = project_root / "scripts" / "version.py"
@@ -93,6 +97,12 @@ def build_deb(project_root: Path, build_dir: Path, release_dir: Path):
         src = project_root / f
         if src.exists():
             shutil.copy2(src, kaula_dest / f)
+
+    # 版本文件：写到 /usr/local/kaula/bin/version.json 与
+    # /usr/local/kaula/compiler/version.json，命中 kaulac 的两条查找路径。
+    # 缺版本文件直接拒绝出包，避免 --version 静默降级成 dev-local。
+    stage_into(project_root, kaula_dest)
+    verify_installed(kaula_dest, version)
 
     # Create symlinks in /usr/local/bin
     kaulac_bin = kaula_dest / "bin" / "kaulac"

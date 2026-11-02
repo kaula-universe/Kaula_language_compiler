@@ -24,6 +24,10 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+# 同目录共享模块：version.json 落盘与出包前校验
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from version_file import stage_into, verify_installed
+
 
 class ReleasePackager:
     """发布包打包器"""
@@ -154,6 +158,10 @@ class ReleasePackager:
         src_dir = self.project_root / "src"
         if src_dir.exists():
             shutil.copytree(src_dir, pkg_dir / "src")
+
+        # 版本文件：让解压即用的归档里 kaulac --version 也是真实版本号
+        stage_into(self.project_root, pkg_dir)
+        verify_installed(pkg_dir, self.version)
 
         return pkg_dir
 
