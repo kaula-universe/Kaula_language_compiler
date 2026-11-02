@@ -10,8 +10,10 @@
 //   - Kaula 已知类型（i64、*u8 等）→ 走 Kaula 类型映射
 //   - 外部 C 类型（size_t、FILE* 等）→ 直接透传到 C
 //
-// 本文件是所有 std 模块胶水层的公共依赖；各模块 <mod>.kl 直接
-// import 本文件并复用其中的 C 标量别名，仅声明模块特有的不透明句柄。
+// 注意：C 侧已有 typedef struct {...} X; 的模块句柄类型（JsonValue、Regex、
+// DBConnection、Socket 等）**不**在此用 adopt X* 包装——那会生成
+// `typedef X* X;` 与 C 侧 struct typedef 冲突。这些类型已在 stdlib.json 的
+// types 字段注册，用户直接写 `X*` 即可（编译器原生映射）。
 
 // ═══════════════════════════════════════════════════════════════
 // 平台相关整数类型（#[transparent]：可比较可运算）
@@ -73,126 +75,11 @@ type CVoid = adopt void*        // 通用可写缓冲区
 type CConstVoid = adopt const void* // 通用只读缓冲区
 
 // ═══════════════════════════════════════════════════════════════
-// StringBuilder 句柄（struct StringBuilder*）
+// FILE* 句柄（C 侧无 struct typedef，Kaula 原生不认识 FILE）
+// ═══════════════════════════════════════════════════════════════
+type IoFile = adopt File         // std.io: C 侧 typedef FILE* File;
+
+// ═══════════════════════════════════════════════════════════════
+// StringBuilder 句柄（C 侧已有 typedef，adopt 复用不冲突）
 // ═══════════════════════════════════════════════════════════════
 type StringBuilder = adopt StringBuilder*
-
-// ═══════════════════════════════════════════════════════════════
-// 全标准库模块不透明句柄（adopt 零成本抽象）
-//
-// 这些类型仅以指针形式出现在 stdlib.json 的函数签名中，
-// 没有按值传递的场景，因此用 adopt X* 包装为不透明句柄。
-// C 侧零成本：adopt 类型即底层 C 指针，无装箱、无拆箱。
-// 禁止直接比较，仅通过对应模块的 std.<mod>.<fn> 函数操作。
-// ═══════════════════════════════════════════════════════════════
-
-// —— io / fs ——
-type IoFile = adopt File              // std.io: C 侧 typedef FILE* File
-type AsyncIO = adopt AsyncIO          // std.io: typedef void* AsyncIO
-type MemoryStream = adopt MemoryStream*
-type BufferedWriter = adopt BufferedWriter*
-type BufferedReader = adopt BufferedReader*
-type DirIterator = adopt DirIterator*
-type FileInfo = adopt FileInfo*
-
-// —— error ——
-type Error = adopt Error*
-type ErrorType = adopt ErrorType      // 枚举（透明标量）
-
-// —— json ——
-type JsonValue = adopt JsonValue*
-
-// —— regex ——
-type Regex = adopt Regex*
-type RegexMatch = adopt RegexMatch*
-type RegexCapture = adopt RegexCapture*
-
-// —— net / tls / ssh / web ——
-type Socket = adopt Socket*
-type TLSContext = adopt TLSContext*
-type SSHSession = adopt SSHSession*
-type SSHChannel = adopt SSHChannel*
-type HttpClient = adopt HttpClient*
-type HttpServer = adopt HttpServer*
-type HttpRequest = adopt HttpRequest*
-type HttpResponse = adopt HttpResponse*
-type UrlParts = adopt UrlParts*
-
-// —— db ——
-type DBConnection = adopt DBConnection*
-type DBStatement = adopt DBStatement*
-type DBResult = adopt DBResult*
-
-// —— obj ——
-type Object = adopt Object*
-type IntObject = adopt IntObject*
-type FloatObject = adopt FloatObject*
-type BoolObject = adopt BoolObject*
-type StringObject = adopt StringObject*
-
-// —— container / heap / hash / trie / graph ——
-type Vector = adopt Vector*
-type LinkedList = adopt LinkedList*
-type HashMap = adopt HashMap*
-type HashSet = adopt HashSet*
-type Stack = adopt Stack*
-type PriorityQueue = adopt PriorityQueue*
-type Heap = adopt Heap*
-type Trie = adopt Trie*
-type Graph = adopt Graph*
-type GraphNode = adopt GraphNode*
-
-// —— concurrent / async / task ——
-type Channel = adopt Channel*
-type Future = adopt Future*
-type Promise = adopt Promise*
-type AsyncEventLoop = adopt AsyncEventLoop*
-type AsyncNode = adopt AsyncNode*
-type LightAsyncLoop = adopt LightAsyncLoop*
-type LightTimerManager = adopt LightTimerManager*
-type TaskQueue = adopt TaskQueue*
-type PriorityTaskQueue = adopt PriorityTaskQueue*
-
-// —— format / crypto / msgpack / protobuf ——
-type FormatBuilder = adopt FormatBuilder*
-type FormatOptions = adopt FormatOptions*
-type SHA256Context = adopt SHA256Context*
-type HashSHA1Context = adopt HashSHA1Context*
-type HashSHA512Context = adopt HashSHA512Context*
-type MPReader = adopt MPReader*
-type MPWriter = adopt MPWriter*
-type PBReader = adopt PBReader*
-type PBWriter = adopt PBWriter*
-
-// —— datetime / calendar / system / time ——
-type TimeZone = adopt TimeZone*
-type Calendar = adopt Calendar*
-type Time = adopt Time*
-
-// —— cli ——
-type CliApp = adopt CliApp*
-
-// —— option ——
-type Option = adopt Option*
-type Result = adopt Result*
-
-// —— toml ——
-type TomlDocument = adopt TomlDocument*
-type TomlTable = adopt TomlTable*
-type TomlValue = adopt TomlValue*
-type TOMLNode = adopt TOMLNode*
-
-// —— xml ——
-type XmlDocument = adopt XmlDocument*
-type XmlNode = adopt XmlNode*
-type XMLNode = adopt XMLNode*
-
-// —— testing ——
-type TestSuite = adopt TestSuite*
-type TestCase = adopt TestCase*
-type TestReport = adopt TestReport*
-
-// —— panic / traits ——
-type PanicFrame = adopt PanicFrame*
-type TypeInfo = adopt TypeInfo*
-
