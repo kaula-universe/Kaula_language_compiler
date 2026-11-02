@@ -1,0 +1,588 @@
+# 代码生成器 (Codegen)
+
+代码生成器将 AST 转换为 C 源代码。实现位于 `internal/codegen/` 目录。
+
+## 设计
+
+- **模块化架构**：类型/函数/表达式/语句生成器分离
+- **模板驱动**：使用 Go 模板生成 C 代码
+- **作用域管理**：符号表支持嵌套作用域
+- **SOR 集成**：支持子所有权释放分析结果
+- **泛型实例化缓存**：避免重复生成泛型代码
+- **源码映射**：生成调试用的源码映射
+
+## 目录结构
+
+```
+codegen/
+├── codegen.go         # 核心代码生成器
+├── generator.go       # 生成器接口定义
+├── typegen.go         # 类型生成
+├── funcgen.go         # 函数生成
+├── exprgen.go         # 表达式生成
+├── stmtgen.go         # 语句生成
+├── template.go        # 模板管理
+├── plugin.go          # 插件系统
+├── sor_codegen.go     # SOR 集成
+├── sourcemap.go       # 源码映射
+└── cache/             # 生成缓存
+```
+
+## 代码生成流程
+
+```go
+// CodeGenerator.Generate 方法
+func (cg *CodeGenerator) Generate(program *ast.Program) string {
+    // 1. 排序 AST 语句到四个输出区域
+    //    - 类型定义
+    //    - 全局变量
+    //    - 函数声明
+    //    - main 代码
+    
+    // 2. 解析导入/包含
+    //    - 从 stdlib.json 加载模块头文件
+    //    - 解析第三方库依赖
+    
+    // 3. 生成前向声明
+    //    - 公开函数的前向声明
+    //    - 泛型实例化函数
+    
+    // 4. 生成 C 代码
+    //    - 使用模板或直接拼接
+    //    - 生成源码映射
+    
+    // 5. 返回完整 C 源代码
+}
+```
+
+## 类型生成 (typegen.go)
+
+将 Kaula 类型映射为 C 类型：
+
+```
+Kaula 类型 → C 类型
+int        → i64
+float      → f32
+double     → f64
+bool       → bool
+char       → char
+string     → const char*
+void       → void
+Type*      → Type*
+Box<int>   → Box_int (泛型实例化)
+```
+
+### 用户类型命名消歧
+
+为避免与系统头文件中的宏/类型冲突（如 Windows `wingdi.h` 的 `Rectangle` 函数宏），所有用户定义的 struct/class/enum/interface 在生成 C 代码时统一添加 `K_` 前缀：
+
+```
+Kaula 类型 → C 类型
+struct Point        → typedef struct K_Point { ... } K_Point
+struct Rectangle    → typedef struct K_Rectangle { ... } K_Rectangle
+class Box           → typedef struct K_Box { ... } K_Box
+interface Drawable  → typedef struct K_Drawable_MethodGroup { ... } K_Drawable_MethodGroup
+enum Option         → typedef enum { Option_Kind_... } Option_Kind
+                       typedef struct K_Option { Option_Kind kind; union { ... } data; } K_Option
+```
+
+`MapKaulaTypeToC` 函数自动处理前缀转换：当类型名注册在 `structTypes` 中时，返回带 `K_` 前缀的 C 类型名。用户代码中直接使用 Kaula 原名（如 `Rectangle`），编译器在代码生成阶段统一替换为 `K_Rectangle`。
+
+## 函数生成 (funcgen.go)
+
+生成 C 函数：
+
+```c
+// Kaula 源码
+fn add(int a, int b) int {
+    return a + b
+}
+
+// 生成的 C 代码
+i64 add(i64 a, i64 b) {
+    return a + b;
+}
+```
+
+函数生成处理：
+- 参数类型映射
+- 返回类型映射
+- 函数体语句生成
+- KMM 作用域管理
+- 泛型实例化
+
+## 表达式生成 (exprgen.go)
+
+生成 C 表达式：
+
+```
+Kaula 表达式 → C 表达式
+a + b        → (a + b)
+a == b       → (a == b)
+!a           → (!a)
+&a           → (&a)
+obj.field    → (obj->field)           // 静态对象
+obj.field    → dynobj_get(obj, "field") // 动态对象
+arr[i]       → (arr[i])
+func(a, b)   → func(a, b)
+(i64)(x)     → ((i64)(x))
+```
+
+### 动态对象字面量 (exprgen.go)
+
+动态对象字面量 `object { name: value, ... }` 生成运行时动态对象创建代码：
+
+```c
+// Kaula: object { x: 10, y: 20 }
+// 生成的 C 代码
+static Object* _dynobj_lit_0 = NULL;
+if (_dynobj_lit_0 == NULL) {
+    _dynobj_lit_0 = (Object*)dynobj_create();
+    dynobj_set(_dynobj_lit_0, "x", dynobj_box_i64(10));
+    dynobj_set(_dynobj_lit_0, "y", dynobj_box_i64(20));
+}
+```
+
+- 空对象：`object()` → `(Object*)dynobj_create()`
+- 字段值自动装箱：整数 → `dynobj_box_i64`，浮点 → `dynobj_box_f64`，字符串 → 直接 `string`，布尔 → `dynobj_box_bool`
+- 对象字面量缓存在静态变量中，多次执行只初始化一次
+- 成员访问 `obj.field` 自动检测动态对象类型，生成 `dynobj_get(obj, "field")`
+
+## 语句生成 (stmtgen.go)
+
+生成 C 语句：
+
+```
+Kaula 语句 → C 语句
+if (cond) {}                       → if (cond) {}
+while (cond) {}                    → while (cond) {}
+for x in range(N) { body }        → for (long long _i_ = 0; _i_ < (N); _i_ += 1) { long long x = _i_; body }
+for x in range(s, e) { body }     → for (long long _i_ = (s); _i_ < (e); _i_ += 1) { long long x = _i_; body }
+for x in range(s, e, step) { }    → for (long long _i_ = (s); _i_ < (e); _i_ += (step)) { long long x = _i_; ... }
+                                     // step < 0 时条件自动改为 _i_ > (e)
+for x in arr { body }             → for (size_t _i_ = 0; _i_ < (arr).len; _i_++) { T x = arr.ptr[_i_]; body }
+return x                          → return x;
+break                             → break;
+continue                          → continue;
+```
+
+注：Kaula 不再支持 C 风格 `for(init; cond; update)`。所有计数循环通过 `range(...)` 表达，索引变量 `_i_` 由编译器管理，用户代码不可见。
+
+### Spend 语句 (stmtgen.go)
+
+spend 语句生成强制消费流代码，支持数组模式和枚举模式：
+
+**数组模式**：将目标包装为 Spendable → `spend_lock` → 逐子句 `spend_call`（标记消费并校验）→ `call(default)` 时 `spend_consume_all` → `spend_unlock`（校验全消费）→ destroy
+
+```c
+// Kaula: spend(arr) { call(1) { ... } call(2) { ... } }
+// 生成的 C 代码（arr 为长度 2 的数组）
+Spendable* _spd_1 = spendable_create(2);
+spendable_add(_spd_1, &(arr)[0]);
+spendable_add(_spd_1, &(arr)[1]);
+spend_lock(_spd_1);
+
+spend_call(_spd_1, 1);
+{ /* 元素 1 的消费逻辑 */ }
+
+spend_call(_spd_1, 2);
+{ /* 元素 2 的消费逻辑 */ }
+
+spend_unlock(_spd_1);        // 校验 remaining == 0，否则按资源泄漏终止
+spendable_destroy(_spd_1);
+```
+
+有 `call(default)` 时，对应位置生成 `spend_consume_all(_spd_1);` 而非 `spend_call`。
+运行时实现在 `src/spend_call.c`，语义与错误码见[强制消费流教程](tutorials/spend-and-call.md)。
+
+**枚举模式**：生成 `switch` 穷尽分发，`default` 分支为运行时安全网
+
+```c
+// Kaula: spend(color) { call(Red) { ... } call(Green) { ... } call(Blue) { ... } }
+// 生成的 C 代码
+{
+    Color_Kind _sp_kind = color.kind;
+    switch (_sp_kind) {
+        case Color_Kind_Red:
+            // ... 消费逻辑 ...
+            break;
+        case Color_Kind_Green:
+            // ... 消费逻辑 ...
+            break;
+        case Color_Kind_Blue:
+            // ... 消费逻辑 ...
+            break;
+        default:
+            spend_unreachable();
+            break;
+    }
+}
+```
+
+- 数组模式：`resolveSpendTarget` 解析目标类型，编译期确定元素个数
+- 枚举模式：`generateSpendEnum` 生成 switch-case 穷尽分发
+- `spend_unreachable()` 是枚举 default 分支的运行时安全网（编译期已证明不可达）
+- `arrayLens` 记录数组字面量长度，供 spend 强制消费流使用
+
+## 模板管理 (template.go)
+
+使用 Go 模板生成 C 代码框架：
+
+```go
+// templates/main.c.tmpl
+#include <stdio.h>
+#include <stdlib.h>
+
+// 类型定义
+{{.TypeDefinitions}}
+
+// 全局变量
+{{.GlobalVariables}}
+
+// 函数声明
+{{.FunctionDeclarations}}
+
+// 函数实现
+{{.FunctionImplementations}}
+
+// main 函数
+int main(int argc, char* argv[]) {
+    {{.MainBody}}
+    return 0;
+}
+```
+
+## 插件系统 (plugin.go)
+
+支持注册自定义代码生成插件：
+
+```go
+// 注册插件
+cg.RegisterPlugin("myPlugin", myPluginHandler)
+
+// 插件接口
+type Plugin interface {
+    Generate(node ast.Node) string
+    CanHandle(node ast.Node) bool
+}
+```
+
+## SOR 集成 (sor_codegen.go)
+
+将 SOR 分析结果集成到代码生成：
+
+- 生成 KMM 作用域清理代码
+- 插入所有权检查
+- 生成释放点代码
+- 池容量定义（`KMM_V4_POOL_SIZE`）
+
+## 源码映射 (sourcemap.go)
+
+生成 C 代码到 Kaula 源码的映射：
+
+```go
+type SourceMap struct {
+    CLine    int  // C 代码行号
+    KLLine   int  // Kaula 源码行号
+    KLColumn int  // Kaula 源码列号
+    KLFile   string // Kaula 源文件
+}
+```
+
+## 作用域管理
+
+```go
+// 进入新作用域
+cg.EnterScope("function_name")
+
+// 添加符号
+cg.AddSymbol("x", "int", false)
+
+// 查找符号
+symbol := cg.GetSymbol("x")
+
+// 退出作用域
+cg.ExitScope()
+```
+
+## 泛型实例化
+
+```go
+// 实例化泛型函数
+code, err := cg.InstantiateGeneric("max", []string{"int"}, line)
+
+// 泛型缓存
+type GenericInstanceCache struct {
+    instances map[string]string  // key: "funcName<typeArgs>"
+}
+```
+
+## 多翻译单元（Multi-TU）拆分
+
+被 `import` 的本地 `.kl` 各自生成**一份独立的 C 翻译单元**，由 C 编译器
+并行编译成 `.o` 后再链接。开关由 `config.Config.TUMode` 控制（编译器内部推导，
+不暴露给用户）：
+
+| TUMode 取值 | 含义 |
+| --- | --- |
+| `""` | 单 TU（默认，也是被验证过的基线） |
+| `"entry"` | 入口 TU：生成 `main` 与顶层语句 |
+| `"definition"` | 被 import 的文件：只生成自己的部分，不含 `main` |
+
+### 跨 TU 可见性
+
+一个 TU 看不到另一个 TU 里的任何东西，因此需要三段"公共接口"：
+
+1. **prelude**（`Config.TUPrelude`）— 跨文件类型定义，前置到每个 TU 的
+   `#include` 之后、前置声明之前。用**内容哈希**做 include guard
+   （不是类型名：两个库各自的 `struct A` 内容不同、必须都保留）。
+2. **header**（`TUArtifacts().Header`）— extern 变量（保留 `const` 限定符）、
+   泛型实例原型、文件作用域 `static` 函数原型、`pub`/`export` 函数原型、
+   类构造函数原型。同样带内容哈希 guard。
+3. **泛型实例归属** — `MangleGenericName` 产出的实例名全局唯一，
+   同一个实例只能有一个 TU 出函数体，其余 TU 只出原型
+   （`deferredGeneric`）。
+
+归属规则（`buildGenericOwnerIndex`）：
+
+- 第 1 优先：**定义泛型模板**的文件本身也实例化了该实例 → 归它；
+- 第 2 优先：全体实例化者中绝对路径最小者（保证确定性）；
+- 入口 TU 永远不定义库实例（`entryTUPath = ""`）。
+
+### 两遍编译
+
+| 遍次 | 目的 | 是否产出 C 源 |
+| --- | --- | --- |
+| probe | 收集每个文件的实例清单、泛型定义、接口段 | 否 |
+| 正式 | 带完整 `TUPrelude` + `TUGenericOwner` 生成各 TU | 是 |
+
+probe 用**一个共享 state** 递归全部顶层文件：每个 `.kl` 只解析 + codegen 一次。
+早期实现是"每个顶层文件各建一个 state、各递归整条链"，12 个库串成链时
+同一批文件被跑 12 遍（O(N²)），codegen 从 18ms 涨到 110ms。
+
+### 参数拆分（`multi_tu.go`）
+
+单 TU 的 clang 命令行里混着"编译期标志"和"链接期输入"，多 TU 必须切开：
+
+```text
+-x c <入口源> ...flags... [-x none <链接输入...>]
+```
+
+`splitLinkInputs` 以 `-x none` 为界切成 `compileFlags` / `entryInput` /
+`linkInputs` 三段，`linkFlagsForLink` 再剔除 `-x c <输入>` 与 `-include-pch`。
+**注意 `-` 本身以 `-` 开头却是输入**（stdin 占位符），不能用"是否以 `-`
+开头"判断选项；漏掉它会得到
+`clang: error: -E or -x required when input is from standard input`。
+（gcc 侧没有 `-include-pch` 可剥——它的 PCH 消费是 `-I <gch 目录>`，与
+其余 `-I` 无异，见 [PCH 家族适配](core-runtime.md#pch-的编译器家族适配clang--gcc)。）
+
+### 落盘与并行
+
+- 目录：`<cache>/tmp/kaula-tu/<sha256(编译器指纹 + 全部源内容)[:16]>`；
+- 每个 TU 文件名 = `原基名 + 路径哈希`，避免不同目录下的同名 `.kl` 互相覆盖；
+- 内容未变的 TU 源跳过重写（避免 mtime 抖动引发下游误判）；
+- 并行度 `tuWorkers()`：默认 `min(NumCPU, 16)`，`KAULAC_TU_JOBS` 可覆盖；
+- 失败**不静默回退单 TU**，全部 TU 都尝试后汇总报错（按文件名排序，
+  与 goroutine 完成顺序无关）。
+
+## KMM V4 内存管理
+
+KMM V4 是 Kaula 的默认内存分配器，代码生成器负责将 Kaula 层的内存操作转换为高效的 C 代码。
+
+### 设计架构
+
+KMM V4 采用 **per-thread heap + bump allocation + scope-based reclamation** 架构：
+
+- **Per-Thread Heap**：每个线程从全局池批量获取内存块，分配时只推进线程本地 offset
+- **Bump Allocation**：分配即指针推进，O(1) 复杂度
+- **Scope-based Reclamation**：作用域退出时批量回收，`kmm_v4_free` 为 no-op
+
+### 代码生成的分配路径
+
+KMM V4 分配器（`kmm_v4_alloc` 系列）与系统分配器（`std_malloc`/`std_free`）是严格分离的两个系统：
+
+- **KMM V4 分配器**：`kmm_v4_alloc`、`kmm_v4_calloc`、`kmm_v4_alloc_auto` 等 — 从线程本地 bump pool 分配，作用域退出自动回收
+- **系统分配器**：`std_malloc`、`std_free` — 包装系统 malloc/free，内存需手动释放，不受 scope 管理
+
+编译器根据模式处理 `std_malloc`：
+- **freestanding 模式**（无 libc）：`std_malloc` 重写为 `kmm_v4_alloc_auto`，从静态池分配
+- **hosted 模式**（默认）：`std_malloc` 保留为系统 malloc 调用，**不重写**，与 KMM 严格区分
+
+#### 1. kmm_v4_alloc_auto 内联优化
+
+编译器将 KMM 分配调用内联为 `kmm_v4_alloc_auto`：
+
+```kaula
+// Kaula 源码
+auto buf = std.memory.kmm_v4_alloc(1024)
+```
+
+```c
+// 生成的 C 代码（inline 展开）
+void* buf = kmm_v4_alloc_auto(1024);
+```
+
+**关键规则**：
+- `kmm_v4_alloc_auto` 是 `static inline` 函数，编译器可完全内联
+- 消除函数调用开销，分配路径仅剩指针推进 + 比较
+
+#### 2. 作用域自动插入
+
+代码生成器跟踪 KMM 作用域深度，在函数入口/出口自动插入 scope 操作：
+
+```kaula
+// Kaula 源码
+fn process() {
+    auto a = std.memory.kmm_v4_alloc(64)
+    auto b = std.memory.kmm_v4_alloc(128)
+    // ... 使用 a, b ...
+}
+```
+
+```c
+// 生成的 C 代码
+void process(void) {
+    kmm_v4_scope_push();           // 函数入口：保存 thread heap offset
+    void* a = kmm_v4_alloc_auto(64);
+    void* b = kmm_v4_alloc_auto(128);
+    // ... 使用 a, b ...
+    kmm_v4_scope_pop();            // 函数出口：恢复 offset，批量回收
+}
+```
+
+**作用域插入策略**：
+- `kmm_v4_scope_push()` 插入在函数入口（prologue 之后）
+- `kmm_v4_scope_pop()` 插入在所有退出路径（return/break/continue + 函数末尾）
+- 嵌套作用域支持最大深度 1024 层（`KMM_V4_MAX_SCOPE_DEPTH`，可用 `-DKMM_V4_MAX_SCOPE_DEPTH=N` 覆盖）。
+  该上限只约束**会 push 作用域的层数**：纯计算函数 codegen 不生成作用域
+  （`shouldUseKMMScopeForFunc`），所以不受它限制。
+- 函数级作用域用 `KMM_V4_SCOPE_NAMED("K_foo")` 发射，作用域栈溢出时的 FATAL
+  信息会打印 `innermost managed scope: K_foo`（TLS 单指针记录归属，每帧仍是
+  16 字节 `{base, offset}`）。
+- 编译期对"递归且每层 push 作用域"的函数给出 `recursion_scope_depth` 警告，
+  提示深度上限与三种处理方式（改循环 / `#[no_kmm]` / 放宽宏）。
+
+**尾调用改写（TCO）**：
+- 触发条件：受作用域托管（`useKMM`）、无捕获、self-call 位于 `return f(...)`
+  返回值位置、实参个数与形参一致、实参是无副作用的简单表达式
+  （标识符/字面量/一元/二元/括号/类型转换）。
+- 改写形态：函数体被包进 `for (;;) { checkpoint; KMM_V4_SCOPE_NAMED {...} } `，
+  尾调用点发射"本层 free → `kmm_v4_survivor_rewind` → `kmm_v4_scope_pop` →
+  实参写回形参 → `goto` 循环顶部"，因此**每轮复用同一个 C 栈帧**，
+  递归深度不再受 `KMM_V4_MAX_SCOPE_DEPTH` / C 栈限制。
+- 语义等价性由"尾调用点执行与 return 完全相同的本层回收动作"保证；
+  实参若引用本帧会被回收的对象（指针/String 局部变量），生成期检测到后退回
+  真实调用（该函数仍受深度上限约束，并保留 `recursion_scope_depth` 警告）。
+- 不改写的场景：互递归、非尾递归、带捕获的嵌套函数、`#[no_kmm]`/`#[inline]`
+  函数。纯计算递归无需 Kaula 层 TCO——clang -O2 的 TailRecursionElimination
+  已经把它转成循环。
+
+```go
+// 代码生成器中的 KMM 作用域管理
+cg.kmmScopeDepth++
+
+// 生成作用域开始代码
+cg.emit("kmm_v4_scope_push();")
+
+// 生成函数体
+cg.generateBody(func.Body)
+
+// 在所有退出路径插入 scope_pop
+for _, exitPoint := range func.ExitPoints {
+    cg.emitAt(exitPoint, "kmm_v4_scope_pop();")
+}
+```
+
+#### 3. free 消除
+
+KMM V4 中 `kmm_v4_free` 是 no-op，代码生成器不生成任何 free 调用：
+
+```kaula
+// Kaula 源码（如果用户写了 free）
+std.memory.kmm_v4_free(buf)
+```
+
+```c
+// 生成的 C 代码
+// (无代码生成，kmm_v4_free 是空操作)
+```
+
+### 分配路径生成
+
+代码生成器为不同的分配模式生成最优代码：
+
+```kaula
+// 1. KMM 池普通分配
+auto p = std.memory.kmm_v4_alloc(64)
+// → kmm_v4_alloc_auto(64)
+
+// 2. 零初始化分配
+auto arr = std.memory.kmm_v4_calloc(100, sizeof_int)
+// → kmm_v4_calloc(100, sizeof(int))
+
+// 3. 字符串复制
+auto s = std.memory.kmm_v4_strdup("hello")
+// → kmm_v4_strdup("hello")
+```
+
+### #[no_kmm] 属性
+
+使用 `#[no_kmm]` 属性可以在特定函数中禁用 KMM 作用域管理（但 `std_malloc` 仍保持系统 malloc 语义）：
+
+```kaula
+#[no_kmm]
+fn raw_buffer() void* {
+    // 此函数内不插入 scope_push/pop
+    return std.memory.std_malloc(1024)
+}
+```
+
+### SOR 模式下的集成
+
+启用 `--sor` 时，SOR 分析结果指导代码生成：
+
+```go
+// SOR 分析传递池容量给代码生成
+if config.SOR {
+    sorResult := sor.AnalyzeFull(program)
+    codegen.SetSORResult(sorResult)
+    
+    // 生成 KMM 池大小定义
+    // #define KMM_V4_POOL_SIZE <poolSize>
+}
+```
+
+SOR 模式下的额外优化：
+- **逃逸分析**：无逃逸对象可省略 scope_push/pop
+- **活跃性分析**：精确计算作用域释放点
+- **池容量优化**：根据对象大小总和自动计算 `KMM_V4_POOL_SIZE`
+
+### 性能数据
+
+KMM V4 的 inline 机制带来显著性能提升（10M 次迭代基准测试）：
+
+| 场景 | KMM V4 (inline) | malloc/free | 加速比 |
+|------|-----------------|-------------|--------|
+| 纯分配吞吐量（64B, 1M 次） | 3.5 ms | 72.7 ms | **20.5x** |
+| 16B 小对象分配+回收 | 51.8 ms | 634.3 ms | **12.2x** |
+| 64B 对象分配+回收 | 65.9 ms | 661.5 ms | **10.0x** |
+| 混合负载（16~1024B） | 287.9 ms | 658.1 ms | **2.2x** |
+
+## API
+
+```go
+// 创建代码生成器
+cg := NewCodeGenerator(config)
+
+// 生成代码
+cCode := cg.Generate(program)
+
+// 设置 SOR 结果
+cg.SetSORResult(sorResult)
+
+// 设置标准库配置
+cg.SetStdlibConfig(stdlibConfig)
+
+// 设置源文件
+cg.SetSourceFile("main.kl")
+```

@@ -1,0 +1,7 @@
+{
+  "base":   [],
+  "memory": ["base"],
+  "string": ["memory"],
+  "math":   ["base"],
+  "io":     ["string", "math"]
+}

@@ -1,0 +1,140 @@
+// Kaula 语言层 TCP 订单服务 —— 负载对齐 C 版（kaula_order_server.c）
+// 每请求：checksum256(256轮) + parse seq/qty/price + KMM业务分配+64轮校验
+//        + sleep 200us + 响应 "R,<seq>,<hex8 ck>,<total>\n"（同 C 版格式）
+import std.io
+import std.memory
+import std.time
+
+extern fn kaula_svc_listen(port: i32) -> i32
+extern fn kaula_svc_accept(lfd: i32) -> i32
+extern fn kaula_tls_io_result() -> i32
+extern fn kaula_close(fd: i32) -> i32
+extern fn net_recv(fd: i32, buf: *u8, len: i32) -> i64
+extern fn kaula_svc_send(fd: i32, buf: *u8, len: i32) -> i32
+
+fn checksum256_at(s: *u8, off: i32, n: i32) -> u32 {
+    u32 h = 0x811C9DC5
+    for round in range(256) {
+        for i in range(n) {
+            h = (h ^ as<u32>(s[off + i])) * 16777619 + as<u32>(round)
+        }
+    }
+    return h
+}
+
+// 解析第 k 个逗号分隔字段的十进制整数（0 起始："O,<seq>,<item>,<qty>,<price>"）
+fn parse_field_at(line: *u8, off: i32, n: i32, k: i32) -> i32 {
+    i32 i = 0
+    i32 f = 0
+    while (i < n && f < k) {
+        if (line[off + i] == 44) { f = f + 1 }
+        i = i + 1
+    }
+    i32 v = 0
+    while (i < n && line[off + i] != 44) {
+        v = v * 10 + (line[off + i] - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn itoa(v: i32, out: *u8, base: i32) -> i32 {
+    i32 t = v
+    i32 nd = 1
+    while (t >= 10) { t = t / 10; nd = nd + 1 }
+    i32 p = base + nd - 1
+    t = v
+    while (t > 0) {
+        out[p] = 48 + (t % 10)
+        t = t / 10
+        p = p - 1
+    }
+    return nd
+}
+
+// 8 位 16 进制输出（对齐 C 版 %08x；u32→i64 保证非负余数）
+fn itohex8(v: u32, out: *u8, base: i32) -> i32 {
+    i64 t = as<i64>(v)
+    i32 p = base + 7
+    for k in range(8) {
+        i64 d = t % 16
+        if (d < 10) {
+            out[p] = 48 + as<i32>(d)
+        } else {
+            out[p] = 87 + as<i32>(d)
+        }
+        t = t / 16
+        p = p - 1
+    }
+    return 8
+}
+
+conc fn conn_task(fd: i32) -> i32 {
+    u8* buf = std.memory.kmm_v4_alloc(1024)
+    u8* resp = std.memory.kmm_v4_alloc(128)
+    while (true) {
+        net_recv(fd, buf, 1024)
+        i32 got = kaula_tls_io_result()
+        if (got <= 0) {
+            kaula_close(fd)
+            return 0
+        }
+        i32 off = 0
+        while (off < got) {
+            i32 n = 0
+            while (off + n < got && buf[off + n] != 10) { n = n + 1 }
+            if (off + n >= got) { break }
+            // 解析（对齐 C 版 strtoul/strtol ×3 + item 跳过）
+            i32 seq = parse_field_at(buf, off, n, 1)
+            i32 qty = parse_field_at(buf, off, n, 3)
+            i32 price = parse_field_at(buf, off, n, 4)
+            u32 ck = checksum256_at(buf, off, n)
+            i32 total = qty * price
+            // 业务分配 + 64 轮混合校验（对齐 C 版 BizRecord + mixed_verify）
+            u8* r = std.memory.kmm_v4_alloc(64)
+            r[0] = as<u8>(seq % 256)
+            r[1] = as<u8>(qty % 256)
+            r[2] = as<u8>(price % 256)
+            i32 h = 0
+            for k in range(64) {
+                h = (h ^ as<i32>(r[k])) + seq + qty + price
+                h = h * 31 + k
+            }
+            ck = ck ^ as<u32>(h)
+            // 响应：R,<seq>,<hex8 ck>,<total>\n
+            std.time.time_sleep_us(200)
+            resp[0] = 82
+            resp[1] = 44
+            i32 pos = itoa(seq, resp, 2)
+            pos = pos + 2
+            resp[pos] = 44
+            pos = pos + 1
+            pos = itohex8(ck, resp, pos) + pos
+            resp[pos] = 44
+            pos = pos + 1
+            pos = itoa(total, resp, pos) + pos
+            resp[pos] = 10
+            pos = pos + 1
+            kaula_svc_send(fd, resp, pos)
+            off = off + n + 1
+        }
+    }
+    kaula_close(fd)
+    return 0
+}
+
+fn main() -> i32 {
+    i32 lfd = kaula_svc_listen(8126)
+    if (lfd < 0) {
+        std.io.println("listen failed")
+        return 1
+    }
+    std.io.println("kl full on 8126")
+    while (true) {
+        i32 cfd = kaula_svc_accept(lfd)
+        if (cfd >= 0) {
+            spawn conn_task(cfd)
+        }
+    }
+    return 0
+}

@@ -1,0 +1,26 @@
+import std.io
+
+fn add(i32 a, i32 b) i32 {
+    return a + b
+}
+
+fn greet(string name) {
+    std.io.println("Hello, ", name)
+}
+
+fn factorial(i32 n) i32 {
+    if (n <= 1) {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn main() {
+    i32 result = add(10, 20)
+    std.io.println("10 + 20 = ", result)
+
+    greet("Kaula")
+
+    i32 fact = factorial(5)
+    std.io.println("5! = ", fact)
+}

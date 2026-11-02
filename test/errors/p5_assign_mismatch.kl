@@ -1,0 +1,8 @@
+import std.io
+
+fn main() {
+    i32 n = 42
+    string s = "hi"
+    n = s
+    std.io.println(n)
+}

@@ -1,0 +1,5 @@
+import std.io
+
+fn g() { return 42 }
+
+fn main() { g() }

@@ -1,0 +1,101 @@
+# leak_container_escape.kl —— 方案 A' 的反向护栏（P2 边界）
+#
+# 与 leak_writethrough.kl 结构相同，但**容器随返回值逃出函数**：
+#
+#     fn build(i64 n) i64 {
+#         Node* cur = alloc(16)
+#         Node* head = cur
+#         while ... { nd = alloc(16); cur.next = as<i64>(nd); cur = nd }
+#         return as<i64>(head)      # ← head 与 cur 是别名，整类都逃逸
+#     }
+#
+# 此时 cur / head 都**不是**安全局部容器（head 被 return、且与 cur 互为别名）。
+# A' 必须整体退回旧路径（promote + 回卷）——对象若留在 bump 区，
+# 函数出口 scope_pop 会把 return 出去的链一并回收，调用方拿到悬垂指针。
+#
+# 判据：回读求和必须正确（抓悬垂/成环），且跨轮次稳定。
+
+import std.io
+import std.memory
+
+struct Node {
+    value: i64
+    next: i64
+}
+
+# 容器逃逸：head/cur 是别名，head 随返回值离开函数
+fn build_chain_escaped(i64 n) i64 {
+    Node* cur = std.memory.kmm_v4_alloc(16)
+    cur.value = -1
+    cur.next = -1
+    Node* head = cur
+    i64 i = 0
+    while i < n {
+        Node* nd = std.memory.kmm_v4_alloc(16)
+        nd.value = i
+        nd.next = -1
+        cur.next = as<i64>(nd)
+        cur = nd
+        i += 1
+    }
+    return as<i64>(head)
+}
+
+fn sum_chain(i64 head, i64 n) i64 {
+    i64 s = 0
+    i64 p = head
+    i64 steps = 0
+    while p != -1 && steps <= n + 4 {
+        Node* np = as<Node*>(p)
+        s += np.value
+        p = np.next
+        steps += 1
+    }
+    if steps > n + 4 {
+        std.io.println("FAIL container_escape: chain has a cycle (steps=", steps, ")")
+        return -1
+    }
+    return s
+}
+
+fn check(bool cond, string label) {
+    if !cond {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    i64 n = 2000
+    i64 rounds = 50
+    # 期望 = 头节点 value(-1) + 节点 value(0..n-1)
+    i64 expect = -1
+    i64 i = 0
+    while i < n {
+        expect += i
+        i += 1
+    }
+
+    # 逃逸容器的链必须完整：head 返回后仍可读，内容正确
+    i64 head0 = build_chain_escaped(n)
+    i64 s0 = sum_chain(head0, n)
+    check(s0 == expect, "escaped container chain content")
+
+    # 跨多轮构建（每轮链都被 return 出去、上一层不再引用）：
+    # 旧路径下每次调用都会 promote 整条链；这里只要求**回读正确**，
+    # 不要求水位不涨（那正是"用泄漏换正确性"的既定代价）。
+    i64 r = 1
+    i64 lastHead = head0
+    while r < rounds {
+        lastHead = build_chain_escaped(n)
+        r += 1
+    }
+    i64 sL = sum_chain(lastHead, n)
+    check(sL == expect, "escaped container chain content after many rounds")
+
+    # 再回读第一轮的链：若 A' 错误地把逃逸容器当安全局部容器，
+    # 第一轮那条链会在后续调用中悬垂/被覆盖 → 内容错乱。
+    i64 s0b = sum_chain(head0, n)
+    check(s0b == expect, "first escaped chain survives later rounds")
+
+    std.io.println("PASS leak_container_escape")
+}

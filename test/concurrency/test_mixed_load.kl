@@ -1,0 +1,103 @@
+// Kaula 并发内核 · 混载压测（kl 侧，真并发窗口）
+//
+// 与 C 层 bench_mixed 同口径：计算任务 + 挂起任务混载。
+// 编译器不支持 Handle 数组，用固定 8 变量作为并发窗口：
+// 每批 spawn 8 个（不 await）→ 再逐个 await → 校验返回值。
+//
+// 判据（外部记录，不依赖内核调试钩子）：
+//   errors == 0   结果精确匹配（await 误报 / 任务丢失 / double 都会暴露为返回值错）
+//   耗时打印      混载吞吐的基准数字
+//
+// 场景 A：纯计算 conc fn（无挂起）
+// 场景 B：10% 任务含 time_sleep(2ms)（走 IoDriver，可插桩 IO 不占线程）
+
+import std.io
+import std.time
+
+conc fn compute(i64 input) -> i64 {
+    return input + 1
+}
+
+conc fn slow(i64 input) -> i64 {
+    std.time.time_sleep(2)
+    return input + 1000
+}
+
+// 统一入口：按 idx%100 < pct 分流到 slow/compute。
+// conc fn 内顺序调用 conc fn（状态机合并），挂起点在 slow 内部。
+conc fn task(i64 input, i64 pct) -> i64 {
+    if input % 100 < pct {
+        return slow(input)
+    }
+    return compute(input)
+}
+
+// 并发窗口 = 8：spawn 全部 → await 全部
+fn run_8(i64 base, i64 pct) -> i64 {
+    i64 e0 = 0
+    Handle h0 = spawn task(base + 0, pct)
+    Handle h1 = spawn task(base + 1, pct)
+    Handle h2 = spawn task(base + 2, pct)
+    Handle h3 = spawn task(base + 3, pct)
+    Handle h4 = spawn task(base + 4, pct)
+    Handle h5 = spawn task(base + 5, pct)
+    Handle h6 = spawn task(base + 6, pct)
+    Handle h7 = spawn task(base + 7, pct)
+    i64 r0 = h0.await
+    i64 r1 = h1.await
+    i64 r2 = h2.await
+    i64 r3 = h3.await
+    i64 r4 = h4.await
+    i64 r5 = h5.await
+    i64 r6 = h6.await
+    i64 r7 = h7.await
+    // 校验：按 idx%100<10 判定任务类型（base 取批起始，8 连续，类型由 idx 决定）
+    for j in range(8) {
+        i64 idx = base + j
+        i64 got = 0
+        if j == 0 { got = r0 }
+        if j == 1 { got = r1 }
+        if j == 2 { got = r2 }
+        if j == 3 { got = r3 }
+        if j == 4 { got = r4 }
+        if j == 5 { got = r5 }
+        if j == 6 { got = r6 }
+        if j == 7 { got = r7 }
+        if idx % 100 < pct {
+            if got != idx + 1000 {
+                e0 += 1
+                std.io.println("ERR slow idx=", idx, " got=", got)
+            }
+        } else {
+            if got != idx + 1 {
+                e0 += 1
+                std.io.println("ERR compute idx=", idx, " got=", got)
+            }
+        }
+    }
+    return e0
+}
+
+fn main() -> i32 {
+    i64 n = 100000
+    i64 pct = 10
+
+    i64 t0 = std.time.time_now_ms()
+    i64 errA = 0
+    for b in range(n / 8) {
+        errA += run_8(b * 8, 0)
+    }
+    i64 t1 = std.time.time_now_ms()
+    std.io.println("[A] compute-only  n=", n, " err=", errA, " ", (t1 - t0), " ms")
+
+    i64 t2 = std.time.time_now_ms()
+    i64 errB = 0
+    for b in range(n / 8) {
+        errB += run_8(b * 8, pct)
+    }
+    i64 t3 = std.time.time_now_ms()
+    std.io.println("[B] mixed(10% io) n=", n, " err=", errB, " ", (t3 - t2), " ms")
+
+    std.io.println("mixed_load ok err=", (errA + errB))
+    return 0
+}

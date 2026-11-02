@@ -1,0 +1,6 @@
+fn main() i32 {
+ i64 seed = 40
+ auto add = fn(i64 x) -> i64 { return seed + x }
+ if (add(2) != 42) { return 1 }
+ return 0
+}
