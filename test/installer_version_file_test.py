@@ -243,14 +243,20 @@ class InstalledBinarySmokeTest(unittest.TestCase):
             exe = install_root / "bin" / binary.name
 
             try:
+                # 故意不用 text=True：banner 含终端图形字符，其 UTF-8 字节序列在
+                # Windows 默认编码 (cp1252) 下不可解码，text=True 会让 subprocess 的
+                # readerthread 抛 UnicodeDecodeError 并把 stdout 读成空串，症状层
+                # 于是误报"版本号为空"。这里按字节捕获、自行容错解码。
                 proc = subprocess.run(
-                    [str(exe), "--version"], capture_output=True, text=True,
+                    [str(exe), "--version"], capture_output=True,
                     timeout=120, cwd=str(tmp))
             except (OSError, subprocess.TimeoutExpired) as exc:
                 self.fail(f"运行 {exe} --version 失败: {exc}")
 
-            out = (proc.stdout or "") + (proc.stderr or "")
+            out = ((proc.stdout or b"") + (proc.stderr or b"")).decode(
+                "utf-8", errors="replace")
             self.assertEqual(proc.returncode, 0, f"--version 退出码非 0:\n{out}")
+            self.assertTrue(out.strip(), "--version 无任何输出（捕获/解码失败）")
 
             plain = strip_ansi(out)
             self.assertNotIn("dev-local", plain,
