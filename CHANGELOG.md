@@ -51,6 +51,14 @@
     产出的 `kaula_1.1.377_amd64.deb` 解包后包内 `kaulac --version` = `v1.1.377`。
   - `.gitignore` 补 `release/`（打包产物目录，此前未忽略，`git add -A` 会误提交）。
 
+- **修复 `test.yml` linux job 在 ubuntu-latest 镜像升级后必然挂死（CI 环境漂移）**：
+  ubuntu-latest 已切到 Ubuntu 26.04（resolute），`qemu-system-riscv64` 变为
+  virtual package（候选 `qemu-system-riscv` / `qemu-system-riscv-hwe`），按旧包名
+  `apt-get install -y qemu-system-riscv64` 报 `has no installation candidate` 并
+  exit 100 —— 装依赖这一步就在所有测试之前，导致 linux job 全线 skipped、Test
+  工作流红。改为先按旧名安装（兼容 22.04 / 24.04 镜像），失败再装真实包名，
+  测试覆盖范围不变。
+
 - **修复 PCH 指纹阶段把文件系统根 `/` 纳入递归导致编译挂死（阻塞性）**：
   freestanding 搜索路径为 clang `-I` 前缀解析会经 `filepath.Dir` 逐级上溯父目录，
   该膨胀后的 `validFreePaths` 原先被整体喂给 `pchHeadersFingerprint` 的

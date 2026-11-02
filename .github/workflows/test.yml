@@ -72,7 +72,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install Clang (toolchain + cross targets)
-        run: sudo apt-get update && sudo apt-get install -y clang lld llvm qemu-system-x86 qemu-system-arm qemu-system-riscv64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm qemu-system-x86 qemu-system-arm
+          # Ubuntu 26.04（ubuntu-latest 当前镜像）起 qemu-system-riscv64 成了
+          # virtual package，按旧包名直装报 "has no installation candidate"
+          # 并 exit 100，整个 linux job 在装依赖阶段就挂掉。候选是
+          # qemu-system-riscv / qemu-system-riscv-hwe。这里先按旧名装（兼容
+          # 22.04 / 24.04 镜像），失败再装真实包名，不改变测试覆盖范围。
+          sudo apt-get install -y qemu-system-riscv64 || sudo apt-get install -y qemu-system-riscv
 
       - name: Build toolchain
         run: |
