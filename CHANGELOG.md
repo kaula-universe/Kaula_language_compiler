@@ -9,6 +9,15 @@
 
 ## [Unreleased]
 
+### Added
+- **全标准库 adopt 胶水层**：为 39 个 std 模块补齐模块级 `.kl` 胶水层（`std/<mod>/<mod>.kl`），
+  用 `type X = adopt X*` 包装各模块特有的不透明句柄（JsonValue/Regex/DBConnection/Socket/
+  TLSContext/SSHSession/HttpServer 等 70+ 类型），运行时零成本（C 侧即底层指针），编译期
+  强类型隔离。`std/ctypes.kl` 同步扩充公共 C 标量别名（CUint/CLong/CFloat/CDouble/BoolT 等）
+  与全库句柄类型索引，`import std.ctypes` 即可用全部类型安全句柄。
+- **parser 修复**：`parseTypeStringImpl` 在连续标识符 token 间补空格，修复 `adopt unsigned int`、
+  `adopt long long` 等多词 C 类型被拼成 `unsignedint`、`longlong` 导致 C 编译失败的 bug。
+
 ### Documentation
 - **全量审计文档中的「未完成 / 不可用」声明，去伪存真并集中管理**：
   - 剔除「代码已实现、文档仍写未完成」的过时说法：

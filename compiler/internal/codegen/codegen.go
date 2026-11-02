@@ -2113,6 +2113,9 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			 *     `#include "<路径>.kl"` 或把本地库名当成 std 模块处理。
 			 *   - std / freestanding / pkglib 模块：每个 TU 都要自己的头，
 			 *     照旧计入。
+			 *   - std 模块胶水层：parser 自动把 std/<mod>/<mod>.kl 设为 IsLocal=true
+			 *     （以便类型声明注入主文件），但模块名仍以 std./freestanding. 开头，
+			 *     必须同时计入 importedModules 才能 include 正确的 C 头文件。
 			 */
 			if !importStmt.IsLocal {
 				importedModules[importStmt.Module] = true

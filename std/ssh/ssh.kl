@@ -1,0 +1,10 @@
+// ssh.kl — std.ssh 模块胶水层
+//
+// 包装该模块中 Kaula 侧不兼容的 C 句柄类型，统一走 adopt 零成本抽象。
+// 用户代码 import std.ssh 时本文件自动加载，句柄类型在主文件可见。
+// C 侧零成本：adopt 类型即底层 C 指针，无装箱、无拆箱。
+
+import std.ctypes
+
+type SSHChannel = adopt SSHChannel*
+type SSHSession = adopt SSHSession*

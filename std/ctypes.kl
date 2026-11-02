@@ -9,30 +9,190 @@
 // adopt 后直接写类型名，编译器自动推断：
 //   - Kaula 已知类型（i64、*u8 等）→ 走 Kaula 类型映射
 //   - 外部 C 类型（size_t、FILE* 等）→ 直接透传到 C
+//
+// 本文件是所有 std 模块胶水层的公共依赖；各模块 <mod>.kl 直接
+// import 本文件并复用其中的 C 标量别名，仅声明模块特有的不透明句柄。
 
+// ═══════════════════════════════════════════════════════════════
 // 平台相关整数类型（#[transparent]：可比较可运算）
+// ═══════════════════════════════════════════════════════════════
 #[transparent]
 type Size = adopt size_t       // 无符号整数，sizeof 的返回类型
 #[transparent]
 type SSize = adopt ssize_t     // 有符号整数，read/write 返回类型
 #[transparent]
-type IntPtr = adopt intptr_t   // 能容纳指针的有符号整数
+type IntPtr = adopt intptr_t    // 能容纳指针的有符号整数
 #[transparent]
-type UIntPtr = adopt uintptr_t // 能容纳指针的无符号整数
+type UIntPtr = adopt uintptr_t  // 能容纳指针的无符号整数
 
-// C 原生 int（32 位，与 Kaula 默认 int64 区分）
+// ═══════════════════════════════════════════════════════════════
+// C 原生标量类型（与 Kaula 默认定宽类型区分）
+// ═══════════════════════════════════════════════════════════════
 #[transparent]
-type CInt = adopt int
+type CInt = adopt int           // C 的 int（32 位），与 Kaula i64 默认区分
+#[transparent]
+type CUint = adopt unsigned int // C 的 unsigned int
+#[transparent]
+type CLong = adopt long          // C 的 long（LP64=64 位，Win64=32 位）
+#[transparent]
+type CULong = adopt unsigned long
+#[transparent]
+type CLongLong = adopt long long
+#[transparent]
+type CShort = adopt short
+#[transparent]
+type CUShort = adopt unsigned short
+#[transparent]
+type CChar = adopt char          // C 的 char（可能有符号也可能无符号）
+#[transparent]
+type CUChar = adopt unsigned char
+#[transparent]
+type CSChar = adopt signed char
 
-// C 字符串（const char*）—— 不透明句柄，禁止直接比较
-type CStr = adopt const char*
+// C 浮点类型（C 的 float/double 与 Kaula f32/f64 同宽，但语义独立）
+#[transparent]
+type CFloat = adopt float
+#[transparent]
+type CDouble = adopt double
 
-// C 可变字符串（char*）—— 用于函数指针传递、string.ptr 赋值、FFI 边界
-// 与 CStr(const char*) 区分：cstring 是可变指针，可接收 string.ptr
-type cstring = adopt char*
+// C 的 bool（stdbool.h）—— std/base/types.h 里 typedef bool bool_t
+#[transparent]
+type BoolT = adopt bool_t
 
-// StringBuilder 句柄（struct StringBuilder*）—— 字符串构建器，带 SSO 优化
-// C 侧已有 typedef struct {...} StringBuilder;，adopt 检测到同名类型时
-// 不重复生成 typedef，直接复用 C 侧类型，零成本别名。
-// 不透明句柄，禁止直接比较，通过 std.string.string_builder_* 函数操作。
+// ═══════════════════════════════════════════════════════════════
+// C 字符串指针（不透明句柄，禁止直接比较）
+// ═══════════════════════════════════════════════════════════════
+type CStr = adopt const char*   // C 只读字符串
+type cstring = adopt char*      // C 可变字符串（FFI 边界、string.ptr 赋值）
+type CStrList = adopt const char** // 以 NULL 结尾的字符串数组（argv 等）
+
+// ═══════════════════════════════════════════════════════════════
+// C void* 通用指针（不透明，用于内存缓冲区 FFI）
+// ═══════════════════════════════════════════════════════════════
+type CVoid = adopt void*        // 通用可写缓冲区
+type CConstVoid = adopt const void* // 通用只读缓冲区
+
+// ═══════════════════════════════════════════════════════════════
+// StringBuilder 句柄（struct StringBuilder*）
+// ═══════════════════════════════════════════════════════════════
 type StringBuilder = adopt StringBuilder*
+
+// ═══════════════════════════════════════════════════════════════
+// 全标准库模块不透明句柄（adopt 零成本抽象）
+//
+// 这些类型仅以指针形式出现在 stdlib.json 的函数签名中，
+// 没有按值传递的场景，因此用 adopt X* 包装为不透明句柄。
+// C 侧零成本：adopt 类型即底层 C 指针，无装箱、无拆箱。
+// 禁止直接比较，仅通过对应模块的 std.<mod>.<fn> 函数操作。
+// ═══════════════════════════════════════════════════════════════
+
+// —— io / fs ——
+type IoFile = adopt File              // std.io: C 侧 typedef FILE* File
+type AsyncIO = adopt AsyncIO          // std.io: typedef void* AsyncIO
+type MemoryStream = adopt MemoryStream*
+type BufferedWriter = adopt BufferedWriter*
+type BufferedReader = adopt BufferedReader*
+type DirIterator = adopt DirIterator*
+type FileInfo = adopt FileInfo*
+
+// —— error ——
+type Error = adopt Error*
+type ErrorType = adopt ErrorType      // 枚举（透明标量）
+
+// —— json ——
+type JsonValue = adopt JsonValue*
+
+// —— regex ——
+type Regex = adopt Regex*
+type RegexMatch = adopt RegexMatch*
+type RegexCapture = adopt RegexCapture*
+
+// —— net / tls / ssh / web ——
+type Socket = adopt Socket*
+type TLSContext = adopt TLSContext*
+type SSHSession = adopt SSHSession*
+type SSHChannel = adopt SSHChannel*
+type HttpClient = adopt HttpClient*
+type HttpServer = adopt HttpServer*
+type HttpRequest = adopt HttpRequest*
+type HttpResponse = adopt HttpResponse*
+type UrlParts = adopt UrlParts*
+
+// —— db ——
+type DBConnection = adopt DBConnection*
+type DBStatement = adopt DBStatement*
+type DBResult = adopt DBResult*
+
+// —— obj ——
+type Object = adopt Object*
+type IntObject = adopt IntObject*
+type FloatObject = adopt FloatObject*
+type BoolObject = adopt BoolObject*
+type StringObject = adopt StringObject*
+
+// —— container / heap / hash / trie / graph ——
+type Vector = adopt Vector*
+type LinkedList = adopt LinkedList*
+type HashMap = adopt HashMap*
+type HashSet = adopt HashSet*
+type Stack = adopt Stack*
+type PriorityQueue = adopt PriorityQueue*
+type Heap = adopt Heap*
+type Trie = adopt Trie*
+type Graph = adopt Graph*
+type GraphNode = adopt GraphNode*
+
+// —— concurrent / async / task ——
+type Channel = adopt Channel*
+type Future = adopt Future*
+type Promise = adopt Promise*
+type AsyncEventLoop = adopt AsyncEventLoop*
+type AsyncNode = adopt AsyncNode*
+type LightAsyncLoop = adopt LightAsyncLoop*
+type LightTimerManager = adopt LightTimerManager*
+type TaskQueue = adopt TaskQueue*
+type PriorityTaskQueue = adopt PriorityTaskQueue*
+
+// —— format / crypto / msgpack / protobuf ——
+type FormatBuilder = adopt FormatBuilder*
+type FormatOptions = adopt FormatOptions*
+type SHA256Context = adopt SHA256Context*
+type HashSHA1Context = adopt HashSHA1Context*
+type HashSHA512Context = adopt HashSHA512Context*
+type MPReader = adopt MPReader*
+type MPWriter = adopt MPWriter*
+type PBReader = adopt PBReader*
+type PBWriter = adopt PBWriter*
+
+// —— datetime / calendar / system / time ——
+type TimeZone = adopt TimeZone*
+type Calendar = adopt Calendar*
+type Time = adopt Time*
+
+// —— cli ——
+type CliApp = adopt CliApp*
+
+// —— option ——
+type Option = adopt Option*
+type Result = adopt Result*
+
+// —— toml ——
+type TomlDocument = adopt TomlDocument*
+type TomlTable = adopt TomlTable*
+type TomlValue = adopt TomlValue*
+type TOMLNode = adopt TOMLNode*
+
+// —— xml ——
+type XmlDocument = adopt XmlDocument*
+type XmlNode = adopt XmlNode*
+type XMLNode = adopt XMLNode*
+
+// —— testing ——
+type TestSuite = adopt TestSuite*
+type TestCase = adopt TestCase*
+type TestReport = adopt TestReport*
+
+// —— panic / traits ——
+type PanicFrame = adopt PanicFrame*
+type TypeInfo = adopt TypeInfo*
+

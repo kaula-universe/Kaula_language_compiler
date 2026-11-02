@@ -1,0 +1,13 @@
+// string.kl — std.string 模块胶水层
+//
+// std.string 的核心类型 String 是 C 侧按值传递的 struct（SSO 优化），
+// 不是指针句柄，因此不需要 adopt 包装——它在 stdlib.json 里直接以
+// "String" 值类型出现，由编译器原生映射。
+//
+// 本文件仅保留该模块特有的、需要不透明化的句柄类型声明。
+// StringBuilder 已在 std/ctypes.kl 中定义，此处不重复。
+
+import std.ctypes
+
+// String 是值类型，无需 adopt。
+// StringBuilder 见 std.ctypes。

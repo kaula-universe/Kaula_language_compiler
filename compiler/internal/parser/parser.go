@@ -3197,6 +3197,17 @@ func (p *Parser) parseTypeStringImpl(greedyReturn bool) string {
 			p.nextToken()
 		case lexer.TOKEN_IDENT, lexer.TOKEN_TYPE_INT, lexer.TOKEN_TYPE_FLOAT, lexer.TOKEN_TYPE_DOUBLE,
 			lexer.TOKEN_TYPE_BOOL, lexer.TOKEN_TYPE_CHAR, lexer.TOKEN_TYPE_STRING, lexer.TOKEN_TYPE_VOID:
+			// 修复：连续两个标识符拼接时（C 多词类型如 "unsigned int"、"long long"、
+			// "unsigned char"），必须在中间保留空格，否则 typedef unsignedint CULong;
+			// 会生成非法 C。仅当上一段以字母/数字结尾时才补空格；const 分支已自带尾空格，
+			// * ( < [ , 等标点后不需要补。
+			if typeStr.Len() > 0 {
+				last := typeStr.String()[typeStr.Len()-1]
+				if (last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z') ||
+					(last >= '0' && last <= '9') {
+					typeStr.WriteByte(' ')
+				}
+			}
 			// void(T...)R 签名记法：
 			//   void()        - 完全不透明指针 (void*)
 			//   void(T)       - 幻影类型化数据指针 (void*, 类型系统记 T)
@@ -5876,6 +5887,10 @@ func (p *Parser) validateImports(program *ast.Program) {
 			filepath.Join(exeDir, "..", "compiler", "stdlib.json"),
 		)
 	}
+	// glueSearchRoots 用于定位 std/<mod>/<mod>.kl 胶水层（adopt 类型声明）。
+	// stdlib.json 位于 <repo>/compiler/stdlib.json，std/ 位于 <repo>/std/。
+	var glueSearchRoots []string
+
 	for _, path := range stdlibPaths {
 		stdlibConfig, err := stdlib.LoadStdlibConfig(path)
 		if err == nil && stdlibConfig != nil {
@@ -5886,6 +5901,22 @@ func (p *Parser) validateImports(program *ast.Program) {
 			// 添加第三方库
 			for _, lib := range stdlibConfig.ThirdParty {
 				validModules[lib.Name] = true
+			}
+			// 记录 stdlib.json 的位置，用于推导 std/<mod>/<mod>.kl 胶水层路径
+			stdlibAbs, _ := filepath.Abs(path)
+			stdlibDir := filepath.Dir(stdlibAbs)
+			glueSearchRoots = []string{
+				filepath.Join(stdlibDir, "..", "std"),                  // 源码布局：compiler/../std
+				filepath.Join(stdlibDir, "std"),                        // 安装布局：bin/std
+				filepath.Join(stdlibDir, "..", "share", "kaula", "std"), // 安装布局：share/kaula/std
+			}
+			// 开发布局：stdlib.json 被复制到 build/bin/，需从 stdlibDir 上溯查找仓库根的 std/
+			for _, up := range []string{"..", "../..", "../../.."} {
+				glueSearchRoots = append(glueSearchRoots, filepath.Join(stdlibDir, up, "std"))
+			}
+			// 工作目录下的 std/（cwd 在仓库根时）
+			if cwd, err := os.Getwd(); err == nil {
+				glueSearchRoots = append(glueSearchRoots, filepath.Join(cwd, "std"))
 			}
 			if verboseEnabled {
 				fmt.Printf("Parser: Loaded %d stdlib modules and %d third-party libraries from %s\n", len(stdlibConfig.Modules), len(stdlibConfig.ThirdParty), path)
