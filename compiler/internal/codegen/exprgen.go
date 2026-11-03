@@ -4396,7 +4396,23 @@ func (eg *ExpressionGenerator) generateSpawnExpression(e *ast.SpawnExpression) s
 
 	// 求值实参
 	argCodes := make([]string, 0, len(e.Args))
+	var promotePrefix strings.Builder
 	for _, arg := range e.Args {
+		// 审计 §3.3 修复：spawn 实参按值写进 Frame，但指针类型实参不 promote
+		// 会被父 worker scope_pop 回卷 TLAB，导致子任务读已回收内存。
+		// 对标识符类型的指针实参做 promote（提升到幸存段）。
+		if ident, ok := arg.(*ast.Identifier); ok && ident.Name != "" {
+			sg := eg.codegen.statementGenerator
+			if sg != nil && !eg.codegen.IsPromoted(ident.Name) &&
+				(sg.isPointerTyped(ident.Name) || sg.isStringTyped(ident.Name)) {
+				sizeExpr := "sizeof(*" + ident.Name + ")"
+				if line := sg.emitPromoteForType(ident.Name, sizeExpr, "promote spawn arg", ident.Name); line != "" {
+					promotePrefix.WriteString(line)
+					eg.codegen.MarkAssignEscaped(ident.Name)
+					eg.codegen.MarkPromoted(ident.Name)
+				}
+			}
+		}
 		argCodes = append(argCodes, eg.GenerateExpression(arg))
 	}
 
@@ -4406,7 +4422,7 @@ func (eg *ExpressionGenerator) generateSpawnExpression(e *ast.SpawnExpression) s
 	if conc.IsBlocking(ident.Name) {
 		flags = 1 /* KAULA_TASK_FLAG_HINT_BLOCKING */
 	}
-	return emitter.GenerateSpawn(argCodes, flags)
+	return promotePrefix.String() + emitter.GenerateSpawn(argCodes, flags)
 }
 
 /*

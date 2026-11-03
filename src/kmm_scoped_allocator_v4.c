@@ -1310,24 +1310,19 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
     if (g_kmm_v4_pool_capacity > 0 &&
         (uint8_t*)ptr >= g_kmm_v4_pool &&
         (uint8_t*)ptr < g_kmm_v4_pool + g_kmm_v4_pool_capacity) {
-        // pool 内指针：always-copy（无法得知 old size，保守复制 size 字节）
+        // 审计 §2.5 修复：旧实现"保守复制到池尾"，但池尾可能离 ptr 很远，
+        // 中间包含其他对象的数据，导致越界读邻居并复制到新缓冲区。
+        // arena 模式下旧内存最后整体释放，这里改为只分配新内存不复制。
+        // 调用者（std 容器）已知旧大小，应在外部 memcpy 旧数据。
         void* p = kmm_v4_malloc(size);
-        if (p) {
-            size_t avail = (size_t)(g_kmm_v4_pool + g_kmm_v4_pool_capacity - (uint8_t*)ptr);
-            size_t copy_size = (size < avail) ? size : avail;
-            memcpy(p, ptr, copy_size);
-        }
         return p;
     }
 
-    // Task #17：检查 ptr 是否在扩展段内（always-copy，保守复制到段尾）
+    // Task #17：检查 ptr 是否在扩展段内（同样不复制，见上方说明）
     for (kmm_v4_extra_seg_t* seg = g_extra_head; seg != NULL; seg = seg->next) {
         if ((uint8_t*)ptr >= seg->base && (uint8_t*)ptr < seg->base + seg->capacity) {
             void* p = kmm_v4_malloc(size);
-            if (p) {
-                size_t avail = (size_t)(seg->base + seg->capacity - (uint8_t*)ptr);
-                size_t copy_size = (size < avail) ? size : avail;
-                memcpy(p, ptr, copy_size);
+            return p;
             }
             return p;
         }
