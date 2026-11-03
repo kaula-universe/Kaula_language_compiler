@@ -1895,7 +1895,14 @@ func main() {
 		// stdlib.json，而它的候选列表不含 exeDir（只有 cwd 相对路径），
 		// 不回传就会查不到并打印一条误导性的「标准库函数签名将不可用」警告。
 		cfg.StdlibPath = stdlibPath
-		stdlibConfig, _ = stdlib.LoadStdlibConfigWithPkglib(stdlibPath, cfg.PkglibPath)
+		var err error
+		stdlibConfig, err = stdlib.LoadStdlibConfigWithPkglib(stdlibPath, cfg.PkglibPath)
+		if err != nil && stdlibPath != "" {
+			// 审计 §4.2.2：stdlib.json 加载失败不能静默吞掉。
+			// 旧实现 stdlibConfig, _ = 吞掉 err，导致 std 调用检查全熄火、
+			// 拼错的 std 函数名不被拦，却打出"编译成功"。
+			fmt.Fprintf(os.Stderr, "[WARN] stdlib.json 加载失败（%s）：std 函数签名检查将不可用\n", err)
+		}
 	}()
 
 	// Stage 1: Lex + Parse（与 stdlib 加载并行）
