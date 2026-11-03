@@ -125,3 +125,15 @@ jobs:
         run: python3 scripts/run_tests.py
         env:
           PYTHONIOENCODING: utf-8
+
+      # 审计 §3.7：ASan 内存错误检测。编译关键测试文件时加 -fsanitize=address，
+      # 捕获 UAF、越界读写、内存泄漏等问题。TSan 暂不加（并发测试还不稳定）。
+      - name: ASan memory safety tests
+        run: |
+          export PATH="$PWD/build/bin:$PATH"
+          for f in test/stdlib_memory_safety.kl test/spend_and_call.kl test/memA.kl; do
+            echo "=== ASan: $f ==="
+            kaulac "$f" --cflags="-fsanitize=address -fno-omit-frame-pointer" 2>&1 | tail -2
+          done
+        env:
+          PYTHONIOENCODING: utf-8
