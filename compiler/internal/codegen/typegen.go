@@ -120,7 +120,7 @@ var globalTypeMap = map[string]string{
 	"int16":  "int16_t",
 	"int32":  "int32_t",
 	"int64":  "int64_t",
-	"int":    "int64_t",
+	"int":    "int32_t", // 审计 §1.3：从 int64_t 改成 int32_t，与 GetTypeSize("int")=4 字节一致
 	"u8":     "uint8_t",
 	"u16":    "uint16_t",
 	"u32":    "uint32_t",
@@ -129,7 +129,7 @@ var globalTypeMap = map[string]string{
 	"uint16": "uint16_t",
 	"uint32": "uint32_t",
 	"uint64": "uint64_t",
-	"uint":   "uint64_t",
+	"uint":   "uint32_t", // 审计 §1.3：从 uint64_t 改成 uint32_t，与 numericAliases(uint→u32) 一致
 	"float":  "float",
 	"f32":    "float",
 	"double": "double",
@@ -1059,8 +1059,8 @@ func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
 	basicTypeSizes := map[string]int{
 		"i8": 1, "int8": 1, "sbyte": 1, "byte": 1, "uint8": 1, "u8": 1, "char": 1, "bool": 1, "boolean": 1,
 		"i16": 2, "int16": 2, "short": 2, "ushort": 2, "uint16": 2, "u16": 2,
-		"i32": 4, "int32": 4, "int": 4, "integer": 4, "float": 4, "f32": 4, "single": 4,
-		"i64": 8, "int64": 8, "long": 8, "uint": 8, "uint64": 8, "u64": 8,
+		"i32": 4, "int32": 4, "int": 4, "integer": 4, "uint": 4, "uint32": 4, "float": 4, "f32": 4, "single": 4,
+		"i64": 8, "int64": 8, "long": 8, "uint64": 8, "u64": 8,
 		"double": 8, "f64": 8, "real": 8,
 	}
 

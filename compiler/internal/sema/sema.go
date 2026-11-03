@@ -4946,7 +4946,8 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 		 * 不是语言语义，只是编码细节；需要窄类型请显式写 u8/i32。
 		 * 负数字面量同样归一到 int，避免 -1 被推断成 i8。
 		 */
-		return "int"
+		// 审计 §1.3：字面量默认类型从 "int" 改成 "i64"，消除 sema/codegen 位宽矛盾。
+		return "i64"
 	case *ast.FloatLiteral:
 		return "f64"
 	case *ast.StringLiteral:
@@ -5042,7 +5043,7 @@ func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 			}
 			symbol := sa.symbolTable.GetSymbol(ident.Name)
 			if symbol != nil && symbol.Type == "function" {
-				return "int"
+				return "i64" // 审计 §1.3：默认返回 i64 而非 int
 			}
 		}
 		if member, ok := funcExpr.(*ast.MemberAccessExpression); ok {
@@ -5134,9 +5135,10 @@ func (sa *SemanticAnalyzer) inferLiteralType(expr *ast.LiteralExpression) string
 	}
 	switch expr.Kind {
 	case "int":
-		// 与 inferExpressionType 同口径：整数字面量默认 int（int64_t），
+		// 与 inferExpressionType 同口径：整数字面量默认 i64（显式 64 位），
 		// 不按数值大小收窄（见 inferExpressionType 中 *ast.IntegerLiteral 分支）。
-		return "int"
+		// 审计 §1.3：从 "int" 改成 "i64"，消除位宽矛盾。
+		return "i64"
 	case "float":
 		return "f64"
 	case "string":
@@ -5174,8 +5176,8 @@ func promoteIntegerType(left, right string) string {
 	precision := map[string]int{
 		"i8": 1, "int8": 1, "sbyte": 1, "byte": 1, "u8": 1, "uint8": 1, "uchar": 1,
 		"i16": 2, "int16": 2, "short": 2, "u16": 2, "uint16": 2, "ushort": 2,
-		"i32": 3, "int32": 3, "u32": 3, "uint32": 3,
-		"i64": 4, "int64": 4, "int": 4, "integer": 4, "long": 4,
+		"i32": 3, "int32": 3, "int": 3, "integer": 3, "u32": 3, "uint32": 3,
+		"i64": 4, "int64": 4, "long": 4,
 		"u64": 5, "uint64": 5, "uint": 5, "ulong": 5,
 	}
 	leftPrec := precision[left]
