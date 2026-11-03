@@ -161,6 +161,10 @@ func (sg *StatementGenerator) GenerateStatement(stmt ast.Statement) string {
 	case *ast.ExtractStatement:
 		return sg.generateExtractStatement(s)
 	default:
+		// 审计 §4.2.5：未支持的语句类型静默蒸发。先打印警告让用户知道，
+		// 暂不改成硬错误（避免某些内部生成的节点类型导致编译失败）。
+		// 后续确认所有合法节点都有 case 后再升级为硬错误。
+		fmt.Fprintf(os.Stderr, "[codegen] 警告: 未处理的语句类型 %T，将静默跳过\n", stmt)
 		return ""
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"kaula/internal/comptime"
 	"kaula/internal/stdlib"
 	"math"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -324,6 +325,10 @@ func (eg *ExpressionGenerator) GenerateExpression(expr ast.Expression) string {
 	case *ast.AwaitExpression:
 		return eg.generateAwaitExpression(e)
 	default:
+		// 审计 §4.2.5：未支持的表达式类型静默变成字面量 0，参与运算。
+		// 先打印警告让用户知道，暂不改成硬错误。
+		// 后续确认所有合法节点都有 case 后再升级为硬错误。
+		fmt.Fprintf(os.Stderr, "[codegen] 警告: 未处理的表达式类型 %T，将当作 0 处理\n", e)
 		return "0"
 	}
 }

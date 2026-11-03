@@ -675,7 +675,10 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	}
 
 	// 语义分析（跳过 main 检查）
-	localAnalyzer := sema.NewSemanticAnalyzer()
+	// 关键：复用主 errorCollector，让被 import 文件的 sema 错误也能被 fail-fast gate 捕获。
+	// 旧实现 NewSemanticAnalyzer() 自建私有 collector，导致被 import 文件的类型错误
+	// 一路绿灯走到 codegen 并产出"合法外观的错误二进制"（审计 §4.2.1）。
+	localAnalyzer := sema.NewSemanticAnalyzerWithConfig("kaula/stdlib.json", s.errorCollector)
 	if s.stdlibConfig != nil {
 		localAnalyzer.SetStdlibConfig(s.stdlibConfig)
 	}
@@ -2004,6 +2007,12 @@ func main() {
 				if err.Details != "" {
 					fmt.Printf("      %s\n", err.Details)
 				}
+				// 把 SOR 错误并入主 errorCollector，让 fail-fast gate 触发。
+				// 旧实现只 print 不进 collector（审计 §4.2.4），导致 SOR 报错但
+				// codegen 照跑、C 照进缓存，违反"前端报错 codegen 不得跑"的原则。
+				errorCollector.AddSemanticError(
+					"SOR: "+err.Message,
+					err.SourceLine, 0, "", "")
 			}
 		}
 
