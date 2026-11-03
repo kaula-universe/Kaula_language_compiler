@@ -4270,6 +4270,15 @@ func UsesConcurrency() bool { return codeUsesConcurrency }
 // noteConcurrencyUse 供其他生成器（语句生成器）标记并发内核已被使用
 func (eg *ExpressionGenerator) noteConcurrencyUse() { codeUsesConcurrency = true }
 
+// codeUsesSpend 记录本 TU 是否用到 SOR spendable 运行时（spend_call.c）。
+//
+// 只有用户写了 spend 语法（数组模式消费）才需要链接 spend_call.o，
+// 否则最终二进制白白带上 spendable_create/add/call/destroy 符号。
+var codeUsesSpend bool
+
+// UsesSpend 报告本 TU 是否用到 spendable 运行时
+func UsesSpend() bool { return codeUsesSpend }
+
 /*
  * EmitResume 在 resume 上下文中生成函数体。
  *

@@ -1204,6 +1204,9 @@ func (sg *StatementGenerator) generateSpendArray(stmt *ast.SpendStatement, count
 		return builder.String()
 	}
 
+	// 标记用到 spendable 运行时（链接时按需链接 spend_call.o）
+	codeUsesSpend = true
+
 	// 包装元素指针到 Spendable
 	builder.WriteString(fmt.Sprintf("Spendable* %s = spendable_create(%d);\n", spdName, count))
 	for i := 0; i < count; i++ {

@@ -1953,6 +1953,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	 * 那正是这条注释原本要防的事，所以复位必须发生在这里。
 	 */
 	codeUsesConcurrency = false
+	codeUsesSpend = false
 
 	// TU 拆分模式：每次 Generate 都从 config 重新读取（同一个 CodeGenerator
 	// 不会跨文件复用，但显式复位可以避免上一次生成的残留状态影响归属决策）。

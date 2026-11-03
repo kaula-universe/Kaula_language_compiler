@@ -5092,25 +5092,41 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		}
 	}
 
-	// 非安装模式下需要链接的运行时对象（kmm_v4：KMM 分配器；spend_call：强制消费流；allocator：fast_alloc 系列符号）
+	// 非安装模式下需要链接的运行时对象（kmm_v4：KMM 分配器；allocator：fast_alloc 系列符号）
+	// spend_call.o 按需链接：只有程序用了 spend 语法才加（见下方 UsesSpend 判断）。
 	// 裸机模式用 _fs 后缀的独立产物：KMM 的静态池/无 libc 变体与托管版不是同一个 .o，
 	// 共用缓存路径会互相覆盖（先编裸机再跑普通程序，就会链接到没有 calloc 的版本）。
-	runtimeObjs := []string{"kmm_v4.o", "spend_call.o", "allocator.o"}
+	runtimeObjs := []string{"kmm_v4.o", "allocator.o"}
 	if isFreestanding {
 		// 裸机只需要 KMM（见下方循环的跳过逻辑）
 		runtimeObjs = []string{"kmm_v4_fs.o"}
 	}
 
 	// 编译 KMM V4 runtime（src/kmm_scoped_allocator_v4.c）— std 模块依赖其符号
-	// 同时编译 spend_call.c（Spend/Call 强制消费流）与 allocator.c（fast_alloc 系列符号）
+	// allocator.c（fast_alloc 系列）是 std.memory 的运行时依赖，始终链接。
+	// spend_call.c（Spend/Call 强制消费流）按需链接：只有程序用了 spend 语法才编。
 	if kaulaSrcPath != "" && !useInstalledLibraries {
 		runtimeSources := []struct {
 			cName string
 			oName string
 		}{
 			{"kmm_scoped_allocator_v4.c", "kmm_v4.o"},
-			{"spend_call.c", "spend_call.o"},
 			{"allocator.c", "allocator.o"},
+		}
+
+		/*
+		 * spend_call 按需链接：用户写了 spend 语法（数组模式消费）才需要
+		 * spendable_create/add/call/destroy 这些符号。不用 spend 的程序
+		 * 不应该带上这 ~5KB 的运行时代码。
+		 */
+		if codegen.UsesSpend() {
+			runtimeSources = append(runtimeSources, struct{ cName, oName string }{
+				"spend_call.c", "spend_call.o",
+			})
+			runtimeObjs = append(runtimeObjs, "spend_call.o")
+			if verboseMode {
+				fmt.Println("[Compile] spend_call: 程序使用了 spend 语法，链接消费流运行时")
+			}
 		}
 
 		/*
