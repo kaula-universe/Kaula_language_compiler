@@ -25,6 +25,20 @@ compiler/build/
 compiler/dbg_build_log.txt
 __pycache__/
 *.pyc
+# ---------- test/ 编译产物：反向白名单（通用规则）----------
+# 语料 test/*.kl 编译出的可执行文件没有扩展名，逐个点名必漏——历史上就漏过
+# 50 个 ELF（5.0 MB）进仓库。这里改为默认忽略 test/ 树内所有条目，只放回
+# 带扩展名的源文件（.kl/.c/.cpp/.py/.h/.json …）与子目录本身（必须放行目录，
+# git 才会继续往下递归）。
+# 注意顺序：下面保留的逐条点名规则必须写在白名单之后才能生效（.gitignore
+# 是后写的规则优先），它们针对的是"带扩展名的产物"，白名单会放行它们。
+# 兜底：scripts/check_no_binaries.py 在 CI 里做内容级（魔数）检查。
+test/**
+!test/**/*.*
+!test/**/
+# 编辑器扩展打包产物（0.3.0 版 vsix 曾误入库 418 KB，仓库内既无源码也无引用）
+*.vsix
+
 test/*.exe
 test/**/*.exe
 test/*.o

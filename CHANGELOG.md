@@ -36,6 +36,33 @@
     示例的必要提示；并发内核缺口仍以 `core-runtime.md` 第 5 章为权威表，清单只引用不重复。
 
 ### Fixed
+- **清理仓库中误入库的 51 个编译产物并建立内容级卫生门禁**：
+  `.gitignore` 对测试产物采取"逐个点名"式规则，而语料 `test/*.kl` 编译出的
+  可执行文件**没有扩展名**，每新增一个语料名就漏一次。`8c76dfd` 一次性把
+  50 个 ELF（5.0 MB）提交进仓库（`test/binary_trees`、`test/alloc_bench`、
+  `test/memMT_large_4t` 等）；另外 `439e276` 曾误提交 `kaula-language-0.3.0.vsix`
+  （418 KB，仓库内既无扩展源码也无任何引用）。
+  - `git rm --cached` 摘出全部 51 个（磁盘文件保留，不影响本地已编译产物）。
+  - `.gitignore` 改为反向白名单：`test/**` 默认忽略 + `!test/**/*.*` 放回带扩展名
+    源文件 + `!test/**/` 放行目录（不显式放行目录 git 不会向下递归）。逐条点名规则
+    保留在白名单**之后**（.gitignore 后写优先），用于覆盖"带扩展名的产物"
+    （`*.o`、`results_*.json`、`ab_*.kl` 等），顺序颠倒会让这些规则失效。
+    另补 `*.vsix`。
+  - 新增 `scripts/check_no_binaries.py`：按 git 索引对象的**魔数**判定（ELF /
+    ar 静态库 / Mach-O / PE / zip / gzip / xz / bzip2 / LLVM bitcode / 含 NUL），
+    图片类资源（PNG/JPEG/GIF/ICO/ICNS/WebP/BMP）作为真实资源放行，
+    `logo.png` 被 README 与三个打包脚本引用，属必要资源不清理。支持
+    `--staged`（pre-commit）与 `--allow <路径>`（显式豁免）。规则挡不住的
+    情形（改名、落到别的目录、白名单被删）由这一层内容检查兜底。
+  - `test.yml` linux job 新增 `Repository hygiene check` 步骤接入 CI。
+  - 验证：清理后索引 873 个文件、0 个二进制构建产物；`.gitignore` 规则经
+    探针实测——新建 `test/probe_new_case.kl` / `test/probe_new_case.c` /
+    `test/subprobe/deep_case.kl` 均不被忽略，无扩展名的
+    `test/probe_new_noext` 与 `test/subprobe/deep_noext` 均被忽略，
+    即"不误伤源码、能挡住产物"。`test/` 一层原有 128 个跟踪文件中，
+    50 个无扩展名的全部是二进制、78 个带扩展名的全部是 `.kl/.c/.cpp/.py` 源文件，
+    不存在"无扩展名的真实源文件"，反向白名单因此安全。
+
 - **修复四类安装包全部缺失 `version.json`，装完后 `kaulac --version` 静默显示 `dev-local`（发布可观测性缺陷）**：
   版本号唯一来源是构建生成的 `compiler/version.json`（生成物、已 gitignore），kaulac
   运行期按 `LookupPaths()` 查找，找不到即降级为 `dev-local`。v1.1.377 及之前的

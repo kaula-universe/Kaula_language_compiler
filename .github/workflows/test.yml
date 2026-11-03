@@ -104,6 +104,13 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      # 仓库卫生门禁：语料编译出的可执行文件没有扩展名，历史上漏过 50 个 ELF
+      # 进仓库。这里按内容（魔数）检查索引，任何二进制构建产物直接判红。
+      - name: Repository hygiene check (no compiled binaries)
+        run: python3 scripts/check_no_binaries.py
+        env:
+          PYTHONIOENCODING: utf-8
+
       - name: C kernel concurrency tests (27)
         run: python3 test/concurrency/run_tests.py
         env:
