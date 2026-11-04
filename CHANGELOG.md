@@ -24,6 +24,12 @@
   可由 wasmtime/wasm3 直接 invoke。新增冒烟测试 `test/freestanding/kl/wasm_smoke.kl`
   （fs_alloc/memset/memcpy/math 端到端，Python wasmtime 断言返回值 0）。`freestanding.c.tmpl`
   在 `__wasm__` 下去掉 noreturn/hlt/wfi，让入口能正常返回。
+- **禁用未完成的 `object Type Name self(...)` 语句形式**：旧路径 AST 字段为 `[]Expression`
+  （键名丢弃）、sema 只注册符号不做字段检查、codegen 对 `*ObjectStatement` 只返回 Pos
+  不生成 `dynobj_create/set`，是个空壳。现在 parser 在变量声明类型解析层检测到
+  `object <Ident> <Ident>` 形态时，报清晰错误"该形式尚未实现，请使用 `object { field: value }`"
+  并 depth-aware 跳过语句边界，消除原先 COLON 连锁语法错误 + sema 未定义变量连锁。
+  已完成的动态对象字面量 `object { x: 10, y: 20 }` / `object()` 不受影响。
 
 ### Documentation
 - **全量审计文档中的「未完成 / 不可用」声明，去伪存真并集中管理**：
