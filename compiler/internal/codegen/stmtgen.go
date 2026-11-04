@@ -1394,19 +1394,41 @@ func (sg *StatementGenerator) generateTreeImplementation(stmt *ast.TreeStatement
 	return code
 }
 
-// generateObjectStatement 生成 object 语句代码
+// generateObjectStatement 生成 object 全局动态对象声明代码
+// object Name { key: value, ... } → 文件级 static Object* Name，
+// prelude 中 dynobj_create + dynobj_set 初始化（与 ObjectLiteral 同一运行时）
 func (sg *StatementGenerator) generateObjectStatement(stmt *ast.ObjectStatement) string {
-	code := fmt.Sprintf("// Object: %s of type %s\n", stmt.Name, stmt.Type)
-	sg.codegen.typeGenerator.structTypes[stmt.Name] = true
-	code += fmt.Sprintf("typedef struct %s {\n", stmt.Name)
-	for i := range stmt.Fields {
-		code += fmt.Sprintf("    void* field%d;\n", i+1)
+	sg.codegen.needsObjRuntime = true
+	varName := stmt.Name
+
+	// 注册全局符号（成员访问/类型识别需要：Config 视为 object 类型）
+	sg.codegen.AddSymbol(varName, "object", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+
+	// 1. 文件作用域静态变量声明（放在 functionCode 开头）
+	sg.codegen.AddObjectDecl(fmt.Sprintf("static Object* %s = NULL;\n", varName))
+
+	// 2. prelude 初始化代码（放在 main 函数体开头）
+	var initCode strings.Builder
+	initCode.WriteString(fmt.Sprintf("if (%s == NULL) {\n", varName))
+	if stmt.Value != nil {
+		// object Name = <expr>：直接用表达式结果作为对象
+		initCode.WriteString(fmt.Sprintf("    %s = (Object*)%s;\n", varName,
+			sg.codegen.expressionGenerator.GenerateExpression(stmt.Value)))
+	} else {
+		initCode.WriteString(fmt.Sprintf("    %s = (Object*)dynobj_create();\n", varName))
+		for _, field := range stmt.Fields {
+			if field == nil || field.Value == nil {
+				continue
+			}
+			fieldKey := "\"" + escapeCString(field.Name) + "\""
+			fieldBoxed := sg.codegen.expressionGenerator.boxDynamicValue(field.Value)
+			initCode.WriteString(fmt.Sprintf("    dynobj_set(%s, %s, %s);\n", varName, fieldKey, fieldBoxed))
+		}
 	}
-	code += fmt.Sprintf("} %s;\n", stmt.Name)
-	// 声明全局变量
-	varName := stmt.Name + "_obj"
-	code += fmt.Sprintf("%s* %s;\n", stmt.Name, varName)
-	return code
+	initCode.WriteString("}\n")
+	sg.codegen.AddPreludeInit(initCode.String())
+
+	return fmt.Sprintf("// Object: %s (dynamic global object)\n", stmt.Name)
 }
 
 // generateIfStatement 生成 if 语句代码

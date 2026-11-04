@@ -123,6 +123,16 @@ object { x: 10 }  // 推导为 object 类型
 obj.field         // 动态对象成员访问，类型为 object
 ```
 
+#### 全局动态对象声明分析
+
+```go
+object Config { x: 1, x: 2 }  // 错误：字段 x 重复定义（duplicate_object_field）
+```
+
+- 全局对象名登记为 `object` 类型符号（全局作用域）
+- 逐字段分析值表达式类型，检查重复字段名
+- 可选的 `= <expr>` 初始化表达式一并参与类型分析
+
 #### Spend 语句强制消费流分析
 
 spend 语句在编译期进行全消费证明（Full Consumption Proof）：

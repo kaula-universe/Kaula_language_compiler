@@ -587,7 +587,10 @@ func (f *Formatter) formatObjectStatement(stmt *ast.ObjectStatement) {
 		f.indent++
 		for _, field := range stmt.Fields {
 			f.writeIndent()
-			f.formatExpression(field)
+			if field.Name != "" {
+				f.buf.WriteString(field.Name + ": ")
+			}
+			f.formatExpression(field.Value)
 			f.buf.WriteString("\n")
 		}
 		if stmt.Value != nil {

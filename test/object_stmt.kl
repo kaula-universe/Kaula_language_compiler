@@ -1,0 +1,15 @@
+// object_stmt.kl — ObjectStatement（全局动态对象声明）链路回归
+// 语法：object Name { key: value, ... }
+// 编译为全局 Object* Name，prelude 中 dynobj_create + dynobj_set 初始化，
+// 字段访问经 dynobj_get(Name, "key")。
+import std.io
+
+object Config {
+    name: "kaula"
+    port: 8080
+    active: 1
+}
+
+fn main() {
+    std.io.println("object stmt compile check")
+}

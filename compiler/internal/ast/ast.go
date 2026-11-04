@@ -178,7 +178,9 @@ func traverseNode(node Node, visitor func(Node)) {
 		}
 	case *ObjectStatement:
 		for _, field := range n.Fields {
-			traverseNode(field, visitor)
+			if field != nil {
+				traverseNode(field.Value, visitor)
+			}
 		}
 		if n.Value != nil {
 			traverseNode(n.Value, visitor)
@@ -702,11 +704,20 @@ func (t *TreeStatement) GetBody() []Statement {
 	return t.Body
 }
 
-// ObjectStatement 表示object语句
+// ObjectField 表示 object 语句中的一个具名字段：name: value
+type ObjectField struct {
+	Name  string
+	Value Expression
+	Pos   Position
+}
+
+// ObjectStatement 表示 object 全局动态对象声明语句
+// 语法：object Name { name: value, ... }
+// 编译为全局 Object* 变量，在 prelude 中 dynobj_create + dynobj_set 初始化
 type ObjectStatement struct {
 	Type   string
 	Name   string
-	Fields []Expression
+	Fields []*ObjectField
 	Value  Expression
 	Pos    Position
 }

@@ -222,6 +222,34 @@ type ObjectLiteral struct {
 - 字段访问 `obj.field` → `dynobj_get(obj, "field")`
 - 字段赋值 `obj.field = value` → `dynobj_set(obj, "field", boxed_value)`
 
+### ObjectStatement（全局动态对象声明语句）
+
+```go
+type ObjectField struct {
+    Name  string       // 字段名（保留键名，不再丢弃）
+    Value Expression  // 字段值表达式
+    Pos   Position
+}
+
+type ObjectStatement struct {
+    Type   string        // 可选类型标注（旧形态）
+    Name   string        // 全局对象名
+    Fields []*ObjectField // 具名字段列表
+    Value  Expression   // 可选：直接初始化表达式
+    Pos    Position
+}
+```
+
+语法：`object Name { name: value, ... }`（兼容旧形态 `object Type Name self{...}` / `self(...)` / `::[...]`）。
+
+与 ObjectLiteral 的区别：ObjectLiteral 是表达式（局部/临时对象），ObjectStatement 在文件级声明一个具名全局 `Object*` 变量，prelude 阶段初始化后可被全程序引用。
+
+代码生成映射：
+- `static Object* Name = NULL;`（文件作用域声明）
+- prelude 初始化：`dynobj_create()` + 逐字段 `dynobj_set(Name, "name", boxed_value)`
+- 字段访问 `Name.field` → `dynobj_get(Name, "field")`
+- 重复字段名在语义分析阶段报错（`duplicate_object_field`）
+
 ## 泛型支持
 
 ### TypeParameter

@@ -300,7 +300,18 @@ func RewriteStatementChildren(s ast.Statement, fn RewriteTransform) ast.Statemen
 		return &c
 	case *ast.ObjectStatement:
 		c := *n
-		c.Fields = rewriteExprSlice(n.Fields, fn)
+		var newFields []*ast.ObjectField
+		for _, f := range n.Fields {
+			if f == nil {
+				continue
+			}
+			if replaced, ok := fn(f.Value).(ast.Expression); ok && replaced != nil {
+				newFields = append(newFields, &ast.ObjectField{Name: f.Name, Value: replaced, Pos: f.Pos})
+			} else {
+				newFields = append(newFields, &ast.ObjectField{Name: f.Name, Value: f.Value, Pos: f.Pos})
+			}
+		}
+		c.Fields = newFields
 		c.Value = ex(n.Value)
 		return &c
 	case *ast.SwitchStatement:

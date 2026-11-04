@@ -1227,7 +1227,14 @@ func (sg *StatementGenerator) expandVarArgNestedStmt(s ast.Statement, param stri
 		return &c
 	case *ast.ObjectStatement:
 		c := *n
-		c.Fields = sg.expandVarArgExprSlice(n.Fields, param, temps, errs)
+		var newFields []*ast.ObjectField
+		for _, f := range n.Fields {
+			if f == nil {
+				continue
+			}
+			newFields = append(newFields, &ast.ObjectField{Name: f.Name, Value: ex(f.Value), Pos: f.Pos})
+		}
+		c.Fields = newFields
 		c.Value = ex(n.Value)
 		return &c
 	case *ast.SwitchStatement:

@@ -269,8 +269,21 @@ func (p *Parser) parseStatementIterative() (stmt ast.Statement) {
 			return p.parseExpressionStatementIterative()
 		}
 		if p.peekTok.Type == lexer.TOKEN_IDENT {
-			if stmt := p.parseVariableDeclarationIterative(); stmt != nil {
-				return stmt
+			// 前瞻区分：object Name { ... } / object Name self... 是对象声明语句；
+			// object Name = ... 才是动态对象类型变量声明。
+			savedLex := p.lexer.SaveState()
+			savedCur := p.curTok
+			savedPeek := p.peekTok
+			p.nextToken() // 越过 object
+			p.nextToken() // 越过 Name
+			isObjectDecl := p.curTok.Type == lexer.TOKEN_LBRACE || p.curTok.Type == lexer.TOKEN_SELF
+			p.lexer.RestoreState(savedLex)
+			p.curTok = savedCur
+			p.peekTok = savedPeek
+			if !isObjectDecl {
+				if stmt := p.parseVariableDeclarationIterative(); stmt != nil {
+					return stmt
+				}
 			}
 		}
 		return p.parseObjectStatementIterative()
@@ -1362,46 +1375,112 @@ func (p *Parser) parseTreeStatementIterative() *ast.TreeStatement {
 	return stmt
 }
 
-// parseObjectStatementIterative 迭代解析 object 语句
-//
-// 历史上这里预留过一条 `object Type Name self(...) { key: value }` 的对象
-// 声明路径（类似轻量类实例化），但它从未走完设计：
-//   - AST 字段 Fields 是 []Expression，键名在解析时被丢弃（ast.go:706）
-//   - sema 只把 Name 注册成 "object" 符号，不做字段检查（sema.go analyzeObjectStatement）
-//   - codegen 对 *ast.ObjectStatement 只返回 Pos，不生成任何 dynobj_create/set 代码
-//
-// 走到这里意味着用户写的是这种未完成形态。直接报清晰错误，并手动 depth-aware
-// 跳过到本语句结束（匹配的 } 或 ; 或 EOF），避免产出"键名丢失 + COLON 连锁
-// 语法错误"的垃圾诊断。已完成的动态对象字面量走
-// parseObjectLiteralExpressionIterative（object { ... }）。
+// parseObjectStatementIterative 迭代解析 object 全局动态对象声明语句
+// 语法：object [Type] Name { key: value, ... } ；兼容旧形态 self(...) / self{...} / ::[...]
 func (p *Parser) parseObjectStatementIterative() *ast.ObjectStatement {
-	pos := ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file}
-	p.error("object 语句形式 `object Type Name self(...)` 尚未实现；请使用动态对象字面量 `object { field: value, ... }` 或 `object()`")
-	// 手动跳过这条语句：跟踪 {} () [] 深度，深度归零时遇到 ; 或换行级语句边界即停。
-	depth := 0
-	for p.curTok.Type != lexer.TOKEN_EOF {
-		switch p.curTok.Type {
-		case lexer.TOKEN_LBRACE, lexer.TOKEN_LPAREN, lexer.TOKEN_LBRACKET:
-			depth++
-		case lexer.TOKEN_RBRACE:
-			if depth == 0 {
-				// 不消费外层函数体的 }
-				return &ast.ObjectStatement{Fields: []ast.Expression{}, Pos: pos}
-			}
-			depth--
-		case lexer.TOKEN_RPAREN, lexer.TOKEN_RBRACKET:
-			if depth > 0 {
-				depth--
-			}
-		case lexer.TOKEN_SEMICOLON:
-			if depth == 0 {
-				p.nextToken()
-				return &ast.ObjectStatement{Fields: []ast.Expression{}, Pos: pos}
-			}
+	stmt := &ast.ObjectStatement{
+		Fields: []*ast.ObjectField{},
+	}
+	p.nextToken()
+	if p.curTok.Type == lexer.TOKEN_IDENT {
+		if p.peekTok.Type == lexer.TOKEN_IDENT {
+			// 旧形态：object Type Name { ... }
+			stmt.Type = p.curTok.Value
+			p.nextToken()
+			stmt.Name = p.curTok.Value
+			p.nextToken()
+		} else {
+			// 新形态：object Name { ... }
+			stmt.Name = p.curTok.Value
+			p.nextToken()
 		}
+	}
+	// 兼容旧的 self 前缀（object Type Name self{...}）
+	if p.curTok.Type == lexer.TOKEN_SELF {
 		p.nextToken()
 	}
-	return &ast.ObjectStatement{Fields: []ast.Expression{}, Pos: pos}
+
+	// 括号位置参数：self(a, b) → 无键字段，占位键名 field1 / field2 ...
+	if p.curTok.Type == lexer.TOKEN_LPAREN {
+		p.nextToken()
+		fieldIdx := 1
+		for p.curTok.Type != lexer.TOKEN_RPAREN && p.curTok.Type != lexer.TOKEN_EOF {
+			value := p.parseExpressionIterative()
+			stmt.Fields = append(stmt.Fields, &ast.ObjectField{
+				Name:  fmt.Sprintf("field%d", fieldIdx),
+				Value: value,
+				Pos:   ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file},
+			})
+			fieldIdx++
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RPAREN {
+			p.nextToken()
+		}
+	}
+
+	// 大括号字段列表：key: value（保留键名，不再丢弃）
+	if p.curTok.Type == lexer.TOKEN_LBRACE {
+		p.nextToken()
+		for p.curTok.Type != lexer.TOKEN_RBRACE && p.curTok.Type != lexer.TOKEN_EOF {
+			fieldName := ""
+			if p.curTok.Type == lexer.TOKEN_IDENT {
+				fieldName = p.curTok.Value
+				p.nextToken()
+				if p.curTok.Type == lexer.TOKEN_COLON {
+					p.nextToken()
+				}
+			}
+			fieldValue := p.parseExpressionIterative()
+			if fieldName == "" {
+				fieldName = fmt.Sprintf("field%d", len(stmt.Fields)+1)
+			}
+			stmt.Fields = append(stmt.Fields, &ast.ObjectField{
+				Name:  fieldName,
+				Value: fieldValue,
+				Pos:   ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file},
+			})
+			if p.curTok.Type == lexer.TOKEN_COMMA {
+				p.nextToken()
+			}
+		}
+		if p.curTok.Type == lexer.TOKEN_RBRACE {
+			p.nextToken()
+		}
+	}
+
+	// 直接初始化：object Name = <expr>
+	if p.curTok.Type == lexer.TOKEN_ASSIGN {
+		p.nextToken()
+		stmt.Value = p.parseExpressionIterative()
+	}
+
+	// 旧形态 ::[...] 附加表达式列表（方法/槽位声明），按无键字段保留
+	if p.curTok.Type == lexer.TOKEN_DOUBLE_COLON {
+		p.nextToken()
+		if p.curTok.Type == lexer.TOKEN_LBRACKET {
+			p.nextToken()
+			for p.curTok.Type != lexer.TOKEN_RBRACKET && p.curTok.Type != lexer.TOKEN_EOF {
+				value := p.parseExpressionIterative()
+				stmt.Fields = append(stmt.Fields, &ast.ObjectField{
+					Name:  fmt.Sprintf("field%d", len(stmt.Fields)+1),
+					Value: value,
+					Pos:   ast.Position{Line: p.curTok.Line, Column: p.curTok.Column, File: p.file},
+				})
+				if p.curTok.Type == lexer.TOKEN_COMMA {
+					p.nextToken()
+				} else if p.curTok.Type != lexer.TOKEN_RBRACKET {
+					p.nextToken()
+				}
+			}
+			if p.curTok.Type == lexer.TOKEN_RBRACKET {
+				p.nextToken()
+			}
+		}
+	}
+	return stmt
 }
 
 // parseObjectLiteralExpressionIterative 解析动态对象字面量
@@ -5799,9 +5878,6 @@ func (p *Parser) Validate(program *ast.Program) {
 
 	for _, stmt := range program.Statements {
 		if objStmt, ok := stmt.(*ast.ObjectStatement); ok {
-			if objStmt.Type == "" {
-				p.error("object 语句缺少类型")
-			}
 			if objStmt.Name == "" {
 				p.error("object 语句缺少名称")
 			}

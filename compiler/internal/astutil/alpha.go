@@ -230,7 +230,14 @@ func (r *alphaRenamer) rewriteStmt(s ast.Statement, local map[string]string) ast
 		return &c
 	case *ast.ObjectStatement:
 		c := *n
-		c.Fields = rewriteExprs(n.Fields, func(e ast.Expression) ast.Expression { return r.rewriteExpr(e, local) })
+		var newFields []*ast.ObjectField
+		for _, f := range n.Fields {
+			if f == nil {
+				continue
+			}
+			newFields = append(newFields, &ast.ObjectField{Name: f.Name, Value: r.rewriteExpr(f.Value, local), Pos: f.Pos})
+		}
+		c.Fields = newFields
 		c.Value = r.rewriteExpr(n.Value, local)
 		return &c
 	case *ast.SwitchStatement:
@@ -544,7 +551,9 @@ func ScanFreeReferences(stmts []ast.Statement) []string {
 			// 嵌套函数体属于函数边界：其引用由函数自身的捕获分析负责
 		case *ast.ObjectStatement:
 			for _, f := range n.Fields {
-				walkExpr(f)
+				if f != nil {
+					walkExpr(f.Value)
+				}
 			}
 			walkExpr(n.Value)
 		case *ast.PrefixVarArgDecl:

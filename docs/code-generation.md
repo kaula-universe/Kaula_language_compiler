@@ -148,6 +148,26 @@ if (_dynobj_lit_0 == NULL) {
 - 对象字面量缓存在静态变量中，多次执行只初始化一次
 - 成员访问 `obj.field` 自动检测动态对象类型，生成 `dynobj_get(obj, "field")`
 
+### 全局动态对象声明 (stmtgen.go)
+
+`object Name { name: value, ... }` 在文件级声明一个具名全局 `Object*`，初始化代码注入 prelude（main 函数体开头），只初始化一次：
+
+```c
+// Kaula: object Config { name: "kaula", port: 8080 }
+// 文件作用域声明
+static Object* Config = NULL;
+// prelude 初始化
+if (Config == NULL) {
+    Config = (Object*)dynobj_create();
+    dynobj_set(Config, "name", dynobj_box_cstr("kaula"));
+    dynobj_set(Config, "port", dynobj_box_i64(8080));
+}
+```
+
+- 全局对象符号登记为 `object` 类型，成员访问 `Config.field` 走 `dynobj_get(Config, "field")`
+- 字段值装箱规则与对象字面量一致
+- `object Name = <expr>` 形态直接用表达式结果作为全局对象，不再 `dynobj_create` 空对象
+
 ## 语句生成 (stmtgen.go)
 
 生成 C 语句：

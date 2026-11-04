@@ -305,6 +305,12 @@ array[index]
 object { name: "value", count: 42 }
 object()  // 空对象
 object { name: "hello", fn: func() { println("world") } }
+
+// 全局动态对象声明语句（文件级具名对象）
+object Config {
+    name: "kaula"
+    port: 8080
+}
 ```
 
 ## 核心类型

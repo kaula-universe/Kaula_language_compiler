@@ -2586,8 +2586,11 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// 注入字符串运行时的最小内联实现（仅依赖 KMM 分配器，避免链接整个 std.string 模块）
 		allIncludes.WriteString(`
 // --- inline string minimal runtime ---
+// 仅在未链入 std.string（string.h 未包含）时提供 KMM 兜底实现；
+// 已链接 std.string 时复用其 .o 实现，避免与 extern 声明/目标文件重复定义。
 #ifndef KAULA_INLINE_STRING_RUNTIME
 #define KAULA_INLINE_STRING_RUNTIME
+#ifndef STD_STRING_STRING_H
 #include "base/types.h"
 #include "memory/memory.h"
 #include <string.h>
@@ -2625,6 +2628,7 @@ static inline String string_concat_float(String s, double v) {
     snprintf(buf, sizeof(buf), "%f", v);
     return string_concat(s, string_create(buf));
 }
+#endif
 #endif
 // --- end inline string runtime ---
 `)

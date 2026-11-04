@@ -375,7 +375,9 @@ func (s *containerScan) scanStmt(stmt ast.Statement) {
 		s.scanStmts(st.Body)
 	case *ast.ObjectStatement:
 		for _, f := range st.Fields {
-			s.scanExpr(f)
+			if f != nil {
+				s.scanExpr(f.Value)
+			}
 		}
 		s.scanExpr(st.Value)
 	case *ast.FunctionStatement:

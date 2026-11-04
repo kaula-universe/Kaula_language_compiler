@@ -1515,8 +1515,28 @@ func (sa *SemanticAnalyzer) analyzeOrphanTree(stmt *ast.TreeStatement) {
 // analyzeObjectStatement 分析 object 语句
 func (sa *SemanticAnalyzer) analyzeObjectStatement(stmt *ast.ObjectStatement) {
 	sa.symbolTable.AddSymbol(stmt.Name, "object", false, "global", stmt.Pos.Line, stmt.Pos.Column)
+	// 检查字段重名，分析字段值表达式
+	seen := make(map[string]bool)
 	for _, field := range stmt.Fields {
-		sa.analyzeExpression(field)
+		if field == nil {
+			continue
+		}
+		if seen[field.Name] {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("object 声明中字段 '%s' 重复定义", field.Name),
+				field.Pos.Line,
+				field.Pos.Column,
+				"duplicate_object_field",
+				"删除重复的字段或改名",
+			)
+		}
+		seen[field.Name] = true
+		if field.Value != nil {
+			sa.analyzeExpression(field.Value)
+		}
+	}
+	if stmt.Value != nil {
+		sa.analyzeExpression(stmt.Value)
 	}
 }
 
