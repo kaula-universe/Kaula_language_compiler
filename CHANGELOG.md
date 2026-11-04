@@ -17,6 +17,13 @@
   与全库句柄类型索引，`import std.ctypes` 即可用全部类型安全句柄。
 - **parser 修复**：`parseTypeStringImpl` 在连续标识符 token 间补空格，修复 `adopt unsigned int`、
   `adopt long long` 等多词 C 类型被拼成 `unsignedint`、`longlong` 导致 C 编译失败的 bug。
+- **WASM 目标重写为 freestanding 直编**：`--wasm` 不再走 Emscripten（hosted html/js/wasm），
+  在 config 层自动 implies `--freestanding` + `TargetTriple=wasm32`，链接路径改为
+  `clang --target=wasm32 -ffreestanding -nostdlib` 直链 kaula freestanding runtime（KMM 静态池
+  + memset/memcpy/strlen），导出 `_kaula_entry` 与 `kaula_main`，输出纯 `.wasm`（32MB 线性内存），
+  可由 wasmtime/wasm3 直接 invoke。新增冒烟测试 `test/freestanding/kl/wasm_smoke.kl`
+  （fs_alloc/memset/memcpy/math 端到端，Python wasmtime 断言返回值 0）。`freestanding.c.tmpl`
+  在 `__wasm__` 下去掉 noreturn/hlt/wfi，让入口能正常返回。
 
 ### Documentation
 - **全量审计文档中的「未完成 / 不可用」声明，去伪存真并集中管理**：

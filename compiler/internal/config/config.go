@@ -419,7 +419,7 @@ func loadFlags(config *Config) {
 	// 编译模式
 	flag.BoolVar(&config.SOR, "sor", config.SOR, "启用 SOR 编译时所有权分析")
 	flag.BoolVar(&config.Release, "release", config.Release, "Release 模式 (-O3)")
-	flag.BoolVar(&config.WASM, "wasm", config.WASM, "编译成 WASM（Emscripten），输出 html/js/wasm")
+	flag.BoolVar(&config.WASM, "wasm", config.WASM, "编译成 WASM32（自动启用 freestanding，输出 .wasm，由 wasmtime/wasm3 运行）")
 
 	// 调试
 	flag.BoolVar(&config.Debug, "debug", config.Debug, "生成 DWARF 调试符号 (-g)")
@@ -476,6 +476,19 @@ func loadFlags(config *Config) {
 	}
 	if *cLibs != "" {
 		config.CLibs = splitList(*cLibs)
+	}
+
+	// WASM 目标强制 freestanding：WASM 产物不依赖 libc/OS，只能走裸机链接路径
+	// （clang --target=wasm32 -nostdlib + kaula freestanding runtime）。
+	// 用户显式给 --wasm 时无需再手敲 --freestanding；同时拒绝 hosted stdlib 混入。
+	if config.WASM {
+		if !config.Freestanding {
+			fmt.Fprintln(os.Stderr, "[config] --wasm 已自动启用 --freestanding（WASM 仅支持裸机 freestanding 编译）")
+			config.Freestanding = true
+		}
+		if config.TargetTriple == "" {
+			config.TargetTriple = "wasm32"
+		}
 	}
 }
 

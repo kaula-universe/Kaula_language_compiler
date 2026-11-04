@@ -3506,43 +3506,85 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 	result := &compileResult_t{}
 	startTime := time.Now()
 
-	// WASM 目标：生成 C 后直接调 emcc 编译成 html/js/wasm
+	// WASM 目标：强制 freestanding（见 config.go），用 clang --target=wasm32
+	// 直接从 C 编到 .wasm，不依赖 emcc/libc/OS。链接 kaula 自带的 freestanding
+	// runtime（memset/memcpy/KMM 静态池），导出 _kaula_entry 与 kaula_main，
+	// 由 wasmtime/wasm3 等运行时直接 invoke。
 	if cfg.WASM {
 		outDir := inputDir
 		if cfg.OutputDir != "" {
 			outDir = cfg.OutputDir
 			os.MkdirAll(outDir, 0755)
 		}
-		outHTML := filepath.Join(outDir, inputName+".html")
-		emccPath, err := exec.LookPath("emcc")
-		if err != nil {
-			result.Error = fmt.Errorf("emcc not found in PATH（WASM 目标需要 Emscripten）")
-			return result
+		outWasm := filepath.Join(outDir, inputName+".wasm")
+
+		// 选择 C 编译器：优先 --cc，否则 PATH 里的 clang
+		ccPath := cfg.CCompiler
+		if ccPath == "" {
+			p, err := exec.LookPath("clang")
+			if err != nil {
+				result.Error = fmt.Errorf("clang not found in PATH（WASM 目标需要带 wasm32 后端的 clang；可用 --cc 指定）")
+				return result
+			}
+			ccPath = p
 		}
-		var emccArgs []string
-		emccArgs = append(emccArgs, cacheFile)
+
 		kaulaSrcPath := findBootKaulaSrcPath(workDir)
-		if kaulaSrcPath != "" {
-			emccArgs = append(emccArgs,
-				filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c"),
-				filepath.Join(kaulaSrcPath, "allocator.c"),
-			)
-			emccArgs = append(emccArgs, "-I", kaulaSrcPath)
+		kaulaFreePath := findBootKaulaFreePath(workDir)
+
+		wasmArgs := []string{
+			"--target=wasm32",
+			"-ffreestanding", "-nostdlib", "-nostdlibinc", "-fno-pic",
+			"-DKAULA_FREESTANDING", "-DKMM_V4_STATIC_POOL",
+			"-O2",
+			// wasm 链接：不依赖 _start，导出入口供 runtime invoke
+			"-Wl,--no-entry",
+			"-Wl,--export=_kaula_entry",
+			"-Wl,--export=kaula_main",
+			// KMM 静态池 16MB（见 kmm_scoped_allocator_v4.h KMM_V4_POOL_SIZE），
+			// 加上代码/栈/BSS，wasm 线性内存至少留 32MB
+			"-Wl,--initial-memory=33554432",
+			"-Wl,--max-memory=33554432",
+			"-Wl,--gc-sections",
 		}
-		emccArgs = append(emccArgs,
-			"-sALLOW_MEMORY_GROWTH",
-			"-o", outHTML,
-		)
-		fmt.Printf("[WASM] emcc %s\n", strings.Join(emccArgs, " "))
-		cmd := exec.Command(emccPath, emccArgs...)
+		if kaulaSrcPath != "" {
+			wasmArgs = append(wasmArgs, "-I", kaulaSrcPath)
+			// 生成代码 #include "freestanding/memory/memory.h" 需要 -I 到 kaula 根
+			wasmArgs = append(wasmArgs, "-I", filepath.Dir(kaulaSrcPath))
+		}
+		if kaulaFreePath != "" {
+			wasmArgs = append(wasmArgs, "-I", kaulaFreePath)
+		}
+		// 用户自定义 flags/defines
+		for _, f := range cfg.CFlags {
+			wasmArgs = append(wasmArgs, f)
+		}
+		for _, d := range cfg.CDefines {
+			wasmArgs = append(wasmArgs, "-D"+d)
+		}
+
+		// 输入：生成的 C + KMM 分配器 + freestanding runtime（unity build）
+		wasmArgs = append(wasmArgs, cacheFile)
+		if kaulaSrcPath != "" {
+			if p := filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c"); fileExists(p) {
+				wasmArgs = append(wasmArgs, p)
+			}
+			if p := filepath.Join(kaulaSrcPath, "kaula_freestanding_runtime.c"); fileExists(p) {
+				wasmArgs = append(wasmArgs, p)
+			}
+		}
+		wasmArgs = append(wasmArgs, "-o", outWasm)
+
+		fmt.Printf("[WASM] %s %s\n", ccPath, strings.Join(wasmArgs, " "))
+		cmd := exec.Command(ccPath, wasmArgs...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			result.Error = fmt.Errorf("emcc 编译失败: %w", err)
+			result.Error = fmt.Errorf("wasm 编译失败: %w", err)
 			return result
 		}
-		result.OutputFile = outHTML
-		fmt.Printf("[WASM] 产物: %s\n", outHTML)
+		result.OutputFile = outWasm
+		fmt.Printf("[WASM] 产物: %s\n", outWasm)
 		return result
 	}
 

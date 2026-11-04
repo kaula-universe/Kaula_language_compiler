@@ -269,3 +269,45 @@ riscv64 virt NS16550 `0x10000000`、aarch64 virt PL011 `0x09000000`。
   `Error loading uncompressed kernel without PVH ELF Note`。修法不只是加
   `PHDRS`：只声明 PHDRS 而不把段挂上去（`:note`），lld 会生成一个
   `Offset=0/FileSize=0` 的空 PT_NOTE —— 头有了内容没有，照样失败。
+
+---
+
+## 6. WASM 目标（`--wasm`）
+
+`kaulac --wasm` 把 Kaula 程序编译成 **wasm32 裸 wasm**（`.wasm`），强制走
+freestanding 路径：
+
+- **自动 implies `--freestanding`**：`--wasm` 会在 config 层强制
+  `Freestanding=true`、`TargetTriple=wasm32`，用户无需手敲；hosted stdlib
+  （`std.*` 线程/文件/socket）不会被链接。
+- **不再依赖 Emscripten**：旧实现走 `emcc` 输出 html/js/wasm（hosted），
+  已替换为 `clang --target=wasm32 -ffreestanding -nostdlib` 直链。
+- **链接输入**：生成的 C + `kmm_scoped_allocator_v4.c` +
+  `kaula_freestanding_runtime.c`（unity build，含 memset/memcpy/strlen/KMM 静态池）。
+- **导出符号**：`_kaula_entry`（无停机指令，wasm 下直接 return）与
+  `kaula_main`（用户 main，返回 i32），供运行时 invoke。
+- **线性内存**：`--initial-memory=32MB`，容纳 16MB KMM 静态池 + 代码/栈/BSS。
+
+### 编译与运行
+
+```bash
+# 需要带 wasm32 后端的 clang（LLVM 18+）；用 --cc 指定
+kaulac --wasm --cc /path/to/clang my_program.kl
+# → my_program.wasm
+
+# 用 wasmtime 运行（CLI 不打印 i32 返回值，建议用 Python wasmtime 断言）
+wasmtime my_program.wasm --invoke _kaula_entry
+```
+
+Python 断言返回值（0 = 通过）：
+
+```python
+from wasmtime import Engine, Store, Module, Instance
+store = Store(Engine())
+inst = Instance(store, Module.from_file(store.engine, "my_program.wasm"), [])
+ret = inst.exports(store)["kaula_main"](store)
+assert ret == 0
+```
+
+冒烟测试：`test/freestanding/kl/wasm_smoke.kl` 覆盖 fs_alloc/memset/memcpy/
+math.max 在 wasm 线性内存中的端到端行为。

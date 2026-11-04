@@ -1,0 +1,46 @@
+// wasm_smoke.kl — WASM freestanding 端到端冒烟测试
+//
+// 用途: 验证 `kaulac --wasm` 能把 Kaula 程序编到 wasm32，并在 wasmtime 下跑通。
+//       不依赖 stdio（wasm 没有 OS），只通过 main 的返回值暴露结果：
+//         0 = 全部通过
+//         非 0 = 首个失败的检查编号
+//
+// 覆盖:
+//   - freestanding 代码生成（--wasm 自动 implies --freestanding）
+//   - KMM 静态池在 wasm 线性内存里可分配
+//   - freestanding.memory 的 memset/memcpy 链接正常
+//   - _kaula_entry 导出后 wasmtime 可 invoke
+
+import freestanding.memory
+import freestanding.math
+
+fn chk(id: i32, ok: bool, cur: i32) -> i32 {
+    if (!ok && cur == 0) {
+        return id
+    }
+    return cur
+}
+
+fn main() -> i32 {
+    i32 r = 0
+
+    // 1) KMM 分配一块 256 字节
+    u8* p = as<u8*>(freestanding.memory.fs_alloc(256))
+    r = chk(1, p != as<u8*>(0), r)
+
+    // 2) memset 清零后写已知模式
+    freestanding.memory.memset(p, 0xAA, 256)
+    r = chk(2, p[0] == 0xAA, r)
+    r = chk(3, p[255] == 0xAA, r)
+
+    // 3) memcpy 到第二块
+    u8* q = as<u8*>(freestanding.memory.fs_alloc(256))
+    freestanding.memory.memset(q, 0x00, 256)
+    freestanding.memory.memcpy(q, p, 256)
+    r = chk(4, q[128] == 0xAA, r)
+
+    // 4) math 模块
+    r = chk(5, freestanding.math.max(3, 7) == 7, r)
+
+    return r
+}
