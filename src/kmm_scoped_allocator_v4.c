@@ -1323,8 +1323,6 @@ void* kmm_v4_realloc(void* ptr, size_t size) {
         if ((uint8_t*)ptr >= seg->base && (uint8_t*)ptr < seg->base + seg->capacity) {
             void* p = kmm_v4_malloc(size);
             return p;
-            }
-            return p;
         }
     }
 

@@ -3506,6 +3506,46 @@ func concurrentCompile(cacheFile, cCode, inputDir, inputName, workDir string, us
 	result := &compileResult_t{}
 	startTime := time.Now()
 
+	// WASM 目标：生成 C 后直接调 emcc 编译成 html/js/wasm
+	if cfg.WASM {
+		outDir := inputDir
+		if cfg.OutputDir != "" {
+			outDir = cfg.OutputDir
+			os.MkdirAll(outDir, 0755)
+		}
+		outHTML := filepath.Join(outDir, inputName+".html")
+		emccPath, err := exec.LookPath("emcc")
+		if err != nil {
+			result.Error = fmt.Errorf("emcc not found in PATH（WASM 目标需要 Emscripten）")
+			return result
+		}
+		var emccArgs []string
+		emccArgs = append(emccArgs, cacheFile)
+		kaulaSrcPath := findBootKaulaSrcPath(workDir)
+		if kaulaSrcPath != "" {
+			emccArgs = append(emccArgs,
+				filepath.Join(kaulaSrcPath, "kmm_scoped_allocator_v4.c"),
+				filepath.Join(kaulaSrcPath, "allocator.c"),
+			)
+			emccArgs = append(emccArgs, "-I", kaulaSrcPath)
+		}
+		emccArgs = append(emccArgs,
+			"-sALLOW_MEMORY_GROWTH",
+			"-o", outHTML,
+		)
+		fmt.Printf("[WASM] emcc %s\n", strings.Join(emccArgs, " "))
+		cmd := exec.Command(emccPath, emccArgs...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			result.Error = fmt.Errorf("emcc 编译失败: %w", err)
+			return result
+		}
+		result.OutputFile = outHTML
+		fmt.Printf("[WASM] 产物: %s\n", outHTML)
+		return result
+	}
+
 	// 缓存文件由调用方写入（cacheManager.Store 或无缓存模式的 os.WriteFile），
 	// 这里不再重复写；cacheHit=false 时 cacheFile 一定是已就绪的完整内容，
 	// clang（boot 模式）读取它不存在"写一半"竞态。

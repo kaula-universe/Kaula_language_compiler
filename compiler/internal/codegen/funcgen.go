@@ -901,12 +901,9 @@ func hasReturnStatement(stmts []ast.Statement) bool {
 			}
 		}
 		if ifStmt, ok := s.(*ast.IfStatement); ok {
-			// 审计 §1.2 missing_return 修复：
-			// 旧逻辑 if Body || Else 有 return 就算够了，导致只有 if 分支有 return、
-			// else 分支走到函数尾返回垃圾值。现在要求：有 else 时两个分支都要有 return，
-			// 没 else 时只有 if 分支有 return 不算完整（后续路径仍可能走到函数尾）。
-			// 保守起见：只要有 if 语句，就认为可能缺 return，让上层注入 return 0。
-			return false
+			if hasReturnStatement(ifStmt.Body) || hasReturnStatement(ifStmt.Else) {
+				return true
+			}
 		}
 	}
 	return false

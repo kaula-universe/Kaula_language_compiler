@@ -43,6 +43,9 @@ type Config struct {
 	SOR     bool `json:"sor"`
 	Release bool `json:"release,omitempty"`
 
+	// ====== WASM 目标 ======
+	WASM bool `json:"wasm,omitempty"` // 编译成 WASM（Emscripten），输出 html/js/wasm
+
 	// ====== 缓存选项 ======
 	NoCache bool `json:"no_cache,omitempty"`
 
@@ -416,6 +419,7 @@ func loadFlags(config *Config) {
 	// 编译模式
 	flag.BoolVar(&config.SOR, "sor", config.SOR, "启用 SOR 编译时所有权分析")
 	flag.BoolVar(&config.Release, "release", config.Release, "Release 模式 (-O3)")
+	flag.BoolVar(&config.WASM, "wasm", config.WASM, "编译成 WASM（Emscripten），输出 html/js/wasm")
 
 	// 调试
 	flag.BoolVar(&config.Debug, "debug", config.Debug, "生成 DWARF 调试符号 (-g)")
