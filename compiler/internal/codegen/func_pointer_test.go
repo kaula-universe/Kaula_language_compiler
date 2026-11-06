@@ -38,9 +38,11 @@ func TestParseVoidSignatureFuncPointer(t *testing.T) {
 		kaulaType string
 		want      string
 	}{
-		{"void(int,int)int", "int64_t (*)(int64_t, int64_t)"},
+		// 审计 §1.3：int 口径统一为 int32_t（与 GetTypeSize("int")=4、
+		// numeric_names.go 的 int->i32 一致），签名里的 int 必须映射成 int32_t。
+		{"void(int,int)int", "int32_t (*)(int32_t, int32_t)"},
 		{"void(string)void", "void (*)(String)"},
-		{"void()int", "int64_t (*)(void)"},
+		{"void()int", "int32_t (*)(void)"},
 		// 无返回类型仍是数据指针 void*（既有行为）
 		{"void(int)", "void*"},
 	}

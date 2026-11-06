@@ -86,8 +86,11 @@ func TestMultiVarDeclInFunction(t *testing.T) {
 		}
 		types[vd.Name] = vd.Type
 	}
-	// p 的整数字面量默认 int（int64_t），q 推导为 string —— 两个 auto 各自独立推导
-	want := map[string]string{"a": "i64", "b": "i64", "p": "int", "q": "string"}
+	// 审计 §1.3：整数字面量默认 i64（显式 64 位）。int 已统一为 int32_t
+	// （GetTypeSize=4、numeric_names.go 的 int->i32），把字面量推成 int 会
+	// 凭空窄化 32 位，故期望从 "int" 改为 "i64"。
+	// q 仍推导为 string —— 两个 auto 各自独立推导。
+	want := map[string]string{"a": "i64", "b": "i64", "p": "i64", "q": "string"}
 	for name, expect := range want {
 		if got := types[name]; got != expect {
 			t.Errorf("%s 的类型 = %q，期望 %q", name, got, expect)

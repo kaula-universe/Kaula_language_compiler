@@ -21,6 +21,7 @@
 
 ### 编译流水线组件
 
+- [数字类型位宽口径](numeric-type-width.md) - int=int32_t、uint=uint32_t、整数字面量默认 i64，三处必须同改的实现点与回归门禁
 - [词法分析器 (Lexer)](lexer.md) - Token 类型、扫描策略、API
 - [语法分析器 (Parser)](parser.md) - 语法规则、递归下降解析、错误恢复
 - [抽象语法树 (AST)](ast.md) - 节点类型、层次结构、遍历机制

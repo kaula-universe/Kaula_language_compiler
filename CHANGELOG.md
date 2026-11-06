@@ -76,6 +76,24 @@
     50 个无扩展名的全部是二进制、78 个带扩展名的全部是 `.kl/.c/.cpp/.py` 源文件，
     不存在"无扩展名的真实源文件"，反向白名单因此安全。
 
+- **修复 `int` 口径统一后遗留的两个过时回归测试，并把口径写成权威文档（阻塞 CI 三天的红灯）**：
+  `231dea0 数字类型口径统一（审计 §1.3）`（11-03 21:40）把 `int`→`int32_t`、
+  `uint`→`uint32_t`、整数字面量默认类型 `int`→`i64`，但没同步两处早已固化旧口径的
+  回归断言，`Go unit tests` 自此在 master 上一直红（`bb8c821`→`360bbcc` 五次提交无人修）：
+  - `func_pointer_test.go`：`convertType("void(int,int)int")` 实得
+    `int32_t (*)(int32_t, int32_t)`，断言仍要求旧口径 `int64_t` → 期望更新为 `int32_t`。
+  - `multi_decl_test.go`：`auto p = 1` 实得 `i64`，断言仍要求 `int` → 期望更新为 `i64`；
+    该行注释原写「p 的整数字面量默认 int（int64_t）」，在新口径下已是错述，一并改写。
+  - 方向判定依据：新口径三处自洽（`globalTypeMap` int→int32_t、`GetTypeSize("int")`=4、
+    `numeric_names.go` int→i32），且审计 §1.3 把「sema 视 int 为 64 位」列为待修病灶；
+    按 `231dea0` 收敛，而非回退。字面量取 `i64` 也避免 `auto` 被凭空窄化到 32 位。
+  - 新增 `docs/numeric-type-width.md` 作为位宽权威规范（口径表、三处必须同改的实现点、
+    回归门禁、以及 §1.3 第 4 条 pkgblib LP64/LLP64 仍未解决的遗留声明），
+    并挂入 `docs/README.md` 索引；此前该口径只散落在代码注释与审计文档的「问题陈述」里。
+  - 验证：全量 `go test ./...` 20 包全绿（改前 `codegen`/`sema` 两包 FAIL）；
+    full 语料 **138/138 通过**（含慢速多线程分配器压测）；C 并发内核 **32 用例 ALL PASS**；
+    freestanding 108/115（7 项因本机未装 qemu，属环境缺失，由 CI 覆盖）。
+
 - **修复四类安装包全部缺失 `version.json`，装完后 `kaulac --version` 静默显示 `dev-local`（发布可观测性缺陷）**：
   版本号唯一来源是构建生成的 `compiler/version.json`（生成物、已 gitignore），kaulac
   运行期按 `LookupPaths()` 查找，找不到即降级为 `dev-local`。v1.1.377 及之前的
