@@ -1,0 +1,52 @@
+# TDD: std.concurrent 原子操作测试 (v2 - 修正 API 误用)
+# Kaula 原子操作使用 std.concurrent.kaula_atomic_*
+
+import std.testing
+import std.concurrent
+import std.io
+
+fn assert_msg(cond: bool, msg: string) {
+    if !cond {
+        std.io.println("FAIL: ", msg)
+    }
+}
+
+fn main() {
+    # 测试 1: 原子加法
+    i32 value = 10
+    i32 old = std.concurrent.kaula_atomic_add(&value, 5)
+    assert_msg(old == 10, "原子加应返回旧值 10")
+    assert_msg(value == 15, "加后值应为 15")
+
+    # 测试 2: 原子减法
+    i32 v2 = 100
+    i32 old2 = std.concurrent.kaula_atomic_sub(&v2, 30)
+    assert_msg(old2 == 100, "原子减应返回旧值 100")
+    assert_msg(v2 == 70, "减后值应为 70")
+
+    # 测试 3: 原子交换
+    i32 v3 = 1
+    i32 old3 = std.concurrent.kaula_atomic_exchange(&v3, 99)
+    assert_msg(old3 == 1, "exchange 应返回旧值")
+    assert_msg(v3 == 99, "exchange 后值应为 99")
+
+    # 测试 4: CAS 成功路径
+    i32 v4 = 5
+    bool ok = std.concurrent.kaula_atomic_compare_exchange(&v4, 5, 10)
+    assert_msg(ok, "CAS 应成功")
+    assert_msg(v4 == 10, "CAS 后值应为 10")
+
+    # 测试 5: CAS 失败路径
+    i32 v5 = 5
+    bool ok2 = std.concurrent.kaula_atomic_compare_exchange(&v5, 99, 10)
+    assert_msg(!ok2, "CAS 应失败")
+    assert_msg(v5 == 5, "CAS 失败后值不变")
+
+    # 测试 6: store/load
+    i32 v6 = 0
+    std.concurrent.kaula_atomic_store(&v6, 42)
+    i32 loaded = std.concurrent.kaula_atomic_load(&v6)
+    assert_msg(loaded == 42, "load 应返回 42")
+
+    std.io.println("atomic tests complete")
+}

@@ -1,0 +1,169 @@
+// alloc_bench.kl — Kaula 分配器各路径基准，逐阶段对照 test/alloc_bench.cpp（malloc/free 同口径）
+//
+// 阶段 A：空循环基线（扣掉循环自身开销，两边都跑）
+// 阶段 B：大块 1MB「分配 + 回收」完整循环 ×N
+//         Kaula: scope_enter + kmm_v4_alloc(1MB) + scope_exit（作用域批量回收）
+//         C++:   malloc(1MB) + free
+// 阶段 C：单作用域内连续 N 次 16B bump 分配；随后 scope_exit 一次性批量回收
+//         C++:   N 次 malloc(16)（指针存数组），随后 N 次 free（逐个）
+// 阶段 D：幸存段(slab) 成对 alloc+free ×N —— kmm_v4_global_alloc / kmm_v4_global_free
+//         C++:   malloc(16) + free 成对
+// 阶段 E：kmm_v4_alloc(1MB) + kmm_v4_reset 全量重置 ×M
+//         C++:   malloc(1MB) + free（C++ 无等价"重置"语义，作参照）
+// 阶段 F：真实负载 —— 作用域分配 + 建树 + 中序遍历 ×10000（对照 btree_bench [D]）
+// 阶段 V：checksum 与分配器状态校验
+//
+// 深度 16 完全二叉树 65535 节点，中序 checksum = sum(0..65534) = 2147385345。
+import std.io
+import std.memory
+import std.time
+
+// 节点 16 字节：i32 left + i32 right + i64 value（无填充）
+struct Node {
+    left: i32
+    right: i32
+    value: i64
+}
+
+// 以 idx 为根、自 depth 层向下递归建树（完全二叉树，满 maxDepth 层）
+fn build(Node* nodes, i32 idx, i32 depth, i32 maxDepth) {
+    nodes[idx].left = -1
+    nodes[idx].right = -1
+    nodes[idx].value = as<i64>(idx)
+    if depth < maxDepth {
+        i32 li = idx * 2 + 1
+        i32 ri = idx * 2 + 2
+        nodes[idx].left = li
+        nodes[idx].right = ri
+        build(nodes, li, depth + 1, maxDepth)
+        build(nodes, ri, depth + 1, maxDepth)
+    }
+}
+
+// 中序遍历求和（返回值先绑局部变量再 return，规避 return 路径回收缺陷）
+fn inorder(Node* nodes, i32 idx) i64 {
+    if idx < 0 {
+        return 0
+    }
+    i64 leftSum = inorder(nodes, nodes[idx].left)
+    i64 mid = nodes[idx].value
+    i64 rightSum = inorder(nodes, nodes[idx].right)
+    i64 total = leftSum + mid + rightSum
+    return total
+}
+
+fn main() {
+    i64 n = 200000          // 小对象/大块循环次数
+    i64 block = 1048576     // 1MB
+    i64 resetRounds = 50000 // 阶段 E 轮数
+    i64 fRounds = 10000     // 阶段 F 轮数
+    i64 expect = 2147385345
+    i64 sink = 0            // 防止结果被优化掉
+
+    std.io.println("=== Kaula alloc_bench (N=200000, block=1MB, small=16B) ===")
+
+    // ---- 预热：TLAB/slab 桶懒初始化 + 分支预测 ----
+    i64 w = 0
+    while w < 1000 {
+        std.memory.kmm_v4_scope_enter()
+        i32* wp = as<i32*>(std.memory.kmm_v4_alloc(16))
+        wp[0] = 1
+        sink = sink + wp[0]
+        std.memory.kmm_v4_scope_exit()
+        i32* gp = as<i32*>(std.memory.kmm_v4_global_alloc(16))
+        std.memory.kmm_v4_global_free(gp)
+        w = w + 1
+    }
+
+    // ---- 阶段 A：空循环基线 ----
+    i64 t0 = std.time.time_now_ns()
+    i64 i = 0
+    while i < n {
+        sink = sink + 1
+        i = i + 1
+    }
+    i64 t1 = std.time.time_now_ns()
+    std.io.println("[A] loop baseline            ", (t1 - t0) / n, " ns/op")
+
+    // ---- 阶段 B：大块 1MB 分配 + 作用域回收 ----
+    i64 t2 = std.time.time_now_ns()
+    i = 0
+    while i < n {
+        std.memory.kmm_v4_scope_enter()
+        i32* bp = as<i32*>(std.memory.kmm_v4_alloc(block))
+        bp[0] = 1
+        sink = sink + bp[0]
+        std.memory.kmm_v4_scope_exit()
+        i = i + 1
+    }
+    i64 t3 = std.time.time_now_ns()
+    std.io.println("[B] scope+alloc(1MB)+reclaim x200000 ", (t3 - t2) / 1000000, " ms   ", (t3 - t2) / n, " ns/round")
+
+    // ---- 阶段 C：单作用域内 N 次 16B bump 分配，再批量回收 ----
+    std.memory.kmm_v4_scope_enter()
+    i64 t4 = std.time.time_now_ns()
+    i = 0
+    while i < n {
+        i32* sp = as<i32*>(std.memory.kmm_v4_alloc(16))
+        sp[0] = 1
+        sink = sink + sp[0]
+        i = i + 1
+    }
+    i64 t5 = std.time.time_now_ns()
+    std.memory.kmm_v4_scope_exit()
+    i64 t6 = std.time.time_now_ns()
+    std.io.println("[C] bump alloc 16B x200000   ", (t5 - t4) / 1000000, " ms   ", (t5 - t4) / n, " ns/alloc")
+    std.io.println("[C] scope reclaim (3.2MB bulk) ", (t6 - t5), " ns total for ", n, " slots (O(1) rewind)")
+
+    // ---- 阶段 D：幸存段 slab 成对 alloc+free ----
+    i64 freed = 0
+    i64 t7 = std.time.time_now_ns()
+    i = 0
+    while i < n {
+        i32* lp = as<i32*>(std.memory.kmm_v4_global_alloc(16))
+        lp[0] = 1
+        sink = sink + lp[0]
+        if std.memory.kmm_v4_global_free(lp) {
+            freed = freed + 1
+        }
+        i = i + 1
+    }
+    i64 t8 = std.time.time_now_ns()
+    std.io.println("[D] slab alloc+free 16B x200000 ", (t8 - t7) / 1000000, " ms   ", (t8 - t7) / n, " ns/pair")
+    std.io.println("[D] freed count               ", freed, " / ", n)
+
+    // ---- 阶段 E：alloc(1MB) + reset 全量重置 ----
+    i64 t9 = std.time.time_now_ns()
+    i = 0
+    while i < resetRounds {
+        i32* rp = as<i32*>(std.memory.kmm_v4_alloc(block))
+        rp[0] = 1
+        sink = sink + rp[0]
+        std.memory.kmm_v4_reset()
+        i = i + 1
+    }
+    i64 t10 = std.time.time_now_ns()
+    std.io.println("[E] alloc(1MB)+reset x50000  ", (t10 - t9) / 1000000, " ms   ", (t10 - t9) / resetRounds, " ns/round")
+
+    // ---- 阶段 F：真实负载（作用域分配 + 建树 + 遍历）----
+    i64 checksumF = 0
+    i64 t11 = std.time.time_now_ns()
+    i64 rep = 0
+    while rep < fRounds {
+        std.memory.kmm_v4_scope_enter()
+        Node* nodes = as<Node*>(std.memory.kmm_v4_alloc(65535 * 16))
+        build(nodes, 0, 1, 16)
+        checksumF = checksumF + inorder(nodes, 0)
+        std.memory.kmm_v4_scope_exit()
+        rep = rep + 1
+    }
+    i64 t12 = std.time.time_now_ns()
+    std.io.println("[F] scope+build+traverse x10000 ", (t12 - t11) / 1000000, " ms   ", (t12 - t11) / fRounds, " ns/round")
+    std.io.println("[F] checksum                  ", checksumF)
+
+    // ---- 校验 ----
+    i64 okF = checksumF - fRounds * expect
+    std.io.println("[V] checksum delta           ", okF)
+    std.io.println("[V] kmm_v4_usage after       ", std.memory.kmm_v4_usage())
+    std.io.println("[V] sink                     ", sink)
+}

@@ -1,0 +1,145 @@
+// Kaula 并发内核 · 守卫循环体内 return 的语义钉子
+//
+// == 用例的来历 ==
+//
+// 曾经尝试过一个「出口哨兵」优化：把循环体里作为出口的 return 槽位
+// 挪到守卫链链首，用 `if (sub[d] != 0)` 一次排掉整个链。
+//
+// 那个优化**会静默算错**：守卫链里 sub[d] 是级联推进的（槽位 k 把
+// sub[d] 推到 k+1，紧随的 `if (sub[d] == k+1)` 在同一趟命中），
+// 根本没有「N-1 次失败比较」可省；而 return 槽位被挪走后，
+// 前一条语句设的槽位号落在别的分支里，return 被**静默丢弃**。
+//
+// 实测症状（本用例的 return_then_deadcode）：期望返回 100，
+// 实际死循环 —— 顺序路径与 spawn 路径都一样。优化已回退，
+// 本用例留下来当防回退闸门：**任何改动若再次破坏这里的返回值，
+// 这一条就会挂**。
+//
+// == 判据 ==
+//
+// 全部用返回值判死，不看有没有 printf。守卫模式下「循环体重复执行」
+// 或「return 被丢弃」都不崩不报错，只有返回值能抓住。
+
+import std.io
+import std.time
+
+// A：循环体内顶层 return —— 提前返回，后续轮次不得再跑。
+// 期望 0+1+2+3 = 6（i==3 那轮先挂起、累加、再 return）。
+conc fn early_return(i64 stop) -> i64 {
+    i64 total = 0
+    for i in range(10) {
+        std.time.time_sleep_us(50)
+        total = total + i
+        if i == stop {
+            return total
+        }
+    }
+    return -1
+}
+
+// A'：等价但不含顶层 return，用 break 代替。
+// 期望与 early_return 一致 —— 两条路径的差值本身就是语义证据。
+conc fn early_break(i64 stop) -> i64 {
+    i64 total = 0
+    for i in range(10) {
+        std.time.time_sleep_us(50)
+        total = total + i
+        if i == stop {
+            break
+        }
+    }
+    return total
+}
+
+// B：嵌套循环内的 return（多层守卫）。
+// 期望：i=0 时内层累加 0+1+2+3 = 6，然后 return 6。
+conc fn nested_return(i64 j_lim) -> i64 {
+    i64 total = 0
+    for i in range(5) {
+        for j in range(5) {
+            std.time.time_sleep_us(20)
+            total = total + j
+            if j == j_lim {
+                return total
+            }
+        }
+    }
+    return -1
+}
+
+// C：return 之后还有语句（死代码）。
+// 那条死代码永远不该执行：期望严格等于 100。
+// 「出口哨兵」优化把这个用例变成了死循环 —— 这条是最灵敏的探针。
+conc fn return_then_deadcode() -> i64 {
+    i64 acc = 0
+    for i in range(4) {
+        std.time.time_sleep_us(20)
+        acc = acc + 100
+        return acc
+        acc = acc + 7777
+    }
+    return -1
+}
+
+// D：循环跑满、不提前返回，return 在循环**外**。
+// 期望 0+1+2+3+4+5 = 15。
+conc fn full_loop() -> i64 {
+    i64 s = 0
+    for i in range(6) {
+        std.time.time_sleep_us(10)
+        s = s + i
+    }
+    return s
+}
+
+fn main() -> i32 {
+    i64 err = 0
+
+    // A / A'：提前返回 vs break，两者必须一致
+    i64 ra = early_return(3)
+    i64 rb = early_break(3)
+    if ra != 6 { err += 1; std.io.println("ERR A seq return got=", ra, " want 6") }
+    if rb != 6 { err += 1; std.io.println("ERR A seq break got=", rb, " want 6") }
+    if ra != rb { err += 1; std.io.println("ERR A mismatch return=", ra, " break=", rb) }
+
+    Handle ha = spawn early_return(3)
+    i64 ra2 = ha.await
+    Handle hb = spawn early_break(3)
+    i64 rb2 = hb.await
+    if ra2 != 6 { err += 1; std.io.println("ERR A spawn return got=", ra2, " want 6") }
+    if rb2 != 6 { err += 1; std.io.println("ERR A spawn break got=", rb2, " want 6") }
+    if ra2 != rb2 { err += 1; std.io.println("ERR A spawn mismatch return=", ra2, " break=", rb2) }
+
+    // B：嵌套 return
+    Handle hn = spawn nested_return(3)
+    i64 rn = hn.await
+    if rn != 6 { err += 1; std.io.println("ERR B nested got=", rn, " want 6") }
+
+    // C：return 后死代码不得执行（最灵敏的一条）
+    Handle hc = spawn return_then_deadcode()
+    i64 rc = hc.await
+    if rc != 100 { err += 1; std.io.println("ERR C deadcode got=", rc, " want 100") }
+    i64 rcseq = return_then_deadcode()
+    if rcseq != 100 { err += 1; std.io.println("ERR C seq deadcode got=", rcseq, " want 100") }
+
+    // D：循环跑满
+    Handle hd = spawn full_loop()
+    i64 rd = hd.await
+    if rd != 15 { err += 1; std.io.println("ERR D full got=", rd, " want 15") }
+
+    // E：压测 —— 大量并发任务，每条都走含 return 的循环
+    i64 n = 200
+    i64 sum = 0
+    i64 k = 0
+    while k < n {
+        Handle h = spawn full_loop()
+        i64 v = h.await
+        if v != 15 { err += 1; std.io.println("ERR E burst got=", v, " want 15") }
+        sum = sum + v
+        k = k + 1
+    }
+    if sum != n * 15 { err += 1; std.io.println("ERR E sum got=", sum, " want", n * 15) }
+
+    std.io.println("guard_loop_return ok err=", err)
+    return 0
+}

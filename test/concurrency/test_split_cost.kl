@@ -1,0 +1,55 @@
+// 分解实验：把「spawn+await 调度往返」和「定时器挂起」的成本分开。
+//
+// 目的：定位 200µs 的 sleep 实际耗掉 ~33ms，那 33ms 到底花在哪一段。
+//
+//   A 组：spawn + await，无任何挂起   → 纯调度往返成本
+//   B 组：spawn + await，带 200µs 挂起 → 调度往返 + 定时器成本
+//
+// 差值即定时器通路的成本。
+
+import std.io
+import std.time
+
+// 无挂起点：单一形态
+conc fn pure(a: i64) -> i64 {
+    return a + 1
+}
+
+// 有挂起点：双形态
+conc fn nap(us: i64) -> i64 {
+    std.time.time_sleep_us(us)
+    return us
+}
+
+fn main() -> i32 {
+    // ---- A 组：纯调度往返 ----
+    i64 t0 = std.time.time_now_ms()
+    i64 acc = 0
+    i64 i = 0
+    while i < 1000 {
+        Handle h = spawn pure(i)
+        i64 v = h.await
+        acc = acc + v
+        i = i + 1
+    }
+    i64 tA = std.time.time_now_ms() - t0
+
+    // ---- B 组：带 200µs 挂起 ----
+    i64 t1 = std.time.time_now_ms()
+    i64 acc2 = 0
+    i64 j = 0
+    while j < 1000 {
+        Handle h = spawn nap(200)
+        i64 v = h.await
+        acc2 = acc2 + v
+        j = j + 1
+    }
+    i64 tB = std.time.time_now_ms() - t1
+
+    std.io.println("A  sched_only_ms = ", tA)
+    std.io.println("B  with_timer_ms = ", tB)
+    std.io.println("   timer_delta_ms = ", tB - tA)
+    std.io.println("   per_iter_us    = ", (tB - tA) * 1000 / 1000)
+    std.io.println("acc=", acc, " acc2=", acc2)
+    return 0
+}

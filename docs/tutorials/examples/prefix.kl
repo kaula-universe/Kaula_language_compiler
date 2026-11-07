@@ -1,0 +1,102 @@
+// prefix.kl — 前缀（宏）系统完整可运行示例
+// 覆盖：prefix 语句形态、#[prefix] 函数形态、默认值、let 绑定、
+//       卫生性（alpha 重命名）、嵌套展开、表达式级宏。
+// 运行：kaulac run docs/tutorials/examples/prefix.kl
+import std.io
+
+// 1) prefix 语句形态：参数声明（裸 $name）、调用体拼接点（$body）
+prefix Logger {
+    $message
+    $level
+    auto log = $level + ": " + $message
+    std.io.println(log)
+}
+
+// 2) 默认值：$times = 3，调用方不传就是 3
+prefix Retry {
+    $times = 3
+    std.io.println("[RETRY] budget=", $times)
+}
+
+// 3) #[prefix] 函数形态：形参必须按 $param 引用
+#[prefix]
+fn AddTo(target: i64, value: i64) {
+    $target = $target + $value      // 传了实参 → 普通赋值
+}
+
+#[prefix]
+fn WithDefault(x: i64) {
+    $limit = 10                     // 未传实参 → 默认值声明，不生成代码
+    std.io.println($x + $limit)
+}
+
+// 4) 表达式级宏：模板最后一条语句是表达式 → 宏有值
+#[prefix]
+fn Lower(c: char) -> i64 {
+    i64 base = $c - 'A'
+    base + 'a'
+}
+
+// 5) 卫生性：模板内局部变量被唯一化为 __kaula_m{seq}_{name}
+prefix Swap {
+    $a
+    $b
+    i64 tmp = $a
+    $a = $b
+    $b = tmp
+}
+
+// 6) 嵌套展开：宏里调宏（非自引用），上限 32 层
+#[prefix]
+fn Depth2(v: i64) {
+    i64 u = $v
+    std.io.println("depth2 u=", u)
+}
+
+#[prefix]
+fn Depth3(v: i64) {
+    i64 t = $v
+    @Depth2(v = t)
+}
+
+// 7) let 绑定：$x 引用两次 → 实参只求值一次
+prefix TwiceEval {
+    $x
+    std.io.println($x + $x)
+}
+
+i64 calls = 0
+fn counter() -> i64 {
+    calls = calls + 1
+    return calls
+}
+
+fn main() {
+    // prefix 语句调用
+    @Logger(message = "server started", level = "INFO")
+    @Retry()
+
+    // #[prefix] 函数调用
+    i64 acc = 1
+    @AddTo(target = acc, value = 41)
+    std.io.println("acc=", acc)          // 42
+    @WithDefault(x = 9)                   // 11
+
+    // 表达式级宏
+    i64 v = @Lower(c = 'C') + 1
+    std.io.println("lower+1=", v)         // 100
+
+    // 卫生性：调用方的 tmp 不受宏内 tmp 影响
+    i64 tmp = 100
+    i64 x = 1
+    i64 y = 2
+    @Swap(a = x, b = y)
+    std.io.println("x=", x, " y=", y, " tmp=", tmp)
+
+    // 嵌套展开
+    @Depth3(v = 41)
+
+    // let 绑定：只求值一次
+    @TwiceEval(x = counter())
+    std.io.println("calls=", calls)       // 1，而不是 2
+}

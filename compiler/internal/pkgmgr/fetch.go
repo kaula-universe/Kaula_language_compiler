@@ -1,0 +1,367 @@
+﻿package pkgmgr
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"kaula/internal/config"
+	"kaula/internal/semver"
+)
+
+// 注册源: gitee 组织。包仓库命名约定: kaula-universe/<name>，
+// 版本经 git tag 发布（v1.2.3 或 1.2.3 均可识别）。
+const DefaultRegistry = "https://gitee.com/kaula-universe"
+
+// CacheRoot 返回包缓存根目录 (~/.kaula/pkglib)。
+func CacheRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".kaula", "pkglib"), nil
+}
+
+// pkgDir 返回缓存中某包的工作目录: ~/.kaula/pkglib/<name>/
+// 布局与本地 pkglib 一致（<name>/ 直接是库根），
+// 解析锁 resolved.json 记录当前版本；换版本时删旧目录重克隆。
+func pkgDir(root, name string) string {
+	return filepath.Join(root, name)
+}
+
+// lockFile 返回包的解析锁路径: ~/.kaula/pkglib/<name>/resolved.json
+func lockFile(root, name string) string {
+	return filepath.Join(pkgDir(root, name), "resolved.json")
+}
+
+// ResolvedLock 记录某包已解析的版本（防重复 fetch）
+type ResolvedLock struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Tag     string `json:"tag,omitempty"`
+	Commit  string `json:"commit,omitempty"`
+}
+
+// LoadResolved 读取包解析锁；不存在返回 nil。
+func LoadResolved(root, name string) (*ResolvedLock, error) {
+	data, err := os.ReadFile(lockFile(root, name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var l ResolvedLock
+	if err := json.Unmarshal(data, &l); err != nil {
+		return nil, fmt.Errorf("parse resolved lock: %w", err)
+	}
+	return &l, nil
+}
+
+// SaveResolved 写回包解析锁。
+func SaveResolved(root, name string, l *ResolvedLock) error {
+	dir := pkgDir(root, name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(l, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(lockFile(root, name), data, 0644)
+}
+
+// RegistryURL 返回包的注册源仓库 URL。
+func RegistryURL(registry, name string) string {
+	return fmt.Sprintf("%s/%s.git", strings.TrimSuffix(registry, "/"), name)
+}
+
+// ListTags 用 git ls-remote 列出远端仓库的版本 tag（v1.2.3 / 1.2.3）。
+func ListTags(repoURL string) ([]string, error) {
+	cmd := exec.Command("git", "ls-remote", "--tags", repoURL)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-remote %s: %w (%s)", repoURL, err, strings.TrimSpace(string(out)))
+	}
+	seen := map[string]bool{}
+	var tags []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ref := fields[1]
+		// 跳过 ^{} 剥离后缀行
+		if strings.HasSuffix(ref, "^{}") {
+			continue
+		}
+		// 只取 refs/tags/ 下的，跳过非版本 tag
+		if !strings.HasPrefix(ref, "refs/tags/") {
+			continue
+		}
+		tag := strings.TrimPrefix(ref, "refs/tags/")
+		// 跳过带斜杠的嵌套 tag 名
+		if strings.Contains(tag, "/") {
+			continue
+		}
+		if seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags, nil
+}
+
+// CloneTag 浅克隆远端仓库指定 tag 到 dst（目录已存在则跳过）。
+func CloneTag(repoURL, tag, dst string) error {
+	if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
+		return nil // 已克隆
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	// 浅克隆指定 tag（--depth 1 --branch tag）
+	args := []string{"clone", "--depth", "1", "--branch", tag, "--single-branch", repoURL, dst}
+	cmd := exec.Command("git", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// 浅克隆失败时清理残留目录（如 tag 名非法时 git 可能建了空目录）
+		_ = os.RemoveAll(dst)
+		return fmt.Errorf("git clone --branch %s: %w (%s)", tag, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// FetchResult 拉取结果
+type FetchResult struct {
+	Name    string
+	Version string
+	Tag     string
+	Dir     string
+	Source  string // "cache" | "fetched"
+}
+
+// printProbeSummary 打印多源测速汇总，并提示最终选中的最快源。
+// probes 必须已按延迟升序排序（probeBestSource 的返回约定）。
+func printProbeSummary(probes []sourceProbe) {
+	fmt.Printf("[pkg] probing %d registries for %s...\n", len(probes), filepath.Base(probes[0].repoURL))
+	for i, p := range probes {
+		if p.err != nil {
+			fmt.Printf("  [%d] %s  FAIL: %v\n", i+1, p.repoURL, p.err)
+		} else {
+			fmt.Printf("  [%d] %s  %s  (%d tags)\n", i+1, p.repoURL, describeLatency(p.latency), len(p.tags))
+		}
+	}
+	if best := pickBestSource(probes); best.err == nil {
+		fmt.Printf("[pkg] fastest source: %s (%s)\n", best.repoURL, describeLatency(best.latency))
+	}
+}
+
+// Fetch 解析并拉取一个包依赖。
+// 流程: 已解析锁满足约束 -> 复用; 否则并发测速候选注册源（gitee/github 镜像），
+// 选最快源列出 tags -> semver 选最高 -> 浅克隆 -> 写锁。
+// 选中源克隆失败时自动降级到下一个候选源，全部失败才报错。
+// 返回包所在目录（供 pkglib 加载）与解析结果。
+func Fetch(registry, name, constraintStr string) (*FetchResult, error) {
+	root, err := CacheRoot()
+	if err != nil {
+		return nil, err
+	}
+	constraint, err := semver.ParseConstraint(constraintStr)
+	if err != nil {
+		return nil, fmt.Errorf("dependency %s: %w", name, err)
+	}
+
+	// 1. 已有解析锁且版本满足约束 -> 直接复用
+	if locked, err := LoadResolved(root, name); err == nil && locked != nil {
+		if lv, perr := semver.Parse(locked.Version); perr == nil && constraint.Matches(lv) {
+			d := pkgDir(root, name)
+			if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+				return &FetchResult{Name: name, Version: locked.Version, Tag: locked.Tag, Dir: d, Source: "cache"}, nil
+			}
+		}
+	}
+
+	// 2. 并发测速候选源，按延迟排序选择最快源
+	candidates := RegistryCandidates(registry)
+	repoURLs := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		repoURLs = append(repoURLs, RegistryURL(c, name))
+	}
+	probes, perr := probeBestSource(gitProbe, repoURLs)
+	if perr != nil {
+		return nil, fmt.Errorf("dependency %s: %w", name, perr)
+	}
+	if len(candidates) > 1 {
+		printProbeSummary(probes)
+	}
+
+	// 3. 按测速顺序（最快优先）尝试: semver 匹配 -> 浅克隆，失败降级下一源
+	dst := pkgDir(root, name)
+	var lastErr error
+	for _, p := range probes {
+		if p.err != nil {
+			lastErr = p.err
+			continue
+		}
+		if len(p.tags) == 0 {
+			lastErr = fmt.Errorf("no version tags in %s (tag versions as v1.2.3)", p.repoURL)
+			continue
+		}
+		best := semver.BestMatch(constraint, p.tags)
+		if best == "" {
+			lastErr = fmt.Errorf("no tag in %s satisfies constraint %q (available: %s)",
+				p.repoURL, constraintStr, strings.Join(p.tags, ", "))
+			continue
+		}
+		norm := strings.TrimPrefix(best, "v")
+		norm = strings.TrimPrefix(norm, "V")
+
+		fmt.Printf("[pkg] fetching %s@%s from %s (probe: %s)\n", name, norm, p.repoURL, describeLatency(p.latency))
+		if locked, _ := LoadResolved(root, name); locked != nil && locked.Version != norm {
+			_ = os.RemoveAll(dst)
+		}
+		if cerr := CloneTag(p.repoURL, best, dst); cerr != nil {
+			lastErr = cerr
+			// 清掉残留目录，避免污染降级源的克隆
+			_ = os.RemoveAll(dst)
+			fmt.Printf("[pkg] warning: clone from %s failed: %v (falling back to next source)\n", p.repoURL, cerr)
+			continue
+		}
+
+		// 4. 写解析锁
+		commit := ""
+		if out, cErr := exec.Command("git", "-C", dst, "rev-parse", "HEAD").CombinedOutput(); cErr == nil {
+			commit = strings.TrimSpace(string(out))
+		}
+		lock := &ResolvedLock{Name: name, Version: norm, Tag: best, Commit: commit}
+		if err := SaveResolved(root, name, lock); err != nil {
+			fmt.Printf("[pkg] warning: failed to write resolved lock: %v\n", err)
+		}
+
+		return &FetchResult{Name: name, Version: norm, Tag: best, Dir: dst, Source: "fetched"}, nil
+	}
+	return nil, fmt.Errorf("dependency %s: all sources failed: %w", name, lastErr)
+}
+
+// FetchGitDependency 从指定的 git 仓库获取包
+// 与 Fetch 的区别：直接使用提供的 git URL，不经过注册表
+func FetchGitDependency(name string, dep config.Dependency) (*FetchResult, error) {
+	root, err := CacheRoot()
+	if err != nil {
+		return nil, err
+	}
+
+	// 确定要克隆的 ref（tag、branch 或 commit）
+	ref := ""
+	if dep.Tag != "" {
+		ref = dep.Tag
+	} else if dep.Branch != "" {
+		ref = dep.Branch
+	} else if dep.Commit != "" {
+		ref = dep.Commit
+	}
+
+	// 检查缓存中是否已有此包
+	dst := pkgDir(root, name)
+	if locked, err := LoadResolved(root, name); err == nil && locked != nil {
+		// 检查缓存的包是否匹配请求的 ref
+		if ref == "" || locked.Tag == ref || locked.Commit == ref {
+			if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
+				return &FetchResult{
+					Name:    name,
+					Version: locked.Version,
+					Tag:     locked.Tag,
+					Dir:     dst,
+					Source:  "cache",
+				}, nil
+			}
+		}
+	}
+
+	// 从 git 仓库克隆
+	fmt.Printf("[pkg] fetching %s from %s", name, dep.Git)
+	if ref != "" {
+		fmt.Printf(" (ref: %s)", ref)
+	}
+	fmt.Println()
+
+	// 清理旧缓存
+	if locked, _ := LoadResolved(root, name); locked != nil {
+		_ = os.RemoveAll(dst)
+	}
+
+	// 克隆仓库
+	if err := cloneGitRepo(dep.Git, ref, dst); err != nil {
+		return nil, fmt.Errorf("dependency %s: %w", name, err)
+	}
+
+	// 获取实际版本信息
+	version := ""
+	commit := ""
+	tag := ""
+
+	if out, cerr := exec.Command("git", "-C", dst, "rev-parse", "HEAD").CombinedOutput(); cerr == nil {
+		commit = strings.TrimSpace(string(out))
+	}
+
+	// 尝试获取当前 tag
+	if out, cerr := exec.Command("git", "-C", dst, "describe", "--tags", "--exact-match").CombinedOutput(); cerr == nil {
+		tag = strings.TrimSpace(string(out))
+		version = strings.TrimPrefix(tag, "v")
+		version = strings.TrimPrefix(version, "V")
+	}
+
+	// 如果没有 tag，使用 commit 的短哈希作为版本
+	if version == "" && commit != "" {
+		if out, cerr := exec.Command("git", "-C", dst, "rev-parse", "--short", "HEAD").CombinedOutput(); cerr == nil {
+			version = "0.0.0+" + strings.TrimSpace(string(out))
+		}
+	}
+
+	// 写解析锁
+	lock := &ResolvedLock{
+		Name:    name,
+		Version: version,
+		Tag:     tag,
+		Commit:  commit,
+	}
+	if err := SaveResolved(root, name, lock); err != nil {
+		fmt.Printf("[pkg] warning: failed to write resolved lock: %v\n", err)
+	}
+
+	return &FetchResult{
+		Name:    name,
+		Version: version,
+		Tag:     tag,
+		Dir:     dst,
+		Source:  "fetched",
+	}, nil
+}
+
+// cloneGitRepo 克隆 git 仓库到指定目录
+func cloneGitRepo(url, ref, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
+	args := []string{"clone", "--depth", "1"}
+	if ref != "" {
+		args = append(args, "--branch", ref, "--single-branch")
+	}
+	args = append(args, url, dst)
+
+	cmd := exec.Command("git", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.RemoveAll(dst)
+		return fmt.Errorf("git clone %s: %w (%s)", url, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
