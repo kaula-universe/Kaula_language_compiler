@@ -1,0 +1,50 @@
+// object_literal.kl — 动态对象字面量 `object { ... }` 回归语料
+// 覆盖整条链路：parser 字面量解析 → ObjectLiteral AST → sema 类型推断
+// → codegen dynobj_create + dynobj_set → 运行时 dynobj_get/set/size/contains/delete。
+import std.io
+import std.obj
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    // 1) 带字段字面量：创建 + 逐字段 set
+    object point = object { x: 1, y: 2 }
+    check(std.obj.dynobj_size(point) == as<size_t>(2), "literal has 2 fields")
+    check(std.obj.dynobj_contains(point, "x"), "literal field x present")
+    check(std.obj.dynobj_contains(point, "y"), "literal field y present")
+    check(!std.obj.dynobj_contains(point, "z"), "missing field z absent")
+
+    // 2) 字段读取：dynobj_get 返回同一已装箱值
+    object xv = point.x
+    check(xv != null, "field read yields boxed value")
+
+    // 3) 字段写入：覆盖已有字段不改字段数
+    point.x = 10
+    check(std.obj.dynobj_size(point) == as<size_t>(2), "overwrite keeps field count")
+
+    // 4) 动态增字段
+    point.z = 3
+    check(std.obj.dynobj_size(point) == as<size_t>(3), "dynamic add grows size")
+    check(std.obj.dynobj_contains(point, "z"), "dynamic add field present")
+
+    // 5) 删除字段
+    std.obj.dynobj_delete(point, "z")
+    check(std.obj.dynobj_size(point) == as<size_t>(2), "delete shrinks size")
+
+    // 6) 空对象 object()
+    object empty = object()
+    check(std.obj.dynobj_size(empty) == as<size_t>(0), "empty literal has 0 fields")
+
+    // 7) 字面量嵌套：对象作为字段值
+    object nested = object { name: "kaula", inner: object { a: 1 } }
+    check(std.obj.dynobj_size(nested) == as<size_t>(2), "nested literal size")
+    check(std.obj.dynobj_contains(nested, "inner"), "nested literal field present")
+
+    std.io.println("object literal corpus done")
+}

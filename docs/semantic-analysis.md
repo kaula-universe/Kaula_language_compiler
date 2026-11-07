@@ -123,6 +123,18 @@ object { x: 10 }  // 推导为 object 类型
 obj.field         // 动态对象成员访问，类型为 object
 ```
 
+**动态对象槽位写入不做静态类型兼容检查（2026-11-07 修正）**
+
+- 动态对象的字段/索引是无类型的装箱槽，运行时 `dynobj_set` 接受任何可装箱值；
+  因此 `obj.field = <任意可装箱值>`、`obj["k"] = <...>` 一律放行。
+- 判定入口：`sema.go` 的 `isDynamicObjectSlot(expr)` —— 左值是 `MemberAccessExpression`
+  或 `IndexExpression`，且其 `Object` 被推断为 `object` 类型时返回 true。
+- 修正前 `point.x = 10` 会报 `assign_type_mismatch`（左值推断为 `object`、右值为 `i64`），
+  与运行期语义冲突，属误判。
+- 回归语料：`test/object_literal.kl`（12 项 check），覆盖字面量创建、字段读、覆盖写、
+  动态加字段、`dynobj_delete`、`object()` 空对象与嵌套字面量。
+  `scripts/run_tests.py` 自动发现 `test/*.kl`，CI 的 `test.yml` 直接跑它，无需改工作流。
+
 #### 全局动态对象声明分析
 
 ```go

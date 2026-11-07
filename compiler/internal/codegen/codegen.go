@@ -2634,6 +2634,21 @@ static inline String string_concat_float(String s, double v) {
 `)
 	}
 
+	// §1.3-4 ABI 护栏：把"宽度静默漂移"变成编译错误。
+	// 口径依据：Kaula 的 i32/i64 分别映射 int/long long，指针与 size_t/uintptr_t
+	// 必须同宽。LLP64（Windows x64）上 long 只有 4 字节，任何把 long 当 64 位
+	// 跨越 ABI 边界的用法都会在这里立即失败，而不是截断后继续跑。
+	allIncludes.WriteString(`
+// --- ABI width guards (audit §1.3-4) ---
+_Static_assert(sizeof(int) == 4, "Kaula i32 requires 4-byte int");
+_Static_assert(sizeof(long long) == 8, "Kaula i64 requires 8-byte long long");
+_Static_assert(sizeof(void*) == sizeof(size_t), "size_t must match pointer width");
+_Static_assert(sizeof(void*) == sizeof(uintptr_t), "uintptr_t must match pointer width");
+#if defined(_WIN64)
+_Static_assert(sizeof(long) == 4, "LLP64: long is 4 bytes, never treat it as 64-bit");
+#endif
+// --- end ABI width guards ---
+`)
 	// export 导出宏（供 KAULA_EXPORT 声明使用）
 	allIncludes.WriteString(`
 #ifndef KAULA_EXPORT

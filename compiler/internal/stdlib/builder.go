@@ -458,7 +458,13 @@ func MergeLibrariesInto(pkgDir string, result *LibAnalysisResult) (*ThirdPartyLi
 
 // BuildLibrary 编译库里所有 C/C++ 源码，打包为 lib<name>.a 静态库。
 // 若是共享头库（无源码），返回 BuildResult{HasLibraries:false}。
-func BuildLibrary(pkgDir string) (*BuildResult, error) {
+func BuildLibrary(pkgDir string, targetTriple ...string) (*BuildResult, error) {
+	// 目标三元组：解析头文件与编译 .o 必须与最终 TU 使用同一 ABI，
+	// 否则 long/size_t/uintptr_t 的宽度会在两个阶段静默分叉（审计 §1.3-4）。
+	target := ""
+	if len(targetTriple) > 0 {
+		target = targetTriple[0]
+	}
 	name := filepath.Base(pkgDir)
 	clangPath, err := findClangPath()
 	if err != nil {
@@ -514,7 +520,7 @@ func BuildLibrary(pkgDir string) (*BuildResult, error) {
 			defer wg.Done()
 			for s := range jobs {
 				sem <- struct{}{}
-				err := compileOneSource(clangPath, objDir, s, includeDirs)
+				err := compileOneSource(clangPath, objDir, s, includeDirs, target)
 				<-sem
 				results <- jobResult{rel: s.RelPath, err: err}
 			}
@@ -580,8 +586,13 @@ func objFullPath(objDir string, src BuildSource) string {
 }
 
 // compileOneSource 用 clang 编译单个源文件为 .o
-func compileOneSource(clangPath, objDir string, s BuildSource, includeDirs []string) error {
+func compileOneSource(clangPath, objDir string, s BuildSource, includeDirs []string, targetTriple string) error {
 	args := []string{"-c", "-O2"}
+	// 与最终 TU 同 ABI：缺了这一条，LP64 宿主上按 8 字节算出的 long/size_t
+	// 会在 LLP64/32 位目标里变成 4 字节，且不报任何错误。
+	if targetTriple != "" {
+		args = append(args, "--target="+targetTriple)
+	}
 
 	if s.Kind == "c++" {
 		args = append(args, "-x", "c++", "-std=c++17")

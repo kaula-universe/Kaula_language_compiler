@@ -1060,7 +1060,10 @@ func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
 		"i8": 1, "int8": 1, "sbyte": 1, "byte": 1, "uint8": 1, "u8": 1, "char": 1, "bool": 1, "boolean": 1,
 		"i16": 2, "int16": 2, "short": 2, "ushort": 2, "uint16": 2, "u16": 2,
 		"i32": 4, "int32": 4, "int": 4, "integer": 4, "uint": 4, "uint32": 4, "float": 4, "f32": 4, "single": 4,
-		"i64": 8, "int64": 8, "long": 8, "uint64": 8, "u64": 8,
+		"i64": 8, "int64": 8, "uint64": 8, "u64": 8,
+		// "long" 故意缺席：LP64 是 8 字节、LLP64（Windows x64）与 32 位目标是 4 字节。
+		// 硬编码任一侧都会在另一侧静默算错 sizeof，因此返回 unknown 交由调用方
+		// 走运行期 sizeof（审计 §1.3-4）。
 		"double": 8, "f64": 8, "real": 8,
 	}
 

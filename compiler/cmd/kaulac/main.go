@@ -4805,6 +4805,11 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 		}
 	}
 	clangArgs = append(clangArgs, "-I", workDir)
+	// §1.3-4：生成 TU 与 pkglib/std 目标文件必须使用同一 ABI 目标，
+	// 否则 long/size_t/uintptr_t 宽度在两个阶段静默分叉。
+	if tt := effectiveTargetTriple(cfg); tt != "" {
+		clangArgs = append(clangArgs, "--target="+tt)
+	}
 	clangArgs = append(clangArgs, tuSemanticCFlags...)
 	// 语义宏（与 std .o / runtime .o 共用同一份定义，杜绝口径分叉）
 	clangArgs = append(clangArgs, semanticDefines...)
@@ -5470,7 +5475,7 @@ func compileCCodePlan(cFile, outputFile, workDir string, usedModules []string, c
 				// 构建只依赖源码扫描，无需函数签名；解析（提取调用签名、
 				// 生成桥接）在后执行，避免"解析先行"在签名提取失败时
 				// 连构建都被跳过。
-				result, bErr := ensureLibrary(resolvedLibDir, libForce)
+				result, bErr := ensureLibrary(resolvedLibDir, libForce, effectiveTargetTriple(cfg))
 				if bErr != nil {
 					fmt.Printf("[Warn] Auto-build failed for %s: %v (continuing)\n", lib.Name, bErr)
 				} else if result != nil && result.HasLibraries {
@@ -5897,7 +5902,7 @@ func printUsage(exe string) {
 
 // ensureLibrary 按需确保库：force 为 true 或归档缺失/源码更新时重建，
 // 否则直接返回现有状态（含 C++ 运行时库项，链接时依然需要）
-func ensureLibrary(libDir string, force bool) (*stdlib.BuildResult, error) {
+func ensureLibrary(libDir string, force bool, targetTriple string) (*stdlib.BuildResult, error) {
 	name := filepath.Base(libDir)
 	if !force && !stdlib.LibNeedsBuild(libDir) {
 		sources, err := stdlib.ScanPackageSources(libDir)
@@ -5925,7 +5930,7 @@ func ensureLibrary(libDir string, force bool) (*stdlib.BuildResult, error) {
 			HasLibraries: true,
 		}, nil
 	}
-	return stdlib.BuildLibrary(libDir)
+	return stdlib.BuildLibrary(libDir, targetTriple)
 }
 
 // dirExists 判断路径是否存在且为目录
@@ -6025,7 +6030,7 @@ func handleBuildPkg(target string, force bool, pkglibPrefer string) {
 				continue
 			}
 			fmt.Printf("\nBuilding: %s\n", libName)
-			if _, err := buildOnePackage(libDir, libName, force); err != nil {
+			if _, err := buildOnePackage(libDir, libName, force, ""); err != nil {
 				fmt.Printf("  失败: %v\n", err)
 				failed++
 				continue
@@ -6043,7 +6048,7 @@ func handleBuildPkg(target string, force bool, pkglibPrefer string) {
 	}
 	ensureFresh(libDir, target)
 	fmt.Printf("Build package: %s\n", target)
-	if res, err := buildOnePackage(libDir, target, force); err != nil {
+	if res, err := buildOnePackage(libDir, target, force, ""); err != nil {
 		fmt.Printf("Error: failed to build %s: %v\n", target, err)
 		os.Exit(1)
 	} else {
@@ -6054,12 +6059,12 @@ func handleBuildPkg(target string, force bool, pkglibPrefer string) {
 }
 
 // buildOnePackage 构建单个包；up-to-date 时提示并返回空结果
-func buildOnePackage(libDir, libName string, force bool) (*stdlib.BuildResult, error) {
+func buildOnePackage(libDir, libName string, force bool, targetTriple string) (*stdlib.BuildResult, error) {
 	if !force && !stdlib.LibNeedsBuild(libDir) {
 		fmt.Printf("  Up to date (no rebuild needed)\n")
 		return &stdlib.BuildResult{Name: libName, ArchivePath: stdlib.LibArchivePath(libDir)}, nil
 	}
-	return stdlib.BuildLibrary(libDir)
+	return stdlib.BuildLibrary(libDir, targetTriple)
 }
 
 // handleAnalyzePkgAll 处理 --analyze-pkg-all 命令，手动分析所有包

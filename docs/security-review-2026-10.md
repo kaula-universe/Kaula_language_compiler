@@ -55,7 +55,7 @@ sema 自己推一遍类型（`inferExpressionType`），推完就丢，只把 `a
 - `int` 在 sema 眼里 = 64 位；
 - `numeric_names.go` 里 `int` 是被禁拼写且 = 32 位；
 - `GetTypeSize("int")` 返回 4；
-- pkgblib 的 C 头按 `.kl` 默认是 LP64、实际编译在 LLP64 平台上会**静默改变所有 `long/size_t/uintptr_t` 宽度**（`stdlib/header_gen.go` + `builder.go` 的 `clangArgs` 里没有 `--target`）。
+- ~~pkgblib 的 C 头按 `.kl` 默认是 LP64、实际编译在 LLP64 平台上会静默改变所有 `long/size_t/uintptr_t` 宽度~~ **[已修复 2026-11-07]**：原先 pkgblib 编译（`stdlib/builder.go:compileOneSource`）与最终 TU 编译（`main.go` 的 `clangArgs`）都不带 `--target`，两个阶段各自按 clang 宿主默认 ABI 解释 `long/size_t/uintptr_t`，一旦宿主与产出目标不同即静默分叉。修复内容：(1) `BuildLibrary(pkgDir, targetTriple ...string)` → `compileOneSource` 在目标三元组非空时透传 `--target=`，`ensureLibrary`/`buildOnePackage` 逐层透传 `effectiveTargetTriple(cfg)`；(2) 最终 TU 的 `clangArgs` 同样追加 `--target=`，保证 .o 与 TU 同 ABI；(3) `codegen/typegen.go:GetTypeSize` 删除硬编码 `"long": 8`（LP64 是 8、LLP64/32 位是 4，未知即返回 unknown 交运行期 `sizeof`）；(4) 生成 TU 的 prelude 新增 `_Static_assert` 宽度护栏（`sizeof(int)==4`、`sizeof(long long)==8`、`size_t/uintptr_t` 与指针同宽，`_WIN64` 下额外断言 `sizeof(long)==4`），把残留的宽度漂移从静默截断变成编译错误。
 
 ---
 

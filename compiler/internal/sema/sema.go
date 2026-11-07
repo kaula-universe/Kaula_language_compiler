@@ -3722,8 +3722,11 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 		if isAssignmentOperator(expr.Operator) && leftType != "" {
 			sa.checkAdoptConversion(leftType, expr.Right, expr.Pos, "赋值")
 		}
+		// 动态对象字段写入（obj.field = v / obj["k"] = v）：字段是无类型的装箱槽，
+		// 任何可装箱值都合法，不做静态类型兼容检查（与运行时 dynobj_set 语义一致）。
+		isDynObjSlot := sa.isDynamicObjectSlot(expr.Left)
 		// 前端严格化：赋值左右类型兼容（= 直接赋值；复合赋值 += 等仍要求同数值家族）
-		if isAssignmentOperator(expr.Operator) && leftType != "" && rightType != "" {
+		if isAssignmentOperator(expr.Operator) && leftType != "" && rightType != "" && !isDynObjSlot {
 			if !typesAssignable(leftType, rightType) {
 				sa.errorCollector.AddSemanticError(
 					fmt.Sprintf("不能把 '%s' 类型的值赋给 '%s' 类型的变量", rightType, leftType),
@@ -4924,6 +4927,18 @@ func (sa *SemanticAnalyzer) classFieldType(className, fieldName string) string {
 }
 
 // inferExpressionType 推断表达式的类型
+// isDynamicObjectSlot 判断赋值目标是否为动态对象的字段/索引槽位。
+// 动态对象字段是无类型的装箱槽（运行时 dynobj_set），任何可装箱值都可写入。
+func (sa *SemanticAnalyzer) isDynamicObjectSlot(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.MemberAccessExpression:
+		return sa.inferExpressionType(e.Object) == "object"
+	case *ast.IndexExpression:
+		return sa.inferExpressionType(e.Object) == "object"
+	}
+	return false
+}
+
 func (sa *SemanticAnalyzer) inferExpressionType(expr ast.Expression) string {
 	if expr == nil {
 		return ""
