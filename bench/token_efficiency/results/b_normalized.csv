@@ -11,7 +11,7 @@ task,lang,tokenizer,tokens,bytes,lines,prefix_tokens
 23_strlen,cpp,o200k_base,20,75,3,8
 23_strlen,c,o200k_base,18,59,3,10
 23_strlen,rs,o200k_base,18,53,3,0
-23_strlen,kl,o200k_base,21,71,3,7
+23_strlen,kl,o200k_base,19,61,3,7
 23_strlen,kl_cstyle,o200k_base,21,71,3,7
 2_truncate_number,py,o200k_base,13,52,2,0
 2_truncate_number,go,o200k_base,29,95,7,5
@@ -39,5 +39,5 @@ task,lang,tokenizer,tokens,bytes,lines,prefix_tokens
 65_circular_shift,cpp,o200k_base,76,270,8,12
 65_circular_shift,c,o200k_base,151,440,17,15
 65_circular_shift,rs,o200k_base,70,226,8,0
-65_circular_shift,kl,o200k_base,144,508,13,7
+65_circular_shift,kl,o200k_base,110,390,13,7
 65_circular_shift,kl_cstyle,o200k_base,183,649,19,7

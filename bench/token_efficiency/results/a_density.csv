@@ -9,10 +9,10 @@ toy-solutions/c,o200k_base,6,3228,1130,158,140,2.86,7.15,8.07
 toy-solutions/c,cl100k_base,6,3228,1148,158,140,2.81,7.27,8.2
 toy-solutions/rs,o200k_base,6,2290,797,117,99,2.87,6.81,8.05
 toy-solutions/rs,cl100k_base,6,2290,806,117,99,2.84,6.89,8.14
-toy-solutions/kl,o200k_base,6,3363,1154,155,137,2.91,7.45,8.42
-toy-solutions/kl,cl100k_base,6,3363,1166,155,137,2.88,7.52,8.51
-kaula/test-corpus,o200k_base,72,141992,44539,4792,4231,3.19,9.29,10.53
-kaula/test-corpus,cl100k_base,72,141992,47283,4792,4231,3.0,9.87,11.18
+toy-solutions/kl,o200k_base,6,3233,1118,153,137,2.89,7.31,8.16
+toy-solutions/kl,cl100k_base,6,3233,1130,153,137,2.86,7.39,8.25
+kaula/test-corpus,o200k_base,73,144012,45099,4852,4282,3.19,9.29,10.53
+kaula/test-corpus,cl100k_base,73,144012,47864,4852,4282,3.01,9.86,11.18
 kaula/tutorial-examples,o200k_base,13,20774,6247,818,723,3.33,7.64,8.64
 kaula/tutorial-examples,cl100k_base,13,20774,6559,818,723,3.17,8.02,9.07
 kaula/std-runtime-c,o200k_base,74,1017088,298431,33595,29624,3.41,8.88,10.07

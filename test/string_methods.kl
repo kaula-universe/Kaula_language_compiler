@@ -48,6 +48,13 @@ fn main() i32 {
         return 6
     }
 
+    # String + 方法调用结果：曾被推断成 int → string_concat_int（C 类型错）
+    String joined = s.substring(0, 2) + s.substring(2, 3)
+    if std.string.compare(joined, std.string.create("abc")) != 0 {
+        std.io.println("FAIL: String + substring(...)")
+        return 7
+    }
+
     std.io.println("string methods ok")
     return 0
 }

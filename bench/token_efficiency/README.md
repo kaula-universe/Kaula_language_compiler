@@ -45,7 +45,7 @@ C 级在没有任何 API key 时可以用 **oracle 下界**（假设一次写对
 | Go | 2615 | 963 | 2.72 | 5.70 |
 | C++ | 3117 | 1004 | 3.10 | 7.02 |
 | C | 3228 | 1130 | 2.86 | 7.15 |
-| **Kaula** | 3363 | **1154** | 2.91 | 7.45 |
+| **Kaula** | 3233 | **1118** | 2.89 | 7.31 |
 
 ### B 级：任务归一产出量
 
@@ -58,13 +58,15 @@ C 级在没有任何 API key 时可以用 **oracle 下界**（假设一次写对
 | Rust | 322 | 1.63x | 40 | 8.05 | 0 |
 | C++ | 375 | 1.89x | 43 | 8.72 | 64 |
 | Go | 386 | 1.95x | 65 | 5.94 | 34 |
-| **Kaula（地道写法）** | **430** | **2.17x** | 52 | 8.27 | 38 |
+| **Kaula（方法写法）** | **394** | **1.99x** | 52 | 7.58 | 38 |
 | C | 451 | 2.28x | 55 | 8.20 | 70 |
 | Kaula（C 风格写法，基线） | 465 | 2.35x | 57 | 8.16 | 38 |
 
-> 两行 Kaula 是同一个语言、同一个任务集、同一个 tokenizer，只差写法：
-> 地道版少用冗余转换、用 `+` 拼字符串、循环起点提前到 `i+1`。
-> **35 token 的差（2.35x → 2.17x）全部是写法问题，不是语言问题。**
+> 两行 Kaula 是同一个语言、同一个任务集、同一个 tokenizer，只差写法。
+> 从 C 风格（465）到方法写法（394）共省 71 token（2.35x → 1.99x）：
+> 去掉冗余转换、用 `+` 拼字符串、循环起点提前到 `i+1`，以及改用
+> `s.length()` / `s.substring(a, b)` 方法形式（此前只能写
+> `std.string.length(s)` + 两次 `as<size_t>`）。**这 71 token 全是写法问题。**
 
 ### C 级：oracle 下界（题面 + 一次写对的实现）
 
@@ -73,7 +75,7 @@ C 级在没有任何 API key 时可以用 **oracle 下界**（假设一次写对
 | Python | 577 | 160 | 737 | 1.00x |
 | Rust | 579 | 238 | 817 | 1.11x |
 | Go | 646 | 289 | 935 | 1.27x |
-| **Kaula** | 622 | 346 | 968 | 1.31x |
+| **Kaula** | 622 | 310 | 932 | 1.26x |
 | C | 609 | 380 | 989 | 1.34x |
 | C++ | 745 | 302 | 1047 | 1.42x |
 
@@ -139,7 +141,8 @@ HumanEval 这 6 个任务是**单个 10~30 行的纯函数**，这些特性没�
 1. **表层密度上 Kaula 不差**：2.91 B/token，与 Python（2.71）、C（2.86）同档。
    大头不是语法，而是"自造标识符被子词化"（`dynobj_contains` = 3 token、
    `isDynamicObjectSlot` = 4 token，而 `println` = 1 token）。
-2. **任务归一后（地道写法）是 2.17x Python，比 C（2.28x）省，但高于 C++（1.89x）和 Go（1.95x）**。原因不是啰嗦，而是
+2. **任务归一后（方法写法）1.99x Python**：实测排序 Python 198 < Rust 322 < C++ 375
+   < Go 386 < **Kaula 394** < C 451，Kaula 已低于 C。原因不是啰嗦，而是
    *Python 的 `sum()`、切片长度、`%` 都内建*，而 Kaula 需要显式 `for` 循环、
    显式 `as<i64>(...)` 转换、显式传数组长度。
 3. **写法会显著改变结论**：C 风格写法 2.35x，地道写法 2.17x。给 Kaula 定价时必须
@@ -172,16 +175,15 @@ OPENAI_API_KEY=sk-... python3 measure_c.py --mode llm \
 
 ## 基准过程中发现的语言问题（如实记录，未全部修复）
 
-1. **小写 `string` 是 `const char*`，大写 `String` 才是对象字符串**。`s.length()`
-   两条路径都不可用：`const char*` 接收者生成 `string_object_length(const char*)` → C 类型错误；
-   `String` 接收者生成 `Object_length` → **该符号在 std/ 中根本不存在** → 链接失败。
-   当前唯一可用写法是 `std.string.length(s)`。已在 `solutions/kl/23_strlen.kl` 沿用。
+1. ~~`s.length()` / `s.substring(a,b)` 不可用~~ **已修复（commit `831e345`）**：
+   两条 length 路径此前分别生成 `Object_length`（符号不存在）和
+   `string_object_length(String)`（形参类型不符），现统一落在 `string_length`；
+   `substring` 方法形式一并支持，参数自动转 `size_t`。
 2. **切片没有长度访问器**：`xs.length` 生成 `xs.length`（C 层不是结构体）→ 编译失败。
    因此 Kaula 侧数组型任务必须显式传 `n`，签名与 C 一样；这会真实增加产出 token。
-3. **字符串方法语法整体缺失**：`s.substring(a,b)`、`s[1]`、`std.string.charAt(s,1)` 全部
-   不成立，只有 `std.string.substring(s,a,b)` 可用，且形参是 `size_t`，每次调用要两次
-   `as<size_t>` 转换。**但 `String + String` 是可用的**，比 `std.string.concat(a,b)` 省一半 token；
-   早期 C 风格版本没用它，是写法失误。
+3. **切片语法 `s[a:b]` 仍不存在**，`std.string.charAt(s, i)` 也不存在（前端直接报未定义）。
+   字符串只能用 `s.substring(a, b)` 取子串。`String + String` 可用，比
+   `std.string.concat(a,b)` 省一半 token。
 4. **`fn strlen` 直接撞 libc 名字**：codegen 生成同名 C 函数与 `<string.h>` 冲突 →
    `conflicting types for 'strlen'`。实际写作需避开 C 标准库已占用的名字。
 5. **`for i in 0..n` 不支持**：必须 `range(n)`；`for i in range(a, b)` 可用。

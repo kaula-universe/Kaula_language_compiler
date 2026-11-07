@@ -2493,6 +2493,17 @@ func (eg *ExpressionGenerator) inferTypeUncached(expr ast.Expression) string {
 		// 方法调用 obj.method(...)：从类定义查方法返回类型，
 		// 否则 println 等方法调用点的 printf 格式会把 f64 返回值当 %d
 		if member, ok := e.Function.(*ast.MemberAccessExpression); ok {
+			// 字符串接收者上的内建方法返回值：substring 返回 String（"s"），
+			// 否则 `rev + s.substring(a, b)` 会按 int 落到 string_concat_int，
+			// 前端放行、C 阶段报 incompatible type（同类缺陷）。
+			if eg.symbolTypeIsStringLike(member.Object) {
+				switch member.Member {
+				case "substring":
+					return "s"
+				case "concat":
+					return "s"
+				}
+			}
 			if retType := eg.memberMethodReturnType(member); retType != "" {
 				switch {
 				case retType == "string" || retType == "str":

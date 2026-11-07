@@ -10,7 +10,7 @@ task,lang,prompt_tokens,stub_tokens,completion_tokens,total_tokens
 23_strlen,cpp,46,10,10,66
 23_strlen,c,41,9,9,59
 23_strlen,rs,41,10,8,59
-23_strlen,kl,41,9,12,62
+23_strlen,kl,41,9,10,60
 2_truncate_number,py,79,5,8,92
 2_truncate_number,go,88,18,11,117
 2_truncate_number,cpp,82,7,14,103
@@ -34,4 +34,4 @@ task,lang,prompt_tokens,stub_tokens,completion_tokens,total_tokens
 65_circular_shift,cpp,83,12,64,159
 65_circular_shift,c,86,11,140,237
 65_circular_shift,rs,86,15,55,156
-65_circular_shift,kl,88,13,131,232
+65_circular_shift,kl,88,13,97,198

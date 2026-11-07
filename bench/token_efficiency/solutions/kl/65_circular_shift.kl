@@ -5,18 +5,17 @@ import std.string
 // BENCH:BEGIN
 fn circular_shift(i64 x, i64 shift) String {
     String s = std.string.create_from_int(x)
-    i64 n = as<i64>(std.string.length(s))
+    i64 n = as<i64>(s.length())
     if shift > n {
         String rev = std.string.create("")
         for i in range(n) {
-            rev = rev + std.string.substring(s, as<size_t>(n - 1 - i), as<size_t>(n - i))
+            rev = rev + s.substring(n - 1 - i, n - i)
         }
         return rev
     }
-    String head = std.string.substring(s, as<size_t>(n - shift), as<size_t>(n))
-    return head + std.string.substring(s, as<size_t>(0), as<size_t>(n - shift))
+    String head = s.substring(n - shift, n)
+    return head + s.substring(0, n - shift)
 }
-
 // BENCH:END
 
 // BENCH:MAIN:BEGIN

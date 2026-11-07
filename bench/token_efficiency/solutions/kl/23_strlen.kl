@@ -4,9 +4,8 @@ import std.string
 
 // BENCH:BEGIN
 fn kl_strlen(String s) i64 {
-    return as<i64>(std.string.length(s))
+    return as<i64>(s.length())
 }
-
 // BENCH:END
 
 // BENCH:MAIN:BEGIN
