@@ -126,6 +126,19 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      # 教程示例与实现脱节就是文档 bug。verify_tutorials.py 把 docs/tutorials/*.md
+      # 里的每个 kaula 块抽出来包装成独立程序编译并运行；examples/*.kl 是完整
+      # 示例（部分交互式，故只编译不运行）。产物一律写 /tmp，不污染仓库。
+      - name: Tutorial corpus verification
+        run: |
+          python3 scripts/verify_tutorials.py
+          for f in docs/tutorials/examples/*.kl; do
+            echo "=== example: $f ==="
+            ./build/bin/kaulac -output-dir /tmp/tutorial-examples "$f"
+          done
+        env:
+          PYTHONIOENCODING: utf-8
+
       # 审计 §3.7：ASan 内存错误检测。编译关键测试文件时加 -fsanitize=address，
       # 捕获 UAF、越界读写、内存泄漏等问题。TSan 暂不加（并发测试还不稳定）。
       - name: ASan memory safety tests

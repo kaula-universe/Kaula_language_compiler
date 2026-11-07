@@ -69,7 +69,7 @@ GitHub（主仓）与 Gitee（国内镜像）之间的自动化同步机制：
 
 ## 语法教程文档
 
-见 [tutorials/README.md](tutorials/README.md)，共 16 篇，建议按顺序阅读：
+见 [tutorials/README.md](tutorials/README.md)，共 19 篇，建议按顺序阅读：
 
 - [入门指南：Hello, Kaula!](tutorials/getting-started.md) - 环境搭建与第一个程序
 - [变量与类型](tutorials/variables-and-types.md) - 内置类型、声明方式、FFI 专用类型记法
@@ -87,6 +87,8 @@ GitHub（主仓）与 Gitee（国内镜像）之间的自动化同步机制：
 - [Extern 声明与 FFI](tutorials/extern-and-ffi.md) - 外部 C/C++ 互操作
 - [std 错误处理与可捕获 Panic](tutorials/error-and-panic.md) - Result/Option、Error 链、errno 桥接、panic_protect 捕获恢复
 - [标准库使用](tutorials/stdlib-usage.md) - 常用 std 模块用法
+- [动态对象（object）](tutorials/dynamic-objects.md) - 运行时字典、字面量与已知限制
+- [字面量与初始化](tutorials/literals.md) - 切片/定长数组/结构体字面量
 
 ## 快速导航
 

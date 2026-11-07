@@ -25,7 +25,7 @@ class Student {
         self.filled = 1
     }
     fn clear() {
-        self.name = 0
+        self.name = as<char*>(0)
         self.score = 0
         self.filled = 0
     }
@@ -34,7 +34,7 @@ class Student {
         std.io.println(index, ". ", self.name, " - ", self.score, " (", g, ")")
     }
     constructor() {
-        self.name = 0
+        self.name = as<char*>(0)
         self.score = 0
         self.filled = 0
     }

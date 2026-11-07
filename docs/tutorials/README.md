@@ -25,6 +25,8 @@
 | 15 | [std 错误处理与可捕获 Panic](error-and-panic.md) | Result/Option、Error 链、panic 捕获恢复 |
 | 16 | [标准库使用](stdlib-usage.md) | 常用 std 模块用法 |
 | 17 | [强制消费流（spend / call）](spend-and-call.md) | 编译期强制全消费：语法、错误码、运行时 API |
+| 18 | [动态对象（object）](dynamic-objects.md) | 运行时字典：字面量、增删字段、内省 API、已知限制 |
+| 19 | [字面量与初始化](literals.md) | 切片/定长数组/结构体字面量的写法与类型推导 |
 
 ## 快速导航
 
@@ -37,6 +39,8 @@
 - **要处理错误** → [std 错误处理与可捕获 Panic](error-and-panic.md)
 - **要写测试/命令行工具** → [属性注解与编译期反射](attributes-and-compiletime.md)（`#[test]`、`#[command]`）
 - **要保证资源/分支"一个都不漏"** → [强制消费流](spend-and-call.md)
+- **字段集合运行期才知道** → [动态对象](dynamic-objects.md)
+- **数组/结构体初始化怎么写** → [字面量与初始化](literals.md)
 
 ## 相关文档
 
