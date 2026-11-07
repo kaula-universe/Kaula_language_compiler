@@ -44,6 +44,34 @@ fn main() {
 }
 ```
 
+#### 方法形式（`s.length()` / `s.substring(a, b)`）
+
+`string` 和 `String` 都可以直接用方法，编译器会改写成对应的 std 函数，
+不必写全限定名，也不用手动 `as<size_t>` 转换：
+
+```kaula
+import std.io
+import std.string
+
+fn main() {
+    String s = std.string.create("abcdef")
+    std.io.println(s.length())        # 6
+    String sub = s.substring(1, 3)
+    std.io.println(sub.length())     # 2，链式也能用
+}
+```
+
+等价关系：
+
+| 方法写法 | 实际生成 |
+|---|---|
+| `s.length()` | `string_length(s)` |
+| `s.substring(a, b)` | `string_substring(s, (size_t)a, (size_t)b)` |
+
+> 注意 `s[a:b]` 这种切片写法**还没有**。数组也没有：`xs.length` 不成立，
+> 需要显式把长度作为参数传入。`extract` 同样不能用于字符串——它是 SOR 的
+> 容器元素所有权提取原语，对 `String` 会报语义错误。
+
 ### std.math — 数学函数
 
 `sin`、`cos`、`sqrt`、`pow`、`abs` 等标准数学函数。

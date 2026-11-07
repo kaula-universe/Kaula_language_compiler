@@ -5730,6 +5730,25 @@ func (sa *SemanticAnalyzer) analyzeExtractStatement(stmt *ast.ExtractStatement) 
 	if stmt.Index != nil {
 		sa.analyzeExpression(stmt.Index)
 	}
+	// extract 取的是"容器元素的所有权"，而 string/String 在 C 层是 SSO 结构体
+	// （std/string/string.h），根本不是可下标数组：放行会在 C 阶段炸
+	// "subscripted value is neither array nor pointer nor vector"。
+	// 前端必须拦住，并指向正确的字符串子串 API。
+	if stmt.Source != nil {
+		// parsePrimaryExpression 会把 `s[1]` 解析成 IndexExpression 塞进 Source，
+		// 所以类型要看下标的载体（Object），而不是整个 IndexExpression。
+		srcExpr := stmt.Source
+		if idx, ok := srcExpr.(*ast.IndexExpression); ok {
+			srcExpr = idx.Object
+		}
+		if t := strings.ToLower(sa.inferExpressionType(srcExpr)); t == "string" || t == "str" {
+			sa.errorCollector.AddSemanticError(
+				"extract 不支持字符串类型：String 不是可下标容器，请改用 std.string.substring(s, start, end)",
+				stmt.Pos.Line, stmt.Pos.Column, "",
+				"用 std.string.substring(String, size_t, size_t) 取子串；extract 只用于数组/容器元素的所有权提取")
+			return
+		}
+	}
 }
 
 // hasSORPrimitives 递归检查函数体中是否使用了 SOR 原语 (yield/release/extract)

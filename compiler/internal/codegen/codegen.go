@@ -2391,6 +2391,8 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		module string
 	}{
 		{"string_survivor_free(", "std.string"},
+		{"string_length(", "std.string"},
+		{"string_substring(", "std.string"},
 		{"println_multi(", "std.io"},
 	}
 	emitted := functionCode.String() + mainCode.String()

@@ -1617,9 +1617,20 @@ func (eg *ExpressionGenerator) generateMethodCall(memberAccess *ast.MemberAccess
 
 	switch methodName {
 	case "length":
-		// 仅字符串类型使用 string_object_length；其它类型（如 Vec2.length()）作为类方法解析
+		// string/String 在 C 层都映射为 std/string/string.h 里的 SSO 结构体 `String`，
+		// 长度必须走 string_length(String)。
+		// 此前：小写 string 生成 string_object_length(String)（形参类型不符 → C 报错），
+		// 大写 String 落到类方法分支生成 Object_length（符号不存在 → 链接失败）。
 		if eg.symbolTypeIsStringLike(memberAccess.Object) {
-			return "string_object_length(" + object + ")"
+			return "((int64_t)string_length(" + object + "))"
+		}
+		return eg.generateObjectMethodCall(memberAccess.Object, object, methodName, args)
+	case "substring":
+		// 方法形式 s.substring(a, b) == std.string.substring(s, a, b)，
+		// 形参是 size_t，这里显式转换以免 i64 实参报 incompatible。
+		if eg.symbolTypeIsStringLike(memberAccess.Object) && len(args) == 2 {
+			return "string_substring(" + object + ", (size_t)(" + eg.GenerateExpression(args[0]) +
+				"), (size_t)(" + eg.GenerateExpression(args[1]) + "))"
 		}
 		return eg.generateObjectMethodCall(memberAccess.Object, object, methodName, args)
 	case "toString":
@@ -1804,7 +1815,18 @@ func (eg *ExpressionGenerator) symbolTypeIsStringLike(expr ast.Expression) bool 
 		if sym == nil {
 			return false
 		}
-		return sym.Type == "string"
+		return sym.Type == "string" || sym.Type == "String"
+	}
+	// 链式：s.substring(0, 2).length() —— 接收者是"返回 String 的方法调用"。
+	// 这类表达式没有符号表条目，inferType 也拿不到类型，必须按调用形态判定，
+	// 否则 length 会落到类方法分支生成不存在的 Object_length。
+	if call, ok := expr.(*ast.CallExpression); ok {
+		if ma, isMember := call.Function.(*ast.MemberAccessExpression); isMember {
+			if ma.Member == "substring" &&
+				eg.symbolTypeIsStringLike(ma.Object) {
+				return true
+			}
+		}
 	}
 	// 字符串字面量 inferType 返回 "s"
 	return eg.inferType(expr) == "s"
