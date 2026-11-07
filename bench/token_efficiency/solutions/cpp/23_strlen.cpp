@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <cstdio>
 #include <string>
 
+// BENCH:BEGIN
 int strlen(const std::string& s) {
     return static_cast<int>(s.size());
 }

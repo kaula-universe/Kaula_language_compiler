@@ -1,3 +1,5 @@
+# BENCH:PREFIX
+
 # BENCH:BEGIN
 def mean_absolute_deviation(numbers):
     mean = sum(numbers) / len(numbers)

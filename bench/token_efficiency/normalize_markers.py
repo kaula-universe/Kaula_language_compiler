@@ -30,7 +30,17 @@ def normalize(path: Path):
     if not m:
         return False
     head, driver = body[:m.start()], body[m.start():]
-    new = (f"{pre} BENCH:BEGIN\n" + head + f"{pre} BENCH:END\n\n"
+    # 把 import / #include / use / package 提到实现区之外，单独记为"语言前缀"。
+    # 这些是每文件固定样板（且部分只被驱动区用到），计进实现区会同时污染
+    # 六种语言的数字，必须同等处理才可比。
+    pref = ("import ", "#include", "use ", "package ", "extern crate", "using namespace")
+    head_lines = head.splitlines()
+    i = 0
+    while i < len(head_lines) and (not head_lines[i].strip() or head_lines[i].lstrip().startswith(pref)):
+        i += 1
+    prefix, body2 = head_lines[:i], head_lines[i:]
+    head = "\n".join(body2) + ("\n" if body2 else "")
+    new = (f"{pre} BENCH:PREFIX\n" + "\n".join(prefix) + f"\n{pre} BENCH:BEGIN\n" + head + f"{pre} BENCH:END\n\n"
            f"{pre} BENCH:MAIN:BEGIN\n" + driver + f"{pre} BENCH:MAIN:END\n")
     path.write_text(new, encoding="utf-8")
     return True

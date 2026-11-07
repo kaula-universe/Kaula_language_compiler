@@ -1,11 +1,12 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 import std.io
 import std.math
 
-fn has_close_elements(f64* numbers, i64 n, f64 threshold) bool {
+// BENCH:BEGIN
+fn has_close_elements(f64* xs, i64 n, f64 eps) bool {
     for i in range(n) {
-        for j in range(n) {
-            if i != j && std.math.abs(numbers[i] - numbers[j]) < threshold {
+        for j in range(i + 1, n) {
+            if std.math.abs(xs[i] - xs[j]) < eps {
                 return true
             }
         }

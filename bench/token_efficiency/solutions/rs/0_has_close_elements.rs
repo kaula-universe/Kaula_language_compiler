@@ -1,3 +1,5 @@
+// BENCH:PREFIX
+
 // BENCH:BEGIN
 fn has_close_elements(numbers: &[f64], threshold: f64) -> bool {
     for i in 0..numbers.len() {

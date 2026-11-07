@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <stdio.h>
 #include <string.h>
 
+// BENCH:BEGIN
 int strlen_of(const char* s) {
     return (int)strlen(s);
 }

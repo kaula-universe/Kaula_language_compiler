@@ -1,0 +1,27 @@
+// BENCH:PREFIX
+import std.io
+import std.math
+
+// BENCH:BEGIN
+fn has_close_elements(f64* numbers, i64 n, f64 threshold) bool {
+    for i in range(n) {
+        for j in range(n) {
+            if i != j && std.math.abs(numbers[i] - numbers[j]) < threshold {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+// BENCH:END
+
+// BENCH:MAIN:BEGIN
+fn main() i32 {
+    []f64 a = [1.0, 2.0, 3.9, 4.0, 5.0, 2.2]
+    if !has_close_elements(a, 6, 0.3) { return 1 }
+    if has_close_elements(a, 6, 0.05) { return 2 }
+    std.io.println("ok")
+    return 0
+}
+// BENCH:MAIN:END

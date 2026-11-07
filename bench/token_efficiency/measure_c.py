@@ -51,12 +51,16 @@ def read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def parts(lang: str, task: str) -> tuple[str, str]:
-    """返回 (实现区, 驱动区)。"""
+PREFIX_RE = re.compile(r"BENCH:PREFIX\s*\n(.*?)\n\s*(?://|#)\s*BENCH:BEGIN", re.S)
+
+
+def parts(lang: str, task: str) -> tuple[str, str, str]:
+    """返回 (语言前缀 import/#include, 实现区, 驱动区)。"""
     p = HERE / "solutions" / lang / (task + {"py": ".py", "go": ".go", "cpp": ".cpp",
                                             "c": ".c", "rs": ".rs", "kl": ".kl"}[lang])
     s = read(p)
-    return REGION_RE.search(s).group(1), MAIN_RE.search(s).group(1)
+    pm = PREFIX_RE.search(s)
+    return (pm.group(1) if pm else ""), REGION_RE.search(s).group(1), MAIN_RE.search(s).group(1)
 
 
 def prompt_for(lang: str, task: str) -> str:
@@ -86,7 +90,8 @@ def prompt_for(lang: str, task: str) -> str:
 
 def stub_for(lang: str, task: str) -> str:
     """该语言的起始骨架：题目要求模型从这里续写。"""
-    impl, _ = parts(lang, task)
+    # 骨架含语言前缀（import/#include），这部分是模型也必须写的内容
+    impl, _ = parts(lang, task)[1:]
     body = impl.split("\n")
     # 保留到第一个函数签名/类型声明为止，其余交给模型
     for i, line in enumerate(body):
@@ -100,7 +105,7 @@ def oracle_cost(enc):
     for task in sorted({p.stem for p in (HERE / "solutions" / "kl").glob("*.kl")}):
         for lang in LANGS:
             prompt = prompt_for(lang, task)
-            impl, _ = parts(lang, task)
+            impl = parts(lang, task)[1]
             stub = stub_for(lang, task)
             rows.append({
                 "task": task, "lang": lang,
@@ -130,7 +135,7 @@ def extract_code(text: str) -> str:
 def llm_run(lang: str, task: str, base_url: str, key: str, model: str,
             max_repairs: int, enc) -> dict:
     prompt = prompt_for(lang, task) + "\n" + stub_for(lang, task)
-    impl, driver = parts(lang, task)
+    prefix, impl, driver = parts(lang, task)
     messages = [{"role": "user", "content": prompt}]
     used = 0
     repairs = 0
@@ -143,7 +148,7 @@ def llm_run(lang: str, task: str, base_url: str, key: str, model: str,
                 return {"lang": lang, "task": task, "ok": False, "error": str(e)}
             used += usage.get("total_tokens", 0)
             code = extract_code(content)
-            source = (prompt + code + "\n" + driver + "\n") if lang != "kl" else (prompt + code + "\n" + driver + "\n")
+            source = prefix + "\n" + prompt + code + "\n" + driver + "\n"
             ok, out = langtools.build_and_run(lang, source, Path(td))
             if ok:
                 break
@@ -192,8 +197,9 @@ def main():
             with tempfile.TemporaryDirectory() as td:
                 for task in sorted({p.stem for p in (HERE / "solutions" / "kl").glob("*.kl")}):
                     for lang in langs:
-                        impl, driver = parts(lang, task)
-                        ok, outtxt = langtools.build_and_run(lang, impl + "\n" + driver, Path(td))
+                        prefix, impl, driver = parts(lang, task)
+                        ok, outtxt = langtools.build_and_run(
+                            lang, prefix + "\n" + impl + "\n" + driver, Path(td))
                         print(f"  {'PASS' if ok else 'FAIL'} {lang}/{task}")
                         allok = allok and ok
             raise SystemExit(0 if allok else 1)

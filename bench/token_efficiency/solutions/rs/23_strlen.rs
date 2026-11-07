@@ -1,3 +1,5 @@
+// BENCH:PREFIX
+
 // BENCH:BEGIN
 fn strlen(s: &str) -> usize {
     s.chars().count()

@@ -1,18 +1,20 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 import std.io
 import std.math
 
-fn mean_absolute_deviation(f64* numbers, i64 n) f64 {
+// BENCH:BEGIN
+fn mean_absolute_deviation(f64* xs, i64 n) f64 {
+    f64 cnt = as<f64>(n)
     f64 sum = 0.0
     for i in range(n) {
-        sum = sum + numbers[i]
+        sum = sum + xs[i]
     }
-    f64 mean = sum / as<f64>(n)
+    f64 mean = sum / cnt
     f64 dev = 0.0
     for i in range(n) {
-        dev = dev + std.math.abs(numbers[i] - mean)
+        dev = dev + std.math.abs(xs[i] - mean)
     }
-    return dev / as<f64>(n)
+    return dev / cnt
 }
 
 // BENCH:END

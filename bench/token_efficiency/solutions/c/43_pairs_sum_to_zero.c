@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <stdbool.h>
 #include <stdio.h>
 
+// BENCH:BEGIN
 bool pairs_sum_to_zero(const long* l, int n) {
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {

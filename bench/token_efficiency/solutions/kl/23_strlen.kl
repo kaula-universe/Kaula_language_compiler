@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 import std.io
 import std.string
 
+// BENCH:BEGIN
 fn kl_strlen(String s) i64 {
     return as<i64>(std.string.length(s))
 }

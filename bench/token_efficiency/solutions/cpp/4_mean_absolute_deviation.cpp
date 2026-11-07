@@ -1,9 +1,10 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <cmath>
 #include <cstdio>
 #include <numeric>
 #include <vector>
 
+// BENCH:BEGIN
 double mean_absolute_deviation(const std::vector<double>& numbers) {
     double sum = std::accumulate(numbers.begin(), numbers.end(), 0.0);
     double mean = sum / static_cast<double>(numbers.size());

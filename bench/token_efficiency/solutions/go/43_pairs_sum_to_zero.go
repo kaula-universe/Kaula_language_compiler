@@ -1,8 +1,9 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 package main
 
 import "fmt"
 
+// BENCH:BEGIN
 func pairsSumToZero(l []int) bool {
 	for i := 0; i < len(l); i++ {
 		for j := i + 1; j < len(l); j++ {

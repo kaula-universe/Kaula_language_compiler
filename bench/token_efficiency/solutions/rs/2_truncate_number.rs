@@ -1,3 +1,5 @@
+// BENCH:PREFIX
+
 // BENCH:BEGIN
 fn truncate_number(number: f64) -> f64 {
     number % 1.0

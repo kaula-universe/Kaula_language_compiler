@@ -1,8 +1,9 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 
+// BENCH:BEGIN
 bool has_close_elements(const double* numbers, int n, double threshold) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {

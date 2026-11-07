@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <math.h>
 #include <stdio.h>
 
+// BENCH:BEGIN
 double mean_absolute_deviation(const double* numbers, int n) {
     double sum = 0.0;
     for (int i = 0; i < n; i++) {

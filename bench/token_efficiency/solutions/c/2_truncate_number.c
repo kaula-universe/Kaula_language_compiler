@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <math.h>
 #include <stdio.h>
 
+// BENCH:BEGIN
 double truncate_number(double number) {
     return fmod(number, 1.0);
 }

@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <cmath>
 #include <cstdio>
 
+// BENCH:BEGIN
 double truncate_number(double number) {
     return std::fmod(number, 1.0);
 }

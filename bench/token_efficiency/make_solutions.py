@@ -796,6 +796,10 @@ fn main() i32 {
 
 def main():
     for rel, content in FILES.items():
+        # kl 分支改写为 solution/kl_cstyle：留作"C 风格"基线，
+        # 地道的 Kaula 实现见 solutions/kl/（手工维护，不被本脚本覆盖）。
+        if rel.startswith("kl/"):
+            rel = rel.replace("kl/", "kl_cstyle/", 1)
         p = SOL / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")

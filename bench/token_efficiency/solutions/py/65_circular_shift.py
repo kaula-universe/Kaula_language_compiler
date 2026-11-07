@@ -1,3 +1,5 @@
+# BENCH:PREFIX
+
 # BENCH:BEGIN
 def circular_shift(x, shift):
     s = str(x)

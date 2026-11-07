@@ -1,3 +1,5 @@
+# BENCH:PREFIX
+
 # BENCH:BEGIN
 def strlen(string):
     return len(string)

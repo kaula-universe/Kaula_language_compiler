@@ -1,3 +1,5 @@
+// BENCH:PREFIX
+
 // BENCH:BEGIN
 fn circular_shift(x: i64, shift: usize) -> String {
     let s = x.to_string();

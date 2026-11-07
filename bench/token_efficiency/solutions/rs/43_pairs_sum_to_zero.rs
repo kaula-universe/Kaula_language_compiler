@@ -1,3 +1,5 @@
+// BENCH:PREFIX
+
 // BENCH:BEGIN
 fn pairs_sum_to_zero(l: &[i64]) -> bool {
     for i in 0..l.len() {

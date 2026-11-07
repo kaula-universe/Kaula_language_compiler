@@ -1,5 +1,6 @@
-# BENCH:BEGIN
+# BENCH:PREFIX
 import math
+# BENCH:BEGIN
 def has_close_elements(numbers, threshold):
     for i, a in enumerate(numbers):
         for j, b in enumerate(numbers):

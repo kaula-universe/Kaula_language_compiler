@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 package main
 
 import (
+// BENCH:BEGIN
 	"fmt"
 	"strconv"
 )

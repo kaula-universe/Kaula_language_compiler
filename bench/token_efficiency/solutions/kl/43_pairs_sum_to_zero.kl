@@ -1,10 +1,11 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 import std.io
 
-fn pairs_sum_to_zero(i64* l, i64 n) bool {
+// BENCH:BEGIN
+fn pairs_sum_to_zero(i64* xs, i64 n) bool {
     for i in range(n) {
         for j in range(i + 1, n) {
-            if l[i] + l[j] == 0 {
+            if xs[i] + xs[j] == 0 {
                 return true
             }
         }

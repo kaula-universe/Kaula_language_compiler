@@ -1,7 +1,8 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <cstdio>
 #include <vector>
 
+// BENCH:BEGIN
 bool pairs_sum_to_zero(const std::vector<int>& l) {
     for (size_t i = 0; i < l.size(); i++) {
         for (size_t j = i + 1; j < l.size(); j++) {

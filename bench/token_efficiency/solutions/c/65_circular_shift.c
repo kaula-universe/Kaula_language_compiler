@@ -1,8 +1,9 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+// BENCH:BEGIN
 char* circular_shift(long x, long shift) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%ld", x);

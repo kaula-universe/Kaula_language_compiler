@@ -1,8 +1,9 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <algorithm>
 #include <cstdio>
 #include <string>
 
+// BENCH:BEGIN
 std::string circular_shift(int x, int shift) {
     std::string s = std::to_string(x);
     if (shift > static_cast<int>(s.size())) {

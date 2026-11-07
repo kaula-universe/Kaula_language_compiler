@@ -1,8 +1,9 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 #include <cmath>
 #include <cstdio>
 #include <vector>
 
+// BENCH:BEGIN
 bool has_close_elements(const std::vector<double>& numbers, double threshold) {
     for (size_t i = 0; i < numbers.size(); i++) {
         for (size_t j = 0; j < numbers.size(); j++) {

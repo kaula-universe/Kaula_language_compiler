@@ -18,9 +18,20 @@ from pathlib import Path
 import tiktoken
 
 HERE = Path(__file__).resolve().parent
-LANGS = ("py", "go", "cpp", "c", "rs", "kl")
-LANG_NAME = {"py": "Python", "go": "Go", "cpp": "C++", "c": "C", "rs": "Rust", "kl": "Kaula"}
+LANGS = ("py", "go", "cpp", "c", "rs", "kl", "kl_cstyle")
+LANG_NAME = {"py": "Python", "go": "Go", "cpp": "C++", "c": "C", "rs": "Rust",
+             "kl": "Kaula(地道)", "kl_cstyle": "Kaula(C 风格)"}
+EXT = {"py": ".py", "go": ".go", "cpp": ".cpp", "c": ".c", "rs": ".rs", "kl": ".kl",
+       "kl_cstyle": ".kl"}
 REGION_RE = re.compile(r"BENCH:BEGIN\s*\n(.*?)\n\s*(?://|#)\s*BENCH:END", re.S)
+
+
+PREFIX_RE = re.compile(r"BENCH:PREFIX\s*\n(.*?)\n\s*(?://|#)\s*BENCH:BEGIN", re.S)
+
+
+def prefix(path: Path) -> str:
+    m = PREFIX_RE.search(path.read_text(encoding="utf-8"))
+    return m.group(1) if m else ""
 
 
 def region(path: Path) -> str:
@@ -42,14 +53,15 @@ def main():
     rows = []
     for task in tasks:
         for lang in LANGS:
-            p = HERE / "solutions" / lang / (task + {"py": ".py", "go": ".go", "cpp": ".cpp",
-                                                "c": ".c", "rs": ".rs", "kl": ".kl"}[lang])
+            p = HERE / "solutions" / lang / (task + EXT[lang])
             code = region(p)
+            pre = prefix(p)
             rows.append({
                 "task": task, "lang": lang, "tokenizer": args.tokenizer,
                 "tokens": len(enc.encode(code)),
                 "bytes": len(code.encode("utf-8")),
                 "lines": len(code.splitlines()),
+                "prefix_tokens": len(enc.encode(pre)),
             })
 
     out_csv = HERE / "results" / "b_normalized.csv"
@@ -62,15 +74,18 @@ def main():
     # 汇总
     tot = {l: 0 for l in LANGS}
     lines = {l: 0 for l in LANGS}
+    pref = {l: 0 for l in LANGS}
     for r in rows:
         tot[r["lang"]] += r["tokens"]
         lines[r["lang"]] += r["lines"]
+        pref[r["lang"]] += r["prefix_tokens"]
     base = min(tot.values())
 
-    md = ["| 语言 | 实现区 tokens 合计 | 相对最小值 | 行数 | tokens/行 |", "|---|---|---|---|---|"]
+    md = ["| 语言 | 实现区 tokens 合计 | 相对最小值 | 行数 | tokens/行 | 前缀样板 tokens |",
+          "|---|---|---|---|---|---|"]
     for l in sorted(LANGS, key=lambda x: tot[x]):
         md.append(f"| {LANG_NAME[l]} | {tot[l]} | {tot[l]/base:.2f}x | {lines[l]} | "
-                  f"{tot[l]/max(lines[l],1):.2f} |")
+                  f"{tot[l]/max(lines[l],1):.2f} | {pref[l]} |")
 
     # 明细表
     detail = ["| 任务 | " + " | ".join(LANG_NAME[l] for l in LANGS) + " |",

@@ -1,3 +1,5 @@
+// BENCH:PREFIX
+
 // BENCH:BEGIN
 fn mean_absolute_deviation(numbers: &[f64]) -> f64 {
     let sum: f64 = numbers.iter().sum();

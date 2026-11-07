@@ -1,9 +1,10 @@
-// BENCH:BEGIN
+// BENCH:PREFIX
 import std.io
 import std.math
 
-fn truncate_number(f64 number) f64 {
-    return std.math.fmod(number, 1.0)
+// BENCH:BEGIN
+fn truncate_number(f64 x) f64 {
+    return std.math.fmod(x, 1.0)
 }
 
 // BENCH:END
