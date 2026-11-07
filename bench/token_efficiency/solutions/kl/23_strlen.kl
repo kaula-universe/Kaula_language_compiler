@@ -1,0 +1,20 @@
+// BENCH:BEGIN
+import std.io
+import std.string
+
+fn kl_strlen(String s) i64 {
+    return as<i64>(std.string.length(s))
+}
+
+// BENCH:END
+
+// BENCH:MAIN:BEGIN
+fn main() i32 {
+    String empty = std.string.create("")
+    String abc = std.string.create("abc")
+    if kl_strlen(empty) != 0 { return 1 }
+    if kl_strlen(abc) != 3 { return 2 }
+    std.io.println("ok")
+    return 0
+}
+// BENCH:MAIN:END

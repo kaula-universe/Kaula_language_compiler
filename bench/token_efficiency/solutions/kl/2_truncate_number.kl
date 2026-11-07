@@ -1,0 +1,17 @@
+// BENCH:BEGIN
+import std.io
+import std.math
+
+fn truncate_number(f64 number) f64 {
+    return std.math.fmod(number, 1.0)
+}
+
+// BENCH:END
+
+// BENCH:MAIN:BEGIN
+fn main() i32 {
+    if truncate_number(3.5) != 0.5 { return 1 }
+    std.io.println("ok")
+    return 0
+}
+// BENCH:MAIN:END
