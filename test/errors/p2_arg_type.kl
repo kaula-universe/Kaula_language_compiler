@@ -1,0 +1,9 @@
+import std.io
+
+fn takes_int(i32 a) i32 { return a * 2 }
+
+fn main() {
+    string s = "hello"
+    i32 r = takes_int(s)
+    std.io.println(r)
+}

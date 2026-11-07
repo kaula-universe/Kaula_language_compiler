@@ -1,0 +1,57 @@
+// objects.kl —— 动态对象（object）教程完整示例
+//
+// 配套教程：docs/tutorials/dynamic-objects.md
+// 由回归语料 test/object_literal.kl 提炼，去掉断言细节、补足教学注释。
+//
+// 编译运行：
+//     kaulac docs/tutorials/examples/objects.kl -o objects && ./objects
+//
+// 观察重点：
+//    - object { ... } 是表达式，每次求值新建对象
+//    - 字段读/写分别落到 dynobj_get / dynobj_set
+//    - 写不存在的键 = 动态增字段，dynobj_delete 删字段
+//    - dynobj_size 返回 size_t，与字面量比较要 as<size_t>(...)
+
+import std.io
+import std.obj
+
+fn main() {
+    // ---- 1. 对象字面量：一次构造多个字段 ----
+    object point = object { x: 1, y: 2 }
+    std.io.println("[1] 字段数 = ", std.obj.dynobj_size(point))
+    std.io.println("[1] 含 x : ", std.obj.dynobj_contains(point, "x"))
+    std.io.println("[1] 含 z : ", std.obj.dynobj_contains(point, "z"))
+
+    // ---- 2. 读字段：返回装箱句柄（当前版本无法直接当数值用）----
+    object xHandled = point.x
+    std.io.println("[2] x 的句柄 = ", xHandled)
+
+    // ---- 3. 覆盖写：字段数不变 ----
+    point.x = 10
+    std.io.println("[3] 覆盖后字段数 = ", std.obj.dynobj_size(point))
+
+    // ---- 4. 动态增字段：写一个新键 ----
+    point.z = 3
+    std.io.println("[4] 新增后字段数 = ", std.obj.dynobj_size(point))
+
+    // ---- 5. 删除字段 ----
+    std.obj.dynobj_delete(point, "z")
+    std.io.println("[5] 删除后字段数 = ", std.obj.dynobj_size(point))
+
+    // ---- 6. 空对象 ----
+    object empty = object()
+    std.io.println("[6] 空对象字段数 = ", std.obj.dynobj_size(empty))
+
+    // ---- 7. 嵌套对象 ----
+    object user = object {
+        name: "kaula",
+        profile: object { age: 1 }
+    }
+    std.io.println("[7] 顶层字段数 = ", std.obj.dynobj_size(user))
+    std.io.println("[7] 含 profile : ", std.obj.dynobj_contains(user, "profile"))
+
+    // ---- 8. size_t 的显式转换 ----
+    if std.obj.dynobj_size(point) == as<size_t>(2) {
+        std.io.println("[8] point 恰好两个字段")
+    }
+}

@@ -1,0 +1,98 @@
+// Kaula 并发内核 · kl 侧路径覆盖（不依赖 C 层 bench）
+//
+// 覆盖内核的关键路径（kl 编译器能生成的）：
+//   P1 多挂起点：一个 conc fn 内两个 time_sleep —— 状态机多段恢复
+//   P2 coercion shim：有挂起 conc fn 被**顺序调用**（不 spawn）——
+//      生成 shim 就地等待（§2.7 顺序路径），返回值必须正确
+//   P3 挂起中计算：任务内"先算 → 挂起 → 再算"，跨挂起点变量存活
+//   P4 嵌套挂起：conc fn 内顺序调含挂起的 conc fn（状态机合并）
+//
+// 判据（外部记录）：任何路径返回值错 / await 误报 / 任务丢失都会
+// 表现为 got != expected，打印 ERR 并累计。
+
+import std.io
+import std.time
+
+// P1：两个挂起点。计算 → sleep(10) → 再算 → sleep(5) → 汇总
+conc fn two_suspends(i64 input) -> i64 {
+    i64 a = input * 2
+    std.time.time_sleep(10)
+    i64 b = a + 1
+    std.time.time_sleep(5)
+    return b + input
+}
+
+// P3：挂起夹在计算中间，中间变量跨挂起点存活。
+// 注意：for..in 循环体内的可插桩调用暂不支持（迭代下标不进 Frame），
+// 这里显式展开三次 —— 恰好让 acc 连续跨 3 个挂起点存活。
+conc fn compute_then_sleep(i64 input) -> i64 {
+    i64 acc = input + 0
+    std.time.time_sleep(3)
+    acc += input + 1
+    std.time.time_sleep(3)
+    acc += input + 2
+    return acc
+}
+
+// P4：嵌套 —— 内部调含挂起的 conc fn
+conc fn inner(i64 input) -> i64 {
+    std.time.time_sleep(2)
+    return input * 3
+}
+
+conc fn outer(i64 input) -> i64 {
+    i64 x = inner(input)
+    i64 y = x + 1
+    std.time.time_sleep(2)
+    return y
+}
+
+fn main() -> i32 {
+    i64 err = 0
+
+    // P2：顺序调用有挂起 conc fn（coercion shim 就地等待）
+    i64 r0 = two_suspends(10)
+    if r0 != 10 * 2 + 1 + 10 {
+        err += 1
+        std.io.println("ERR P2 two_suspends got=", r0)
+    }
+
+    // P1：spawn 有挂起 conc fn
+    Handle h1 = spawn two_suspends(20)
+    i64 r1 = h1.await
+    if r1 != 20 * 2 + 1 + 20 {
+        err += 1
+        std.io.println("ERR P1 spawn two_suspends got=", r1)
+    }
+
+    // P3：挂起夹计算，并发窗口 4
+    Handle p0 = spawn compute_then_sleep(100)
+    Handle p1 = spawn compute_then_sleep(200)
+    Handle p2 = spawn compute_then_sleep(300)
+    Handle p3 = spawn compute_then_sleep(400)
+    i64 a0 = p0.await
+    i64 a1 = p1.await
+    i64 a2 = p2.await
+    i64 a3 = p3.await
+    // acc = 3*input + (0+1+2) = 3*input + 3
+    if a0 != 303 { err += 1; std.io.println("ERR P3 a0 got=", a0) }
+    if a1 != 603 { err += 1; std.io.println("ERR P3 a1 got=", a1) }
+    if a2 != 903 { err += 1; std.io.println("ERR P3 a2 got=", a2) }
+    if a3 != 1203 { err += 1; std.io.println("ERR P3 a3 got=", a3) }
+
+    // P4：嵌套挂起
+    Handle n0 = spawn outer(5)
+    Handle n1 = spawn outer(6)
+    i64 b0 = n0.await
+    i64 b1 = n1.await
+    // inner(5)=15, y=16
+    if b0 != 16 { err += 1; std.io.println("ERR P4 b0 got=", b0) }
+    if b1 != 19 { err += 1; std.io.println("ERR P4 b1 got=", b1) }
+
+    // P4 顺序版：outer 顺序调用
+    i64 c0 = outer(7)
+    if c0 != 22 { err += 1; std.io.println("ERR P4 seq c0 got=", c0) }
+
+    std.io.println("conc_paths ok err=", err)
+    return 0
+}

@@ -1,0 +1,1332 @@
+package codegen
+
+import (
+	"fmt"
+	"kaula/internal/ast"
+	"regexp"
+	"strings"
+)
+
+// TypeGenerator 负责类型相关的代码生�?
+type TypeGenerator struct {
+	codegen        *CodeGenerator
+	clibTypeMap    map[string]string
+	structTypes    map[string]bool
+	classTypes     map[string]bool // class 类型�?(指针语义, �?struct 区分)
+	interfaceTypes map[string]bool // interface 类型�?(接口句柄结构�? 多态分�?
+	enumTypes      map[string]bool // 简单枚举类型名 (typedef enum { ... } Name)
+	typeAliasTypes map[string]bool // type alias 类型�?(typedef ... Name)
+
+	// activeTypeMap 当前活跃的类型参数映射（泛型单态化期间设置）�?
+	// T -> 具体类型（Kaula 类型名，�?"int"�?
+	// �?MapKaulaTypeToC 中查表替换，使函数体内的类型参数引用被替换为具体类型�?
+	activeTypeMap map[string]string
+}
+
+func NewTypeGenerator(cg *CodeGenerator) *TypeGenerator {
+	return &TypeGenerator{
+		codegen: cg,
+		clibTypeMap: map[string]string{
+			"File": "FILE*",
+			// 并发句柄：spawn 的结果类型�?
+			// 对应 src/concurrency/kaula_conc_task.h 里的 KaulaHandle�?
+			// 编译期与运行期必须是同一个类型，否则 spawn 的返回值无法传递�?
+			"Handle": "KaulaHandle",
+			"handle": "KaulaHandle",
+		},
+		structTypes:    make(map[string]bool),
+		classTypes:     make(map[string]bool),
+		interfaceTypes: make(map[string]bool),
+		enumTypes:      make(map[string]bool),
+		typeAliasTypes: make(map[string]bool),
+		activeTypeMap:  nil,
+	}
+}
+
+// PushActiveTypeMap 设置当前活跃的类型参数映射，返回之前的映射（用于恢复）�?
+// 用于泛型单态化：在生成实例化函数体前设置，生成后恢复�?
+func (tg *TypeGenerator) PushActiveTypeMap(m map[string]string) map[string]string {
+	old := tg.activeTypeMap
+	tg.activeTypeMap = m
+	return old
+}
+
+// PopActiveTypeMap 恢复之前的类型参数映射�?
+func (tg *TypeGenerator) PopActiveTypeMap(old map[string]string) {
+	tg.activeTypeMap = old
+}
+
+// kaulaStructTag �?Kaula 类型名转换为 C struct tag 名称�?
+// 不再添加 K_ 前缀：结构体定义、字段引用、跨文件类型引用统一用原名，
+// 保证定义端与引用端拼写一致（此前 typedef 名带 K_、adopt/别名 typedef
+// 是裸名，跨文件引用会得到不存在的 K_cstring 之类符号）�?
+func kaulaStructTag(name string) string {
+	return name
+}
+
+// rewriteStructDefType 在结构体定义内部重写类型引用�?
+// 把已�?struct/class/interface 类型�?X 替换�?struct X，因�?typedef �?
+// 在结构体定义内部还不可用（自引用或前向引用场景）。已�?struct 修饰�?
+// 保持不变；enum/别名�?typedef 提升，直接用 typedef 名即可，不加前缀�?
+func (tg *TypeGenerator) rewriteStructDefType(cType string) string {
+	if cType == "" {
+		return cType
+	}
+	isIdent := func(c byte) bool {
+		return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	}
+	prevWordIsStruct := func(s string, start int) bool {
+		i := start - 1
+		for i >= 0 && (s[i] == ' ' || s[i] == '\t') {
+			i--
+		}
+		end := i + 1
+		for i >= 0 && isIdent(s[i]) {
+			i--
+		}
+		return s[i+1:end] == "struct"
+	}
+	var b strings.Builder
+	b.Grow(len(cType) + 8)
+	for i := 0; i < len(cType); {
+		c := cType[i]
+		atWordStart := i == 0 || !isIdent(cType[i-1])
+		if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) && atWordStart {
+			j := i
+			for j < len(cType) && isIdent(cType[j]) {
+				j++
+			}
+			word := cType[i:j]
+			if !prevWordIsStruct(cType, i) &&
+				(tg.structTypes[word] || tg.classTypes[word] || tg.interfaceTypes[word]) {
+				b.WriteString("struct ")
+			}
+			b.WriteString(word)
+			i = j
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
+}
+
+var globalTypeMap = map[string]string{
+	"i8":     "int8_t",
+	"i16":    "int16_t",
+	"i32":    "int32_t",
+	"i64":    "int64_t",
+	"int8":   "int8_t",
+	"int16":  "int16_t",
+	"int32":  "int32_t",
+	"int64":  "int64_t",
+	"int":    "int32_t", // 审计 §1.3：从 int64_t 改成 int32_t，与 GetTypeSize("int")=4 字节一致
+	"u8":     "uint8_t",
+	"u16":    "uint16_t",
+	"u32":    "uint32_t",
+	"u64":    "uint64_t",
+	"uint8":  "uint8_t",
+	"uint16": "uint16_t",
+	"uint32": "uint32_t",
+	"uint64": "uint64_t",
+	"uint":   "uint32_t", // 审计 §1.3：从 uint64_t 改成 uint32_t，与 numericAliases(uint→u32) 一致
+	"float":  "float",
+	"f32":    "float",
+	"double": "double",
+	"f64":    "double",
+	"bool":   "bool",
+	"char":   "char",
+	"byte":   "uint8_t",
+	"sbyte":  "int8_t",
+	"void":   "void",
+	"string": "String",
+	"object": "Object*",
+}
+
+// splitTopLevelCommas 在顶层（不计嵌套括号/尖括�?方括号）按逗号分割字符串�?
+// 用于解析 void(T1,T2,...)R 中的参数列表，避免误分割 void(void(i32)i32, i32) 这类嵌套签名�?
+func splitTopLevelCommas(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '<', '[':
+			depth++
+		case ')', '>', ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
+// parseVoidSignatureType 解析 void(T...)R 类型记法并映射到 C 类型�?
+//
+// 记法规则（无歧义）：
+//
+//	void()        �?void*                  完全不透明数据指针
+//	void(T)       �?void*                  幻影类型化数据指针（T 仅类型系统跟踪，运行时即 void*�?
+//	void(T1,T2)R  �?R (*)(T1, T2)          带签名函数指针（R 必须显式�?
+//	void(...)void �?void (*)(...)          无返回值函数指针（显式�?void 返回类型�?
+//
+// 判定�?)' 后有返回类型 �?函数指针；无 �?数据指针�?
+// 运行时零开销：数据指针即 void*，函数指针即 C 函数指针，与 C ABI 一一对应�?
+func (tg *TypeGenerator) parseVoidSignatureType(kaulaType string) (string, bool) {
+	if !strings.HasPrefix(kaulaType, "void(") {
+		return "", false
+	}
+	// 定位匹配 void( 的右括号（处理嵌�?void(...) 与泛�?<...> 中的括号�?
+	depth := 1
+	i := 5 // 跳过 "void("
+	for i < len(kaulaType) {
+		switch kaulaType[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				goto foundClose
+			}
+		}
+		i++
+	}
+	return "", false // 括号不匹配，交回主路径处�?
+
+foundClose:
+	argsStr := kaulaType[5:i]
+	retStr := strings.TrimSpace(kaulaType[i+1:])
+
+	// 数据指针�?)' 后无返回类型 �?void*
+	if retStr == "" {
+		return "void*", true
+	}
+
+	// 函数指针�?)' 后有返回类型 R �?R (*)(args...)
+	var cArgs []string
+	if argsStr != "" {
+		for _, part := range splitTopLevelCommas(argsStr) {
+			cArgs = append(cArgs, tg.MapKaulaTypeToC(strings.TrimSpace(part)))
+		}
+	}
+	if len(cArgs) == 0 {
+		cArgs = []string{"void"}
+	}
+	retC := tg.MapKaulaTypeToC(retStr)
+	return fmt.Sprintf("%s (*)(%s)", retC, strings.Join(cArgs, ", ")), true
+}
+
+// tryInstantiateGenericType 解析泛型类型引用并触发实例化�?
+// baseName 是类型名（如 Box），argsStr 是尖括号内的参数列表（如 "int" �?"int, string"）�?
+// args 中的类型参数先经 activeTypeMap 替换为具体类型（�?Box<T> �?T→int），
+// 再调�?InstantiateGenericType 生成实例�?C 类型定义，返�?C 类型名（�?K_Box_int）�?
+func (tg *TypeGenerator) tryInstantiateGenericType(baseName, argsStr string) (string, bool) {
+	baseName = strings.TrimSpace(baseName)
+	if baseName == "" {
+		return "", false
+	}
+
+	var typeArgs []string
+	for _, part := range splitTopLevelCommas(argsStr) {
+		arg := strings.TrimSpace(part)
+		if arg == "" {
+			continue
+		}
+		// 应用 activeTypeMap 替换类型参数（如 T �?int），
+		// �?Box<T> �?activeTypeMap{T:int} 下实例化�?Box<int>�?
+		if tg.activeTypeMap != nil {
+			if substituted, ok := tg.activeTypeMap[arg]; ok && substituted != "" {
+				arg = substituted
+			}
+		}
+		typeArgs = append(typeArgs, arg)
+	}
+
+	if len(typeArgs) == 0 {
+		return "", false
+	}
+
+	cName, err := tg.codegen.InstantiateGenericType(baseName, typeArgs, 0)
+	if err != nil {
+		return "", false
+	}
+	return cName, true
+}
+
+func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
+	if t, ok := tg.closureType(kaulaType); ok {
+		return t
+	}
+	// void(T...)R 签名记法优先处理（必须保留原始大小写，参�?返回类型可能含用户定义类型）
+	if cType, ok := tg.parseVoidSignatureType(kaulaType); ok {
+		return cType
+	}
+
+	// 泛型类型实例化：Name<args> �?实例化为具体 C 类型（如 Box<int> �?K_Box_int）�?
+	// 必须�?activeTypeMap 之前处理，因�?args 中的类型参数（如 Box<T>）需在此处替换�?
+	// 仅匹�?"Name<...>" 形态（�?> 结尾），避免误匹配比较运算符残留�?
+	if lt := strings.Index(kaulaType, "<"); lt > 0 && strings.HasSuffix(kaulaType, ">") {
+		if cType, ok := tg.tryInstantiateGenericType(kaulaType[:lt], kaulaType[lt+1:len(kaulaType)-1]); ok {
+			return cType
+		}
+	}
+
+	// 泛型单态化：若当前活跃类型映射中存在该类型参数，替换为具体类型后递归映射�?
+	// 这样函数体内�?T、[]T�?T 等引用都能被替换为具�?C 类型�?
+	if tg.activeTypeMap != nil {
+		if substituted, ok := tg.activeTypeMap[kaulaType]; ok && substituted != "" && substituted != kaulaType {
+			return tg.MapKaulaTypeToC(substituted)
+		}
+	}
+
+	/*
+	 * 元素类型 / 指针基类型的统一映射入口�?
+	 *
+	 * 必须先查 clibTypeMap 再走 MapKaulaTypeToC —�?后者只�?globalTypeMap�?
+	 * 少了这一步，只在 clibTypeMap 里登记的类型在数组与指针位置就会漏成
+	 * 原始 Kaula 名：`[4]Handle` 生成 `Handle hs[4]`，clang �?
+	 * "use of undeclared identifier 'Handle'"�?
+	 * 标量位置没事，是因为 convertType 先查�?clibTypeMap�?
+	 * 而这里的四个分支都是直接�?MapKaulaTypeToC，把那条路绕过去了�?
+	 */
+	mapElem := func(name string) string {
+		if cType, ok := tg.clibTypeMap[name]; ok {
+			return cType
+		}
+		return tg.MapKaulaTypeToC(name)
+	}
+
+	typeLower := strings.ToLower(kaulaType)
+	if cType, ok := globalTypeMap[typeLower]; ok {
+		return cType
+	}
+	// 处理固定大小数组类型 [N]type �?转换�?C �?"elemType[N]" 格式
+	// 注意：[N] �?N 必须非空，否则是动态数�?[]type �?指针（见下方 [] 分支�?
+	if len(typeLower) > 0 && typeLower[0] == '[' {
+		closeBracket := strings.Index(typeLower, "]")
+		if closeBracket > 1 {
+			arraySize := typeLower[1:closeBracket]
+			// 元素类型保留原始大小写递归映射（用户定义类型可能含大写，如 [4]Entity�?
+			elemType := kaulaType[closeBracket+1:]
+			cElemType := mapElem(elemType)
+			return cElemType + "[" + arraySize + "]"
+		}
+	}
+	if strings.HasPrefix(typeLower, "[]") {
+		innerType := typeLower[2:]
+		if innerType == "cstring" {
+			return "const char**"
+		}
+		if innerType == "string" || innerType == "str" {
+			return "String*"
+		}
+		if cType, ok := globalTypeMap[innerType]; ok {
+			return cType + "*"
+		}
+		return mapElem(kaulaType[2:]) + "*"
+	}
+	if strings.HasPrefix(typeLower, "*") {
+		innerType := typeLower[1:]
+		if innerType == "cstring" {
+			return "const char**"
+		}
+		if innerType == "string" || innerType == "str" {
+			return "String*"
+		}
+		if cType, ok := globalTypeMap[innerType]; ok {
+			return cType + "*"
+		}
+		// 对于 struct 类型，内部递归 tg.MapKaulaTypeToC 会添�?struct 前缀
+		return mapElem(kaulaType[1:]) + "*"
+	}
+	if strings.HasSuffix(typeLower, "*") {
+		baseType := typeLower[:len(typeLower)-1]
+		if baseType == "cstring" {
+			return "const char**"
+		}
+		if baseType == "string" || baseType == "str" {
+			return "String*"
+		}
+		if cType, ok := globalTypeMap[baseType]; ok {
+			return cType + "*"
+		}
+		// 对于 struct 类型，内部递归 tg.MapKaulaTypeToC 会添�?struct 前缀
+		return mapElem(kaulaType[:len(kaulaType)-1]) + "*"
+	}
+	if strings.HasPrefix(typeLower, "const ") {
+		innerType := kaulaType[6:] // 保留原始大小写，用户定义类型可能含大�?
+		if innerType == "string" || innerType == "str" {
+			return "String"
+		}
+		if cType, ok := globalTypeMap[strings.ToLower(innerType)]; ok {
+			return "const " + cType
+		}
+		// 递归映射内部类型，支�?const void() �?const void* 等复合类�?
+		return "const " + tg.MapKaulaTypeToC(innerType)
+	}
+	if tg.structTypes[kaulaType] {
+		// 接口类型：接口句柄结构体按值传�?存储（K_Iface 结构体）
+		if tg.interfaceTypes[kaulaType] {
+			return kaulaStructTag(kaulaType)
+		}
+		// 区分 struct 类型�?class 类型�?
+		// struct 实例按值传�?存储（使�?K_StructName�?
+		// class 实例按引�?指针传�?存储（使�?K_ClassName*，始终是堆分配指针）
+		if tg.codegen != nil && tg.codegen.IsClassType(kaulaType) {
+			return kaulaStructTag(kaulaType) + "*"
+		}
+		return kaulaStructTag(kaulaType)
+	}
+	// 最�?fallback：若名称未注册为 struct 类型，但 AST 中存在同名类定义�?
+	// 仍按 class 指针处理，避免类顺序依赖导致的生成错误�?
+	if tg.codegen != nil && tg.codegen.IsClassType(kaulaType) {
+		return kaulaStructTag(kaulaType) + "*"
+	}
+	// 跨文�?import 的公共类型（struct/enum 值语义、class 指针语义）：
+	// 定义在被导入文件生成�?typeCode 中（C 名带 K_ 前缀），本地
+	// structTypes/classTypes 均未注册，此处按 localPubTypes 补映射，
+	// 否则变量声明会把 Kaula 裸名直接吐进 C（unknown type name）�?
+	if tg.codegen != nil && tg.codegen.localPubTypes != nil {
+		if info, ok := tg.codegen.localPubTypes[kaulaType]; ok && info != nil {
+			switch info.Kind {
+			case "class", "interface":
+				return kaulaStructTag(kaulaType) + "*"
+			case "struct", "enum", "type":
+				return kaulaStructTag(kaulaType)
+			}
+		}
+	}
+	return kaulaType
+}
+
+func (tg *TypeGenerator) RegisterClibType(kaulaType string, cType string) {
+	tg.clibTypeMap[kaulaType] = cType
+}
+
+func (tg *TypeGenerator) GenerateCLibHeaders(headers []string) string {
+	var code strings.Builder
+	for _, h := range headers {
+		code.WriteString(fmt.Sprintf("#include %s\n", h))
+	}
+	return code.String()
+}
+
+func (tg *TypeGenerator) GenerateClassStatement(stmt *ast.ClassStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Class: %s (Implements: %v)\n", stmt.Name, stmt.Implements))
+
+	if stmt.Generic {
+		return tg.GenerateGenericClassStatement(stmt)
+	}
+
+	tg.structTypes[stmt.Name] = true
+	tg.classTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
+
+	for _, ifaceName := range stmt.Implements {
+		methodGroupType := kaulaStructTag(ifaceName + "_MethodGroup")
+		code.WriteString(fmt.Sprintf("    %s %s;\n", methodGroupType, ifaceName))
+	}
+
+	for _, field := range stmt.Fields {
+		fieldType := tg.convertType(field.Type, field.Nullable)
+		// 在结构体定义内部，class 类型�?typedef 名（K_Name）可能还未完成定义，
+		// 自引�?前向引用必须使用 struct K_Name 形式，否�?C �?"unknown type name"�?
+		fieldType = tg.rewriteStructDefType(fieldType)
+		// 处理数组字段：C 语法�?"elemType name[N]"，而非 "elemType[N] name"
+		if strings.Contains(fieldType, "[") && !strings.HasSuffix(fieldType, "*") {
+			openBracket := strings.Index(fieldType, "[")
+			cElemType := fieldType[:openBracket]
+			arrayPart := fieldType[openBracket:]
+			code.WriteString(fmt.Sprintf("    %s %s%s;\n", cElemType, field.Name, arrayPart))
+		} else {
+			code.WriteString(fmt.Sprintf("    %s %s;\n", fieldType, field.Name))
+		}
+	}
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
+
+	for _, method := range stmt.Methods {
+		returnType := tg.convertType(method.ReturnType, false)
+		// 无显式返回类型的方法视为 void 返回
+		if returnType == "" {
+			returnType = "void"
+		}
+		selfStructType := kaulaStructTag(stmt.Name)
+		code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, stmt.Name, method.Name, selfStructType))
+		for _, param := range method.Params {
+			paramType := tg.convertType(param.Type, false)
+			code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
+		}
+		code.WriteString(");\n")
+	}
+	code.WriteString("\n")
+
+	// 构造器与方法体延迟输出（classImplCode）：typeCode 段现位于 forwardDecls
+	// 之前（保�?typedef 先于引用它的函数原型），若方法体留在 typeCode 内，
+	// 其对顶层函数的调用会先于这些函数的原型出现，C �?"undeclared function"�?
+	// 延迟段由装配器置�?forwardDecls 与全局变量之后、普通函数体之前�?
+	impl := &tg.codegen.classImplCode
+
+	// 为每�?implements 的接口生�?具体�?�?接口句柄"提升函数�?
+	// 调用点把具体类对象实参（�?K_Circle*）提升为接口句柄（K_Shape），
+	// 使接口参数能拿到方法�?+ 对象指针，进而在调用处走 vtbl 多态分派�?
+	// 变量声明（Shape sh = Circle(2.0)）与方法返回接口（fn grow() Shape�?
+	// 的装箱也会调用它，故必须排在构造器/方法体之前，否则 C99 隐式声明报错�?
+	for _, ifaceName := range stmt.Implements {
+		ifaceC := kaulaStructTag(ifaceName) // K_Shape
+		classC := kaulaStructTag(stmt.Name) // K_Circle
+		impl.WriteString(fmt.Sprintf("static inline %s %s_from_%s(%s* obj) {\n", ifaceC, ifaceC, stmt.Name, classC))
+		impl.WriteString(fmt.Sprintf("    %s s;\n", ifaceC))
+		impl.WriteString(fmt.Sprintf("    s.vtbl = obj->%s;\n", ifaceName)) // 方法组字段名 = 接口�?
+		impl.WriteString("    s.self = (void*)obj;\n")
+		impl.WriteString("    return s;\n")
+		impl.WriteString("}\n\n")
+	}
+
+	for _, constructor := range stmt.Constructors {
+		impl.WriteString(tg.GenerateConstructorStatementWithInterfaceInit(stmt.Name, stmt.Implements, stmt.Methods, constructor))
+	}
+
+	for _, method := range stmt.Methods {
+		impl.WriteString(tg.GenerateMethodStatement(stmt.Name, method))
+	}
+
+	return code.String()
+}
+
+func (tg *TypeGenerator) GenerateConstructorStatementWithInterfaceInit(className string, interfaces []string, methods []*ast.MethodStatement, constructor *ast.ConstructorStatement) string {
+	var code strings.Builder
+	cName := kaulaStructTag(className)
+	// TU 拆分：构造函数是非 static 的外部符号，别的 TU 调用 `Point(3,4)` 时
+	// 只会生成 `Point_new(3,4)`，必须能在自己的 TU 里看到原型（C99 无隐式声明）。
+	if constructor != nil {
+		var proto strings.Builder
+		fmt.Fprintf(&proto, "%s* %s_new(", cName, className)
+		for i, param := range constructor.Params {
+			if i > 0 {
+				proto.WriteString(", ")
+			}
+			proto.WriteString(fmt.Sprintf("%s %s", tg.convertType(param.Type, param.Nullable), param.Name))
+		}
+		if len(constructor.Params) == 0 {
+			proto.WriteString("void")
+		}
+		// registerTUStatic 会自行补足 ");"，这里只给到左括号为止的签名
+		tg.codegen.registerTUStatic(proto.String())
+	}
+	code.WriteString(fmt.Sprintf("%s* %s_new(", cName, className))
+	for i, param := range constructor.Params {
+		paramType := tg.convertType(param.Type, param.Nullable)
+		if i > 0 {
+			code.WriteString(", ")
+		}
+		code.WriteString(fmt.Sprintf("%s %s", paramType, param.Name))
+	}
+	code.WriteString(") {\n")
+
+	// 进入构造函数作用域：注册作用域名、参数、self 符号
+	tg.codegen.EnterScope("constructor_" + className)
+	tg.codegen.currentClassName = className
+	tg.codegen.currentFunctionReturnType = className + "*"
+	// self �?C 函数体中才声明，这里预注册为局部符号，避免 GenerateIdentifier 误判
+	tg.codegen.AddSymbol("self", className+"*", false, "local", constructor.Pos.Line, constructor.Pos.Column)
+	for _, param := range constructor.Params {
+		tg.codegen.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", constructor.Pos.Line, constructor.Pos.Column)
+	}
+	tg.codegen.indent++
+
+	code.WriteString(tg.codegen.indentString() + fmt.Sprintf("%s* self = KMM_V4_ALLOC_ZERO(%s);\n", cName, cName))
+	code.WriteString(tg.codegen.indentString() + "if (self == NULL) { return NULL; }\n\n")
+
+	if len(interfaces) > 0 && len(methods) > 0 {
+		code.WriteString(tg.codegen.indentString() + "// Initialize interface method groups (composition grouping)\n")
+
+		ifaceMethodsMap := make(map[string]map[string]bool)
+		for _, ifaceName := range interfaces {
+			ifaceMethodsMap[ifaceName] = make(map[string]bool)
+			ifaceMethods := tg.getInterfaceMethods(ifaceName)
+			if ifaceMethods != nil {
+				for _, m := range ifaceMethods {
+					ifaceMethodsMap[ifaceName][m.Name] = true
+				}
+			}
+		}
+
+		for _, classMethod := range methods {
+			for _, ifaceName := range interfaces {
+				if ifaceMethodsMap[ifaceName] != nil {
+					if ifaceMethodsMap[ifaceName][classMethod.Name] {
+						code.WriteString(tg.codegen.indentString() + tg.buildInterfaceMethodCast(className, ifaceName, classMethod))
+					}
+				}
+			}
+		}
+		code.WriteString("\n")
+	}
+
+	tg.codegen.EnterScope("constructor" + className)
+	// 注册 self 和参�?�?exprgen 区分成员变量与局部名)
+	tg.codegen.AddSymbol("self", className, false, "parameter", 0, 0)
+	for _, param := range constructor.Params {
+		if param != nil {
+			tg.codegen.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", 0, 0)
+		}
+	}
+	for _, bodyStmt := range constructor.Body {
+		code.WriteString(tg.codegen.indentString() + tg.codegen.generateStatement(bodyStmt))
+	}
+	tg.codegen.ExitScope()
+
+	code.WriteString(tg.codegen.indentString() + "return self;\n")
+
+	// 作用域清�?
+	tg.codegen.indent--
+	tg.codegen.ExitScope()
+	tg.codegen.currentClassName = ""
+	tg.codegen.currentFunctionReturnType = ""
+
+	code.WriteString("}\n\n")
+
+	return code.String()
+}
+
+func (tg *TypeGenerator) getInterfaceMethods(ifaceName string) []*ast.MethodStatement {
+	if tg.codegen.program == nil {
+		return nil
+	}
+	iface := tg.codegen.program.FindInterface(ifaceName)
+	if iface == nil {
+		return nil
+	}
+	return iface.Methods
+}
+
+func (tg *TypeGenerator) getClassFields(className string) []*ast.FieldDeclaration {
+	if tg.codegen.program == nil {
+		return nil
+	}
+	for _, stmt := range tg.codegen.program.Statements {
+		// class 与 struct 都参与字段遍历：深释放（P-B）与深提升回调的
+		// 合成都依赖此查询，struct 形态（test/recursive_ptr_tree.kl 等）
+		// 的指针字段同样需要按宿主存活语义回收/提升。
+		if classStmt, ok := stmt.(*ast.ClassStatement); ok {
+			if classStmt.Name == className {
+				return classStmt.Fields
+			}
+		}
+		if structStmt, ok := stmt.(*ast.StructStatement); ok {
+			if structStmt.Name == className {
+				return structStmt.Fields
+			}
+		}
+	}
+	return nil
+}
+
+// GenerateGenericClassStatement 泛型类定义：仅生成注释占位�?
+// 实际 C 类型定义在实例化点生成（�?Box<int> 使用时触�?InstantiateGenericType），
+// 生成 K_Box_int typedef 及对应的构造函�?方法。避免类型擦除为 void*�?
+func (tg *TypeGenerator) GenerateGenericClassStatement(stmt *ast.ClassStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Class: %s", stmt.Name))
+	if len(stmt.TypeParams) > 0 {
+		code.WriteString("<")
+		for i, tp := range stmt.TypeParams {
+			if i > 0 {
+				code.WriteString(", ")
+			}
+			code.WriteString(tp.Name)
+		}
+		code.WriteString(">")
+	}
+	code.WriteString(" (instantiated on use)\n")
+	return code.String()
+}
+
+// rewriteInterfaceSelfRef �?正在生成的接口句柄类�?�?typedef 引用改写�?
+// struct tag 形式。接口方法组先于接口句柄 typedef 发射，方法返�?接收接口
+// 自身（fn grow() Shape）时 K_Shape 这个 typedef 名尚不存在，clang 会报
+// "type name requires a specifier or qualifier"。函数指针声明允许不完整返回
+// 类型（struct K_Shape），而句�?typedef 紧随其后补全�?
+// 用词边界匹配，避免误�?K_Shape_MethodGroup 这类前缀相同的名字�?
+func rewriteInterfaceSelfRef(cType, ifaceName string) string {
+	if ifaceName == "" || cType == "" {
+		return cType
+	}
+	tag := kaulaStructTag(ifaceName)
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(tag) + `\b`)
+	return re.ReplaceAllString(cType, "struct "+tag)
+}
+
+func (tg *TypeGenerator) GenerateInterfaceStatement(stmt *ast.InterfaceStatement) string {
+	var code strings.Builder
+
+	// 先登记接口句柄类型，再生成方法组：方法组里每个成员的返回类型要经
+	// convertType 映射，方法返回接口自身（fn grow() Shape）时若此时尚�?
+	// 登记，会�?Kaula 裸名 Shape 直接吐进 C，clang �?
+	// "type name requires a specifier or qualifier"�?
+	tg.interfaceTypes[stmt.Name] = true
+	tg.structTypes[stmt.Name] = true
+
+	code.WriteString(fmt.Sprintf("// Interface: %s (Composition Grouping - Zero Overhead)\n", stmt.Name))
+
+	methodGroupName := stmt.Name + "_MethodGroup"
+	tg.structTypes[methodGroupName] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(methodGroupName)))
+	for _, method := range stmt.Methods {
+		returnType := rewriteInterfaceSelfRef(tg.convertType(method.ReturnType, false), stmt.Name)
+		code.WriteString(fmt.Sprintf("    %s (*%s)(void* self", returnType, method.Name))
+		for _, param := range method.Params {
+			paramType := rewriteInterfaceSelfRef(tg.convertType(param.Type, false), stmt.Name)
+			code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
+		}
+		code.WriteString(");\n")
+	}
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(methodGroupName)))
+
+	// 接口句柄结构体：方法�?+ 具体对象指针�?
+	// �?interface 类型具备 C 映射（接口变�?接口参数），多态分派经
+	// p.vtbl.method(p.self) 走方法组，由 class implements 时生成的提升函数
+	// （K_<Iface>_from_<Class>）把具体类对象提升为接口句柄�?
+	// （structTypes/interfaceTypes 已在函数开头登记——方法组生成需要它。）
+	code.WriteString(fmt.Sprintf("// Interface handle: %s\n", stmt.Name))
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
+	code.WriteString(fmt.Sprintf("    %s vtbl;\n", kaulaStructTag(methodGroupName)))
+	code.WriteString("    void* self;\n")
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
+
+	return code.String()
+}
+
+func (tg *TypeGenerator) GenerateStructStatement(stmt *ast.StructStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Struct: %s (Generic=%v, TypeParams=%d)\n", stmt.Name, stmt.Generic, len(stmt.TypeParams)))
+
+	if stmt.Generic {
+		return tg.GenerateGenericStructStatement(stmt)
+	}
+
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
+	for _, field := range stmt.Fields {
+		fieldType := tg.convertType(field.Type, field.Nullable)
+		// 结构体定义内部：typedef 名尚未生效，自引�?前向引用必须�?struct K_Name
+		fieldType = tg.rewriteStructDefType(fieldType)
+		// 位域: fieldName: type : width �?type fieldName : width;
+		bitSuffix := ""
+		if field.BitWidth > 0 {
+			bitSuffix = fmt.Sprintf(" : %d", field.BitWidth)
+		}
+		// 处理数组字段：C 语法�?"elemType name[N]"，而非 "elemType[N] name"
+		if strings.Contains(fieldType, "[") && !strings.HasSuffix(fieldType, "*") {
+			openBracket := strings.Index(fieldType, "[")
+			cElemType := fieldType[:openBracket]
+			arrayPart := fieldType[openBracket:]
+			code.WriteString(fmt.Sprintf("    %s %s%s%s;\n", cElemType, field.Name, arrayPart, bitSuffix))
+		} else {
+			code.WriteString(fmt.Sprintf("    %s %s%s;\n", fieldType, field.Name, bitSuffix))
+		}
+	}
+
+	// 生成属性对应的 __attribute__
+	attrStr := generateStructAttributes(stmt.Attributes)
+	if attrStr != "" {
+		code.WriteString(fmt.Sprintf("} %s %s;\n\n", attrStr, kaulaStructTag(stmt.Name)))
+	} else {
+		code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
+	}
+
+	return code.String()
+}
+
+// generateStructAttributes �?Kaula 属性转换为 C �?__attribute__ 语法
+// 放在 struct 定义�?} 和类型名之间
+func generateStructAttributes(attrs []*ast.Attribute) string {
+	if len(attrs) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, attr := range attrs {
+		switch attr.Name {
+		case "packed":
+			parts = append(parts, "__attribute__((packed))")
+		case "aligned":
+			if len(attr.Args) > 0 {
+				parts = append(parts, fmt.Sprintf("__attribute__((aligned(%s)))", attr.Args[0]))
+			} else {
+				parts = append(parts, "__attribute__((aligned))")
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// GenerateEnumStatement 生成枚举（ADT/tagged union）的 C 代码
+// 编译�?C �?tagged union:
+//
+//	enum Result<T, E> { Ok(T), Err(E) }
+//
+// 编译�?
+//
+//	typedef enum { Result_Kind_Ok, Result_Kind_Err } Result_Kind;
+//	typedef struct Result { Result_Kind kind; union { struct { T Ok_val; }; struct { E Err_val; }; } data; } Result;
+func (tg *TypeGenerator) GenerateEnumStatement(stmt *ast.EnumStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Enum: %s (ADT/Tagged Union, Generic=%v)\n", stmt.Name, stmt.Generic))
+
+	if stmt.Generic {
+		return tg.GenerateGenericEnumStatement(stmt)
+	}
+
+	// 检查是否有带数据的变体
+	hasDataVariants := false
+	for _, variant := range stmt.Variants {
+		if len(variant.FieldTypes) > 0 {
+			hasDataVariants = true
+			break
+		}
+	}
+
+	if !hasDataVariants {
+		// 简单枚举（无数据），直接生�?C enum
+		tg.enumTypes[stmt.Name] = true // 登记：用于前置声明跳过检�?(typedef 必须�?func 原型之前)
+		code.WriteString(fmt.Sprintf("typedef enum {\n"))
+		if len(stmt.Variants) == 0 {
+			// C 标准不允许空 enum, 生成占位成员
+			code.WriteString(fmt.Sprintf("    %s_Kind__empty\n", stmt.Name))
+		}
+		for i, variant := range stmt.Variants {
+			code.WriteString(fmt.Sprintf("    %s_Kind_%s", stmt.Name, variant.Name))
+			if i < len(stmt.Variants)-1 {
+				code.WriteString(",")
+			}
+			code.WriteString("\n")
+		}
+		code.WriteString(fmt.Sprintf("} %s;\n\n", stmt.Name))
+		return code.String()
+	}
+
+	// 生成 kind 枚举
+	kindEnumName := stmt.Name + "_Kind"
+	tg.enumTypes[kindEnumName] = true // 登记 ADT 枚举�?kind 枚举类型
+	code.WriteString(fmt.Sprintf("typedef enum {\n"))
+	if len(stmt.Variants) == 0 {
+		// C 标准不允许空 enum, 生成占位成员
+		code.WriteString(fmt.Sprintf("    %s_Kind__empty\n", stmt.Name))
+	}
+	for i, variant := range stmt.Variants {
+		code.WriteString(fmt.Sprintf("    %s_Kind_%s", stmt.Name, variant.Name))
+		if i < len(stmt.Variants)-1 {
+			code.WriteString(",")
+		}
+		code.WriteString("\n")
+	}
+	code.WriteString(fmt.Sprintf("} %s_Kind;\n\n", stmt.Name))
+
+	// 生成 tagged union 结构�?
+	tg.structTypes[stmt.Name] = true
+	code.WriteString(fmt.Sprintf("typedef struct %s {\n", kaulaStructTag(stmt.Name)))
+	code.WriteString(fmt.Sprintf("    %s_Kind kind;\n", stmt.Name))
+	code.WriteString("    union {\n")
+	for _, variant := range stmt.Variants {
+		if len(variant.FieldTypes) > 0 {
+			code.WriteString("        struct { ")
+			for j, fieldType := range variant.FieldTypes {
+				cType := tg.MapKaulaTypeToC(fieldType)
+				fieldName := variant.Name + "_val"
+				if len(variant.FieldNames) > j && variant.FieldNames[j] != "" {
+					fieldName = variant.FieldNames[j]
+				} else if len(variant.FieldTypes) > 1 {
+					fieldName = fmt.Sprintf("%s_val%d", variant.Name, j)
+				}
+				if j > 0 {
+					code.WriteString("; ")
+				}
+				code.WriteString(fmt.Sprintf("%s %s", cType, fieldName))
+			}
+			code.WriteString("; };\n")
+		}
+	}
+	code.WriteString("    } data;\n")
+	code.WriteString(fmt.Sprintf("} %s;\n\n", kaulaStructTag(stmt.Name)))
+
+	return code.String()
+}
+
+// GenerateGenericEnumStatement 泛型枚举定义：仅生成注释占位�?
+// 实际 C 类型定义在实例化点生成（�?Result<int, string> 使用时触�?InstantiateGenericType），
+// 生成 K_Result_int_string tagged union，变体字段类型按类型参数替换�?
+func (tg *TypeGenerator) GenerateGenericEnumStatement(stmt *ast.EnumStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Enum: %s", stmt.Name))
+	if len(stmt.TypeParams) > 0 {
+		code.WriteString("<")
+		for i, tp := range stmt.TypeParams {
+			if i > 0 {
+				code.WriteString(", ")
+			}
+			code.WriteString(tp.Name)
+		}
+		code.WriteString(">")
+	}
+	code.WriteString(" (instantiated on use)\n")
+	return code.String()
+}
+
+// GenerateGenericStructStatement 泛型结构体定义：仅生成注释占位�?
+// 实际 C 类型定义在实例化点生成（�?Pair<int, string> 使用时触�?InstantiateGenericType），
+// 生成 K_Pair_int_string typedef，字段类型按类型参数替换�?
+func (tg *TypeGenerator) GenerateGenericStructStatement(stmt *ast.StructStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Struct: %s", stmt.Name))
+	if len(stmt.TypeParams) > 0 {
+		code.WriteString("<")
+		for i, tp := range stmt.TypeParams {
+			if i > 0 {
+				code.WriteString(", ")
+			}
+			code.WriteString(tp.Name)
+		}
+		code.WriteString(">")
+	}
+	code.WriteString(" (instantiated on use)\n")
+	return code.String()
+}
+
+func (tg *TypeGenerator) GenerateMethodStatement(className string, method *ast.MethodStatement) string {
+	returnType := tg.convertType(method.ReturnType, false)
+	// 无显式返回类型的方法视为 void 返回
+	if returnType == "" {
+		returnType = "void"
+	}
+	// self 参数始终是指向类结构体的指针；这里使�?struct tag 本身（非指针）配合后面的显式 * 形成单级指针 K_Class*
+	selfStructType := kaulaStructTag(className)
+
+	// 进入方法作用域：作用域名编码 className �?methodName，供 exprgen 识别
+	tg.codegen.EnterScope("method_" + className + "_" + method.Name)
+	tg.codegen.currentClassName = className
+	tg.codegen.currentFunctionReturnType = method.ReturnType
+	tg.codegen.AddSymbol("self", className+"*", false, "local", method.Pos.Line, method.Pos.Column)
+	for _, param := range method.Params {
+		tg.codegen.AddSymbol(param.Name, param.Type, param.Nullable, "parameter", method.Pos.Line, method.Pos.Column)
+	}
+	tg.codegen.indent++
+
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, selfStructType))
+	for _, param := range method.Params {
+		paramType := tg.convertType(param.Type, false)
+		code.WriteString(fmt.Sprintf(", %s %s", paramType, param.Name))
+	}
+	code.WriteString(") {\n")
+
+	bodyCode := tg.codegen.generateStatementFromStmts(method.Body)
+	code.WriteString(bodyCode)
+
+	if returnType != "void" && !methodHasReturn(method.Body) {
+		code.WriteString(tg.codegen.indentString() + "return NULL;\n")
+	}
+	code.WriteString("}\n\n")
+
+	// TU 拆分：本 TU 输出的文件作用域 static 函数原型登记到接口头，
+	// 供被 import 的调用方 TU 在自己的 TU 内补一份原型（static 不能跨 TU 引用）。
+	tg.codegen.registerTUStatic(fmt.Sprintf("static inline %s %s_%s(%s* self", returnType, className, method.Name, selfStructType))
+
+	// 清理作用�?
+	tg.codegen.indent--
+	tg.codegen.ExitScope()
+	tg.codegen.currentClassName = ""
+	tg.codegen.currentFunctionReturnType = ""
+
+	return code.String()
+}
+
+// buildInterfaceMethodCast 构建接口方法赋值的完整函数指针强转（修复接口多参数调用签名不匹配问题）
+// 生成形如: self->Iface.method = (R(*)(void*, T1, T2))Class_method;
+func (tg *TypeGenerator) buildInterfaceMethodCast(className string, ifaceName string, method *ast.MethodStatement) string {
+	returnType := tg.convertType(method.ReturnType, false)
+	if returnType == "" {
+		returnType = "void"
+	}
+	var paramSig strings.Builder
+	paramSig.WriteString("void*")
+	for _, param := range method.Params {
+		paramSig.WriteString(", ")
+		paramSig.WriteString(tg.convertType(param.Type, false))
+	}
+	return fmt.Sprintf("self->%s.%s = (%s(*)(%s))%s_%s;\n",
+		ifaceName, method.Name,
+		returnType, paramSig.String(),
+		className, method.Name)
+}
+
+func methodHasReturn(stmts []ast.Statement) bool {
+	for _, s := range stmts {
+		if _, ok := s.(*ast.ReturnStatement); ok {
+			return true
+		}
+		if block, ok := s.(*ast.BlockStatement); ok {
+			if methodHasReturn(block.Statements) {
+				return true
+			}
+		}
+		if ifStmt, ok := s.(*ast.IfStatement); ok {
+			if methodHasReturn(ifStmt.Body) || methodHasReturn(ifStmt.Else) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tgReturnTypeToC 函数返回类型 �?C 类型（与函数定义生成保持一致）
+func tgReturnTypeToC(tg *TypeGenerator, kaulaType string) string {
+	switch kaulaType {
+	case "":
+		return "void"
+	case "int":
+		return "int"
+	case "i64":
+		return "int64_t"
+	case "u64":
+		return "uint64_t"
+	case "i32":
+		return "int32_t"
+	case "u32":
+		return "uint32_t"
+	case "i16":
+		return "int16_t"
+	case "u16":
+		return "uint16_t"
+	case "i8":
+		return "int8_t"
+	case "u8":
+		return "uint8_t"
+	case "float":
+		return "float"
+	case "f32":
+		return "float"
+	case "double":
+		return "double"
+	case "f64":
+		return "double"
+	case "bool":
+		return "bool"
+	case "char":
+		return "char"
+	case "void":
+		return "void"
+	case "string":
+		return "String"
+	default:
+		return tg.convertType(kaulaType, false)
+	}
+}
+
+func (tg *TypeGenerator) convertType(kaulaType string, nullable bool) string {
+	if cType, ok := tg.clibTypeMap[kaulaType]; ok {
+		if nullable && !strings.HasSuffix(cType, "*") {
+			cType += "*"
+		}
+		return cType
+	}
+
+	cType := tg.MapKaulaTypeToC(kaulaType)
+
+	if nullable && !strings.HasSuffix(cType, "*") {
+		cType += "*"
+	}
+
+	return cType
+}
+
+// GetTypeSize 获取 Kaula 类型的大小（字节数）
+// 用于编译期优化：�?sizeof 表达式用�?malloc 参数时，尝试在编译期确定大小
+// 返回 (size, true) 如果能确定大小，否则返回 (0, false)
+func (tg *TypeGenerator) GetTypeSize(kaulaType string) (int, bool) {
+	if kaulaType == "" {
+		return 0, false
+	}
+
+	// 基本类型大小映射
+	basicTypeSizes := map[string]int{
+		"i8": 1, "int8": 1, "sbyte": 1, "byte": 1, "uint8": 1, "u8": 1, "char": 1, "bool": 1, "boolean": 1,
+		"i16": 2, "int16": 2, "short": 2, "ushort": 2, "uint16": 2, "u16": 2,
+		"i32": 4, "int32": 4, "int": 4, "integer": 4, "uint": 4, "uint32": 4, "float": 4, "f32": 4, "single": 4,
+		"i64": 8, "int64": 8, "uint64": 8, "u64": 8,
+		// "long" 故意缺席：LP64 是 8 字节、LLP64（Windows x64）与 32 位目标是 4 字节。
+		// 硬编码任一侧都会在另一侧静默算错 sizeof，因此返回 unknown 交由调用方
+		// 走运行期 sizeof（审计 §1.3-4）。
+		"double": 8, "f64": 8, "real": 8,
+	}
+
+	typeLower := strings.ToLower(kaulaType)
+	if size, ok := basicTypeSizes[typeLower]; ok {
+		return size, true
+	}
+
+	// void(T...)R 签名记法：无论数据指针还是函数指针，均为指针大小
+	if strings.HasPrefix(kaulaType, "void(") {
+		return 8, true
+	}
+
+	// 指针类型：所有指针大小相同（8 字节�?4 位系统）
+	if strings.HasPrefix(typeLower, "*") || strings.HasSuffix(typeLower, "*") {
+		return 8, true
+	}
+
+	// 字符串类型：String 结构�?{size_t len; char* ptr;} = 16 字节
+	if typeLower == "string" || typeLower == "str" {
+		return 16, true
+	}
+	// cstring：const char* = 8 字节
+	if typeLower == "cstring" {
+		return 8, true
+	}
+
+	// 数组类型：[N]type -> N * sizeof(type)
+	if len(typeLower) > 0 && typeLower[0] == '[' {
+		closeBracket := strings.Index(typeLower, "]")
+		if closeBracket > 0 {
+			arraySizeStr := typeLower[1:closeBracket]
+			elemType := typeLower[closeBracket+1:]
+			arraySize := 0
+			for _, ch := range arraySizeStr {
+				if ch >= '0' && ch <= '9' {
+					arraySize = arraySize*10 + int(ch-'0')
+				} else {
+					return 0, false // 非数字数组大小，无法编译期确�?
+				}
+			}
+			elemSize, ok := tg.GetTypeSize(elemType)
+			if ok {
+				return arraySize * elemSize, true
+			}
+		}
+	}
+
+	// 动态数�?[]type -> 指针大小（数组描述符�?
+	if strings.HasPrefix(typeLower, "[]") {
+		return 8, true // 简化为指针大小
+	}
+
+	// 用户定义的类型（struct/class）：尝试从已生成的类型中查找
+	// 这里简化处理，返回 false 让优化走 offset_save/restore 路径
+	// 实际可以通过查询符号表或类型定义来获取大�?
+	return 0, false
+}
+
+// mapAdoptUnderlyingToC 将套用类型的底层类型表达式映射为 C 类型�?
+// 编译器自动推断：
+//   - Kaula 固定宽度类型（i8-i64/u8-u64/f32/f64/bool/char/byte/sbyte/void/string/object）→ �?Kaula 类型映射
+//   - 其他（int、size_t、FILE* 等）�?直接透传�?C 类型，保�?C 原生语义
+func (tg *TypeGenerator) mapAdoptUnderlyingToC(underlying string) string {
+	t := strings.TrimSpace(underlying)
+	// 去掉指针前缀，判断基础类型
+	base := strings.TrimPrefix(t, "*")
+	base = strings.TrimSuffix(base, "*")
+	base = strings.TrimSpace(base)
+	// Kaula 固定宽度类型和明确的 Kaula 类型走映�?
+	switch base {
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+		"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+		"f32", "f64", "float", "double", "bool", "char", "byte", "sbyte", "void", "string", "object":
+		return tg.MapKaulaTypeToC(t)
+	}
+	// 其他类型直接透传�?C 类型（保�?C 原生语义，如 C �?int �?32 位）
+	return t
+}
+
+func (tg *TypeGenerator) GenerateTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
+	if stmt == nil {
+		return ""
+	}
+
+	if stmt.Generic {
+		return tg.GenerateGenericTypeAliasStatement(stmt)
+	}
+
+	// 登记 type alias 类型：用于函数前置声明跳过检�?
+	// （typedef 定义必须在引用该类型�?func 原型之前输出�?
+	tg.typeAliasTypes[stmt.Name] = true
+
+	if stmt.IsFuncType {
+		return tg.GenerateFuncTypeAliasStatement(stmt)
+	}
+
+	// 套用类型（adopt）：底层类型表达式映射到 C 类型，零成本
+	// 底层类型可以�?c::size_t（外�?C 类型）或 i64（Kaula 数值类型）
+	// C �?typedef <CType> <Name>; Kaula �?Name 是独立强类型
+	// 优化：若 C 侧已有同名类型（�?typedef struct {...} StringBuilder;），
+	// 则不重复生成 typedef，直接复�?C 侧类型，避免冲突
+	if stmt.IsAdopt {
+		underlying := strings.TrimSpace(stmt.AdoptUnderlying)
+		if underlying == "" {
+			underlying = strings.TrimSpace(stmt.UnderlyingType)
+		}
+		cType := tg.mapAdoptUnderlyingToC(underlying)
+		// 提取 C 类型的基础名（去掉 *、const、struct 等修饰符�?
+		baseName := cType
+		baseName = strings.TrimPrefix(baseName, "const ")
+		baseName = strings.TrimPrefix(baseName, "struct ")
+		baseName = strings.TrimSuffix(baseName, "*")
+		baseName = strings.TrimSpace(baseName)
+		if baseName == stmt.Name {
+			// C 侧已有同名类型，直接复用，不生成 typedef
+			// 但需要注册到 clibTypeMap，让变量声明使用完整�?C 类型（包�?*�?
+			tg.clibTypeMap[stmt.Name] = cType
+			return fmt.Sprintf("// Adopt type: %s = adopt %s (reuse existing C type)\n\n", stmt.Name, underlying)
+		}
+		return fmt.Sprintf("// Adopt type: %s = adopt %s\ntypedef %s %s;\n\n", stmt.Name, underlying, cType, stmt.Name)
+	}
+
+	cType := tg.convertTypeAliasToCType(stmt.UnderlyingType)
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Type alias: %s = %s\n", stmt.Name, stmt.UnderlyingType))
+
+	// void(...)R 函数指针 typedef 需 C 特殊语法：R (*Name)(args)
+	// parseVoidSignatureType 产出形如 "R (*)(args)"，须�?Name 插入 (*Name) 位置
+	if marker := strings.Index(cType, " (*)("); marker > 0 {
+		retType := cType[:marker]
+		argsPart := cType[marker+len(" (*)("):] // "args)"
+		args := strings.TrimSuffix(argsPart, ")")
+		code.WriteString(fmt.Sprintf("typedef %s (*%s)(%s);\n\n", retType, stmt.Name, args))
+	} else {
+		// 数组类型别名：typedef K_Point[4] Path; 非法，须写成 typedef K_Point Path[4];
+		code.WriteString(fmt.Sprintf("typedef %s;\n\n", formatCVarDecl(cType, stmt.Name)))
+	}
+
+	return code.String()
+}
+
+func (tg *TypeGenerator) GenerateFuncTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
+	returnType := tg.convertTypeAliasToCType(stmt.FuncReturnType)
+	if returnType == "" {
+		returnType = "void"
+	}
+
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Function type alias: %s func(", stmt.Name))
+
+	var params []string
+	for i, param := range stmt.FuncParams {
+		paramType := tg.convertTypeAliasToCType(param.Type)
+		if param.Nullable {
+			paramType += "*"
+		}
+		params = append(params, fmt.Sprintf("%s arg%d", paramType, i))
+	}
+	code.WriteString(strings.Join(params, ", "))
+	code.WriteString(fmt.Sprintf(") %s\n", returnType))
+
+	code.WriteString(fmt.Sprintf("typedef %s (*%s)(", returnType, stmt.Name))
+
+	var cParams []string
+	for i, param := range stmt.FuncParams {
+		paramType := tg.convertTypeAliasToCType(param.Type)
+		if param.Nullable {
+			paramType += "*"
+		}
+		cParams = append(cParams, fmt.Sprintf("%s arg%d", paramType, i))
+	}
+	if len(cParams) > 0 {
+		code.WriteString(strings.Join(cParams, ", "))
+	}
+	code.WriteString(");\n\n")
+
+	return code.String()
+}
+
+func (tg *TypeGenerator) convertTypeAliasToCType(kaulaType string) string {
+	cType := kaulaType
+
+	// void(T...)R 签名记法委托给主映射�?
+	if strings.HasPrefix(cType, "void(") {
+		return tg.MapKaulaTypeToC(cType)
+	}
+
+	// 前缀数组 [N]T：直接交给主映射器（下面�?base 提取会把 "[4]Point" �?
+	// base 截成空串，导�?"[4]Point" 原样流进 typedef，生成非�?C�?
+	if strings.HasPrefix(strings.TrimPrefix(cType, "const "), "[") {
+		if mapped := tg.MapKaulaTypeToC(cType); mapped != "" {
+			return mapped
+		}
+	}
+
+	// 用户自定义命名类型（struct/class/enum/跨文件类型，含指�?数组包裹）：
+	// 必须经主映射器补 K_ 前缀（class 为指针），否�?type P = Point 会向 C 吐出
+	// 不存在的裸名 Point（实际类型是 K_Point）。内置数值类型走下方既有逻辑保持不变�?
+	base := strings.TrimPrefix(cType, "const ")
+	base = strings.Trim(base, "*")
+	if strings.HasPrefix(base, "[]") {
+		base = base[2:]
+	}
+	if lb := strings.Index(base, "["); lb >= 0 {
+		base = base[:lb]
+	}
+	base = strings.TrimSpace(base)
+	if _, baseIsBuiltin := globalTypeMap[strings.ToLower(base)]; base != "" && !baseIsBuiltin && base != "string" {
+		if mapped := tg.MapKaulaTypeToC(kaulaType); mapped != "" && mapped != kaulaType {
+			return mapped
+		}
+	}
+
+	cType = strings.ReplaceAll(cType, "*void", "void*")
+	cType = strings.ReplaceAll(cType, "*int", "int*")
+	cType = strings.ReplaceAll(cType, "*float", "float*")
+	cType = strings.ReplaceAll(cType, "*double", "double*")
+	cType = strings.ReplaceAll(cType, "*bool", "bool*")
+	cType = strings.ReplaceAll(cType, "*char", "char*")
+	cType = strings.ReplaceAll(cType, "*string", "char**")
+
+	if strings.HasPrefix(cType, "[]") {
+		innerType := cType[2:]
+		if innerType == "string" {
+			cType = "char**"
+		} else {
+			cType = innerType + "*"
+		}
+	}
+
+	if cType == "string" {
+		cType = "char*"
+	}
+
+	return cType
+}
+
+func (tg *TypeGenerator) GenerateGenericTypeAliasStatement(stmt *ast.TypeAliasStatement) string {
+	var code strings.Builder
+	code.WriteString(fmt.Sprintf("// Generic Type alias: %s", stmt.Name))
+
+	if len(stmt.TypeParams) > 0 {
+		code.WriteString("<")
+		for i, tp := range stmt.TypeParams {
+			if i > 0 {
+				code.WriteString(", ")
+			}
+			code.WriteString(tp.Name)
+		}
+		code.WriteString(">\n")
+	} else {
+		code.WriteString("\n")
+	}
+
+	underlyingType := stmt.UnderlyingType
+	for _, tp := range stmt.TypeParams {
+		underlyingType = strings.ReplaceAll(underlyingType, tp.Name, "void")
+	}
+
+	cType := tg.convertTypeAliasToCType(underlyingType)
+
+	code.WriteString(fmt.Sprintf("typedef %s;\n\n", formatCVarDecl(cType, stmt.Name)))
+
+	return code.String()
+}

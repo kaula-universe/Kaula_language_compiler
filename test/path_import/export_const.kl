@@ -1,0 +1,7 @@
+import std.io
+
+export const C_MAX = 100
+
+fn main() {
+    std.io.println("C_MAX = ", C_MAX)
+}
