@@ -1,0 +1,38 @@
+// 定时器精度标定：区分「固定税」与「按比例放大」
+//
+// 已知：200us 请求实测 ~17ms。两种可能：
+//   (a) 固定税   —— 每次挂起都多花 ~17ms，与请求值无关
+//   (b) 比例误差 —— 实际 ≈ 请求 × k
+// 做法：扫一组跨度大的请求值，看「实际 - 请求」是否近似常数。
+
+import std.io
+import std.time
+
+conc fn nap(us: i64) -> i64 {
+    std.time.time_sleep_us(us)
+    return us
+}
+
+fn measure(us: i64, rounds: i64) -> i64 {
+    i64 t0 = std.time.time_now_us()
+    i64 i = 0
+    while i < rounds {
+        Handle h = spawn nap(us)
+        i64 v = h.await
+        i = i + 1
+    }
+    i64 dt = std.time.time_now_us() - t0
+    return dt / rounds
+}
+
+fn main() -> i32 {
+    // 请求 200us / 2ms / 20ms，各 30 轮
+    i64 a = measure(200, 30)
+    i64 b = measure(2000, 30)
+    i64 c = measure(20000, 30)
+
+    std.io.println("req_us=200    actual_us=", a, "  overhead=", a - 200)
+    std.io.println("req_us=2000   actual_us=", b, "  overhead=", b - 2000)
+    std.io.println("req_us=20000  actual_us=", c, "  overhead=", c - 20000)
+    return 0
+}

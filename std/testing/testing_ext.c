@@ -1,0 +1,213 @@
+#include "testing_ext.h"
+#include "../memory/memory.h"
+#include "../time/time.h"
+#include "../io/io.h"
+#include <time.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdarg.h>
+
+// 本地毫秒时钟：自包含计时，不依赖 std.time 模块符号。
+// （原实现调用 kaula_test_now_ms()，但 testing 模块的 C 依赖未声明，
+// 链接时不会拉入 time.o，导致 undefined reference to time_now_ms。）
+static double kaula_test_now_ms(void) {
+    struct timespec ts;
+#if defined(_WIN32)
+    /* Windows/MSVC target: clock_gettime 不可用，用 C11 timespec_get。
+       基准测试只需单调递增的毫秒读数，此实现足够。 */
+    timespec_get(&ts, TIME_UTC);
+#else
+    /* POSIX: 单调时钟，不受系统时间调整影响 */
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static TestSuiteNode* g_suites = NULL;
+static TestStats g_stats = {0, 0, 0, 0.0};
+static FILE* g_output = NULL;
+static bool_t g_expect_failed = false;
+
+static void output_print(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    if (g_output) {
+        vfprintf(g_output, fmt, args);
+    } else {
+        vprintf(fmt, args);
+    }
+    va_end(args);
+}
+
+static TestSuiteNode* find_suite(const char* name) {
+    TestSuiteNode* s = g_suites;
+    while (s) {
+        if (strcmp(string_cdata(s->name), name) == 0) return s;
+        s = s->next;
+    }
+    return NULL;
+}
+
+void test_register_suite(const char* name) {
+    TestSuiteNode* existing;
+    TestSuiteNode* suite;
+    if (!name) return;
+    existing = find_suite(name);
+    if (existing) return;
+    suite = (TestSuiteNode*)kmm_v4_malloc(sizeof(TestSuiteNode));
+    if (!suite) return;
+    suite->name = string_create(name);
+    suite->cases = NULL;
+    suite->case_count = 0;
+    suite->next = g_suites;
+    g_suites = suite;
+}
+
+void test_register_case(const char* suite_name, const char* case_name, TestFunc func) {
+    TestSuiteNode* suite;
+    TestCaseNode* c;
+    if (!suite_name || !case_name || !func) return;
+    suite = find_suite(suite_name);
+    if (!suite) {
+        test_register_suite(suite_name);
+        suite = find_suite(suite_name);
+        if (!suite) return;
+    }
+    c = (TestCaseNode*)kmm_v4_malloc(sizeof(TestCaseNode));
+    if (!c) return;
+    c->name = string_create(case_name);
+    c->func = func;
+    c->next = suite->cases;
+    suite->cases = c;
+    suite->case_count++;
+}
+
+void test_assert_with_msg(bool_t condition, const char* msg, const char* file, int line) {
+    if (!condition) {
+        output_print("Assertion failed: %s\n  at %s:%d\n", msg ? msg : "unknown", file ? file : "?", line);
+        abort();
+    }
+}
+
+void test_expect_true(bool_t condition, const char* file, int line) {
+    if (!condition) {
+        output_print("Expectation failed: expected true\n  at %s:%d\n", file ? file : "?", line);
+        g_expect_failed = true;
+    }
+}
+
+void test_expect_false(bool_t condition, const char* file, int line) {
+    if (condition) {
+        output_print("Expectation failed: expected false\n  at %s:%d\n", file ? file : "?", line);
+        g_expect_failed = true;
+    }
+}
+
+void test_expect_equal_int(int expected, int actual, const char* file, int line) {
+    if (expected != actual) {
+        output_print("Expectation failed: expected %d, got %d\n  at %s:%d\n", expected, actual, file ? file : "?", line);
+        g_expect_failed = true;
+    }
+}
+
+void test_expect_equal_string(const char* expected, const char* actual, const char* file, int line) {
+    if (!expected || !actual || strcmp(expected, actual) != 0) {
+        output_print("Expectation failed: expected \"%s\", got \"%s\"\n  at %s:%d\n",
+                     expected ? expected : "(null)", actual ? actual : "(null)",
+                     file ? file : "?", line);
+        g_expect_failed = true;
+    }
+}
+
+static void reset_expect_flag(void) {
+    g_expect_failed = false;
+}
+
+static bool_t get_expect_flag(void) {
+    return g_expect_failed;
+}
+
+void test_run_suite_by_name(const char* suite_name) {
+    TestSuiteNode* suite;
+    TestCaseNode* c;
+    double start_ms;
+    if (!suite_name) return;
+    suite = find_suite(suite_name);
+    if (!suite) {
+        output_print("Suite not found: %s\n", suite_name);
+        return;
+    }
+    output_print("=== Running suite: %s ===\n", string_cdata(suite->name));
+    start_ms = kaula_test_now_ms();
+    c = suite->cases;
+    while (c) {
+        bool_t failed;
+        output_print("  [ RUN      ] %s\n", string_cdata(c->name));
+        reset_expect_flag();
+        g_stats.total++;
+        c->func();
+        failed = get_expect_flag();
+        if (failed) {
+            g_stats.failed++;
+            output_print("  [  FAILED  ] %s\n", string_cdata(c->name));
+        } else {
+            g_stats.passed++;
+            output_print("  [       OK ] %s\n", string_cdata(c->name));
+        }
+        c = c->next;
+    }
+    g_stats.elapsed_ms += kaula_test_now_ms() - start_ms;
+    output_print("=== Suite %s: %zu passed, %zu failed ===\n\n",
+                 string_cdata(suite->name), g_stats.passed, g_stats.failed);
+}
+
+void test_run_all_suites(void) {
+    TestSuiteNode* s = g_suites;
+    double start_ms = kaula_test_now_ms();
+    g_stats.total = 0;
+    g_stats.passed = 0;
+    g_stats.failed = 0;
+    g_stats.elapsed_ms = 0.0;
+    output_print("========== Running all test suites ==========\n\n");
+    while (s) {
+        TestSuiteNode* next = s->next;
+        test_run_suite_by_name(string_cdata(s->name));
+        s = next;
+    }
+    g_stats.elapsed_ms = kaula_test_now_ms() - start_ms;
+    output_print("========== Summary: %zu total, %zu passed, %zu failed (%.2f ms) ==========\n",
+                 g_stats.total, g_stats.passed, g_stats.failed, g_stats.elapsed_ms);
+}
+
+void test_benchmark(const char* name, BenchmarkFunc func, size_t iterations) {
+    double start_ms, elapsed_ms;
+    size_t i;
+    if (!name || !func || iterations == 0) return;
+    output_print("[BENCHMARK] %s (%zu iterations)...\n", name, iterations);
+    start_ms = kaula_test_now_ms();
+    for (i = 0; i < iterations; i++) {
+        func(i);
+    }
+    elapsed_ms = kaula_test_now_ms() - start_ms;
+    output_print("[BENCHMARK] %s: %.2f ms total, %.6f ms per iteration\n",
+                 name, elapsed_ms, elapsed_ms / (double)iterations);
+}
+
+void test_set_output(const char* filename) {
+    if (g_output) {
+        fclose(g_output);
+        g_output = NULL;
+    }
+    if (filename) {
+        g_output = fopen(filename, "w");
+    }
+}
+
+void test_get_stats(TestStats* stats) {
+    if (!stats) return;
+    stats->total = g_stats.total;
+    stats->passed = g_stats.passed;
+    stats->failed = g_stats.failed;
+    stats->elapsed_ms = g_stats.elapsed_ms;
+}

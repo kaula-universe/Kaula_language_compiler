@@ -1,0 +1,39 @@
+// BENCH:PREFIX
+import std.io
+import std.string
+
+// BENCH:BEGIN
+fn reverse_chars(String s, i64 n) String {
+    String out = std.string.create("")
+    for i in range(n) {
+        String c = std.string.substring(s, as<size_t>(n - 1 - i), as<size_t>(n - i))
+        out = std.string.concat(out, c)
+    }
+    return out
+}
+
+fn circular_shift(i64 x, i64 shift) String {
+    String s = std.string.create_from_int(x)
+    i64 n = as<i64>(std.string.length(s))
+    if shift > n {
+        return reverse_chars(s, n)
+    }
+    String head = std.string.substring(s, as<size_t>(n - shift), as<size_t>(n))
+    String tail = std.string.substring(s, as<size_t>(0), as<size_t>(n - shift))
+    return std.string.concat(head, tail)
+}
+
+// BENCH:END
+
+// BENCH:MAIN:BEGIN
+fn main() i32 {
+    String a = circular_shift(100, 2)
+    String b = circular_shift(97, 8)
+    String c = circular_shift(11, 101)
+    if std.string.compare(a, std.string.create("001")) != 0 { return 1 }
+    if std.string.compare(b, std.string.create("79")) != 0 { return 2 }
+    if std.string.compare(c, std.string.create("11")) != 0 { return 3 }
+    std.io.println("ok")
+    return 0
+}
+// BENCH:MAIN:END

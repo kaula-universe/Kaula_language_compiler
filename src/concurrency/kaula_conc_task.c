@@ -1,0 +1,928 @@
+/*
+ * Kaula 并发内核（CONC）· 任务生命周期
+ *
+ * 修复记录：
+ * - 原 kaula_handle_await 是轮询 `while (!done_flag) sleep_us(10)`，
+ *   空耗 CPU 且唤醒延迟不确定。现改为 park/unpark（事件语义），
+ *   并在 Worker 上下文里协作执行其他任务。
+ * - 原 kaula_task_recycle 从未被调用 —— Task 与帧全泄漏。
+ *   现改为：结果被取走（或无需保留）后走 epoch 延迟回收（P5）。
+ * - 原实现用裸 `KaulaHandle.task` 指针 + 立即释放的组合，
+ *   一旦真的释放就是 UAF。现改为 epoch 保护（见 kaula_conc_epoch.h）。
+ */
+
+#include "kaula_conc_task.h"
+#include "kaula_conc_worker.h"
+#include "kaula_conc_scheduler.h"
+#include "kaula_conc_epoch.h"
+#include "kaula_conc_completion.h"
+#include "kaula_conc_metrics.h"
+#include "../kmm_scoped_allocator_v4.h"
+
+/* 统一对外头不能被本模块包含（与本头互 include）——就地声明用到的两个符号 */
+extern int kaula_runtime_ensure_init(void);
+
+#include <stdlib.h>
+#include <string.h>
+
+/* ========== 分配 ========== */
+
+static KaulaTask* global_task_pool_pop(void);
+static void       global_task_pool_push(KaulaTask* task);
+
+/*
+ * 排空全局复用池：runtime shutdown 时调用。
+ *
+ * 必须做，否则池里的 Task 指针在下次 runtime init 后成为悬垂 ——
+ * g_global_task_pool 是 static，跨 init/shutdown 周期存活，而池内
+ * Task 已在 shutdown 时被释放。test_epoch / test_task 这类"多次
+ * init+shutdown"的用例会立刻段错误。
+ */
+void kaula_task_global_pool_reset(void) {
+    KaulaTask* t = global_task_pool_pop();
+    while (t != NULL) {
+        if (kaula_p_event_is_valid(&t->done_event)) {
+            kaula_p_event_destroy(&t->done_event);
+            kaula_p_event_invalidate(&t->done_event);
+        }
+        kmm_v4_survivor_free(t);
+        t = global_task_pool_pop();
+    }
+}
+
+KaulaTask* kaula_task_alloc(void) {
+    KaulaWorker* w = kaula_conc_current_worker();
+
+    /*
+     * P0-2：优先从本 Worker 的复用池取 Task。
+     *
+     * 池是 owner 独占的单链表：Task 只由「把它 retire 进去的那个 Worker」
+     * 回收（kaula_task_complete 把 pool 指针传成 &cw->task_pool），
+     * 回收也只在该 Worker 的 epoch_exit 里发生（kaula_epoch_try_reclaim）。
+     * 非 Worker 线程（IoDriver / Block Lane）完成的任务传的是 NULL，
+     * 走 survivor_free，不会混进任何池。
+     *
+     * 于是从池里取出的 Task 在此刻**只有本 Worker 能访问**，字段重置
+     * 用普通读写即可 —— 12 条原子 store 全是白付的缓存一致性代价。
+     *
+     * 跨线程可见性不靠这里的 store：kaula_spawn_to_flags 在投递之前
+     * 有一条 `state = KAULA_TASK_READY`（memory_order_release），
+     * 它把上面所有字段的写入一并发布出去。
+     *
+     * done_event 跨复用保留（池内 Task 的 event 从未被 destroy），
+     * 因此此处不 memset 整个结构，只重置业务字段。
+     */
+    if (w != NULL && w->task_pool != NULL) {
+        KaulaTask* task = w->task_pool;
+        w->task_pool = task->next_free;
+        task->next_free = NULL;
+        w->task_pool_len--;
+
+        task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
+                                                  memory_order_relaxed);
+        /* owner 独占：以下全部是普通读写，与原子 store 语义等价 */
+        task->state = KAULA_TASK_CREATED;
+        task->resume_fn = NULL;
+        task->frame = NULL;
+        task->frame_size = 0;
+        task->inner_frame = NULL;
+        task->owner = NULL;
+        task->submit_ns = 0;
+        task->complete_ns = 0;
+        task->result = NULL;
+        task->error = 0;
+        task->cancelled = 0;
+        task->pin_refs = 0;
+        task->waiters = 0;
+        memset(&task->io_request, 0, sizeof(task->io_request));
+        task->io_result = 0;
+        task->io_do_in_worker = 0;
+        task->next = NULL;
+        task->resume_next = NULL;          /* 链指针一律归零（P-D2/P-D3 防御） */
+        task->local_deadline_ns = 0;       /* P-D3：不在本地定时器链上 */
+        task->created_ns = kaula_p_now_ns();
+        task->started_ns = 0;
+        task->resume_count = 0;
+        task->steal_count = 0;
+        task->flags = 0;
+        task->kmm_entry_depth = UINT32_MAX;  /* 未记录基线（guard 在首跑时写入） */
+        return task;
+    }
+
+    /*
+     * 非 Worker 上下文（main / 外部线程）：
+     *
+     * 优先从**全局复用池**取 —— 原实现一律走 kmm_v4_alloc_global，实测
+     * 每次 spawn 4.12us（alloc + event_create + memset），在 20000 spawn
+     * 的基准里就是整个墙钟。全局池命中时只需重置字段 + 重建 event，
+     * 省掉分配器的跨线程记账与 TLS 桶查找。
+     *
+     * 池内 Task 的 done_event 在归还时已被 destroy（见
+     * kaula_task_pool_return / global_task_pool_push 的超水位分支），
+     * 因此这里必须重新 create。
+     *
+     * 池空则回落 KMM survivor 段（跨 scope 存活，帧也来自同一段，
+     * 回收时能成对释放）。
+     */
+    KaulaTask* task = global_task_pool_pop();
+    if (task != NULL) {
+        /* 独占期：普通读写即可（在发布给任何其他线程之前） */
+        task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
+                                                  memory_order_relaxed);
+        task->state = KAULA_TASK_CREATED;
+        task->resume_fn = NULL;
+        task->frame = NULL;
+        task->frame_size = 0;
+        task->inner_frame = NULL;
+        task->owner = NULL;
+        task->submit_ns = 0;
+        task->complete_ns = 0;
+        task->result = NULL;
+        task->error = 0;
+        task->cancelled = 0;
+        task->pin_refs = 0;
+        task->waiters = 0;
+        memset(&task->io_request, 0, sizeof(task->io_request));
+        task->io_result = 0;
+        task->io_do_in_worker = 0;
+        task->next = NULL;
+        task->resume_next = NULL;
+        task->local_deadline_ns = 0;
+        task->created_ns = kaula_p_now_ns();
+        task->started_ns = 0;
+        task->resume_count = 0;
+        task->steal_count = 0;
+        task->flags = 0;
+        task->kmm_entry_depth = UINT32_MAX;  /* 未记录基线（guard 在首跑时写入） */
+        if (kaula_p_event_create(&task->done_event) != 0) {
+            /* event 重建失败：还回池/彻底回收，返回 NULL */
+            global_task_pool_push(task);
+            return NULL;
+        }
+        return task;
+    }
+
+    task = (KaulaTask*)kmm_v4_alloc_global(sizeof(KaulaTask));
+    if (task == NULL) return NULL;
+
+    memset(task, 0, sizeof(*task));
+    task->task_id = atomic_fetch_add_explicit(&g_conc_runtime.next_task_id, 1,
+                                              memory_order_relaxed);
+    atomic_store_explicit(&task->state, KAULA_TASK_CREATED, memory_order_relaxed);
+    task->kmm_entry_depth = UINT32_MAX;  /* 未记录基线（guard 在首跑时写入） */
+    task->created_ns = kaula_p_now_ns();
+
+    if (kaula_p_event_create(&task->done_event) != 0) {
+        kmm_v4_survivor_free(task);
+        return NULL;
+    }
+    atomic_store(&task->waiters, 0);
+    return task;
+}
+
+void kaula_task_init(KaulaTask* task, KaulaResumeFn fn, KaulaResumeFn enter_fn, void* frame, size_t frame_size) {
+    task->resume_fn = fn;
+    task->enter_fn = enter_fn;
+    task->frame = frame;
+    task->frame_size = frame_size;
+    task->inner_frame = NULL;
+    /*
+     * 提交时刻在这里打点。
+     *
+     * 必须在「还没进队列」时取 —— 等 post 之后再取就把投递耗时排除在外，
+     * 而那正是调度器该被计入的成本。
+     */
+    task->submit_ns = kaula_p_now_ns();
+    task->complete_ns = 0;
+}
+
+/* ========== 完成 ========== */
+
+void kaula_task_wake_waiters(KaulaTask* task) {
+    if (atomic_load(&task->waiters) > 0) {
+        kaula_p_event_signal(&task->done_event);
+    }
+}
+
+/*
+ * retire_frames 把任务持有的帧交给 epoch 延迟释放。
+ *
+ * 不能在 kaula_task_complete 里直接 free：await 可能正持有 handle
+ * 并准备读 frame 里的 result 字段。epoch 保证所有活跃 Worker 离开后
+ * 才真正释放，那时已经没人能读到它了。
+ *
+ * 两块帧（内核包装帧 + 用户帧）分别退休 —— epoch 只会 survivor_free
+ * 它拿到的那个指针，没有析构钩子，所以得分两次挂。
+ */
+static void retire_frames(KaulaTask* task) {
+    if (task->flags & KAULA_TASK_FLAG_FRAME_ON_HEAP) {
+        if (task->inner_frame != NULL) {
+            kaula_epoch_retire(task->inner_frame);
+            task->inner_frame = NULL;
+        }
+        if (task->frame != NULL && task->frame_size > 0) {
+            kaula_epoch_retire(task->frame);
+            task->frame = NULL;
+        }
+    }
+}
+
+/* 可观测性计数：外部压测/测试经 extern 读取（不进正常输出） */
+_Atomic(uint64_t) kaula_dbg_double_complete_count = 0;
+_Atomic(uint64_t) kaula_dbg_owner_mismatch_count = 0;
+
+void kaula_task_complete(KaulaTask* task, void* result) {
+    /*
+     * 幂等防护：只有非 DONE 状态能完成（CAS 原子裁决）。
+     *
+     * 压测发现 double complete（任务被两个执行路径各 complete 一次）：
+     * active_task_count 被过度递减 → uint64 下溢成巨值 → spawn 的
+     * I3 背压（active >= max_tasks）误触发 → 后续 spawn 全部被拒 →
+     * 数万 await 永久挂起。
+     *
+     * 用 CAS 把 state 从非 DONE 推到 DONE：赢者执行完整完成路径，
+     * 输者（已被完成）直接返回，active/wake 统计不重复执行。
+     * 注意：double complete 的根源（任务被两次执行）仍需单独排查，
+     * 这里只是让计数与唤醒保持幂等，避免下溢灾难。
+     *
+     * 顺序必须是：**先发布 result，再 CAS 置 DONE**。
+     *
+     * 原实现 CAS 先置 DONE、result 后写 —— 读者看到 DONE（acquire）
+     * 时 result 可能还是 NULL（未写），await 读到 NULL 误报失败。
+     * 压测实测：50000 任务每轮 0~5 个 await 返回 NULL，但任务实际
+     * 全部完成（done=50000、state=DONE、frame 结果正确）。
+     * 把 result（release）写在 DONE（acq_rel CAS）之前，任何看到
+     * DONE 的读者都必能看到 result —— release/acquire 配对。
+     */
+    int prev = atomic_load_explicit(&task->state, memory_order_relaxed);
+    if (prev == KAULA_TASK_DONE) {
+        atomic_fetch_add(&kaula_dbg_double_complete_count, 1);
+        return; /* 已被完成：忽略 */
+    }
+    /* 先发布结果（release），再 CAS 置 DONE —— 读者看到 DONE 必看到 result */
+    atomic_store_explicit(&task->result, result, memory_order_release);
+    task->error = KAULA_OK;
+    task->complete_ns = kaula_p_now_ns();
+
+    if (!atomic_compare_exchange_weak_explicit(
+            &task->state, &prev, KAULA_TASK_DONE,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        /*
+         * CAS 输：另一线程已完成该任务（prev 被它改成 DONE）。
+         * 结果字段以赢者为准（release 序）；输者不再执行
+         * push/wake/retire —— 那些赢者已做，重复执行会下溢计数。
+         */
+        return;
+    }
+    /* 赢者：继续完整完成路径 */
+
+    /*
+     * 统计与活跃计数必须在唤醒等待者之前更新完。
+     * 否则等待者被唤醒后立刻读 metrics，会看到一个"任务已完成但
+     * 完成计数还没涨"的瞬时不一致状态。
+     */
+    atomic_fetch_sub_explicit(&g_conc_runtime.active_task_count, 1,
+                              memory_order_acq_rel);
+    kaula_conc_metrics_inc_completed();
+
+    /*
+     * 完成队列：仅在有消费者时承接 payload（见 kaula_conc_completion.h）。
+     *
+     * metrics 打开 = 需要完整可观测，此时开启消费期，保持与旧实现
+     * 完全一致的行为（入队 + 可 take + total_drops 计数）。
+     *
+     * metrics 关闭（基准/生产默认）时热路径 await 不读该队列，于是
+     * 完全跳过环形缓冲写入与片满判定 —— 省掉每任务一次索引计算 +
+     * head 读 + slot 写 + tail release 写，以及稳态下必然发生的
+     * total_drops 原子加（片早已灌满且无消费者）。
+     *
+     * g_completion_consumer_active 是同一个进程内的 bool；在 spawn 之前
+     * 就已由 runtime_init 依 enable_metrics 设定，运行期不变，
+     * 因此这里读它是无竞争的（与 metrics_enabled 同类的运行期常量）。
+     */
+    if (atomic_load_explicit(&kaula_conc_metrics_enabled, memory_order_relaxed)) {
+        kaula_completion_consumer_begin();
+    }
+    kaula_completion_push(task);
+
+    /* 唤醒放最后：此刻任务的状态与统计都已就绪 */
+    kaula_task_wake_waiters(task);
+
+    /*
+     * 延迟回收（P5）+ 复用池（P0-2）。
+     * 不能立即 free：可能有线程正持有 KaulaHandle.task 指针在 await。
+     * epoch 保证所有活跃 Worker 都离开后才会真正释放（或进复用池）。
+     */
+    retire_frames(task);
+    KaulaWorker* cw = kaula_conc_current_worker();
+    /* 无 Worker 上下文（main/外部线程）：归还全局池而非直接 free —— 下一轮
+     * 同线程的 spawn 就能复用，省掉一次 kmm 分配（degrade 曲线的主要成本）。 */
+    kaula_epoch_retire_to(task,
+        cw ? (void**)&cw->task_pool : KAULA_TASK_POOL_GLOBAL);
+}
+
+void kaula_task_fail(KaulaTask* task, KaulaError err) {
+    /*
+     * 幂等：与 kaula_task_complete 完全对称，用 CAS 把 state 从非 DONE
+     * 推到 DONE。complete 与 fail 并发调用时，恰好一个线程赢，只有赢者
+     * 递减 active_task_count / 唤醒 / retire —— 杜绝旧裸 store 实现下
+     * complete+fail 各减一次导致 active_task_count 下溢、背压误触发、
+     * await 永久挂起。
+     */
+    int prev = atomic_load_explicit(&task->state, memory_order_relaxed);
+    if (prev == KAULA_TASK_DONE) {
+        return; /* 已被完成/失败：忽略 */
+    }
+    atomic_store_explicit(&task->result, NULL, memory_order_release);
+    task->error = (int)err;
+    task->complete_ns = kaula_p_now_ns();
+
+    if (!atomic_compare_exchange_weak_explicit(
+            &task->state, &prev, KAULA_TASK_DONE,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        /* 输者：另一线程已 complete/fail，统计/唤醒/retire 由赢者完成，
+         * 此处不得重复递减计数，否则 active_task_count 下溢。 */
+        return;
+    }
+
+    atomic_fetch_sub_explicit(&g_conc_runtime.active_task_count, 1,
+                              memory_order_acq_rel);
+    kaula_conc_metrics_inc_failed();
+
+    kaula_task_wake_waiters(task);
+
+    retire_frames(task);
+    KaulaWorker* cw = kaula_conc_current_worker();
+    kaula_epoch_retire_to(task,
+        cw ? (void**)&cw->task_pool : KAULA_TASK_POOL_GLOBAL);
+}
+
+int kaula_task_cancel(KaulaTask* task) {
+    /* #[hint(unintrusive)] 的任务不可取消 */
+    if (task->flags & KAULA_TASK_FLAG_UNINTRUSIVE) return 0;
+    if (atomic_load_explicit(&task->state, memory_order_acquire) == KAULA_TASK_DONE) {
+        return 0;   /* 已完成，无需取消 */
+    }
+    atomic_store_explicit(&task->cancelled, 1, memory_order_release);
+
+    /* 正在 park 等 IO 的任务需要被唤醒才能观察到取消 */
+    int st = atomic_load_explicit(&task->state, memory_order_acquire);
+    if (st == KAULA_TASK_SUSPENDED) {
+        task->io_result = 0;
+        kaula_scheduler_resume_task(task);
+    }
+    return 1;
+}
+
+/* ========== 等待 ========== */
+
+static int task_is_done(const KaulaTask* task) {
+    return atomic_load_explicit(&task->state, memory_order_acquire) == KAULA_TASK_DONE;
+}
+
+int kaula_task_await(KaulaTask* task, uint64_t timeout_ns) {
+    /* NULL 无结果可等，视为"已完成"（返回 1），结果指针为 NULL */
+    if (task == NULL) return 1;
+    if (task_is_done(task)) return 1;
+
+    KaulaWorker* w = kaula_conc_current_worker();
+
+    if (w != NULL) {
+        /*
+         * Worker 上下文：绝不阻塞。
+         * 协作执行其他任务直到目标完成 —— 这是 work-stealing 的
+         * 另一种形态（帮别人干活），比 park 更有效。
+         */
+        atomic_fetch_add_explicit(&task->waiters, 1, memory_order_acq_rel);
+        uint64_t deadline = (timeout_ns == KAULA_P_WAIT_FOREVER)
+                          ? 0 : kaula_p_now_ns() + timeout_ns;
+
+        /* 复查：同上，避免"注册前已完成"导致的漏唤醒 */
+        if (task_is_done(task)) {
+            atomic_fetch_sub_explicit(&task->waiters, 1, memory_order_acq_rel);
+            return 1;
+        }
+
+        uint64_t idle_park_ns = 100000ULL;   /* P1-4：自适应退避起点 */
+
+        while (!task_is_done(task)) {
+            KaulaTask* other = kaula_conc_worker_find_work(w);
+            if (other != NULL) {
+                kaula_worker_execute_task(w, other);
+                idle_park_ns = 100000ULL;   /* 有活干：重置退避 */
+                continue;
+            }
+            /*
+             * P1-4：无事可做时自适应退避 park（100us 起步，×2 到 1ms 上限）。
+             *
+             * 目标任务可能正被别的 Worker 执行，完成时只 signal 它的
+             * done_event，不会唤醒本 Worker 的 park_event —— 原实现固定
+             * 1ms 超时意味着最多赔 1ms 唤醒延迟。短退避起步压低平均延迟；
+             * 持续空闲时指数退避到 1ms 兜底（保持"漏唤醒自愈"语义）。
+             */
+            kaula_p_event_wait(&w->park_event, idle_park_ns);
+            if (idle_park_ns < 1000000ULL) idle_park_ns <<= 1;
+
+            if (deadline != 0 && kaula_p_now_ns() >= deadline) break;
+        }
+        atomic_fetch_sub_explicit(&task->waiters, 1, memory_order_acq_rel);
+        return task_is_done(task) ? 1 : 0;
+    }
+
+    /* 非 Worker 线程：park 到 done_event */
+    atomic_fetch_add_explicit(&task->waiters, 1, memory_order_acq_rel);
+
+    /*
+     * 注册后必须复查一次状态。
+     *
+     * 否则存在这个窗口：
+     *   本线程        上面的 task_is_done() 返回 false
+     *   执行者线程    置 DONE，并看到 waiters == 0 → 不发信号
+     *   本线程        waiters 加 1，然后 park → 永远等不到信号
+     *
+     * 这个死锁窗口很窄（几条指令），但 20 个定时器任务里
+     * 偶尔撞上一次就足以让整个测试挂死 —— 实测 3 次里挂 2 次。
+     */
+    if (task_is_done(task)) {
+        atomic_fetch_sub_explicit(&task->waiters, 1, memory_order_acq_rel);
+        return 1;
+    }
+
+    int r;
+    if (timeout_ns == KAULA_P_WAIT_FOREVER) {
+        r = kaula_p_event_wait(&task->done_event, KAULA_P_WAIT_FOREVER);
+    } else {
+        /*
+         * 分段等待：每次 50ms 后复查 running 状态，
+         * 避免 shutdown 时永久挂住。
+         */
+        uint64_t deadline = kaula_p_now_ns() + timeout_ns;
+        r = 0;
+        while (kaula_p_now_ns() < deadline) {
+            uint64_t remaining = deadline - kaula_p_now_ns();
+            uint64_t slice = remaining > 50000000ULL ? 50000000ULL : remaining;
+            if (kaula_p_event_wait(&task->done_event, slice)) { r = 1; break; }
+            if (task_is_done(task)) { r = 1; break; }
+            if (atomic_load(&g_conc_runtime.shutdown)) break;
+        }
+    }
+    atomic_fetch_sub_explicit(&task->waiters, 1, memory_order_acq_rel);
+
+    return task_is_done(task) ? 1 : (r ? 1 : 0);
+}
+
+/* ========== 回收 ========== */
+
+void kaula_task_recycle(KaulaTask* task) {
+    /*
+     * 显式回收：仅在没有等待者时安全。
+     * 正常路径下任务完成后已由 kaula_task_complete 交给 epoch，
+     * 此函数用于"创建后立刻放弃"的路径（如 spawn 被拒后的清理）。
+     */
+    if (task == NULL) return;
+
+    if (task->frame != NULL && task->frame_size > 0 &&
+        (task->flags & KAULA_TASK_FLAG_FRAME_ON_HEAP)) {
+        kmm_v4_survivor_free(task->frame);
+        task->frame = NULL;
+    }
+    if (task->inner_frame != NULL) {
+        kmm_v4_survivor_free(task->inner_frame);
+        task->inner_frame = NULL;
+    }
+    if (kaula_p_event_is_valid(&task->done_event)) {
+        kaula_p_event_destroy(&task->done_event);
+        kaula_p_event_invalidate(&task->done_event);
+    }
+    kmm_v4_survivor_free(task);
+}
+
+/* ========== Task 复用池高水位收缩 ========== */
+
+static uint32_t g_task_pool_high_water = KAULA_TASK_POOL_HIGH_WATER_DEFAULT;
+
+/* ========== 全局 Task 复用池（Treiber 栈，跨线程） ========== */
+
+/*
+ * 为什么需要它：非 Worker 线程（main / 外部线程）spawn 时
+ * kaula_conc_current_worker() == NULL，原实现直接落到 kmm_v4_alloc_global
+ * —— 那是带 slab 桶、跨线程归还、TLS 缓存的一整套分配器，实测
+ * **每次 spawn 4.12us**。base 与 shard 两版都测到同样数值，占满整个
+ * 运行时间（20000 × 4.12us = 82ms ≈ 总墙钟），是 degrade 曲线的真瓶颈。
+ *
+ * 全局池用 Treiber 栈（无锁 push/pop，CAS 循环）：任何线程都能归还，
+ * 任何线程都能取用。语义上它只缓存「已退还的 Task 结构」，字段重置仍
+ * 在 kaula_task_alloc 里按「独占者」前提做（pop 出来的 Task 在发布给
+ * 任何其他线程之前，只有当前线程能访问）。done_event 在归还时必须已
+ * destroy（见 kaula_task_pool_return / reclaim），池内 Task 一律
+ * kaula_p_event_create 重建 —— 因此从全局池取出的 Task 与从
+ * alloc_global 取出的 Task 走同一段初始化。
+ *
+ * 上限：与 per-Worker 池同一高水位，防止无界增长（I3 一切有界）。
+ */
+static _Atomic(KaulaTask*) g_global_task_pool = NULL;
+static _Atomic(uint32_t)    g_global_task_pool_len = 0;
+
+static KaulaTask* global_task_pool_pop(void) {
+    _Atomic(KaulaTask*)* head = &g_global_task_pool;
+    for (int spin = 0; spin < 64; spin++) {
+        KaulaTask* top = atomic_load_explicit(head, memory_order_acquire);
+        if (top == NULL) return NULL;
+        KaulaTask* next = atomic_load_explicit(&top->gpool_next,
+                                               memory_order_acquire);
+        if (atomic_compare_exchange_weak_explicit(
+                head, &top, next,
+                memory_order_acq_rel, memory_order_acquire)) {
+            atomic_fetch_sub_explicit(&g_global_task_pool_len, 1,
+                                      memory_order_relaxed);
+            top->gpool_next = NULL;
+            return top;
+        }
+    }
+    return NULL; /* 竞争太激烈：让调用方回落 alloc_global，不阻塞 */
+}
+
+static void global_task_pool_push(KaulaTask* task) {
+    if (task == NULL) return;
+    if (atomic_load_explicit(&g_global_task_pool_len, memory_order_relaxed)
+            >= g_task_pool_high_water) {
+        /* 超水位：调用方已负责彻底回收（destroy/free），这里不入池 */
+        if (kaula_p_event_is_valid(&task->done_event)) {
+            kaula_p_event_destroy(&task->done_event);
+            kaula_p_event_invalidate(&task->done_event);
+        }
+        kmm_v4_survivor_free(task);
+        return;
+    }
+    _Atomic(KaulaTask*)* head = &g_global_task_pool;
+    KaulaTask* top;
+    do {
+        top = atomic_load_explicit(head, memory_order_relaxed);
+        task->gpool_next = top;
+    } while (!atomic_compare_exchange_weak_explicit(
+                head, &top, task,
+                memory_order_release, memory_order_relaxed));
+    atomic_fetch_add_explicit(&g_global_task_pool_len, 1, memory_order_relaxed);
+}
+
+
+uint32_t kaula_task_pool_high_water(void) {
+    return g_task_pool_high_water;
+}
+
+void kaula_task_pool_high_water_init(void) {
+    const char* v = kaula_p_get_env("KAULA_TASK_POOL_HIGH_WATER");
+    if (v != NULL && *v != '\0') {
+        char* end = NULL;
+        unsigned long parsed = strtoul(v, &end, 10);
+        if (end != v && parsed > 0 && parsed <= 1000000) {
+            g_task_pool_high_water = (uint32_t)parsed;
+        }
+    }
+}
+
+void kaula_task_pool_return(KaulaTask* task, void** pool) {
+    if (task == NULL || pool == NULL) return;
+
+    /*
+     * 全局池哨兵：非 Worker 线程（main / 外部线程）完成的任务走这里。
+     * 全局池是 Treiber 栈，push/pop 都是 CAS，任何线程都能用；
+     * 超水位时的彻底回收由 global_task_pool_push 内部处理。
+     */
+    if (pool == KAULA_TASK_POOL_GLOBAL) {
+        global_task_pool_push(task);
+        return;
+    }
+
+    /* pool == &worker->task_pool，由偏移反推 worker 以维护长度计数 */
+    KaulaWorker* w = (KaulaWorker*)((char*)pool - offsetof(KaulaWorker, task_pool));
+
+    if (w->task_pool_len < g_task_pool_high_water) {
+        task->next_free = *pool;
+        *pool = task;
+        w->task_pool_len++;
+    } else {
+        /* 超水位：彻底回收，不再入池。
+         * frame/inner_frame 已由 retire_frames 单独退休（这里兜底 free 残留），
+         * done_event 必须 destroy+invalidate，否则同步原语泄漏。 */
+        if (task->flags & KAULA_TASK_FLAG_FRAME_ON_HEAP) {
+            if (task->inner_frame != NULL) {
+                kmm_v4_survivor_free(task->inner_frame);
+                task->inner_frame = NULL;
+            }
+            if (task->frame != NULL && task->frame_size > 0) {
+                kmm_v4_survivor_free(task->frame);
+                task->frame = NULL;
+            }
+        }
+        if (kaula_p_event_is_valid(&task->done_event)) {
+            kaula_p_event_destroy(&task->done_event);
+            kaula_p_event_invalidate(&task->done_event);
+        }
+        kmm_v4_survivor_free(task);
+    }
+}
+
+/* ========== Handle ========== */
+
+/*
+ * 句柄持有 pin：安全期的定义是「从 spawn 到 await 读完」。
+ *
+ * 只在 await 里 pin 是不够的 —— 那是马后炮：
+ *   main: spawn 返回 ──── 某个 Worker: 完成 → retire → 立刻 reclaim ──── main: pin, await
+ * 这个窗口里帧已经被释放了。醒来 memcpy 读到的是已回收内存
+ * （表现为一个像指针的垃圾数），而它往往不崩。
+ *
+ * 所以 pin 在句柄产生的那一刻拿，由 kaula_handle_release 归还。
+ *
+ * 归还点有两个，都是「句柄不再可能被读」的时刻：
+ *   - await_into 读完（声明位置，编译器走这条）
+ *   - 句柄离开作用域（编译器在作用域出口发射 kaula_handle_release）
+ *
+ * 计数放在 Task 上而不是句柄结构里，是为了让 release 幂等：
+ * 编译器若在 await_into 之后再发一次 release（作用域出口那一发），
+ * 第二次会发现计数已经归零并补回去，不会把 epoch pin 多放一次 ——
+ * 多放一次就是提前回收，那是悬垂，比泄漏危险得多。
+ *
+ * 漏发 release 仍然是可能的（那是编译器侧的保守退化）：
+ * pin 不归还 → 那块内存留到 shutdown。可观测的泄漏，不是悬垂。
+ */
+KaulaHandle kaula_handle_from_task(KaulaTask* task) {
+    KaulaHandle h;
+    h.task_id = task->task_id;
+    h.task = task;
+    /*
+     * pin 不在句柄产生时拿：它在 spawn 提交（READY 置位）之前已经预拿
+     * （kaula_spawn_to_flags / kaula_spawn_simple 的预 pin），
+     * 由 kaula_handle_release 归还。见 handle_from_task 调用点的注释。
+     */
+    return h;
+}
+
+/*
+ * kaula_handle_release 归还句柄持有的那一个 pin。
+ *
+ * 幂等：多调一次只是什么都不做，不会把 pin 放成负数。
+ * 放在 Task 上做 CAS 递减，最后一个持有者才真正 unpin。
+ */
+void kaula_handle_release(KaulaHandle h) {
+    if (h.task == NULL) return;
+    int prev = atomic_fetch_sub_explicit(&h.task->pin_refs, 1, memory_order_acq_rel);
+    if (prev == 1) {
+        kaula_epoch_unpin();
+    } else if (prev <= 0) {
+        /* 释放次数多于句柄数：补回去，别让计数变负（那会让下一次 release 少放一个 pin） */
+        atomic_fetch_add_explicit(&h.task->pin_refs, 1, memory_order_acq_rel);
+    }
+}
+
+/* 测试可观测：当前还欠多少个 epoch pin（未归还的句柄数） */
+int kaula_handle_pin_debt(KaulaHandle h) {
+    if (h.task == NULL) return 0;
+    int n = atomic_load_explicit(&h.task->pin_refs, memory_order_acquire);
+    return n > 0 ? n : 0;
+}
+
+KaulaHandle kaula_handle_null(void) {
+    KaulaHandle h = {0, NULL, {0}};
+    return h;
+}
+
+/*
+ * kaula_handle_complete：构造一个"已完成"的 Handle。
+ *
+ * 从 task 池分配一个最小任务，直接置 DONE，结果存在 inline_result。
+ * await/poll 走正常路径（task_is_done 即返回），无需额外特殊处理。
+ */
+KaulaHandle kaula_handle_complete(uint64_t result_val) {
+    kaula_runtime_ensure_init();
+    KaulaTask* t = kaula_task_alloc();
+    if (t == NULL) return kaula_handle_null();
+    t->state = KAULA_TASK_DONE;
+    t->inline_result = result_val;
+    atomic_store_explicit(&t->result, &t->inline_result, memory_order_release);
+    return kaula_handle_from_task(t);
+}
+
+int kaula_handle_is_null(KaulaHandle h) {
+    return h.task == NULL;
+}
+
+int kaula_handle_error(KaulaHandle h) {
+    if (h.task != NULL) return h.task->error;
+    /* task == NULL 时错误码放在 task_id 里 */
+    return (int)h.task_id;
+}
+
+/*
+ * await 的结果约定：内核返回的是「结果所在内存的地址」，不是结果本身。
+ *
+ * 那个地址指向 Task 的 Frame 里的一块字段。Frame 在任务完成时就随任务
+ * 一起 retire 了，所以地址的有效期只到"epoch 判定没人再读"为止。
+ *
+ * 因此 await 必须 pin 住整个「等 + 读」过程，而且读出来的内容必须
+ * 在 pin 期间拷走 —— 返回裸指针等于把一个随时会悬垂的地址交给调用者。
+ * main 这类非 Worker 线程没有 epoch 槽位，不 pin 就等于告诉回收器
+ * 「没人会读，随便收」：醒来读到的可能是已释放内存，
+ * 或者更糟 —— 一个已回收并复用的 Frame 里残留的旧值。
+ */
+
+/* 核心：等完成后把结果拷进调用者的缓冲区 */
+/*
+ * 上一次 await 的服务时间。
+ *
+ * 定义在 task.c 而不是 worker.c（那里有 kaula_conc_tls_io_result），
+ * 因为它属于 await 路径 —— 与它记的量同生命周期。
+ */
+_Thread_local uint64_t kaula_conc_tls_last_latency_ns = 0;
+
+/* Task 的服务时间；打点缺失或时钟倒流时返回 0 —— 不编造数值 */
+uint64_t kaula_task_latency_ns(const KaulaTask* task) {
+    if (task == NULL) return 0;
+    uint64_t c = task->complete_ns;
+    uint64_t s = task->submit_ns;
+    return (c > s) ? (c - s) : 0;
+}
+
+static int await_copy_out(KaulaHandle h, void* dst, size_t dst_size, uint64_t timeout_ns) {
+    if (h.task == NULL || dst == NULL) return 0;
+
+    /*
+     * 句柄在 kaula_handle_from_task 里已经 pin 过，
+     * 安全期从 spawn 就开始 —— 这里不能只靠本次 pin。
+     */
+    int ok = kaula_task_await(h.task, timeout_ns);
+    if (ok) {
+        const void* src = atomic_load_explicit(&h.task->result, memory_order_acquire);
+        if (src != NULL && dst_size > 0) {
+            memcpy(dst, src, dst_size);
+        }
+        /*
+         * 把本次 await 的服务时间留在 TLS 里，供调用方随后取用。
+         *
+         * 走 TLS 而不给 await 加出参：codegen 只生成
+         * `kaula_handle_await_into(h, &x, sizeof(x))` 这一种形态，
+         * 改出参会牵动所有 await 的生成与 ABI。一个无参访问器就够
+         * 基准与诊断用了。
+         */
+        kaula_conc_tls_last_latency_ns = kaula_task_latency_ns(h.task);
+    } else {
+        kaula_conc_tls_last_latency_ns = 0;
+    }
+
+    /* 读完了，归还句柄持有的那个 pin */
+    kaula_handle_release(h);
+    return ok;
+}
+
+/*
+ * kaula_conc_last_latency_ns —— 上一次 await 的服务时间（纳秒）。
+ *
+ * 与「谁先取到结果」无关，所以延迟统计该用它：并发窗口里按调用方
+ * 掐表量到的是排队 + 顺序取回，与服务时间能差两个数量级。
+ *
+ * 编译器生成的 await 形态不带出参，基准与诊断代码经
+ *   extern fn kaula_conc_last_latency_ns() -> u64
+ * 取值（extern 形参里放不了 Handle，无参就没这个问题）。
+ */
+uint64_t kaula_conc_last_latency_ns(void) {
+    return kaula_conc_tls_last_latency_ns;
+}
+
+/*
+ * await_into：把结果直接写进调用者的变量。
+ *
+ * 这是编译器唯一应当使用的 await 入口 —— 调用点知道结果的类型与大小，
+ * 由它提供 dst，拷贝就发生在一个大小明确、类型正确、栈上的位置。
+ * 不需要内核猜类型，也不需要分配临时缓冲（那会漏）。
+ */
+void kaula_handle_await_into(KaulaHandle h, void* dst, size_t dst_size) {
+    kaula_handle_await_into_timed(h, dst, dst_size, NULL);
+}
+
+/* 诊断插桩（临时）：await_into 三路径计数，shutdown 打印 */
+_Atomic(uint64_t) g_dbg_ai_null = 0;
+_Atomic(uint64_t) g_dbg_ai_awaitfail = 0;
+_Atomic(uint64_t) g_dbg_ai_ok = 0;
+
+/*
+ * await_into_timed：await 的同时给出「内核测得的服务时间」。
+ *
+ * out_latency_ns = complete_ns - submit_ns，即任务从被创建到真正做完
+ * 花了多久。这个量与「调用方什么时候轮到去取结果」无关 ——
+ * 并发窗口里那两者能差两个数量级，所以延迟统计必须用这个。
+ *
+ * out_latency_ns 可为 NULL（不关心延迟）。
+ */
+void kaula_handle_await_into_timed(KaulaHandle h, void* dst, size_t dst_size,
+                                   uint64_t* out_latency_ns) {
+    /*
+     * 任务若是外部（IoDriver / 阻塞车道）线程直接置的 DONE，
+     * 唤醒事件可能还没建好。走 ensure_init 会顺带补建。
+     */
+    kaula_runtime_ensure_init();
+
+    if (out_latency_ns != NULL) *out_latency_ns = 0;
+
+    if (h.task == NULL) {
+        atomic_fetch_add_explicit(&g_dbg_ai_null, 1, memory_order_relaxed);
+        if (dst != NULL && dst_size > 0) memset(dst, 0, dst_size);
+        return;
+    }
+
+    if (!await_copy_out(h, dst, dst_size, KAULA_P_WAIT_FOREVER)) {
+        atomic_fetch_add_explicit(&g_dbg_ai_awaitfail, 1, memory_order_relaxed);
+        /* 诊断插桩（临时）：失败时打印 Task 现场 */
+        if ((atomic_load_explicit(&g_dbg_ai_awaitfail, memory_order_relaxed) & 0x3F) == 0) {
+            fprintf(stdout, "DBG awaitfail task=%p state=%d result=%p pin=%d waiters=%d id=%llu\n",
+                    (void*)h.task,
+                    atomic_load_explicit(&h.task->state, memory_order_acquire),
+                    atomic_load_explicit(&h.task->result, memory_order_acquire),
+                    atomic_load_explicit(&h.task->pin_refs, memory_order_acquire),
+                    atomic_load_explicit(&h.task->waiters, memory_order_acquire),
+                    (unsigned long long)h.task->task_id);
+            fflush(stdout);
+        }
+        memset(dst, 0, dst_size);
+        return;
+    }
+    atomic_fetch_add_explicit(&g_dbg_ai_ok, 1, memory_order_relaxed);
+    /* 诊断插桩（临时）：ok 路径但 result 值为 0（r=0 根源），打印现场 */
+    {
+        const int64_t* rp = (const int64_t*)atomic_load_explicit(&h.task->result, memory_order_acquire);
+        if (rp != NULL && *rp == 0) {
+            static _Atomic(uint64_t) g_dbg_zero_print = 0;
+            uint64_t z = atomic_fetch_add_explicit(&g_dbg_zero_print, 1, memory_order_relaxed);
+            if (z < 12) {
+                fprintf(stdout, "DBG zero result task=%p res=%p frame=%p id=%llu state=%d\n",
+                        (void*)h.task, (const void*)rp, (void*)h.task->frame,
+                        (unsigned long long)h.task->task_id,
+                        atomic_load_explicit(&h.task->state, memory_order_acquire));
+                fflush(stdout);
+            }
+        }
+    }
+
+    if (out_latency_ns != NULL) {
+        /*
+         * 只能取 await_copy_out 留下的 TLS 值，**不能回头读 h.task**。
+         *
+         * await_copy_out 在拷贝完结果后就 kaula_handle_release(h) 了 ——
+         * 那是句柄持有的最后一个引用，Task 可能已经被回收。
+         * 此时再读 h.task->complete_ns 就是 use-after-free。
+         *
+         * 这个坑的表现很有欺骗性：不立刻崩，而是安静地返回上一个
+         * 任务的旧值，或者在别处崩（本机实测是 0xC0000005）。
+         *
+         * TLS 值是在 release **之前**、pin 仍然有效时取的，所以它安全。
+         */
+        *out_latency_ns = kaula_conc_tls_last_latency_ns;
+    }
+}
+
+int kaula_handle_try_await_into(KaulaHandle h, void* dst, size_t dst_size, uint64_t timeout_ns) {
+    if (h.task == NULL) {
+        if (dst != NULL && dst_size > 0) memset(dst, 0, dst_size);
+        return 0;
+    }
+    return await_copy_out(h, dst, dst_size, timeout_ns);
+}
+
+/*
+ * await 返回「结果所在内存的地址」。
+ *
+ * 与 await_into 的区别只在于 pin 的去留：
+ *   await_into  读完立刻归还句柄持有的 pin —— 推荐，声明处用它
+ *   await       不归还：返回的是「结果的地址」，调用方接着要解引用它，
+ *               此刻 pin 还得留着。归还点交给 kaula_handle_release ——
+ *               编译器在句柄离开作用域时会发一次。
+ *
+ * 所以表达式位置的 await（`h1.await + h2.await`）不再把那块内存
+ * 永久留到 shutdown：它在作用域出口就还掉了 pin。
+ *
+ * 但地址本身的生命周期仍然是「到 epoch 判定没人再读为止」，所以
+ * 表达式位置仍然不该出现在需要长期持有结果的场景 —— 声明位置的
+ * await_into 才是那条安全路径。
+ */
+void* kaula_handle_await(KaulaHandle h) {
+    if (h.task == NULL) return NULL;
+    kaula_runtime_ensure_init();
+    if (!kaula_task_await(h.task, KAULA_P_WAIT_FOREVER)) return NULL;
+    return atomic_load_explicit(&h.task->result, memory_order_acquire);
+}
+
+void* kaula_handle_try_await(KaulaHandle h, uint64_t timeout_ns) {
+    if (h.task == NULL) return NULL;
+    if (!kaula_task_await(h.task, timeout_ns)) return NULL;
+    return atomic_load_explicit(&h.task->result, memory_order_acquire);
+}
+
+int kaula_handle_poll(KaulaHandle h) {
+    if (h.task == NULL) return 0;
+    return atomic_load_explicit(&h.task->state, memory_order_acquire) == KAULA_TASK_DONE;
+}
+
+void kaula_handle_cancel(KaulaHandle h) {
+    if (h.task == NULL) return;
+    kaula_task_cancel(h.task);
+}

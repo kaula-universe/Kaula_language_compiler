@@ -1,0 +1,26 @@
+// 反向跨回归：comptime 值反哺宏分派（tree(mode = :value) 值约束）。
+// comptime(shape_of(v)) 算出的字符串直接决定选中哪条 #[prefix] 规则。
+import std.io
+
+#[prefix]
+fn Gen(tree(mode = :int), mode) {
+    std.io.println("rule INT")
+}
+
+#[prefix]
+fn Gen(tree(mode = :string), mode) {
+    std.io.println("rule STRING")
+}
+
+#[prefix]
+fn Gen(mode) {
+    std.io.println("rule FALLBACK")
+}
+
+fn main() {
+    i32 v = 7
+    @Gen(mode = comptime(shape_of(v)))       # shape_of(v)=="ident" → 兜底
+    @Gen(mode = comptime(shape_of("hi")))    # =="string" → 命中 STRING
+    @Gen(mode = "other")                     # 既非 int 也非 string → 兜底
+    std.io.println("value dispatch ok")
+}

@@ -1,0 +1,23 @@
+# 线程逃逸回归：传参对象不得提前回收；线程函数不得回收全局
+import std.memory
+import std.concurrent
+import std.io
+
+i64* g_buf = 0
+
+fn worker(arg: void*) void* {
+    i64* p = as<i64*>(arg)
+    g_buf[0] = p[0] + 1
+    return null
+}
+
+fn main() {
+    i64* buf = std.memory.kmm_v4_alloc(8)
+    g_buf = buf
+    i64* slot = std.memory.kmm_v4_alloc(8)
+    slot[0] = 777
+    Thread t
+    t = std.concurrent.thread_create(worker, slot)
+    std.concurrent.thread_join(t)
+    std.io.println("val=", g_buf[0])
+}

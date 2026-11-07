@@ -1,0 +1,29 @@
+// BENCH:PREFIX
+import std.io
+import std.math
+
+// BENCH:BEGIN
+fn mean_absolute_deviation(f64* xs, i64 n) f64 {
+    f64 cnt = as<f64>(n)
+    f64 sum = 0.0
+    for i in range(n) {
+        sum = sum + xs[i]
+    }
+    f64 mean = sum / cnt
+    f64 dev = 0.0
+    for i in range(n) {
+        dev = dev + std.math.abs(xs[i] - mean)
+    }
+    return dev / cnt
+}
+
+// BENCH:END
+
+// BENCH:MAIN:BEGIN
+fn main() i32 {
+    []f64 a = [1.0, 2.0, 3.0, 4.0]
+    if std.math.abs(mean_absolute_deviation(a, 4) - 1.0) > 1e-6 { return 1 }
+    std.io.println("ok")
+    return 0
+}
+// BENCH:MAIN:END

@@ -1,0 +1,121 @@
+# stress_chain.kl —— 链式调用压力测试
+# 覆盖：构造器链、方法结果链、链式结果作为实参/返回值/条件、链式后取字段、
+#       std 链式(compare().ignore_case)仍然可用，
+#       以及"链式语句后紧跟 [N]Type 定长数组声明"不能被粘成下标表达式。
+#
+# 注意：cond ? a : b 三元表达式当前解析器未实现（ast.ConditionalExpression
+# 是死节点），本文件不使用它。
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+class Counter {
+    value: i32
+
+    constructor(i32 v) {
+        self.value = v
+    }
+
+    fn add(i32 n) Counter {
+        return Counter(self.value + n)
+    }
+
+    fn mul(i32 n) Counter {
+        return Counter(self.value * n)
+    }
+
+    fn get() i32 {
+        return self.value
+    }
+}
+
+# 方法返回另一个 class：链式取字段
+class Holder {
+    inner: Counter
+
+    constructor(i32 v) {
+        self.inner = Counter(v)
+    }
+
+    fn wrap() Counter {
+        return Counter(self.inner.get() + 100)
+    }
+}
+
+# 普通函数返回 class：链式接收者是函数调用结果
+fn make_counter(i32 v) Counter {
+    return Counter(v)
+}
+
+# 链式结果直接返回
+fn chained(i32 v) i32 {
+    return Counter(v).add(1).mul(2).get()
+}
+
+fn main() {
+    # 1. 构造器链：1 + 2 = 3, 3 * 3 = 9
+    check(Counter(1).add(2).mul(3).get() == 9, "ctor chain")
+
+    # 2. 方法结果链
+    Counter c = Counter(10)
+    check(c.add(5).get() == 15, "method result chain")
+    check(c.mul(2).get() == 20, "method result chain 2")
+
+    # 3. 链式结果作为实参
+    std.io.println("chain as arg = ", Counter(2).add(3).get())
+    check(Counter(2).add(3).get() == 5, "chain as argument")
+
+    # 4. 链式结果用在条件里
+    if Counter(1).add(1).get() == 2 {
+        check(true, "chain in condition")
+    } else {
+        check(false, "chain in condition")
+    }
+
+    # 5. 链式后取字段：wrap() 返回 Counter，再 .get()
+    check(Holder(7).wrap().get() == 107, "chain then method")
+
+    # 6. 接收者是普通函数调用结果
+    check(make_counter(4).add(1).get() == 5, "chain on function result")
+
+    # 7. 链式结果在 return 里
+    check(chained(3) == 8, "chain in return")
+
+    # 8. 链式赋值给变量再继续
+    Counter mid = Counter(10).add(5)
+    check(mid.get() == 15, "chain assign")
+    check(mid.mul(2).get() == 30, "chain assign then chain")
+
+    # 9. 回归护栏：链式语句后紧跟 [N]Type 定长数组声明，
+    #    [N] 不能被当成前一条表达式的下标
+    [3]Counter arr
+    arr[0] = Counter(1).add(1)
+    arr[1] = Counter(2).add(2)
+    arr[2] = Counter(3).add(3)
+    check(arr[0].get() == 2 && arr[1].get() == 4 && arr[2].get() == 6, "fixed array decl after chain")
+
+    # 10. 回归护栏：下标 + 字段穿透仍然正常
+    Holder hs[2]
+    hs[0] = Holder(1)
+    hs[1] = Holder(2)
+    check(hs[1].inner.get() == 2, "array of class + field")
+
+    # 11. std 链式仍然工作（compare().ignore_case() -> string_compare_ignore_case）
+    string a = std.string.create("Hello")
+    string b = std.string.create("hello")
+    i32 cmp = std.string.compare().ignore_case(a, b)
+    check(cmp == 0, "stdlib chain still works")
+
+    # 12. 链式结果参与逻辑运算
+    check(Counter(1).add(1).get() == 2 && Counter(2).get() == 2, "chain in logical expr")
+
+    # 13. 链式调用作为另一个方法的实参
+    check(c.add(Counter(4).get()).get() == 14, "chain as method argument")
+}

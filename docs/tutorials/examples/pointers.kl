@@ -1,0 +1,8 @@
+import std.io
+
+fn main() {
+    i32 x = 10
+    i32 y = 20
+    i32 z = x + y
+    std.io.println("x + y = ", z)
+}
