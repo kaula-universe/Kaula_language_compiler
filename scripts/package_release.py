@@ -43,6 +43,13 @@ class ReleasePackager:
         """获取当前版本号"""
         version_script = self.project_root / "scripts" / "version.py"
         if version_script.exists():
+            # 先用当前 HEAD 刷新 build 目录里的 version.json：否则 --from-file 读到
+            # 上一次构建留下的旧版本号，而 stage_into 写的是新算出的版本，
+            # verify_installed 直接报"介质内版本号与包版本不一致"（v1.1.402 踩过）。
+            subprocess.run(
+                [sys.executable, str(version_script), "--update"],
+                capture_output=True, text=True, cwd=str(self.project_root)
+            )
             result = subprocess.run(
                 [sys.executable, str(version_script), "--release", "--from-file"],
                 capture_output=True, text=True, cwd=str(self.project_root)
