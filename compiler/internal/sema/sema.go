@@ -3079,6 +3079,20 @@ func (sa *SemanticAnalyzer) analyzeExpression(expr ast.Expression) {
 			sa.analyzeExpression(elem)
 		}
 	case *ast.ObjectLiteral:
+		// 裸机（--freestanding / --wasm）没有托管 std 运行时：object 字面量生成的
+		// dynobj_create / dynobj_set / dynobj_box_* 全部实现在 std/obj/dynobj.c，
+		// 建立在 std_malloc 与 StringObject 之上。历史行为是前端一路放行、
+		// 链接期才炸 undefined symbol；与 object 声明同样提前到 sema 拒绝。
+		if sa.freestanding {
+			sa.errorCollector.AddSemanticError(
+				"object 字面量依赖托管动态对象运行时（dynobj_*），裸机（--freestanding）不支持",
+				e.Pos.Line,
+				e.Pos.Column,
+				"object_freestanding_unsupported",
+				"改用 struct 字面量，或去掉 --freestanding 走托管编译",
+			)
+			return
+		}
 		// 动态对象字面量：检查字段重名，分析字段值
 		seen := make(map[string]bool)
 		for _, field := range e.Fields {

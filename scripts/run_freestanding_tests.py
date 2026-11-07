@@ -759,6 +759,10 @@ HOSTED_ONLY_TESTS = {
     # "预期的托管限定特性"，跳过而不是判红。撤销本条目前提是 freestanding 侧
     # 真正实现 dynobj（见 docs/known-limitations.md 第 4 节）。
     "object_stmt",
+    # object_literal：同一套 dynobj 运行时，sema 现对字面量也报
+    # object_freestanding_unsupported（此前字面量漏了这道闸门，L5 以
+    # "undefined symbol: dynobj_*" 判红）。恢复托管 dynobj 前维持跳过。
+    "object_literal",
 }
 
 

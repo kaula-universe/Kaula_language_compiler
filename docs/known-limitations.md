@@ -62,6 +62,7 @@
 | KMM `realloc` 跨区域指针 | 不支持 KMM 指针与 libc 指针混入同一个 `realloc` | 分配与释放须在同一分配器域 | [core-runtime.md](core-runtime.md) KMM 章 |
 | `fast_free`（Deprecated） | `fast_allocator` 为 bump 分配器不支持逐个释放，`fast_free` 当前为 no-op，仅保留符号兼容 | 批量回收经 `fast_allocator_reset()` | CHANGELOG · Deprecated |
 | `struct KaulaTask` ABI | 完整定义仍暴露于安装头，标注为内部/非稳定 ABI；不透明化推迟到 v1.2 | 不要依赖其布局做跨版本 ABI | CHANGELOG · Known issues |
+| `object` 字面量 `object { x: 1 }`（裸机） | 与下方 object 声明同一套 dynobj 运行时，字面量此前漏了前端闸门，`--freestanding` 会一路放行到链接期报 `undefined symbol: dynobj_create`；现由 sema 报 `object_freestanding_unsupported` | 托管编译正常；裸机改用 `struct` 字面量。freestanding 侧实现 dynobj 后可解除 | sema `analyzeExpression` 的 `*ast.ObjectLiteral` 分支 / `test/object_literal.kl` |
 | `object` 全局动态对象声明（裸机） | 依赖托管 dynobj 运行时（`std/obj/dynobj.c`，建立在 `std_malloc` 与 `StringObject` 上），freestanding 库无对应实现；`--freestanding` / `--wasm` 下由 sema 报 `object_freestanding_unsupported` 并 fail-fast | 托管编译正常；裸机改用 `class`/`struct` 逐字段初始化。freestanding 侧实现 dynobj 后可解除 | sema `analyzeObjectStatement` / `test/object_stmt.kl` |
 | LSan 测试残留报告 | 短生命周期 C 内核测试二进制退出时报 128–320B pthread 描述符残留；进程未调用 `kaula_runtime_shutdown`，属退出 teardown 良性残留（OS 回收），非运行期泄漏 | 非缺陷，无需修复 | CHANGELOG · Known issues |
 
