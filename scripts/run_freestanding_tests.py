@@ -752,6 +752,13 @@ SLOW_TESTS = {
 #   （full_concurrency / conc_paths 等）仍保留在裸机编译里。
 HOSTED_ONLY_TESTS = {
     "spend_and_call", "stress_concurrent_spawn",
+    # object_stmt：全局动态对象声明依赖托管 dynobj 运行时（std/obj/dynobj.c，
+    # 建在 std_malloc + StringObject 上），freestanding 没有对应实现。现在由 sema
+    # 在 --freestanding / --wasm 下直接报 object_freestanding_unsupported 并 fail-fast，
+    # 因此它以"前端明确拒绝"结束、不再产生 undefined symbol —— 对 L5 而言属于
+    # "预期的托管限定特性"，跳过而不是判红。撤销本条目前提是 freestanding 侧
+    # 真正实现 dynobj（见 docs/known-limitations.md 第 4 节）。
+    "object_stmt",
 }
 
 

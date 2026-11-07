@@ -20,42 +20,43 @@ import (
 )
 
 type SemanticAnalyzer struct {
-	symbolTable              *symbol.SymbolTable
-	scope                    int
-	errorCollector           *errors.ErrorCollector
-	currentFunction          *ast.FunctionStatement
-	sorGlobalEnabled         bool // 全局 SOR 模式（--sor 标志）
-	program                  *ast.Program
-	stdlibConfig             *stdlib.StdlibConfig
-	genericStack             []*ast.FunctionStatement
-	typeConstraints          map[string][]string
-	exportedSymbols          map[string]bool
-	treeManager              *core.TreeManager
-	prefixManager            *core.PrefixManager
-	rootTreeFound            bool
-	source                   string                         // 源码用于错误上下文
-	prefixSymbolTables       map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
+	symbolTable        *symbol.SymbolTable
+	scope              int
+	errorCollector     *errors.ErrorCollector
+	currentFunction    *ast.FunctionStatement
+	sorGlobalEnabled   bool // 全局 SOR 模式（--sor 标志）
+	program            *ast.Program
+	stdlibConfig       *stdlib.StdlibConfig
+	genericStack       []*ast.FunctionStatement
+	typeConstraints    map[string][]string
+	exportedSymbols    map[string]bool
+	treeManager        *core.TreeManager
+	prefixManager      *core.PrefixManager
+	rootTreeFound      bool
+	source             string                         // 源码用于错误上下文
+	prefixSymbolTables map[string]*symbol.SymbolTable // 前缀名 -> 前缀符号表
 	// analyzingPrefixes 正在分析中的 prefix 语句（指针识别，防止自我调用时无限递归）
-	analyzingPrefixes map[*ast.PrefixStatement]bool
-	currentPrefixTable       *symbol.SymbolTable            // 当前 @前缀块 的符号表
-	comptime                 *comptime.Evaluator            // 编译期表达式评估器
-	importedModules          map[string]bool                // 记录实际导入的模块
-	thirdPartyTypeSet        map[string]bool                // 第三方库签名中的类型名缓存（lazy 构建）
-	funcReturnTypes          map[string]string              // 函数名 -> 返回类型（用于调用表达式类型推断）
-	arrayLens                map[string]int                 // 数组变量名 -> 元素个数（用于 spend 全集证明）
-	localImportFuncs         map[string]bool                // 本地 import 的 pub 函数名
-	localModuleFuncs         map[string]bool                // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
-	localModuleFuncsByModule map[string]map[string]bool     // 本地 import 模块名 -> 该模块全部函数名(限定调用检查用)
-	localPubVars             map[string]bool                // 本地 import / export 的变量名（跨文件变量引用）
-	localPubTypes            map[string]*LocalPubTypeInfo   // 本地 import 的类型定义（class 含完整定义）
-	inElseIfChain            bool                           // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
-	comptimeDepth            int                            // 嵌套进入 comptime(...) 的层数；shape_of 等仅 comptime 可用的内建据此判定
-	usedFunctions            map[string]bool                // 被调用的顶层函数名(unused-function 检查用)
-	libraryMode              bool                           // 库文件分析模式(跳过 unused-function 检查)
-	localModuleTypes         map[string]bool                // 本地 import 文件的类型名(class/struct, 跨文件可见)
-	adoptTypes               map[string]bool                // 套用类型名集合（adopt 声明的类型）
-	transparentAdopt         map[string]bool                // 标记 #[transparent] 的套用类型（可比较/可运算）
-	adoptUnderlying          map[string]string              // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
+	analyzingPrefixes        map[*ast.PrefixStatement]bool
+	currentPrefixTable       *symbol.SymbolTable          // 当前 @前缀块 的符号表
+	comptime                 *comptime.Evaluator          // 编译期表达式评估器
+	importedModules          map[string]bool              // 记录实际导入的模块
+	thirdPartyTypeSet        map[string]bool              // 第三方库签名中的类型名缓存（lazy 构建）
+	funcReturnTypes          map[string]string            // 函数名 -> 返回类型（用于调用表达式类型推断）
+	arrayLens                map[string]int               // 数组变量名 -> 元素个数（用于 spend 全集证明）
+	localImportFuncs         map[string]bool              // 本地 import 的 pub 函数名
+	localModuleFuncs         map[string]bool              // 本地 import 模块的全部函数名(含非 pub, 导出检查用)
+	localModuleFuncsByModule map[string]map[string]bool   // 本地 import 模块名 -> 该模块全部函数名(限定调用检查用)
+	localPubVars             map[string]bool              // 本地 import / export 的变量名（跨文件变量引用）
+	localPubTypes            map[string]*LocalPubTypeInfo // 本地 import 的类型定义（class 含完整定义）
+	inElseIfChain            bool                         // 当前是否在 else-if 链的内层分支 (避免重复的 match 建议警告)
+	comptimeDepth            int                          // 嵌套进入 comptime(...) 的层数；shape_of 等仅 comptime 可用的内建据此判定
+	usedFunctions            map[string]bool              // 被调用的顶层函数名(unused-function 检查用)
+	libraryMode              bool                         // 库文件分析模式(跳过 unused-function 检查)
+	freestanding             bool                         // 裸机模式（--freestanding / --wasm）：托管 std 运行时不可用
+	localModuleTypes         map[string]bool              // 本地 import 文件的类型名(class/struct, 跨文件可见)
+	adoptTypes               map[string]bool              // 套用类型名集合（adopt 声明的类型）
+	transparentAdopt         map[string]bool              // 标记 #[transparent] 的套用类型（可比较/可运算）
+	adoptUnderlying          map[string]string            // 套用类型名 → 底层类型表达式（如 "c::size_t"、"i64"）
 
 	// 本地 import 文件里的前缀定义（跨文件可见）。
 	// 主程序的 AST 不含被导入文件的语句，查不到就是"静默丢掉整段 @展开"，
@@ -148,6 +149,13 @@ func (sa *SemanticAnalyzer) SetLocalModuleTypes(types map[string]bool) {
 // SetLibraryMode 标记当前分析的是库文件(import 的 .kl), 跳过 unused-function 检查
 func (sa *SemanticAnalyzer) SetLibraryMode(mode bool) {
 	sa.libraryMode = mode
+}
+
+// SetFreestanding 标记本次编译是裸机模式（--freestanding，或 --wasm 隐式启用）。
+// 裸机链接路径没有托管 std 运行时，部分语言特性必须在前端就拒绝，
+// 不能放行到链接期才以 undefined symbol 的形式暴露。
+func (sa *SemanticAnalyzer) SetFreestanding(v bool) {
+	sa.freestanding = v
 }
 
 // SetLocalImportFuncs 注册本地 import 的 pub 函数（跨文件调用）
@@ -1514,6 +1522,24 @@ func (sa *SemanticAnalyzer) analyzeOrphanTree(stmt *ast.TreeStatement) {
 
 // analyzeObjectStatement 分析 object 语句
 func (sa *SemanticAnalyzer) analyzeObjectStatement(stmt *ast.ObjectStatement) {
+	// 裸机（--freestanding，或被 --wasm 隐式启用）的链接路径没有托管 std 运行时：
+	// object 声明生成的代码依赖 dynobj_create / dynobj_set / dynobj_get /
+	// dynobj_box_*，它们实现在 std/obj/dynobj.c，建立在 std_malloc 与 StringObject
+	// 之上，freestanding 库里一个都没有。
+	//
+	// 历史行为是一路放行，直到链接期才炸 "undefined symbol: dynobj_create" ——
+	// 用户看到的是一条与自己写的代码毫无关系的 C 链接错误。按前端严格化方针
+	// （docs/frontend-strictness-plan.md）把诊断提前到 sema，直接说明原因与出路。
+	if sa.freestanding {
+		sa.errorCollector.AddSemanticError(
+			fmt.Sprintf("object 声明 '%s' 依赖托管动态对象运行时（dynobj_*），裸机（--freestanding）不支持", stmt.Name),
+			stmt.Pos.Line,
+			stmt.Pos.Column,
+			"object_freestanding_unsupported",
+			"改用 class/struct 定义并逐字段初始化，或去掉 --freestanding 走托管编译",
+		)
+		return
+	}
 	sa.symbolTable.AddSymbol(stmt.Name, "object", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 	// 检查字段重名，分析字段值表达式
 	seen := make(map[string]bool)
@@ -4010,7 +4036,7 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 		}
 	}
 
-// adopt() / unwrap() / range() 内置运算符：编译期处理，不做函数符号检查
+	// adopt() / unwrap() / range() 内置运算符：编译期处理，不做函数符号检查
 	if ident, ok := expr.Function.(*ast.Identifier); ok {
 		if ident.Name == "adopt" || ident.Name == "unwrap" || ident.Name == "range" {
 			for _, arg := range expr.Args {
@@ -4305,7 +4331,6 @@ func nameSimilarity(a, b string) float64 {
 	}
 	return sim
 }
-
 
 // checkLocalModuleCall 检查本地 import 模块的限定调用 lib.fn:
 //

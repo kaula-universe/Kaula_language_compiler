@@ -76,6 +76,32 @@
     50 个无扩展名的全部是二进制、78 个带扩展名的全部是 `.kl/.c/.cpp/.py` 源文件，
     不存在"无扩展名的真实源文件"，反向白名单因此安全。
 
+- **修复裸机（freestanding / wasm）下 `object` 全局动态对象声明一路放行、到链接期才炸 `undefined symbol: dynobj_*`**：
+  `360bbcc` 补全 ObjectStatement 编译链路时新增了 `test/object_stmt.kl`，但生成的代码依赖
+  `dynobj_create / dynobj_set / dynobj_get / dynobj_box_*`（实现在 `std/obj/dynobj.c`，建立在
+  `std_malloc` 与 `StringObject` 之上），freestanding 库一个都没有。此前它被 CI 上 Go 单测红灯
+  掩盖（linux job 在 Go 步骤就终止，跑不到 freestanding），修好口径红灯后立刻暴露：
+  `Freestanding tests (L1-L6)` 的 L5 报
+  `[FAIL] L5 object_stmt 非 OS 依赖的缺失符号: ['dynobj_box_cstr','dynobj_box_i64','dynobj_create','dynobj_set']`。
+  `dynobj_*` 不在 `OS_ONLY_SYMBOLS` 白名单内，L5 判定正确——这是 freestanding 的真缺口，不是闸门误报。
+  - `compiler/internal/sema/sema.go`：新增 `freestanding` 字段 + `SetFreestanding()`（沿用既有
+    `SetLibraryMode` 风格）；`analyzeObjectStatement` 在裸机模式下报
+    `object_freestanding_unsupported` 语义错误并直接返回，按前端严格化方针
+    （`docs/frontend-strictness-plan.md`）把诊断从链接期提前到 sema，不再产出"合法外观的错误二进制"。
+  - `compiler/cmd/kaulac/main.go`：`concurrentSemanticAnalysisWithConfig` 加 `freestanding` 参数并
+    接线（调用点传 `cfg.Freestanding`）；被 import 库文件分析路径（`localAnalyzer`）同步接线。
+    `--wasm` 在 config 里已强制 `Freestanding=true`，因此自然覆盖、无需另接。
+  - 未改动同名死代码 `concurrentSemanticAnalysis`（无调用者、无测试引用），避免超出本次范围。
+  - `scripts/run_freestanding_tests.py`：`object_stmt` 登记进 `HOSTED_ONLY_TESTS`（附理由注释）。
+    必要性：L5 的判据是"无 undefined 符号即视为真失败"，若只改编译器而不登记，该语料会从
+    "链接期缺符号"变成"前端拒绝后 undef 为空"仍判红。
+  - `docs/known-limitations.md` 第 4 节登记该托管限定特性，写明替代写法与解除条件。
+  - 回归测试 `compiler/internal/sema/object_freestanding_test.go`（3 项，TDD 先红后绿）：裸机必须
+    报错、托管必须零错误（防这次修复变成新回归）、未调用 setter 时默认按托管处理。
+  - 端到端实测（本机构建完整工具链后）：`-freestanding` → 报 `object_freestanding_unsupported`
+    且不产出任何产物；托管 → `Status: Success`，产物运行输出 `object stmt compile check`；
+    `-wasm` → 自动启用 freestanding 后被同一诊断拦下。
+
 - **修复 `int` 口径统一后遗留的两个过时回归测试，并把口径写成权威文档（阻塞 CI 三天的红灯）**：
   `231dea0 数字类型口径统一（审计 §1.3）`（11-03 21:40）把 `int`→`int32_t`、
   `uint`→`uint32_t`、整数字面量默认类型 `int`→`i64`，但没同步两处早已固化旧口径的

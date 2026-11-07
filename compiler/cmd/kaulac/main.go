@@ -695,6 +695,9 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	}
 	localAnalyzer.SetLibraryMode(true) // 库文件: 跳过 unused-function 检查(函数可能被外部调用)
 	localAnalyzer.SetSOREnabled(s.cfg.SOR)
+	// 被 import 的库文件里也可能有 object 声明，裸机模式同样要在 sema 拦住，
+	// 否则错误符号照样漏到链接期。
+	localAnalyzer.SetFreestanding(s.cfg != nil && s.cfg.Freestanding)
 	localAnalyzer.Analyze(localProgram)
 
 	// 代码生成（本地文件使用 freestanding 模板，避免注入用户态/宿主入口）
@@ -1972,7 +1975,7 @@ func main() {
 
 	localPrefixStmts, localPrefixFuncs := collectLocalPrefixDefs(program, inputDir)
 
-	concurrentSemanticAnalysisWithConfig(program, stdlibPath, stdlibConfig, errorCollector, cfg.SOR, localPubFuncs, localAllFuncs, localPubVars, localPubTypes, localPrefixStmts, localPrefixFuncs)
+	concurrentSemanticAnalysisWithConfig(program, stdlibPath, stdlibConfig, errorCollector, cfg.SOR, cfg.Freestanding, localPubFuncs, localAllFuncs, localPubVars, localPubTypes, localPrefixStmts, localPrefixFuncs)
 	stage2Time := time.Since(stage2Start)
 	if verbose {
 		fmt.Printf(i18n.T(i18n.MsgStage2Completed)+"\n", stage2Time)
@@ -3690,7 +3693,7 @@ func concurrentSemanticAnalysis(program *ast.Program, stdlibPath string, errorCo
 
 // concurrentSemanticAnalysisWithConfig 执行语义分析（使用已加载的配置）
 // 注：原实现为假并发（单 goroutine + 立即 Wait），已改为直接同步调用。
-func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibPath string, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo, localPrefixStmts map[string]*ast.PrefixStatement, localPrefixFuncs map[string]*ast.FunctionStatement) *semaResult_t {
+func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibPath string, stdlibConfig *stdlib.StdlibConfig, errorCollector *errors.ErrorCollector, sorEnabled bool, freestanding bool, localPubFuncs map[string]bool, localAllFuncs map[string]bool, localPubVars map[string]bool, localPubTypes map[string]*sema.LocalPubTypeInfo, localPrefixStmts map[string]*ast.PrefixStatement, localPrefixFuncs map[string]*ast.FunctionStatement) *semaResult_t {
 	result := &semaResult_t{ErrorCollector: errorCollector}
 
 	// stdlibPath 由调用方解析（findStdlib），避免 cwd 不在仓库根时
@@ -3708,6 +3711,9 @@ func concurrentSemanticAnalysisWithConfig(program *ast.Program, stdlibPath strin
 	sa.SetLocalPubTypes(localPubTypes)
 	sa.SetLocalExternalPrefixes(localPrefixStmts, localPrefixFuncs)
 	sa.SetSOREnabled(sorEnabled)
+	// 裸机模式必须透传给 sema：object 等依赖托管 std 运行时的特性要在前端
+	// 就拒绝，而不是放行到链接期报 undefined symbol: dynobj_*。
+	sa.SetFreestanding(freestanding)
 	sa.Analyze(program)
 
 	return result
