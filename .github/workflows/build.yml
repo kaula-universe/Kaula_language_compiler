@@ -30,4 +30,7 @@ jobs:
         run: python scripts/version.py --update
 
       - name: Build compiler
-        run: go build -o kaulac.exe ./compiler/cmd/kaulac
+        # go.mod 在 compiler/ 下，仓库根没有 module；从根直接 go build 会报
+        # "cannot find main module"（v1.1.402/403 的 Build on Tag 就是因此红的）。
+        working-directory: compiler
+        run: go build -o ../kaulac.exe ./cmd/kaulac
