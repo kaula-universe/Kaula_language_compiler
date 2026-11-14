@@ -37,6 +37,12 @@
   `-cflags`。产物零未定义符号，QEMU 串口输出 `KAULA-XAPI-DIRECT` 并 exit 0。
   `run_qemu_stress.sh` 新增 `MARKER` 变量以复用压测（默认仍为 shim 版标记）。
 
+### Removed
+- **移除根目录 `bench/token_efficiency/`（跨语言 token 效率基准，58 个文件）**：该目录是根目录
+  下唯一的非测试产物，按仓库约定测试与基准语料统一收在 `test/`，因此整体删除，根目录不再保留
+  只含单一子目录的 `bench/`。删除后全仓已无 `token_efficiency` 引用（CI 工作流、`scripts/`、
+  `toolkit_build.py`、`.gitignore`、文档均已核对），无构建或测试链路依赖该目录。
+
 ### Documentation
 - **全量审计文档中的「未完成 / 不可用」声明，去伪存真并集中管理**：
   - 剔除「代码已实现、文档仍写未完成」的过时说法：
