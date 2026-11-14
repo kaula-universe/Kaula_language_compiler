@@ -1,0 +1,12 @@
+// hello.kl — 在 XJ380 OS 上运行的最小 Kaula 程序
+//
+// 构建与运行说明见 examples/xj380/README.md。
+// 该程序刻意保持最小：只依赖 freestanding.io，输出经弱钩子
+// fs_output_putchar 转发到 XJ380 的 XAPI_OUTPUT 系统调用。
+
+import freestanding.io
+
+fn main() -> i32 {
+    freestanding.io.println("KAULA-XJ380-HELLO")
+    return 0
+}
