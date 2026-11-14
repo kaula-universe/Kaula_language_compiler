@@ -1588,7 +1588,7 @@ func (cg *CodeGenerator) ResetUserFreedVars() {
 
 // MarkUserFreed 标记变量已被用户代码显式释放（std.memory.kmm_v4_free /
 // kmm_v4_global_free / string_free / libc free 等 *_free 调用）。
-// 所有权已转移给用户代码，所有权��的回收路径（作用域末尾 per-object reclaim、
+// 所有权已转移给用户代码，所有权相关的回收路径（作用域末尾 per-object reclaim、
 // return 前回收、liveness 提前释放）都必须跳过，否则同一指针被释放两次。
 func (cg *CodeGenerator) MarkUserFreed(name string) {
 	if name != "" {
@@ -2482,6 +2482,21 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		// kmm_v4_scope_pop / kmm_v4_survivor_* / kaula_add_i64 未声明直接编译失败。
 		allIncludes.WriteString("#include \"kmm_scoped_allocator_v4.h\"\n")
 		allIncludes.WriteString("#include \"kaula_runtime.h\"\n")
+		// freestanding 下不链接 kaula.h（std/base/types.h），但代码生成器仍按
+		// SSO 形态产出字符串字面量 (String){.len=..,.sso=".."} 并调用
+		// string_cdata() 解包实参。此处补一份 SSO 感知兜底宏，避免模板未定义
+		// 时出现 "undeclared function 'string_cdata'"。用 #ifndef 幂等保护：
+		// 若用户通过 -cflags -include 引入 freestanding/base/types.h，或模板
+		// 已自带定义，则跳过，不产生宏重定义。与模板/官方头逐字一致。
+		allIncludes.WriteString("#ifndef STRING_SSO_CAPACITY\n")
+		allIncludes.WriteString("#define STRING_SSO_CAPACITY 15\n")
+		allIncludes.WriteString("#endif\n")
+		allIncludes.WriteString("#ifndef string_data\n")
+		allIncludes.WriteString("#define string_data(s) ((s).len <= STRING_SSO_CAPACITY ? (char*)(s).sso : (char*)(s).ptr)\n")
+		allIncludes.WriteString("#endif\n")
+		allIncludes.WriteString("#ifndef string_cdata\n")
+		allIncludes.WriteString("#define string_cdata(s) ((s).len <= STRING_SSO_CAPACITY ? (const char*)(s).sso : (const char*)(s).ptr)\n")
+		allIncludes.WriteString("#endif\n")
 		// 并发内核：conc fn 的 Frame / resume / coercion shim 依赖
 		// KaulaResumeResult、kaula_spawn、kaula_handle_await 等。
 		// 仅当程序里真的出现 conc fn 时才包含 —— 不用 spawn 的程序

@@ -1,12 +1,31 @@
 {{includes}}
 
-// 裸机字符串类型（与 std/base/types.h 一致；若 stdlib 头已定义则跳过）
+// 裸机字符串类型（与 std/base/types.h、freestanding/base/types.h 逐字一致；
+// 若外部头已定义则跳过）
 #ifndef KAULA_STRING_DEFINED
 #define KAULA_STRING_DEFINED
+// SSO 布局必须与官方头一致：代码生成器按 (String){.len=..,.sso=".."} 产出
+// 字符串字面量并用 string_cdata() 解包实参。若这里只有 .ptr，freestanding
+// 下任何用到 Kaula string 的程序都会编译失败（field designator 'sso' /
+// undeclared function 'string_cdata'）。
 typedef struct {
     size_t len;
-    char* ptr;
+    union {
+        char* ptr;       // len > 15 时使用堆指针
+        char sso[16];    // len <= 15 时使用内嵌缓冲区（15字节 + null）
+    };
 } String;
+#endif
+
+// SSO 感知解包宏（幂等：外部头已定义则跳过；与 codegen includes 兜底一致）
+#ifndef STRING_SSO_CAPACITY
+#define STRING_SSO_CAPACITY 15
+#endif
+#ifndef string_data
+#define string_data(s) ((s).len <= STRING_SSO_CAPACITY ? (char*)(s).sso : (char*)(s).ptr)
+#endif
+#ifndef string_cdata
+#define string_cdata(s) ((s).len <= STRING_SSO_CAPACITY ? (const char*)(s).sso : (const char*)(s).ptr)
 #endif
 
 {{forward_decls}}

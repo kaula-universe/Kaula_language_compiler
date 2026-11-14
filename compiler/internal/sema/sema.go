@@ -4123,7 +4123,11 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 			// 前端严格化：调用一个非函数类型的标识符（i32 n = 42; n(1,2)）
 			// 豁免：sym.Type 是 class/struct/enum/interface 时，这是构造器调用
 			// （如 Counter("tick")），不是把变量当函数调。
-			if ident.Name != "range" && sym != nil && sym.Type != "" {
+			// 豁免：extern fn 声明注册符号时 Type 记的是返回类型（供赋值/表达式
+			// 推导使用），Scope 为 "extern_func"。它本身是函数；若只看 Type，
+			// 所有 extern 函数调用都会被误判为 calling_non_callable。
+			if ident.Name != "range" && sym != nil && sym.Type != "" &&
+				sym.Scope != "extern_func" {
 				isCtor := sym.Type == "class" || sym.Type == "struct" ||
 					sym.Type == "enum" || sym.Type == "interface" ||
 					strings.HasPrefix(sym.Type, "enum_variant:")
@@ -5417,7 +5421,12 @@ func isCScalarType(cType string) bool {
 		"long long", "unsigned long long", "short", "unsigned short",
 		"char", "unsigned char", "signed char", "int8_t", "int16_t",
 		"int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-		"float", "double", "long double", "bool", "_Bool":
+		"float", "double", "long double", "bool", "_Bool",
+		// freestanding/base/types.h 与 std/base/types.h 中的标量 typedef：
+		// typedef bool bool_t; / typedef char char_t;
+		// std/ctypes.kl 的 #[transparent] type BoolT = adopt bool_t 依赖此白名单，
+		// 漏掉会让 import std.ctypes 直接报 adopt_transparent_non_scalar。
+		"bool_t", "char_t":
 		return true
 	}
 	return false
