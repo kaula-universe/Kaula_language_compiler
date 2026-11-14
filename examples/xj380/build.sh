@@ -33,8 +33,13 @@ clang -O2 -ffreestanding -fno-builtin -fno-stack-protector -mno-red-zone \
     -m64 -Wall -Wextra -c "$HERE/xj380_shim.c" -o "$OUT/xj380_shim.o"
 
 # 3) freestanding 运行库目标文件（kaulac 编译时生成在 cache/std-objects/）
-FS=$(echo "$KAULA_ROOT"/cache/std-objects/fs-*)
-[ -f "$FS/kaula_fs_runtime.o" ] || { echo "缺少 freestanding 运行库目标文件" >&2; exit 2; }
+#    缓存目录名带编译器/配置 hash，可能存在多个；用 find 逐个定位，
+#    不要 echo 通配拼接（多目录时会拼成空格串，使 -f 判定必然失败）。
+FS_RUNTIME=$(find "$KAULA_ROOT/cache/std-objects" -name "kaula_fs_runtime.o" | head -1)
+FS_KMM=$(find "$KAULA_ROOT/cache/std-objects" -name "kmm_v4_fs.o" | head -1)
+for f in "$FS_RUNTIME" "$FS_KMM"; do
+    [ -f "$f" ] || { echo "缺少 freestanding 运行库目标文件：$f" >&2; exit 2; }
+done
 
 # 4) 按 XJ380 用户态规则链接：复用其 crt0 + XAPI 目标文件，加载地址 0x200000
 cd "$XJ380_ROOT"
@@ -46,8 +51,8 @@ ld -Ttext=0x200000 \
     out/xapi/constart.cpp.o \
     "$OUT/xj380_shim.o" \
     "$OUT/hello.elf" \
-    "$FS/kaula_fs_runtime.o" \
-    "$FS/kmm_v4_fs.o" \
+    "$FS_RUNTIME" \
+    "$FS_KMM" \
     -o "$OUT/shell.elf"
 
 # 5) 写入镜像（XJ380_USER_APP 为 ninja_build.py 提供的可选覆盖点）

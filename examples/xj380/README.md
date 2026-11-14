@@ -178,6 +178,11 @@ python3 scripts/run_freestanding_tests.py --only L1,L3,L6 --quick -j 8
 导致超过 255 字节的行静默丢字节。改为「缓冲满则先冲刷、再写入当前字符」，并用
 单元测试（600 字节超长行、恰好 255 字节 + 换行）锁住该边界。
 
+**构建脚本**：`build.sh` 原先以 `FS=$(echo .../fs-*)` 定位 freestanding 运行库
+目标文件，当 `cache/std-objects/` 下存在多个 hash 缓存目录时会拼成空格串，
+误报「缺少 freestanding 运行库目标文件」。改为 `find` 逐个定位
+`kaula_fs_runtime.o` / `kmm_v4_fs.o`（与 `build_xapi.sh` 一致），多目录下仍可构建。
+
 ## 7. 已知限制
 
 - 只验证了字符串输出路径；文件 I/O、线程、动态内存、浮点格式化等在 XJ380 上的行为未覆盖。

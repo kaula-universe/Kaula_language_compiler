@@ -60,6 +60,14 @@
   而不可用的既有独立限制，并写明本地 `type CStr = adopt const char*` 替代写法。
 
 ### Fixed
+- **`examples/xj380/build.sh` freestanding 运行库目标文件定位健壮性**：
+  旧写法 `FS=$(echo "$KAULA_ROOT"/cache/std-objects/fs-*)` 在
+  `cache/std-objects/` 下存在多个 hash 缓存目录时拼接成空格分隔串，
+  随后的 `[ -f "$FS/kaula_fs_runtime.o" ]` 必然失败，误报「缺少 freestanding
+  运行库目标文件」，shim 版路线无法构建。改为 `find` 逐个定位
+  `kaula_fs_runtime.o` / `kmm_v4_fs.o`（与 `build_xapi.sh` 一致），多目录下仍可构建。
+  适配层单元测试按 README 命令单文件编译（`test_xj380_shim.c` 内部
+  `#define main` 后 include 被测实现），14 checks / 0 failures。
 - **Freestanding `String` 定义与 `string_cdata` 宏自洽性（3 处原位修复）**：
   `--freestanding` 生成的 C 里，`freestanding.c.tmpl` / `user.c.tmpl` 的 `String`
   兜底定义仍是「仅 `ptr`」形态，但 codegen 按 SSO 形态产出
