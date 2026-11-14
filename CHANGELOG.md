@@ -30,6 +30,12 @@
   `object <Ident> <Ident>` 形态时，报清晰错误"该形式尚未实现，请使用 `object { field: value }`"
   并 depth-aware 跳过语句边界，消除原先 COLON 连锁语法错误 + sema 未定义变量连锁。
   已完成的动态对象字面量 `object { x: 10, y: 20 }` / `object()` 不受影响。
+- **`examples/xj380/hello_xapi.kl` + `build_xapi.sh`：纯 Kaula 直调 XJ380 XAPI，无 C shim**：
+  借助上述 freestanding SSO 修复，纯 `.kl` 程序用 `type CStr = adopt const char*`
+  声明 `extern fn enter_syscall`，以 `msg.ptr` 取得 C 字符串指针，链接期用
+  `--defsym main=kaula_main` 对齐 XJ380 入口，无需 `xj380_shim.c`、无需任何
+  `-cflags`。产物零未定义符号，QEMU 串口输出 `KAULA-XAPI-DIRECT` 并 exit 0。
+  `run_qemu_stress.sh` 新增 `MARKER` 变量以复用压测（默认仍为 shim 版标记）。
 
 ### Documentation
 - **全量审计文档中的「未完成 / 不可用」声明，去伪存真并集中管理**：
@@ -47,8 +53,43 @@
     CLI 工具链 / 运行时平台边界 / 测试质量共 5 节，逐条附替代写法与复核位置）；
     根 README、`stdlib-integration.md` 等处的缺口括注改为指向该清单，教程只保留紧邻
     示例的必要提示；并发内核缺口仍以 `core-runtime.md` 第 5 章为权威表，清单只引用不重复。
+- **`docs/known-limitations.md` 同步 freestanding 字符串相关限制**：
+  第 1 节 `cstring("...")` 条目补上 `String.ptr` → `string_cdata()` 的可行路径（指向
+  `examples/xj380/hello_xapi.kl`）；第 4 节登记 `import std.ctypes` 在
+  `--freestanding` / `--wasm` 下因依赖宿主 C 类型（`File` / `ssize_t` / `bool_t`）
+  而不可用的既有独立限制，并写明本地 `type CStr = adopt const char*` 替代写法。
 
 ### Fixed
+- **Freestanding `String` 定义与 `string_cdata` 宏自洽性（3 处原位修复）**：
+  `--freestanding` 生成的 C 里，`freestanding.c.tmpl` / `user.c.tmpl` 的 `String`
+  兜底定义仍是「仅 `ptr`」形态，但 codegen 按 SSO 形态产出
+  `(String){.len=..,.sso=".."}` 字面量并用 `string_cdata()` 解包实参，且该兜底宏
+  只写在 `codegen.go` 的**非** freestanding 分支。三者叠加使 freestanding 下任何
+  用到 Kaula string 的程序都在 clang 阶段失败（`field designator 'sso' does not
+  refer to any field in type 'String'` + `call to undeclared function
+  'string_cdata'`）；此前只能靠 `-cflags "-include .../freestanding/base/types.h"`
+  绕过。
+  - `compiler/templates/freestanding.c.tmpl`、`user.c.tmpl`：`String` 兜底定义改为
+    与 `std/base/types.h` / `freestanding/base/types.h` 逐字一致的 SSO union
+    （`char sso[16]` + `STRING_SSO_CAPACITY 15`），并自带 SSO 感知的
+    `string_data` / `string_cdata` 宏。
+  - `compiler/internal/codegen/codegen.go`：freestanding 分支的 includes 补一份
+    **SSO 感知**的 `string_cdata` 兜底宏（非 `((s).ptr)`，否则短串读未初始化 ptr）。
+  - 三处均用 `#ifndef` 幂等保护，外部头 / 模板已定义则跳过，不产生宏重定义。
+  - 新增回归测试 `compiler/internal/codegen/freestanding_sso_string_test.go`，
+    断言两个模板的 SSO 布局与生成 C 的 SSO 感知兜底宏。
+- **`isCScalarType` 白名单补 `bool_t` / `char_t`**：这两个是官方头里的标量 typedef
+  （`typedef bool bool_t;` / `typedef char char_t;`），原白名单漏收，导致
+  `std/ctypes.kl` 的 `#[transparent] type BoolT = adopt bool_t` 被判成 non-scalar，
+  报 `adopt_transparent_non_scalar`，整个 `import std.ctypes` 连语义分析都过不了。
+  补齐后托管模式 `import std.ctypes` 编译通过（EXIT 0）；指针仍被拒绝以防放宽过度。
+  新增回归测试 `compiler/internal/sema/adopt_scalar_types_test.go`。
+- **`extern fn` 调用被误判为非函数**：sema 的调用检查漏了 `sym.Scope ==
+  "extern_func"` 豁免（同一文件其它检查已豁免），使所有 FFI 调用报
+  `calling_non_callable`（官方 `test/bench` 的 `order_server.kl` 即因此报 11 个错）。
+  补上豁免并保留「普通变量被当函数调用仍报错」的回归保护，测试见
+  `compiler/internal/sema/extern_func_call_test.go`。
+
 - **清理仓库中误入库的 51 个编译产物并建立内容级卫生门禁**：
   `.gitignore` 对测试产物采取"逐个点名"式规则，而语料 `test/*.kl` 编译出的
   可执行文件**没有扩展名**，每新增一个语料名就漏一次。`8c76dfd` 一次性把
