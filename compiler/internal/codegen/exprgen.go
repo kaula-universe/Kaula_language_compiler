@@ -4166,6 +4166,11 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 			return fmt.Sprintf("__asm__ __volatile__(%s)", args[0])
 		}
 		// 扩展形式: 有输出/输入/破坏列表
+		//
+		// 参数多于 4 个时，args[2..n-2] 全部视为输入操作数，最后一个是破坏列表。
+		// 这是必要的：系统调用/寄存器传参场景常有 4 个以上输入（如 x86-64 syscall
+		// 需要同时约束 rdi/rsi/rdx/r10/r8/r9），而一个输入位置装不下。
+		// 参数 ≤ 4 个时行为与旧版完全一致（template : output : input : clobbers）。
 		template := args[0]
 		output := ""
 		input := ""
@@ -4173,11 +4178,16 @@ func (eg *ExpressionGenerator) generateAttributeExpression(expr *ast.AttributeEx
 		if len(args) > 1 {
 			output = args[1]
 		}
-		if len(args) > 2 {
-			input = args[2]
-		}
-		if len(args) > 3 {
-			clobbers = args[3]
+		if len(args) > 4 {
+			input = strings.Join(args[2:len(args)-1], ", ")
+			clobbers = args[len(args)-1]
+		} else {
+			if len(args) > 2 {
+				input = args[2]
+			}
+			if len(args) > 3 {
+				clobbers = args[3]
+			}
 		}
 		// GCC extended asm 格式: asm volatile (template : output : input : clobbers)
 		return fmt.Sprintf("({ __asm__ __volatile__(%s : %s : %s : %s); })",

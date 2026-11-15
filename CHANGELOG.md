@@ -66,6 +66,17 @@
   而不可用的既有独立限制，并写明本地 `type CStr = adopt const char*` 替代写法。
 
 ### Fixed
+- **表达式级 `#[asm]` 扩展形式丢弃输入操作数**：`generateAttributeExpression`
+  的 `case "asm"` 分支只读取 `args[2]` 作为输入、`args[3]` 作为破坏列表，第 5 个
+  参数之后一律忽略。凡需要一次约束 4 个以上输入的场景（典型如 x86-64 上直接用
+  `syscall` 指令发起调用，要同时给 `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9` 六个寄存器
+  定值）都会在无声无息中丢掉其余操作数，生成出来的 asm 只剩前一两个约束，行为
+  与源码意图不符且没有任何告警。现在参数多于 4 个时把 `args[2..n-2]` 全部按顺序
+  拼成输入列表、最后一个仍作破坏列表；参数 ≤ 4 个时保持原有
+  `template : output : input : clobbers` 语义不变，向后兼容。
+  新增 `compiler/internal/codegen/asm_attribute_test.go`，覆盖 1/2/3/4 参数各形态
+  与六输入 syscall 场景，并单独断言多输入时每个操作数都出现在生成结果中。
+  `docs/bare-metal.md` 补充参数归位表与 `syscall` 示例。
 - **`examples/xj380/build.sh` freestanding 运行库目标文件定位健壮性**：
   旧写法 `FS=$(echo "$KAULA_ROOT"/cache/std-objects/fs-*)` 在
   `cache/std-objects/` 下存在多个 hash 缓存目录时拼接成空格分隔串，
