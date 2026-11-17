@@ -1,0 +1,91 @@
+# stress_struct.kl — struct 组合/数组/值语义压力测试
+# 验证: 嵌套 struct/struct 数组/值传递/函数参数与返回/字段赋值
+import std.io
+import std.string
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+struct Vec2 {
+    x: f64,
+    y: f64
+}
+
+struct Rect2 {
+    origin: Vec2,
+    w: f64,
+    h: f64
+}
+
+struct Inventory {
+    name: string,
+    count: i32,
+    price: f64
+}
+
+fn addVec(Vec2 a, Vec2 b) Vec2 {
+    Vec2 r
+    r.x = a.x + b.x
+    r.y = a.y + b.y
+    return r
+}
+
+fn area2(Rect2 r) f64 {
+    return r.w * r.h
+}
+
+fn main() {
+    # struct 组合
+    Vec2 a
+    a.x = 1.0
+    a.y = 2.0
+    Vec2 b
+    b.x = 10.0
+    b.y = 20.0
+    Vec2 s = addVec(a, b)
+    check(s.x == 11.0 && s.y == 22.0, "vec add")
+
+    # 嵌套 struct
+    Rect2 r
+    r.origin = a
+    r.w = 5.0
+    r.h = 4.0
+    check(r.origin.x == 1.0, "nested origin x")
+    check(area2(r) == 20.0, "rect area")
+
+    # struct 数组
+    [3]Vec2 pts
+    for i in range(3) {
+        pts[i].x = i
+        pts[i].y = i * 10
+    }
+    check(pts[0].x == 0.0 && pts[2].y == 20.0, "struct array fields")
+
+    # struct 值语义: 赋值拷贝
+    Vec2 c
+    c.x = 99.0
+    c.y = 0.0
+    Vec2 d = c
+    d.x = 1.0
+    check(c.x == 99.0, "value semantics copy")
+
+    # struct 作为返回值 + 字段链
+    Vec2 e = addVec(pts[1], pts[2])
+    check(e.x == 3.0 && e.y == 30.0, "struct return chain")
+
+    # 多字段 struct
+    Inventory inv
+    inv.name = "apple"
+    inv.count = 10
+    inv.price = 2.5
+    f64 total = inv.count * inv.price
+    check(total == 25.0, "inventory total")
+    check(std.string.string_equals(inv.name, std.string.string_create("apple")), "inventory name")
+
+    std.io.println("--- stress_struct done ---")
+}

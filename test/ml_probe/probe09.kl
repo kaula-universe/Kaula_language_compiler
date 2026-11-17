@@ -1,0 +1,16 @@
+import std.io
+
+export class A {
+    x: f64
+    y: f64
+
+    constructor(f64 x, f64 y) {
+        self.x = x
+        self.y = y
+    }
+}
+
+fn main() {
+    A a = A(1.0, 2.0)
+    std.io.println("a = (", a.x, ", ", a.y, ")")
+}

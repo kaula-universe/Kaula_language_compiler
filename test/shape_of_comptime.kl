@@ -1,0 +1,21 @@
+# shape_of(expr) comptime 形状查询内建测试
+# shape_of 只允许出现在 comptime(...) 上下文；返回实参的语法形状类别字符串。
+import std.io
+
+fn main() {
+    i32 x = 7
+    i32 a = 1
+    i32 b = 2
+    string s1 = comptime(shape_of(123))
+    string s2 = comptime(shape_of(1.5))
+    string s3 = comptime(shape_of(true))
+    string s4 = comptime(shape_of("hi"))
+    string s5 = comptime(shape_of(x))
+    string s6 = comptime(shape_of(a + b))
+    std.io.println(s1)
+    std.io.println(s2)
+    std.io.println(s3)
+    std.io.println(s4)
+    std.io.println(s5)
+    std.io.println(s6)
+}

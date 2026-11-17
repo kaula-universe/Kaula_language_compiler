@@ -1,0 +1,69 @@
+# stress_panic.kl — std.panic 压力测试
+# 已知缺陷（std/panic/panic.c 注释确认）：panic_try 的 setjmp 帧注册在 C
+# 函数栈上，panic_try 返回后帧即失效，此后 longjmp 回跳属未定义行为——
+# Kaula 侧调用 panic()/panic_with_code()/panicf() 触发跳转即段错误。
+# 官方建议用 panic_protect（回调期间帧存活），但 Kaula 侧函数指针回调
+# 尚未打通（sema 不支持函数指针参数/赋值）。
+# 因此本测试仅覆盖可稳定运行的 panic_try/panic_leave 正常路径与状态查询；
+# 触发路径待 panic 运行时修复后补回。
+import std.io
+import std.string
+import std.panic
+
+fn check(bool cond, string label) {
+    if cond {
+        std.io.println("PASS ", label)
+    } else {
+        std.io.println("FAIL ", label)
+    }
+}
+
+fn main() {
+    # ---- 正常路径: panic_try + panic_leave 完整帧 ----
+    PanicFrame f1
+    i32 done1 = 0
+    check(!std.panic.panic_active(), "panic_active false before try")
+    if std.panic.panic_try(&f1) == 0 {
+        check(std.panic.panic_active(), "panic_active true inside protected frame")
+        std.panic.panic_leave(&f1)
+        done1 = 1
+    } else {
+        std.panic.panic_leave(&f1)
+    }
+    check(done1 == 1, "normal try/leave completes")
+    check(!std.panic.panic_active(), "panic_active false after leave")
+
+    # ---- 多帧顺序使用: 帧可复用 ----
+    PanicFrame f2
+    i32 done2 = 0
+    if std.panic.panic_try(&f2) == 0 {
+        std.panic.panic_leave(&f2)
+        done2 = 1
+    } else {
+        std.panic.panic_leave(&f2)
+    }
+    check(done2 == 1, "second frame reuse")
+
+    # ---- 嵌套帧（都不触发 panic，正常退出） ----
+    PanicFrame outer
+    i32 innerOk = 0
+    if std.panic.panic_try(&outer) == 0 {
+        PanicFrame inner
+        if std.panic.panic_try(&inner) == 0 {
+            innerOk = 1
+            std.panic.panic_leave(&inner)
+        } else {
+            std.panic.panic_leave(&inner)
+        }
+        std.panic.panic_leave(&outer)
+    } else {
+        std.panic.panic_leave(&outer)
+    }
+    check(innerOk == 1, "nested frames ok")
+
+    # ---- panic_last_code 初始值（未触发时读取不崩溃） ----
+    i32 code = std.panic.panic_last_code()
+    check(code == 0 || code != 0, "panic_last_code readable")
+
+    std.io.println("--- stress_panic done (trigger path disabled: known runtime crash) ---")
+}

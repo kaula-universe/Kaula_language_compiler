@@ -1,0 +1,91 @@
+// recursive_ptr_tree.kl — 递归指针树跨函数返回的回归用例
+//
+// 锁死的 bug（ChainLinked 判据过窄）：
+//   `n.left = l` 是**字段写穿**，不是 yield——l 没有交出所有权，但字段存储
+//   产生一个随宿主 n 存活的引用。词法 liveness 只看到"l 此后不再出现"，
+//   在写穿点/return 点回收 l 指向的对象 → n.left 悬垂。
+//   旧判据要求"宿主是安全局部容器（不逃逸）"，而 `return n` 让 n 逃逸，
+//   l/r 反而拿不到豁免 → depth>=8（slab 耗尽后分配覆写已回收槽位）必崩，
+//   depth<=7 因 slab 未耗尽不暴露。
+//
+// 修复（safe_container_scan.go）：ChainLinked 不再要求宿主是安全局部容器，
+// 所有写穿源对象一律豁免 early free 与 return 路径回收，死亡点推迟到宿主。
+// return 路径的对称闸门在 stmtgen.go 的 return 回收循环。
+//
+// 验证点：depth=10 单棵树 checksum=2047；反复建/弃树（CLBG binary-trees
+// 用法，每次子树都跨函数返回后存入父节点字段）checksum 稳定收敛。
+import std.io
+import std.memory
+
+struct Node {
+    left: Node*
+    right: Node*
+}
+
+fn bottomUpTree(depth: i64) Node* {
+    if depth <= 0 {
+        Node* leaf = as<Node*>(std.memory.kmm_v4_alloc(16))
+        leaf.left = null
+        leaf.right = null
+        return leaf
+    }
+    Node* l = bottomUpTree(depth - 1)
+    Node* r = bottomUpTree(depth - 1)
+    Node* n = as<Node*>(std.memory.kmm_v4_alloc(16))
+    n.left = l
+    n.right = r
+    return n
+}
+
+fn itemCheck(n: Node*) i64 {
+    if n.left == null {
+        return 1
+    }
+    return 1 + itemCheck(n.left) + itemCheck(n.right)
+}
+
+fn main() {
+    // 1) 单棵深树：depth=10 → 2^10-1 个节点，checksum=2047
+    i64 d = 10
+    Node* t = bottomUpTree(d)
+    i64 single = itemCheck(t)
+    std.io.println("depth=", d, " check=", single, " expect=2047")
+
+    // 2) 反复建/弃：每棵子树的节点都跨函数返回后存入父节点字段，
+    //    写穿源对象的回收时机全部推迟到宿主——20 轮 checksum 必须精确收敛
+    i64 rounds = 20
+    i64 depth = 8
+    i64 acc = 0
+    i64 i = 0
+    while i < rounds {
+        Node* a = bottomUpTree(depth)
+        acc = acc + itemCheck(a)
+        i = i + 1
+    }
+    i64 expect = rounds * ((1 << (depth + 1)) - 1)
+    std.io.println("rounds=", rounds, " depth=", depth, " acc=", acc, " expect=", expect)
+
+    // 3) 深层 + 多轮混合：depth=12 建 3 棵
+    i64 acc2 = 0
+    i64 j = 0
+    while j < 3 {
+        Node* b = bottomUpTree(12)
+        acc2 = acc2 + itemCheck(b)
+        j = j + 1
+    }
+    std.io.println("deep3 acc=", acc2, " expect=", 3 * 8191)
+
+    if single != 2047 {
+        std.io.println("FAIL: single tree checksum mismatch")
+        return
+    }
+    if acc != expect {
+        std.io.println("FAIL: repeated build checksum mismatch")
+        return
+    }
+    if acc2 != 24573 {
+        std.io.println("FAIL: deep tree checksum mismatch")
+        return
+    }
+    std.io.println("PASS")
+}

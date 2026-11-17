@@ -1,0 +1,32 @@
+// BENCH:PREFIX
+import std.io
+import std.string
+
+// BENCH:BEGIN
+fn circular_shift(i64 x, i64 shift) String {
+    String s = std.string.create_from_int(x)
+    i64 n = as<i64>(s.length())
+    if shift > n {
+        String rev = std.string.create("")
+        for i in range(n) {
+            rev = rev + s.substring(n - 1 - i, n - i)
+        }
+        return rev
+    }
+    String head = s.substring(n - shift, n)
+    return head + s.substring(0, n - shift)
+}
+// BENCH:END
+
+// BENCH:MAIN:BEGIN
+fn main() i32 {
+    String a = circular_shift(100, 2)
+    String b = circular_shift(97, 8)
+    String c = circular_shift(11, 101)
+    if std.string.compare(a, std.string.create("001")) != 0 { return 1 }
+    if std.string.compare(b, std.string.create("79")) != 0 { return 2 }
+    if std.string.compare(c, std.string.create("11")) != 0 { return 3 }
+    std.io.println("ok")
+    return 0
+}
+// BENCH:MAIN:END

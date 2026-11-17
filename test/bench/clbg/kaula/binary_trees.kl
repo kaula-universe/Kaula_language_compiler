@@ -1,0 +1,103 @@
+// binary_trees.kl — CLBG binary-trees 标准算法的 Kaula 实现（arena 数组模式）
+//
+// 算法来源：CLBG binary-trees（Kevin Carson 的 C 版 / Go Authors 的 Go 版）。
+// 三边同算法同参数：bottomUpTree(depth) 递归构建完全二叉树，
+// itemCheck 递归遍历求和；反复建/弃短命树 + 一棵 long-lived 树。
+// CLBG 官方标准参数 N=21（runner 编译前注入）。
+//
+// ⚠ 内存管理口径说明（本边与 C/Go 边的核心差异）：
+//   C 参考每节点 malloc + DeleteTree 递归 free（手动管理）；
+//   Go 参考每节点 &Node{} 分配、GC 回收（自动管理）；
+//   Kaula 本文件用 **arena 数组模式**：单块连续数组 + 下标子节点
+//   （left/right 为 i32 下标，-1 表示空），建树/遍历算法与标准版逐行等价，
+//   分配策略为「一块常驻 arena 复用」。选这个形态的原因：
+//   Kaula 的标准递归指针版在 CLBG 标准参数下 survivor 段只增不减
+//   （见 docs/core-runtime.md §2.10 已知限制与 binary_trees_ptr.kl 的实测），
+//   N=21 理论驻留 ~17GB，OOM 打断；arena 模式内存 O(1)，是 Kaula 侧
+//   当前可跑完整标准参数的形态。两版的算法语义、checksum 完全一致。
+import std.io
+import std.format
+import std.memory
+import std.time
+
+// 节点 8 字节：i32 left + i32 right（与 C 参考的两个指针对应，
+// left/right 为 arena 下标，-1 表示空）
+struct Node {
+    left: i32
+    right: i32
+}
+
+// 以 idx 为根、自 depth 层向下递归建完全二叉树。
+// base 为该树所在区域的起始下标：堆式布局要求「子节点 = base + (idx-base)*2 + {1,2}」，
+// 只有根在 base 的树其相对下标才恰好铺满 [base, base + 2^(maxDepth+1) - 1)。
+// 因此长驻树（根在 longOff）与循环内复用的工作树（根在 0）必须各自带 base，
+// 否则长驻树子节点按绝对下标 2*idx+1 计算会直接越界。
+fn build(Node* nodes, i32 idx, i32 base, i32 depth, i32 maxDepth) {
+    nodes[idx].left = -1
+    nodes[idx].right = -1
+    if depth < maxDepth {
+        i32 li = base + (idx - base) * 2 + 1
+        i32 ri = base + (idx - base) * 2 + 2
+        nodes[idx].left = li
+        nodes[idx].right = ri
+        build(nodes, li, base, depth + 1, maxDepth)
+        build(nodes, ri, base, depth + 1, maxDepth)
+    }
+}
+
+// 递归数节点（与 CLBG 参考的 ItemCheck 语义一致：叶子 1、内部 1+left+right）
+fn itemCheck(Node* nodes, i32 idx) i64 {
+    if idx < 0 {
+        return 0
+    }
+    i64 leftSum = itemCheck(nodes, nodes[idx].left)
+    i64 rightSum = itemCheck(nodes, nodes[idx].right)
+    i64 total = 1 + leftSum + rightSum
+    return total
+}
+
+fn main() {
+    i64 n = N_PLACEHOLDER
+    i64 minDepth = 4
+    i64 maxDepth = n
+    if minDepth + 2 > n {
+        maxDepth = minDepth + 2
+    }
+    i64 stretchDepth = maxDepth + 1
+
+    // 最大需求 = stretch 树：2^(stretchDepth+1)-1 个节点。
+    // long-lived 树常驻到程序结束，单独放尾部独立区域（不被循环内的
+    // 重建覆写——C 参考里 longLivedTree 是独立 malloc 的，语义对齐）。
+    i64 maxNodes = (1 << (stretchDepth + 1)) - 1
+    i64 longNodes = (1 << (maxDepth + 1)) - 1
+    i64 longOff = maxNodes - longNodes
+    Node* nodes = as<Node*>(std.memory.kmm_v4_alloc(maxNodes * 8))
+
+    char* buf = as<char*>(std.memory.kmm_v4_alloc(96))
+
+    // stretch 树（CLBG 参考先建 stretch 并 DeleteTree，arena 模式即求值后弃用）
+    build(nodes, 0, 0, 0, as<i32>(stretchDepth))
+    std.format.format_printf(buf, 96, "stretch tree of depth %lld\t check: %lld", stretchDepth, itemCheck(nodes, 0))
+    std.io.println(buf)
+
+    // long-lived 树：常驻到程序结束，落在尾部独立区域 [longOff, maxNodes)
+    build(nodes, as<i32>(longOff), as<i32>(longOff), 0, as<i32>(maxDepth))
+
+    i64 depth = minDepth
+    while depth <= maxDepth {
+        i64 iterations = 1 << (maxDepth - depth + minDepth)
+        i64 checksum = 0
+        i64 i = 0
+        while i < iterations {
+            build(nodes, 0, 0, 0, as<i32>(depth))
+            checksum = checksum + itemCheck(nodes, 0)
+            i = i + 1
+        }
+        std.format.format_printf(buf, 96, "%lld\t trees of depth %lld\t check: %lld", iterations, depth, checksum)
+        std.io.println(buf)
+        depth = depth + 2
+    }
+
+    std.format.format_printf(buf, 96, "long lived tree of depth %lld\t check: %lld", maxDepth, itemCheck(nodes, as<i32>(longOff)))
+    std.io.println(buf)
+}

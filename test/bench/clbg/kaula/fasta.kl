@@ -1,0 +1,158 @@
+// fasta.kl — CLBG fasta 标准算法的 Kaula 实现
+//
+// 算法来源：CLBG fasta（Paul Hsieh 的 C 版，Go Authors 的 Go 版同算法）。
+// 三边同算法同参数：LCG 随机数（IM=139968, IA=3877, IC=29573, 种子42），
+// makeCumulative 累积概率 + selectRandom 二分加权选择；三段输出：
+//   ONE 重复 alu 序列 2*n 字符 / TWO IUB 随机 3*n / THREE homosapiens 随机 5*n，
+// 每行 60 字符折行。输出与 C 参考逐字节一致。
+// 参数：n 由 runner 编译前注入（CLBG 官方标准值 250000）。
+import std.io
+import std.memory
+
+const IM = 139968
+const IA = 3877
+const IC = 29573
+
+// LCG 状态（对应 C 的 static long last = 42）
+i64 last = 42
+
+struct Amino {
+    c: char
+    p: f64
+}
+
+// gen_random：与 C 同式（先更新 last，再 max*last/IM，浮点左结合）
+fn genRandom(max: f64) f64 {
+    last = (last * IA + IC) % IM
+    return max * as<f64>(last) / as<f64>(IM)
+}
+
+// makeCumulative：前缀累积概率（原地累加）
+fn makeCumulative(genelist: Amino*, count: i64) {
+    f64 cp = 0.0
+    i64 i = 0
+    while i < count {
+        cp = cp + genelist[i].p
+        genelist[i].p = cp
+        i = i + 1
+    }
+}
+
+// selectRandom：加权二分选择首个 p >= r 的氨基酸（与 C 同式）
+fn selectRandom(genelist: Amino*, count: i64) char {
+    f64 r = genRandom(1.0)
+    if r < genelist[0].p {
+        return genelist[0].c
+    }
+    i64 lo = 0
+    i64 hi = count - 1
+    while hi > lo + 1 {
+        i64 i = (hi + lo) / 2
+        if r < genelist[i].p {
+            hi = i
+        } else {
+            lo = i
+        }
+    }
+    return genelist[hi].c
+}
+
+// makeRepeatFasta：重复 s 共 n 字符，每 60 字符折行（Go 版 s+s 翻倍写法，与 C 输出等价）
+fn makeRepeatFasta(s: char*, kn: i64, n: i64) {
+    // s2 = s + s，方便任意 pos 连续取长 60 的切片
+    char* s2 = as<char*>(std.memory.kmm_v4_alloc((2 * kn + 1) * 1))
+    i64 i = 0
+    while i < kn {
+        s2[i] = s[i]
+        s2[kn + i] = s[i]
+        i = i + 1
+    }
+
+    char buf[64]
+    i64 todo = n
+    i64 pos = 0
+    while todo > 0 {
+        i64 line = 60
+        if todo < line {
+            line = todo
+        }
+        i64 k = 0
+        while k < line {
+            buf[k] = s2[pos + k]
+            k = k + 1
+        }
+        buf[line] = '\n'
+        buf[line + 1] = 0
+        std.io.print(buf)
+        pos = pos + line
+        if pos >= kn {
+            pos = pos - kn
+        }
+        todo = todo - line
+    }
+}
+
+// makeRandomFasta：随机生成 n 字符，每 60 字符折行
+fn makeRandomFasta(genelist: Amino*, count: i64, n: i64) {
+    char buf[64]
+    i64 todo = n
+    while todo > 0 {
+        i64 line = 60
+        if todo < line {
+            line = todo
+        }
+        i64 i = 0
+        while i < line {
+            buf[i] = selectRandom(genelist, count)
+            i = i + 1
+        }
+        buf[line] = '\n'
+        buf[line + 1] = 0
+        std.io.print(buf)
+        todo = todo - line
+    }
+}
+
+// IUB 与 homosapiens 字母表（全局可变，main 里 makeCumulative 原地累积）
+Amino iub[15]
+Amino homo[4]
+
+const ALU = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+fn main() {
+    i64 n = N_PLACEHOLDER
+
+    // 填充 IUB 字母表
+    iub[0].c = 'a'; iub[0].p = 0.27
+    iub[1].c = 'c'; iub[1].p = 0.12
+    iub[2].c = 'g'; iub[2].p = 0.12
+    iub[3].c = 't'; iub[3].p = 0.27
+    iub[4].c = 'B'; iub[4].p = 0.02
+    iub[5].c = 'D'; iub[5].p = 0.02
+    iub[6].c = 'H'; iub[6].p = 0.02
+    iub[7].c = 'K'; iub[7].p = 0.02
+    iub[8].c = 'M'; iub[8].p = 0.02
+    iub[9].c = 'N'; iub[9].p = 0.02
+    iub[10].c = 'R'; iub[10].p = 0.02
+    iub[11].c = 'S'; iub[11].p = 0.02
+    iub[12].c = 'V'; iub[12].p = 0.02
+    iub[13].c = 'W'; iub[13].p = 0.02
+    iub[14].c = 'Y'; iub[14].p = 0.02
+
+    // 填充 homosapiens 字母表
+    homo[0].c = 'a'; homo[0].p = 0.3029549426680
+    homo[1].c = 'c'; homo[1].p = 0.1979883004921
+    homo[2].c = 'g'; homo[2].p = 0.1975473066391
+    homo[3].c = 't'; homo[3].p = 0.3015094502008
+
+    makeCumulative(iub, 15)
+    makeCumulative(homo, 4)
+
+    // 三段输出：表头由 main 直接打印（字面量走 const char* 重载）
+    std.io.println(">ONE Homo sapiens alu")
+    makeRepeatFasta(ALU.ptr, 287, n * 2)
+    std.io.println(">TWO IUB ambiguity codes")
+    makeRandomFasta(iub, 15, n * 3)
+    std.io.println(">THREE Homo sapiens frequency")
+    makeRandomFasta(homo, 4, n * 5)
+}
