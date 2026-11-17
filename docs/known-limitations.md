@@ -20,7 +20,7 @@
 | **lambda 捕获外层变量** | lambda 不能捕获外层局部变量（编译报错） | 改用嵌套函数，嵌套函数按引用捕获外层变量 | [functions.md](tutorials/functions.md) |
 | **闭包逃逸（带捕获的函数返回出去）** | 捕获指针仅在原作用域有效，带捕获的嵌套函数作为返回值传递不支持 | 需要跨作用域传值时封装成结构体持有 | [functions.md](tutorials/functions.md) |
 | **extern C 变参 `(...)`** | `extern fn printf(fmt, ...)` 形式未实现，无法直接调用 C 变参函数 | 为固定签名的 C 函数逐个写 `extern fn` 声明 | [extern-and-ffi.md](tutorials/extern-and-ffi.md) |
-| **`cstring("...")` 内置** | 字符串字面量到 C `const char*` 的内置转换未提供；但 `String.ptr` 成员由 codegen 做 SSO 感知改写，生成 `string_cdata(s)` 直接取得 `const char*`（freestanding 亦可，无需 `-cflags`） | 用 `type CStr = adopt const char*` + `extern fn`，实参传 `msg.ptr`；完整示例 `examples/xj380/hello_xapi.kl` | [extern-and-ffi.md](tutorials/extern-and-ffi.md)、`examples/xj380/README.md` |
+| **`cstring("...")` 内置** | 字符串字面量到 C `const char*` 的内置转换未提供；但 `String.ptr` 成员由 codegen 做 SSO 感知改写，生成 `string_cdata(s)` 直接取得 `const char*`（freestanding 亦可，无需 `-cflags`） | 用 `type CStr = adopt const char*` + `extern fn`，实参传 `msg.ptr`，详见 [extern-and-ffi.md](tutorials/extern-and-ffi.md) 的 adopt 章节 | [extern-and-ffi.md](tutorials/extern-and-ffi.md) |
 | **`transmute<T>` / 无检查位重解释** | 编译器不存在该内置；类型转换以 `as<T>()` 为唯一显式通道 | 需要位重解释时经 `extern` 对接 C 辅助函数 | [extern-and-ffi.md](tutorials/extern-and-ffi.md) |
 | **回调签名式记法 `void(T...)R` 作 extern 参数** | 作为 `extern fn` 参数尚无法解析；作为普通函数参数可解析但代码生成失败。透明指针 `void()` / `const void()` 记法可用 | 先以 `void*` 对接，再在内部 `as<T*>` 转型 | [extern-and-ffi.md](tutorials/extern-and-ffi.md) |
 | **`spend` 语境下带数据的枚举变体** | 报 `spend_enum_with_data`；带数据枚举应在 `match` 表达式中解构 | 用 `match` 匹配 `Some(v) => ...` | [error-and-panic.md](tutorials/error-and-panic.md)、`compiler/internal/sema` |
@@ -65,7 +65,7 @@
 | `object` 字面量 `object { x: 1 }`（裸机） | 与下方 object 声明同一套 dynobj 运行时，字面量此前漏了前端闸门，`--freestanding` 会一路放行到链接期报 `undefined symbol: dynobj_create`；现由 sema 报 `object_freestanding_unsupported` | 托管编译正常；裸机改用 `struct` 字面量。freestanding 侧实现 dynobj 后可解除 | sema `analyzeExpression` 的 `*ast.ObjectLiteral` 分支 / `test/object_literal.kl` |
 | `object` 全局动态对象声明（裸机） | 依赖托管 dynobj 运行时（`std/obj/dynobj.c`，建立在 `std_malloc` 与 `StringObject` 上），freestanding 库无对应实现；`--freestanding` / `--wasm` 下由 sema 报 `object_freestanding_unsupported` 并 fail-fast | 托管编译正常；裸机改用 `class`/`struct` 逐字段初始化。freestanding 侧实现 dynobj 后可解除 | sema `analyzeObjectStatement` / `test/object_stmt.kl` |
 | LSan 测试残留报告 | 短生命周期 C 内核测试二进制退出时报 128–320B pthread 描述符残留；进程未调用 `kaula_runtime_shutdown`，属退出 teardown 良性残留（OS 回收），非运行期泄漏 | 非缺陷，无需修复 | CHANGELOG · Known issues |
-| `import std.ctypes`（`--freestanding` / `--wasm`） | 模块登记了宿主 C 类型别名（`ssize_t` / `bool_t` / `File` = `FILE*`）与全库句柄索引，freestanding 替身头不提供这些类型，clang 阶段报未知类型；托管模式编译正常 | 裸机程序按需本地声明 `type CStr = adopt const char*` 等，见 `examples/xj380/hello_xapi.kl`；待 `std/ctypes.kl` 拆出 freestanding 子集后解除 | `std/ctypes.kl` / `freestanding/base/types.h` |
+| `import std.ctypes`（`--freestanding` / `--wasm`） | 模块登记了宿主 C 类型别名（`ssize_t` / `bool_t` / `File` = `FILE*`）与全库句柄索引，freestanding 替身头不提供这些类型，clang 阶段报未知类型；托管模式编译正常 | 裸机程序按需本地声明 `type CStr = adopt const char*` 等，详见 [extern-and-ffi.md](tutorials/extern-and-ffi.md)；待 `std/ctypes.kl` 拆出 freestanding 子集后解除 | `std/ctypes.kl` / `freestanding/base/types.h` |
 
 ## 5. 测试与质量工程
 
