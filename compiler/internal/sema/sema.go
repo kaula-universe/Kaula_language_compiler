@@ -84,6 +84,12 @@ type SemanticAnalyzer struct {
 	blockCounter int
 	blockPath    []int
 	declBlocks   map[string][]int
+
+	// 表达式级宏（#[prefix] fn）的"宏值语句"：函数体最后一条表达式语句就是
+	// 宏的返回值（教程《前缀系统》§表达式级宏）。分析该函数体期间指向它，
+	// 使 ExpressionStatement 分支跳过 unused_value 警告——该表达式的结果
+	// 并非被丢弃，而是作为 @调用点的值参与外层表达式。
+	prefixValueStmt ast.Statement
 }
 
 // MacroScope 前缀展开期的一层绑定环境（语义分析侧）。
@@ -488,7 +494,9 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 	 * `$参数` 会被当成"越界使用前缀变量"。这里先把 currentPrefixTable 指向
 	 * 本前缀的符号表（形参 + 模板体内所有 $引用），分析完再还原。 */
 	oldPrefixTable := sa.currentPrefixTable
-	if isPrefixFunction(stmt) {
+	var oldPrefixValueStmt ast.Statement
+	fnIsPrefix := isPrefixFunction(stmt)
+	if fnIsPrefix {
 		table := symbol.NewSymbolTable(nil, "prefix_"+stmt.Name)
 		for _, param := range stmt.Params {
 			if param != "" {
@@ -502,6 +510,14 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 		}
 		sa.currentPrefixTable = table
 		sa.prefixSymbolTables[stmt.Name] = table
+		// 表达式级宏：函数体最后一条语句若是表达式，它就是宏的返回值
+		// （返回类型非 void 的 #[prefix] fn），不是"结果被丢弃"的语句。
+		if len(stmt.Body) > 0 {
+			if last, ok := stmt.Body[len(stmt.Body)-1].(*ast.ExpressionStatement); ok && last != nil {
+				oldPrefixValueStmt = sa.prefixValueStmt
+				sa.prefixValueStmt = last
+			}
+		}
 	}
 	for _, bodyStmt := range stmt.Body {
 		if !reached {
@@ -517,16 +533,21 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 		}
 	}
 	sa.currentPrefixTable = oldPrefixTable
+	sa.prefixValueStmt = oldPrefixValueStmt
 
 	// 前端严格化：missing_return 检查。
 	// 非 void 函数必须保证所有执行路径都以 return 结束，否则 codegen 生成的 C
 	// 函数末尾落空，返回值未定义（clang 对此只给 -Wreturn-type 警告，
 	// 漏到运行期才是真正的坑）。豁免：#[noreturn]（函数本身不返回）、
-	// #[test]（测试函数由 runner 收口）。
+	// #[test]（测试函数由 runner 收口）、#[prefix]（前缀模板体是宏骨架而非
+	// 函数体：表达式级宏的最后一条表达式语句就是宏的返回值（教程《前缀系统》
+	// §表达式级宏），赋值结尾的骨架由 codegen 的直译规则处理——该 C 函数
+	// 只是"前缀也能当普通函数调用"的兼容壳，真实调用一律走宏展开）。
 	ret := strings.TrimSpace(stmt.ReturnType)
 	if ret != "" && ret != "void" &&
 		!ast.HasAttribute(stmt.Attributes, "noreturn") &&
-		!ast.HasAttribute(stmt.Attributes, "test") {
+		!ast.HasAttribute(stmt.Attributes, "test") &&
+		!fnIsPrefix {
 		if !sa.blockDefinitelyReturns(stmt.Body) {
 			sa.errorCollector.AddSemanticError(
 				fmt.Sprintf("函数 '%s' 声明返回 %s，但存在不经过 return 的执行路径", stmt.Name, ret),
@@ -648,7 +669,9 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 			isBarePrefixParam = true
 		}
 		// 纯值表达式语句(无副作用): 结果未使用警告 (clang -Wunused-value)
-		if !isBarePrefixParam && isPureValueExpression(s.Expression) {
+		// 表达式级宏（#[prefix] fn）的最后一条表达式语句是宏的返回值，
+		// 结果并未被丢弃，跳过该警告。
+		if !isBarePrefixParam && s != sa.prefixValueStmt && isPureValueExpression(s.Expression) {
 			sa.errorCollector.AddSemanticWarning(
 				"表达式结果未使用",
 				s.Pos.Line, s.Pos.Column, "unused_value",
@@ -675,9 +698,21 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 	}
 }
 
+// markParameterReferenced 在当前作用域链中查找同名形参并标记为已引用。
+// 表达式级宏（#[prefix] fn）的模板体通过 `$name` 引用形参，而前缀变量的
+// 解析走 currentPrefixTable，不经过普通标识符的引用标记路径——缺了这一步，
+// checkUnusedSymbols 会对只被 `$name` 引用的形参误报 unused_parameter。
+// 非 `#[prefix] fn` 语境（prefix 语句宏、@调用点）下找不到形参，为 no-op。
+func (sa *SemanticAnalyzer) markParameterReferenced(name string) {
+	if sym := sa.symbolTable.GetSymbol(name); sym != nil &&
+		(sym.Scope == "parameter" || sym.Scope == "lambda_param") {
+		sym.Referenced = true
+		sym.Read = true
+	}
+}
+
 // analyzeImportStatement 分析导入语句
-func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
-	moduleName := stmt.Module
+func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {	moduleName := stmt.Module
 	if moduleName != "" {
 		sa.symbolTable.AddSymbol(moduleName, "module", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 	}
@@ -3217,17 +3252,23 @@ func (sa *SemanticAnalyzer) analyzeIdentifier(expr *ast.Identifier) {
 			if symbol == nil && sa.macroDeclaresParam(expr.Name) {
 				// 内层前缀体引用了外层前缀的参数（$fwd = $x 这类转发）：
 				// 名字属于外层声明域，本层符号表里没有是正常的。
+				// 表达式级宏（#[prefix] fn）里 $name 与函数形参 name 是
+				// 同一实体，一并标记形参为已引用（否则 unused_parameter
+				// 会对只通过 $name 引用的形参误报）。
+				sa.markParameterReferenced(expr.Name)
 				return
 			}
-			if symbol == nil {
-				sa.errorCollector.AddSemanticError(
-					fmt.Sprintf("未定义的前缀变量: '$%s'", expr.Name),
-					expr.Pos.Line,
-					expr.Pos.Column,
-					"undefined_variable",
-					"请确保前缀变量已声明后再使用",
-				)
+			if symbol != nil {
+				sa.markParameterReferenced(expr.Name)
+				return
 			}
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("未定义的前缀变量: '$%s'", expr.Name),
+				expr.Pos.Line,
+				expr.Pos.Column,
+				"undefined_variable",
+				"请确保前缀变量已声明后再使用",
+			)
 			return
 		}
 		// 如果不在 @前缀块 中，$var 引用是不合法的
