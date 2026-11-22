@@ -321,7 +321,9 @@ func (sg *StatementGenerator) generateVariableDeclaration(stmt *ast.VariableDecl
 		sg.codegen.RecordVarOriginFromAST(stmt.Name, stmt.Value)
 	}
 
-	cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
+	// 数组尺寸引用 const（[capacity]Student）时先解析为字面值，
+	// 否则原样透传到 C 会产生未声明标识符（见 resolveConstArraySizes）
+	cType := sg.codegen.typeGenerator.convertType(sg.codegen.resolveConstArraySizes(stmt.Type), stmt.Nullable)
 	if os.Getenv("KAULA_DEBUG_VARDECL") != "" {
 		fmt.Printf("[DEBUG-VARDECL] name=%s type=%q nullable=%v cType=%q classTypes[Tensor]=%v\n",
 			stmt.Name, stmt.Type, stmt.Nullable, cType, sg.codegen.typeGenerator.classTypes[stmt.Type])
@@ -1049,7 +1051,9 @@ func (sg *StatementGenerator) generateExternStatement(stmt *ast.ExternStatement)
 		builder.WriteString(");\n")
 	} else {
 		// extern 变量声明
-		cType := sg.codegen.typeGenerator.convertType(stmt.Type, stmt.Nullable)
+		// 数组尺寸引用 const（[capacity]Student）时先解析为字面值，
+		// 否则原样透传到 C 会产生未声明标识符（见 resolveConstArraySizes）
+		cType := sg.codegen.typeGenerator.convertType(sg.codegen.resolveConstArraySizes(stmt.Type), stmt.Nullable)
 		builder.WriteString("extern ")
 		builder.WriteString(cType)
 		builder.WriteByte(' ')

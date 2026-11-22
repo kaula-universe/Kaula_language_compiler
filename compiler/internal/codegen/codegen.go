@@ -2099,6 +2099,20 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 
 	importedModules := make(map[string]bool)
 
+	// 预注册顶层 const 到常量表（按声明顺序，引用链自然解析）。
+	// 数组尺寸等类型位置会引用 const（`Student roster[capacity]`），而类型生成
+	// 发生在语句循环里 convertType 时——若 const 声明在数组声明之后才被循环
+	// 注册，尺寸标识符就查不到值。const 本身被折叠不生成 C 定义（下方循环
+	// 会重复注册，结果幂等），预扫保证了"先引用后声明"也能命中。
+	for _, stmt := range program.Statements {
+		if varDecl, ok := stmt.(*ast.VariableDeclaration); ok && varDecl != nil &&
+			varDecl.IsConst && varDecl.Value != nil {
+			if evaluated := cg.tryEvalConstExpr(varDecl.Value); evaluated != "" {
+				cg.constTable[varDecl.Name] = evaluated
+			}
+		}
+	}
+
 	for _, stmt := range program.Statements {
 		if stmt == nil {
 			continue
@@ -2201,7 +2215,10 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 					varDecl.Type = inferExportedType(varDecl.Value)
 				}
 			}
-			cType := cg.typeGenerator.convertType(varDecl.Type, varDecl.Nullable)
+			// 数组尺寸引用 const（[capacity]Student）时先解析为字面值，
+			// 否则原样透传到 C 会产生未声明标识符（见 resolveConstArraySizes）
+			resolvedType := cg.resolveConstArraySizes(varDecl.Type)
+			cType := cg.typeGenerator.convertType(resolvedType, varDecl.Nullable)
 			// class 类型变量: 引用语义, C 类型为指针 (K_A*)
 			if cg.typeGenerator != nil && cg.typeGenerator.classTypes[varDecl.Type] && !strings.HasSuffix(cType, "*") {
 				cType += "*"
@@ -4668,6 +4685,36 @@ func (cg *CodeGenerator) tryEvalConstExpr(expr ast.Expression) string {
 		return cg.tryEvalConstExpr(e.Inner)
 	}
 	return ""
+}
+
+// resolveConstArraySizes 把 Kaula 类型字符串中引用 const 的数组尺寸替换为常量值。
+//
+// parser 把后缀数组声明 `Student roster[capacity]` 归一化为前缀类型
+// `"[capacity]Student"`，数组尺寸原样进入类型名；而 const 声明被折叠进
+// constTable、不生成任何 C 定义，clang 会报
+// "use of undeclared identifier 'capacity'"。此函数按前缀逐段解析 `[...]`，
+// 尺寸表达式命中常量表时替换为求值结果（支持 `const N = 8`、const 引用链
+// 与编译期算术，经 tryEvalConstExpr 预注册保证顺序无关），未命中时保持原样。
+// 多维类型（"[M][N]T"）逐段处理。
+func (cg *CodeGenerator) resolveConstArraySizes(kaulaType string) string {
+	t := kaulaType
+	prefix := ""
+	for strings.HasPrefix(t, "[") {
+		closeIdx := strings.Index(t, "]")
+		if closeIdx < 0 {
+			break
+		}
+		sizeExpr := strings.TrimSpace(t[1:closeIdx])
+		if val, ok := cg.constTable[sizeExpr]; ok {
+			sizeExpr = val
+		}
+		prefix += "[" + sizeExpr + "]"
+		t = t[closeIdx+1:]
+	}
+	if prefix == "" {
+		return kaulaType
+	}
+	return prefix + t
 }
 
 // evalBinaryOp 执行编译期二元运算
