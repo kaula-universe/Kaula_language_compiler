@@ -115,6 +115,23 @@ fn main() {
 }
 ```
 
+`const` 也可以用作**数组尺寸**（全局与局部均可），支持常量引用链与编译期算术——但
+尺寸位置本身只接受标识符，算术请先聚合成常量再引用：
+
+```kaula
+const capacity = 8
+const double_cap = capacity * 2
+
+Student roster[capacity]     # 全局：展开为 Student roster[8]
+i64 grid[double_cap]         # 引用链：展开为 i64 grid[16]
+
+fn fill() {
+    i64 local[capacity]      # 局部：定长栈声明
+    local[0] = 42
+}
+```
+（回归语料见 `test/codegen_member_const_regression.kl`。）
+
 **单条语句内声明多个变量（C 风格逗号分隔）：**
 
 ```kaula

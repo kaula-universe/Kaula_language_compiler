@@ -9,6 +9,46 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`const` 常量用作数组尺寸编译失败**：parser 把后缀数组声明 `Student roster[capacity]`
+  归一化为前缀类型 `"[capacity]Student"`，数组尺寸**原样透传**进生成的 C；而顶层
+  `const` 声明被折叠进编译期常量表、不生成任何 C 定义——clang 阶段报
+  `use of undeclared identifier 'capacity'`，报错位置与用户写的声明毫无关系。
+  修复两点：`Generate()` 入口对顶层 const **按声明顺序预扫描**注册常量表
+  （`tryEvalConstExpr` 结果与语句循环内幂等，const 引用链/编译期算术随之可用，
+  "先引用后声明"也能命中）；新增 `CodeGenerator.resolveConstArraySizes`，全局与
+  局部数组声明在 `convertType` 之前把尺寸标识符解析为字面值（未命中保持原样，
+  多维类型逐段处理）。const 尺寸的局部数组因此正确走**定长栈声明**而非被误判为
+  运行期数组生成 `kmm_v4_alloc_global`。回归：`TestConstAsGlobalArraySize` /
+  `TestConstAsLocalArraySize`、`test/codegen_member_const_regression.kl`。
+  已知边界：尺寸位置仅接受标识符（parser 限制，`[capacity * 2]` 语法不支持），
+  const 算术请先聚合成常量（`const double_cap = capacity * 2`）再引用。
+- **数组元素的字段访问（`roster[i].name`）类型推断失效**：`memberObjectClassName`
+  与 `indexElementKaulaType` 均不处理 `IndexExpression` 基座，成员访问类型回落为
+  整数，两类症状：`println(roster[i].name, ...)` 生成 `(int64_t)(String 结构体强转)`
+  （clang 报 `operand of type 'String' where arithmetic or pointer type is required`）；
+  `roster[i].name == name` 落不到 strcmp 分支，生成非法的 `String == String` 结构体
+  比较。修复：两处均补 `*ast.IndexExpression` 分支——先解析索引对象的元素类型
+  （`[8]Student` → `Student`），多维嵌套索引（`matrix[i][j]`）逐层剥离。
+  回归：`TestArrayElementMemberAccessStringOps`、
+  `test/codegen_member_const_regression.kl`。
+- **无初始化器全局声明触发 nil 表达式警告**：顶层 `Student roster[8]`（无 `= 初值`）
+  把 nil 的 `Value` 直接传给 `generateExpression`，触发
+  `[codegen] 警告: 未处理的表达式类型 <nil>，将当作 0 处理`。产物行为不变：
+  数组由既有 `{0}` 兜底、标量零初始化，仅消除对 nil 表达式的无效调用。
+  回归：`TestGlobalWithoutInitializerNoNilExpression`。
+- **源码映射 generated_line 系统性偏移（-5 / global·func 条目 -4）**：两个独立
+  bug 叠加——(1) 版本 banner 在映射条目换算**之后**才前置到产物头部，所有条目
+  整体少 bannerLines 行；(2) 主分支（hasMain）`globalOffset` 公式多算 1 行
+  （forwardDecls 后空行计数），经 `funcOffset` / `mainFirstLine` 传播到
+  global/func/main 条目（type 条目因类型输出以注释行起头恰好抵消，掩盖了公式
+  错误）。且 `funcOffset` 未计入 globalVars 与 functionCode 之间的 classGlobalVars /
+  deepPromoteCBBlock / classImplCode 插入段，含 class 的文件会进一步漂移。
+  修复：banner 前置先于映射换算（`generated_line += bannerLines`）；globalOffset
+  公式修正；funcOffset 按三个插入段的实际行数补算。修复后映射逐条命中写盘
+  文件真实行号。回归：`TestSourceMapGeneratedLinePointsAtRealLines`
+  （按 kind 断言每个条目的 generated_line 行确实包含对应 C 结构）。
+
 ### Changed
 - **`redeclaration` 升级为错误（前端严格化收尾）**：同一可见作用域重复声明
   同名变量从前端警告升级为**错误**（frontend-strictness-plan §3.2.6 验收）。
