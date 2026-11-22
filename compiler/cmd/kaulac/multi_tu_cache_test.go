@@ -255,3 +255,60 @@ func TestTUObjectCacheKeySensitiveToFlags(t *testing.T) {
 		t.Fatal("flags 变化必须使 TU 缓存失效")
 	}
 }
+
+// TestEntryTUFromCacheStillLinks 回归：入口 TU 命中缓存时，入口 .o 在持久
+// 缓存目录而不在 objDir——入口对象检查此前硬编码 objDir 路径，Windows CI
+// 报"入口对象缺失"；且 rest 过滤失效会把入口 .o 链接两次。
+// 复现：两个项目入口 TU 的 .c 内容完全相同 → 第二个项目入口命中缓存。
+func TestEntryTUFromCacheStillLinks(t *testing.T) {
+	work := t.TempDir()
+	tu := filepath.Join(work, "cache", "tu")
+	os.MkdirAll(tu, 0755)
+	os.MkdirAll(filepath.Join(work, "cache"), 0755)
+
+	counts := map[string]int{}
+	fake := func(dir string, args []string) (string, error) {
+		isCompile := false
+		for i, a := range args {
+			if a == "-c" && i+2 < len(args) {
+				isCompile = true
+				obj := args[i+2]
+				os.WriteFile(obj, []byte("OBJ:"+filepath.Base(obj)), 0644)
+				counts[filepath.Base(obj)]++
+			}
+		}
+		if !isCompile {
+			for i, a := range args {
+				if a == "-o" && i+1 < len(args) {
+					os.WriteFile(args[i+1], []byte("FAKE_EXE"), 0755)
+				}
+			}
+		}
+		return "", nil
+	}
+	orig := tuExec
+	tuExec = fake
+	defer func() { tuExec = orig }()
+
+	// 项目 1：入口 TU 内容 = X
+	entryX := "int main_x(){return 0;}"
+	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte(entryX), 0644)
+	if err := runMultiTU([]string{"-O2", "-x", "c", "i.c"}, "clang", nil,
+		filepath.Join(work, "cache", "entry.c"), filepath.Join(work, "o1.exe"),
+		work, tu, tuExec, false, nil); err != nil {
+		t.Fatalf("项目 1 构建失败: %v", err)
+	}
+
+	// 项目 2：入口 TU 内容与项目 1 完全相同（不同目录的 cacheFile）→ 命中缓存
+	work2 := t.TempDir()
+	os.MkdirAll(filepath.Join(work2, "cache"), 0755)
+	os.WriteFile(filepath.Join(work2, "cache", "entry.c"), []byte(entryX), 0644)
+	if err := runMultiTU([]string{"-O2", "-x", "c", "i.c"}, "clang", nil,
+		filepath.Join(work2, "cache", "entry.c"), filepath.Join(work2, "o2.exe"),
+		work2, tu, tuExec, false, nil); err != nil {
+		t.Fatalf("项目 2（入口缓存命中）构建失败: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(work2, "o2.exe")); err != nil {
+		t.Fatalf("入口缓存命中时输出缺失: %v", err)
+	}
+}

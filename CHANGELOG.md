@@ -52,10 +52,12 @@
   构建身份覆盖 cc/cmdPrefix/编译 flags/编译器构建戳/PCH 内容；命中直接链接
   持久 .o（cache/tu-obj/），未命中照常编译并原子写入缓存（tmp+rename）；
   meta 记录 .o 内容哈希，半写/损坏条目校验时拒绝并回退重编；
-  --no-cache / KAULAC_NO_TU_CACHE=1 关断。实测 200 模块 33.6k 行项目：
+  --no-cache / KAULAC_NO_TU_CACHE=1 关断。命中时缓存 .o 拷回 objDir 的
+  TU 名路径（缓存 .o 以 key 命名，basename 与 TU 名脱钩会破坏入口对象
+  解析与 rest 过滤——Windows CI 实测）。实测 200 模块 33.6k 行项目：
   touch 单文件重建 26.8s → 1.8s（15x）。回归：
   `cmd/kaulac/multi_tu_cache_test.go`（替身执行器，断言只重编变更 TU、
-  损坏条目拒绝、flags 变化失效、关断开关）。
+  损坏条目拒绝、flags 变化失效、关断开关、入口 TU 命中缓存仍正确链接）。
 
 ### Fixed（历史）
 - **missing_return / unused_value / unused_parameter 误伤表达式级 `#[prefix] fn`**：

@@ -356,13 +356,21 @@ func compileTUsParallel(units []tuUnit, flags []string, tuDir, objDir string, cm
 			src := filepath.Join(tuDir, u.Name+".c")
 			obj := filepath.Join(objDir, u.Name+".o")
 
-			// TU 级缓存：命中则链接直接引用持久缓存里的 .o，跳过 clang -c
+			// TU 级缓存：命中则把持久缓存里的 .o 拷回 objDir 的 TU 名路径，
+			// 跳过 clang -c。不直接引用缓存路径——缓存的 .o 以 key 命名，
+			// basename 与 TU 名脱钩会让"入口对象按 basename 解析"失效。
+			// （拷贝 100KB 级 .o 的代价相对 clang -c 可忽略。）
 			if tuCache != nil {
 				if cached := tuCache.lookup(u.Name, src); cached != "" {
-					mu.Lock()
-					objs = append(objs, cached)
-					mu.Unlock()
-					return
+					if data, readErr := os.ReadFile(cached); readErr == nil {
+						if writeErr := os.WriteFile(obj, data, 0644); writeErr == nil {
+							mu.Lock()
+							objs = append(objs, obj)
+							mu.Unlock()
+							return
+						}
+					}
+					// 拷贝失败：回退正常编译（缓存路径仍有效，不影响正确性）
 				}
 			}
 
@@ -570,6 +578,8 @@ func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, ou
 		return err
 	}
 
+	// 命中缓存的 TU 也会拷回 objDir 的 TU 名路径（见 compileTUsParallel），
+	// 因此入口对象始终在 objDir。
 	entryObj := filepath.Join(objDir, entryTUBasename+".o")
 	if _, statErr := os.Stat(entryObj); statErr != nil {
 		return fmt.Errorf("multi-TU: 入口对象缺失 (%s): %w", entryObj, statErr)
