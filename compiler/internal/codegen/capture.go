@@ -21,7 +21,9 @@ type nestedFuncInfo struct {
 // captureArgsFor 返回调用 funcName 时应注入的捕获实参列表（逗号分隔，不含括号）。
 // 若 funcName 没有捕获信息（不是嵌套函数 / 无捕获），返回空串。
 func (cg *CodeGenerator) captureArgsFor(funcName string) string {
-	info, ok := cg.nestedFuncCaptures[funcName]
+	// key 为 Kaula 全路径（见 GenerateFunctionStatement 的限定名机制），
+	// 调用点按当前嵌套前缀解析
+	info, ok := cg.nestedFuncCaptures[cg.currentNestedPrefix+funcName]
 	if !ok || len(info.Captures) == 0 {
 		return ""
 	}
@@ -70,7 +72,7 @@ func (cg *CodeGenerator) detectCaptures(stmt *ast.FunctionStatement, nestedFuncN
 		if nestedFuncNames != nil && nestedFuncNames[name] {
 			isNestedCall = true
 		} else if cg.nestedFuncCaptures != nil {
-			if _, ok := cg.nestedFuncCaptures[name]; ok {
+			if _, ok := cg.nestedFuncCaptures[cg.currentNestedPrefix+name]; ok {
 				isNestedCall = true
 			}
 		}
@@ -173,7 +175,7 @@ func (cg *CodeGenerator) preRegisterNestedFuncs(stmts []ast.Statement) {
 	directCalls := make(map[string][]string)
 	for _, s := range stmts {
 		if fn, ok := s.(*ast.FunctionStatement); ok {
-			if _, exists := cg.nestedFuncCaptures[fn.Name]; exists {
+			if _, exists := cg.nestedFuncCaptures[cg.currentNestedPrefix+fn.Name]; exists {
 				continue
 			}
 			captures, calls := cg.detectCaptures(fn, nestedFuncNames)
@@ -191,7 +193,7 @@ func (cg *CodeGenerator) preRegisterNestedFuncs(stmts []ast.Statement) {
 		if cg.nestedFuncCaptures == nil {
 			cg.nestedFuncCaptures = make(map[string]nestedFuncInfo)
 		}
-		cg.nestedFuncCaptures[name] = cg.buildNestedFuncInfo(captures)
+		cg.nestedFuncCaptures[cg.currentNestedPrefix+name] = cg.buildNestedFuncInfo(captures)
 	}
 }
 

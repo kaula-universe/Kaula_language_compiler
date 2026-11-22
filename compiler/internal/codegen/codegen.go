@@ -464,7 +464,16 @@ type CodeGenerator struct {
 	preludeInitCode strings.Builder
 
 	// 嵌套函数捕获信息：函数名 → 捕获列表（生成函数体与调用点共用）
+	// key 为 Kaula 全路径（"父函数.嵌套函数"，顶层函数即裸名）
 	nestedFuncCaptures map[string]nestedFuncInfo
+
+	// 嵌套函数限定名解析：Kaula 全路径（"父.子"）→ 提升后的 C 函数名。
+	// 嵌套函数被提升（hoist）为文件级定义时若保持裸名，不同父函数（含
+	// 不同 TU）的同名嵌套函数会在链接期 multiple definition——static 只能
+	// 解决跨 TU，解决不了同一 TU 内不同父函数的同名嵌套。调用点经
+	// UserFuncCName 按 currentNestedPrefix 解析限定名。
+	currentNestedPrefix  string
+	nestedQualifiedNames map[string]string
 
 	// 当前正在生成函数体的捕获上下文（identifier 重写为 (*_cap_N)）
 	currentCaptures   []string
@@ -4577,6 +4586,15 @@ func (cg *CodeGenerator) isUserKaulaFunc(name string) bool {
 func (cg *CodeGenerator) UserFuncCName(name string) string {
 	if name == "" || name == "main" {
 		return name
+	}
+	// 嵌套函数调用点：按当前嵌套作用域路径解析限定名。
+	// （词法作用域内嵌套函数遮蔽顶层同名函数，限定名优先命中。）
+	if cg.nestedQualifiedNames != nil {
+		// 顶层父函数的嵌套前缀是空串，不能以 != "" 作为查找前置条件，
+		// 否则其嵌套函数的调用点永远解析不到限定名
+		if qualified, ok := cg.nestedQualifiedNames[cg.currentNestedPrefix+name]; ok {
+			return qualified
+		}
 	}
 	if cg.isUserKaulaFunc(name) {
 		return name

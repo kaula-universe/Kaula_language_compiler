@@ -1,4 +1,4 @@
-﻿package codegen
+package codegen
 
 import (
 	"fmt"
@@ -327,7 +327,36 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// （main/prefix/tree/asm 均不会有外层函数作用域，捕获集为空）
 	// 先收集函数体内的嵌套函数名，用于 detectCaptures 区分函数调用与变量引用
 	nestedFuncNames := collectNestedFuncNames(stmt.Body)
+
+	// 嵌套函数限定名：提升为文件级定义时用 "<父路径>.<名>" 的限定 C 名 +
+	// static 存储，避免不同父函数（含不同 TU）的同名嵌套函数在链接期
+	// multiple definition。fullPath 同时是 nestedFuncCaptures /
+	// nestedQualifiedNames 的 key；生成函数体期间 currentNestedPrefix
+	// 切换为 fullPath+"."，调用点据此解析同层嵌套函数的限定名。
+	parentNestedPrefix := fg.codegen.currentNestedPrefix
+	fnFullPath := parentNestedPrefix + stmt.Name
+	fnIsNested := fg.codegen.inFunctionBody && !stmt.IsExported && stmt.Name != "main"
+	fnQualifiedName := ""
+	if fg.codegen.nestedQualifiedNames == nil {
+		fg.codegen.nestedQualifiedNames = make(map[string]string)
+	}
+	if fnIsNested {
+		// 只有提升（hoist）的嵌套函数才登记限定名。前缀切换（见下）对所有
+		// 函数生效：顶层函数切入 "函数名."，嵌套函数切入 "父路径.名."——
+		// 这样嵌套函数的全路径包含顶层祖先名，"main 里的 add2"（main.add2）
+		// 与 "其它顶层函数里的 add2"（foo.add2）不会撞名。顶层函数本身
+		// 不登记（保持 UserFuncCName 原名路径，测试 runner / 跨文件引用
+		// 都按原名解析）。
+		fnQualifiedName = "kaula_nested_" + strings.ReplaceAll(fnFullPath, ".", "_")
+		fg.codegen.nestedQualifiedNames[fnFullPath] = fnQualifiedName
+	}
+
 	directCaptures, directCalls := fg.codegen.detectCaptures(stmt, nestedFuncNames)
+	// 切换到本函数体的嵌套前缀：其体内定义/调用的嵌套函数以
+	// "<fullPath>.<名>" 解析；函数体生成结束后恢复父前缀。
+	// 前缀切换对所有函数生效（含 main / 导出函数）：函数体内的嵌套函数
+	// 定义与调用都以 "<本函数全路径>.<名>" 登记/解析。
+	fg.codegen.currentNestedPrefix = fnFullPath + "."
 	// 预注册函数体内的其他嵌套函数：确保调用点在定义语句之前时
 	// 也能找到捕获信息（生成调用实参）。预注册包含传递闭包。
 	fg.codegen.preRegisterNestedFuncs(stmt.Body)
@@ -336,7 +365,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	captures := make([]string, len(directCaptures))
 	copy(captures, directCaptures)
 	for _, called := range directCalls {
-		if info, ok := fg.codegen.nestedFuncCaptures[called]; ok {
+		if info, ok := fg.codegen.nestedFuncCaptures[fg.codegen.currentNestedPrefix+called]; ok {
 			for _, cap := range info.Captures {
 				if !containsStr(captures, cap) {
 					captures = append(captures, cap)
@@ -349,9 +378,16 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		// 嵌套函数提升为文件级后，调用点（所在外层函数体）先于其定义出现，
 		// 必须在文件头部追加原型声明（forward declaration），否则 clang 报隐式声明错误
 		var proto strings.Builder
+		if fnIsNested {
+			proto.WriteString("static ")
+		}
 		proto.WriteString(fg.mapReturnType(stmt.ReturnType))
 		proto.WriteByte(' ')
-		proto.WriteString(fg.codegen.UserFuncCName(stmt.Name))
+		if fnIsNested {
+			proto.WriteString(fnQualifiedName)
+		} else {
+			proto.WriteString(fg.codegen.UserFuncCName(stmt.Name))
+		}
 		proto.WriteByte('(')
 		for i, param := range stmt.Params {
 			if i > 0 {
@@ -376,7 +412,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 				proto.WriteString(", ")
 			}
 			capType := "int64_t"
-			if info := fg.codegen.nestedFuncCaptures[stmt.Name]; i < len(info.Types) && info.Types[i] != "" {
+			if info := fg.codegen.nestedFuncCaptures[fnFullPath]; i < len(info.Types) && info.Types[i] != "" {
 				if ctype := fg.codegen.typeGenerator.convertType(info.Types[i], false); ctype != "" {
 					capType = ctype
 				}
@@ -401,7 +437,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		if fg.codegen.nestedFuncCaptures == nil {
 			fg.codegen.nestedFuncCaptures = make(map[string]nestedFuncInfo)
 		}
-		fg.codegen.nestedFuncCaptures[stmt.Name] = info
+		fg.codegen.nestedFuncCaptures[fnFullPath] = info
 		stmt.Captures = captures
 	}
 	// 预注册函数体内的其他嵌套函数：确保调用点在定义语句之前时
@@ -431,8 +467,15 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	// max/min/abs 若为用户定义则 K_max，否则重定向 kaula_max，均由 UserFuncCName 统一处理。
 	// export 函数保持原名（FFI 友好，外部 C 代码直接用原名调用）。
 	var safeName string
+	fnIsNestedDef := false
 	if stmt.IsExported {
 		safeName = stmt.Name
+	} else if fnIsNested {
+		// 嵌套函数提升：限定名（kaula_nested_<父>_<名>）+ static 存储——
+		// 不同父函数（含不同 TU）的同名嵌套函数若保持裸名会在链接期
+		// multiple definition，static 救跨 TU、限定名救同 TU。
+		safeName = fnQualifiedName
+		fnIsNestedDef = true
 	} else {
 		safeName = fg.codegen.UserFuncCName(stmt.Name)
 	}
@@ -468,6 +511,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	savedChain := fg.codegen.currentChain
 	savedChainReceivers := fg.codegen.chainReceivers
 	defer func() {
+		// 恢复进入本函数前的嵌套前缀。必须用 parentNestedPrefix（在
+		// fnFullPath/前缀切换之前捕获）：若沿用此处再捕获的当前值，会把
+		// 本函数的前缀切换泄漏给外层后续语句的生成——嵌套函数体内定义的
+		// 同名调用点会解析到错误的限定名。
+		fg.codegen.currentNestedPrefix = parentNestedPrefix
 		fg.codegen.currentChain = savedChain
 		fg.codegen.chainReceivers = savedChainReceivers
 	}()
@@ -504,6 +552,9 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 	fg.codegen.SetKMMUseMark(false)
 
 	returnType := fg.mapReturnType(stmt.ReturnType)
+	if fnIsNestedDef {
+		builder.WriteString("static ")
+	}
 	builder.WriteString(returnType)
 	builder.WriteString(safeName)
 	// 生成原生 C 参数列表
@@ -532,7 +583,7 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 			builder.WriteString(", ")
 		}
 		capType := "int64_t"
-		if info := fg.codegen.nestedFuncCaptures[stmt.Name]; i < len(info.Types) && info.Types[i] != "" {
+		if info := fg.codegen.nestedFuncCaptures[fnFullPath]; i < len(info.Types) && info.Types[i] != "" {
 			if ctype := fg.codegen.typeGenerator.convertType(info.Types[i], false); ctype != "" {
 				capType = ctype
 			}
@@ -690,10 +741,10 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 				builder.WriteString(bodyIndent + "}\n")
 			}
 		} else {
-		fg.codegen.funcHasKMMCheckpoint = false
-		builder.WriteString(bodyCode)
-	}
-} else {
+			fg.codegen.funcHasKMMCheckpoint = false
+			builder.WriteString(bodyCode)
+		}
+	} else {
 		prevInFuncBody := fg.codegen.inFunctionBody
 		fg.codegen.inFunctionBody = true
 		// 注入静态分析警告
@@ -911,7 +962,7 @@ func hasReturnStatement(stmts []ast.Statement) bool {
 
 // lastStmtIsReturn 检查语句列表的最后一条是否是 return。
 // 方案 A：若末尾是 return，则作用域末尾的 generateSurvivorFreeForScope 是死代码
-//（return 中已通过 generateSurvivorFreeForReturn 遍历作用域链释放），应跳过。
+// （return 中已通过 generateSurvivorFreeForReturn 遍历作用域链释放），应跳过。
 func lastStmtIsReturn(stmts []ast.Statement) bool {
 	if len(stmts) == 0 {
 		return false
@@ -1776,7 +1827,7 @@ func (fg *FunctionGenerator) concSuspendReturn(stmt *ast.FunctionStatement, idx 
 	 * （I5），由专用线程就地执行阻塞操作。
 	 */
 	if blocked {
-		b.WriteString("    return (KaulaResumeResult){ .status = KAULA_RESUME_BLOCKED, "+
+		b.WriteString("    return (KaulaResumeResult){ .status = KAULA_RESUME_BLOCKED, " +
 			".io_request = {0}, .value = NULL };\n")
 	} else if fg.lastIoVar != "" {
 		b.WriteString(fmt.Sprintf("    return (KaulaResumeResult){ .status = KAULA_RESUME_SUSPEND, "+
@@ -1977,7 +2028,7 @@ func (fg *FunctionGenerator) concBodySegments(stmt *ast.FunctionStatement, analy
 				continue
 			}
 
-		/*
+			/*
 			 * 守卫模式下的两段式切分：两个相邻槽位。
 			 *
 			 * 包装由 generateStmtsWithLiveness 自己做，这里不能再包一层 ——
