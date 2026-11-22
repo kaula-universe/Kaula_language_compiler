@@ -23,5 +23,9 @@ done
 | p5_assign_mismatch.kl | assign_type_mismatch | 赋值左右类型不兼容 |
 | p6_return_type.kl | return_type_mismatch | return 表达式类型 ≠ 声明返回类型 |
 | p6b_return_void.kl | return_value_in_void_fn | void 函数 return 带值 |
-| p7_redecl.kl | redeclaration | 同作用域重复声明 |
+| p7_redecl.kl | redeclaration | 同作用域重复声明（错误） |
 | p8_call_nonfn.kl | calling_non_callable | 调用非函数标识符 |
+| p9_missing_return.kl | missing_return | 非 void 函数存在不经过 return 的路径 |
+
+> 兄弟控制流块里各自声明同名变量是**合法**写法（仅警告），正向回归见
+> `test/redecl_sibling_blocks.kl`。

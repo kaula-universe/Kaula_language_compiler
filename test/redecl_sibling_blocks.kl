@@ -1,0 +1,21 @@
+import std.io
+
+# redecl_sibling_blocks.kl — 前端严格化正向兼容回归（redeclaration 规则）
+# 同名变量在**兄弟控制流块**里各自声明是合法写法（C 块作用域），前端只给
+# redeclaration 警告、不报错；同一可见作用域（函数顶层/同一块链）重复声明
+# 才是错误（见 test/errors/p7_redecl.kl）。
+# 期望：编译运行成功，输出 0 1 2 3 4 5。
+
+fn main() {
+    i32 total = 0
+    while total < 3 {
+        i32 i = 0
+        std.io.println(i)
+        total = total + 1
+    }
+    while total < 6 {
+        i32 i = 0
+        std.io.println(i)
+        total = total + 1
+    }
+}

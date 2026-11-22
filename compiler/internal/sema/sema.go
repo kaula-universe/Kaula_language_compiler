@@ -74,6 +74,16 @@ type SemanticAnalyzer struct {
 	structDecls map[string]*ast.StructStatement
 	// 顶层 class 声明索引：与 classFieldType 配合，集中避免重复扫 AST。
 	classDecls map[string]*ast.ClassStatement
+
+	// 前端严格化（redeclaration / missing_return）：块路径跟踪。
+	// Kaula 的 if/while/for 体不创建新符号表作用域（变量函数内全程可见），
+	// 仅靠符号表无法区分「同一可见作用域重复声明」（必须报错）和「兄弟控制流块
+	// 各自声明同名变量」（C 块作用域下合法，保持警告）。blockPath 是当前正在
+	// 分析的语句块 id 栈；declBlocks 记录每个名字最近一次声明所在的块路径，
+	// 覆盖语义与 symbolTable.AddSymbol 一致。
+	blockCounter int
+	blockPath    []int
+	declBlocks   map[string][]int
 }
 
 // MacroScope 前缀展开期的一层绑定环境（语义分析侧）。
@@ -277,6 +287,7 @@ func NewSemanticAnalyzerWithConfig(configPath string, errorCollector *errors.Err
 		adoptTypes:         make(map[string]bool),
 		transparentAdopt:   make(map[string]bool),
 		adoptUnderlying:    make(map[string]string),
+		declBlocks:         make(map[string][]int),
 	}
 }
 
@@ -507,6 +518,24 @@ func (sa *SemanticAnalyzer) analyzeFunctionBody(stmt *ast.FunctionStatement) {
 	}
 	sa.currentPrefixTable = oldPrefixTable
 
+	// 前端严格化：missing_return 检查。
+	// 非 void 函数必须保证所有执行路径都以 return 结束，否则 codegen 生成的 C
+	// 函数末尾落空，返回值未定义（clang 对此只给 -Wreturn-type 警告，
+	// 漏到运行期才是真正的坑）。豁免：#[noreturn]（函数本身不返回）、
+	// #[test]（测试函数由 runner 收口）。
+	ret := strings.TrimSpace(stmt.ReturnType)
+	if ret != "" && ret != "void" &&
+		!ast.HasAttribute(stmt.Attributes, "noreturn") &&
+		!ast.HasAttribute(stmt.Attributes, "test") {
+		if !sa.blockDefinitelyReturns(stmt.Body) {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("函数 '%s' 声明返回 %s，但存在不经过 return 的执行路径", stmt.Name, ret),
+				stmt.Pos.Line, stmt.Pos.Column, "missing_return",
+				"为所有执行路径补充 return 语句；确实无返回值的函数请改返回 void 或标注 #[noreturn]",
+			)
+		}
+	}
+
 	// F10 修复：SOR 原语检查改为仅对显式 #[sor] 注解的函数发出警告
 	// 全局 --sor 模式下普通函数不强制要求使用原语，SOR 分析器自动处理
 	// 显式 #[sor] 注解的函数如果未使用原语，仅警告（提示用户可能忘记）
@@ -631,9 +660,11 @@ func (sa *SemanticAnalyzer) analyzeStatement(s ast.Statement) {
 		// 代码块：进入新作用域，分析其中的每条语句
 		oldSymbolTable := sa.symbolTable
 		sa.symbolTable = symbol.NewSymbolTable(sa.symbolTable, "block")
+		sa.pushBlock()
 		for _, stmt := range s.Statements {
 			sa.analyzeStatement(stmt)
 		}
+		sa.popBlock()
 		sa.symbolTable = oldSymbolTable
 	case *ast.YieldStatement:
 		sa.analyzeYieldStatement(s)
@@ -1086,9 +1117,11 @@ func (sa *SemanticAnalyzer) analyzePrefixStatement(stmt *ast.PrefixStatement) {
 
 	oldPrefixTable := sa.currentPrefixTable
 	sa.currentPrefixTable = sa.symbolTable
+	sa.pushBlock() // prefix 体：块路径跟踪（redeclaration 区分用）
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.popBlock()
 	sa.currentPrefixTable = oldPrefixTable
 
 	sa.symbolTable = oldSymbolTable
@@ -1435,9 +1468,11 @@ func (sa *SemanticAnalyzer) analyzeTreeStatement(stmt *ast.TreeStatement) {
 		sa.analyzeExpression(stmt.Root)
 	}
 
+	sa.pushBlock() // tree 体：块路径跟踪（redeclaration 区分用）
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.popBlock()
 }
 
 func (sa *SemanticAnalyzer) analyzeRootTree(stmt *ast.TreeStatement) {
@@ -1901,19 +1936,8 @@ func (sa *SemanticAnalyzer) analyzeVariableDeclaration(stmt *ast.VariableDeclara
 	}
 
 	// 2. 添加变量到符号表
-	// 前端严格化：同作用域重复声明。
-	// 注意：Kaula 的 if/while/for 体不创建新符号表作用域（变量在函数内全程可见），
-	// 所以顺序两个 while 块里同名变量会命中这里。历史代码大量依赖这种写法
-	// （两个循环各自声明 i/a），因此这里只警告不报错——真正的"同一行附近重复声明"
-	// 由用户肉眼识别，codegen 生成 C 时两个变量落在不同 { } 块里，C 本身允许。
-	if existing := sa.symbolTable.GetLocalSymbol(stmt.Name); existing != nil && existing.Line != stmt.Pos.Line {
-		sa.errorCollector.AddSemanticWarning(
-			fmt.Sprintf("变量 '%s' 在同一作用域重复声明（上一次在第 %d 行）", stmt.Name, existing.Line),
-			stmt.Pos.Line, stmt.Pos.Column,
-			"redeclaration",
-			"在控制流块之间重用变量名虽合法，但可读性差；建议改名",
-		)
-	}
+	// 前端严格化：同作用域重复声明（redeclaration），规则见 checkRedeclaration。
+	sa.checkRedeclaration(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
 	sa.checkVariableShadow(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, stmt.Nullable, sa.variableDeclScope(), stmt.Pos.Line, stmt.Pos.Column)
 
@@ -2203,6 +2227,8 @@ func (sa *SemanticAnalyzer) analyzeAutoDeclaration(stmt *ast.VariableDeclaration
 	}
 
 	// 添加到符号表
+	// 前端严格化：auto 声明同样做同作用域重复声明检查（规则见 checkRedeclaration）
+	sa.checkRedeclaration(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
 	sa.checkVariableShadow(stmt.Name, stmt.Pos.Line, stmt.Pos.Column)
 	sa.symbolTable.AddSymbol(stmt.Name, stmt.Type, false, sa.variableDeclScope(), stmt.Pos.Line, stmt.Pos.Column)
 
@@ -2494,14 +2520,17 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 	thenChecked, elseChecked := sa.extractNullConditions(stmt.Condition)
 	// 3. 应用 then 标记，分析 then 体，记录 then 结束时的状态
 	sa.applyNullChecked(thenChecked)
+	sa.pushBlock() // if then 体：块路径跟踪（redeclaration 区分用）
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.popBlock()
 	thenState := sa.collectNullChecked()
 	// 4. 恢复快照，应用 else 标记，分析 else 体，记录 else 结束时的状态
 	sa.restoreNullChecked(snap)
 	hasElse := len(stmt.Else) > 0
 	sa.applyNullChecked(elseChecked)
+	sa.pushBlock() // if else 体：块路径跟踪（redeclaration 区分用）
 	for _, elseStmt := range stmt.Else {
 		// else-if 嵌套: 作为链的一部分, 跳过独立检测
 		if nested, ok := elseStmt.(*ast.IfStatement); ok {
@@ -2514,6 +2543,7 @@ func (sa *SemanticAnalyzer) analyzeIfStatement(stmt *ast.IfStatement) {
 		sa.analyzeStatement(elseStmt)
 	}
 	elseState := sa.collectNullChecked()
+	sa.popBlock()
 	// 5. 恢复快照，合并状态
 	//    - 提前返回优化：如果 then 分支以 return 结束，则 if 后的代码一定在 else 路径上，
 	//      无 else 时应用 else 标记，有 else 时直接用 elseState
@@ -2803,9 +2833,11 @@ func (sa *SemanticAnalyzer) analyzeWhileStatement(stmt *ast.WhileStatement) {
 	snap := sa.snapshotNullChecked()
 	thenChecked, _ := sa.extractNullConditions(stmt.Condition)
 	sa.applyNullChecked(thenChecked)
+	sa.pushBlock() // while 体：块路径跟踪（redeclaration 区分用）
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.popBlock()
 	sa.restoreNullChecked(snap)
 }
 
@@ -2949,9 +2981,11 @@ func (sa *SemanticAnalyzer) analyzeForInStatement(stmt *ast.ForInStatement) {
 	}
 	// 路径敏感空安全：for-in 循环体可能不执行，循环体内的标记不应带到循环后
 	snap := sa.snapshotNullChecked()
+	sa.pushBlock() // for-in 体：块路径跟踪（redeclaration 区分用）
 	for _, bodyStmt := range stmt.Body {
 		sa.analyzeStatement(bodyStmt)
 	}
+	sa.popBlock()
 	sa.restoreNullChecked(snap)
 }
 
@@ -3352,6 +3386,71 @@ func (sa *SemanticAnalyzer) variableDeclScope() string {
 		return "global"
 	}
 	return "local"
+}
+
+// pushBlock 进入一个新的语句块（if/while/for 体、显式 { } 块等）。
+// 用于前端严格化的块路径跟踪，见 SemanticAnalyzer.declBlocks 注释。
+func (sa *SemanticAnalyzer) pushBlock() {
+	sa.blockCounter++
+	sa.blockPath = append(sa.blockPath, sa.blockCounter)
+}
+
+// popBlock 离开语句块，与 pushBlock 成对使用。
+func (sa *SemanticAnalyzer) popBlock() {
+	if len(sa.blockPath) > 0 {
+		sa.blockPath = sa.blockPath[:len(sa.blockPath)-1]
+	}
+}
+
+// declInVisibleScope 判断名字的上一次声明是否位于当前声明点的可见作用域内
+// （上一次声明在当前块或其祖先块）。是 → 两次声明覆盖同一个符号表条目且同时
+// 可见，属于真正的重复声明；否 → 上一次声明在兄弟块（如前一个循环体）里，
+// codegen 生成 C 时落在不同 { } 块中，C 块作用域下合法。
+func (sa *SemanticAnalyzer) declInVisibleScope(name string) bool {
+	prev, ok := sa.declBlocks[name]
+	if !ok {
+		return false
+	}
+	if len(prev) > len(sa.blockPath) {
+		return false
+	}
+	for i, id := range prev {
+		if sa.blockPath[i] != id {
+			return false
+		}
+	}
+	return true
+}
+
+// recordDeclBlock 记录名字最近一次声明所在的块路径（覆盖语义与 AddSymbol 一致）。
+func (sa *SemanticAnalyzer) recordDeclBlock(name string) {
+	p := make([]int, len(sa.blockPath))
+	copy(p, sa.blockPath)
+	sa.declBlocks[name] = p
+}
+
+// checkRedeclaration 前端严格化：同作用域重复声明检查（redeclaration）。
+//   - 上一次声明在可见作用域内 → 错误：两次声明覆盖同一个符号表条目，
+//     内层块结束后引用会拿到新声明的类型，属于类型混淆隐患；
+//   - 上一次声明在兄弟控制流块（如前一个循环体）→ 警告：历史代码大量依赖
+//     这种写法（两个循环各自声明 i/a），保持兼容。
+func (sa *SemanticAnalyzer) checkRedeclaration(name string, line, col int) {
+	if existing := sa.symbolTable.GetLocalSymbol(name); existing != nil && existing.Line != line {
+		if sa.declInVisibleScope(name) {
+			sa.errorCollector.AddSemanticError(
+				fmt.Sprintf("变量 '%s' 在同一作用域重复声明（上一次在第 %d 行）", name, existing.Line),
+				line, col, "redeclaration",
+				"删除或改名其中一个声明；若要在控制流块之间复用变量名，请把声明提到块外",
+			)
+		} else {
+			sa.errorCollector.AddSemanticWarning(
+				fmt.Sprintf("变量 '%s' 与第 %d 行的声明位于不同控制流块（合法，但可读性差）", name, existing.Line),
+				line, col, "redeclaration",
+				"在控制流块之间重用变量名虽合法，但可读性差；建议改名",
+			)
+		}
+	}
+	sa.recordDeclBlock(name)
 }
 
 // checkVariableShadow 检查变量声明是否遮蔽外层作用域同名符号(clang -Wshadow 语义)。
@@ -4774,6 +4873,120 @@ func endsWithReturn(stmts []ast.Statement) bool {
 		// else 分支可能是多条语句或嵌套 if
 		elseReturns := endsWithReturn(s.Else)
 		return elseReturns
+	}
+	return false
+}
+
+// blockDefinitelyReturns 判断语句列表是否保证所有执行路径都以 return 结束。
+// 与 endsWithReturn 的区别：不要求 return 是最后一条语句——return 之后再
+// 有不可达语句时依然成立（不可达由 unreachable_code 警告单独报告）。
+// 保守策略：只识别能确定返回的形态，识别不了的按"可能不返回"处理（宁可
+// 多报 missing_return，也不放过未定义返回值）：
+//   - 语句列表中出现任意顶层 return；
+//   - if/else 两个分支各自保证返回；
+//   - while true 且循环体内无 break（永不退出）。
+//   - 调用 #[noreturn] 函数后视为路径终结。
+func (sa *SemanticAnalyzer) blockDefinitelyReturns(stmts []ast.Statement) bool {
+	for _, s := range stmts {
+		switch st := s.(type) {
+		case *ast.ReturnStatement:
+			return true
+		case *ast.IfStatement:
+			if len(st.Else) > 0 &&
+				sa.blockDefinitelyReturns(st.Body) &&
+				sa.blockDefinitelyReturns(st.Else) {
+				return true
+			}
+		case *ast.WhileStatement:
+			if isTrueCondition(st.Condition) && !blockContainsBreak(st.Body) {
+				return true
+			}
+		case *ast.ExpressionStatement:
+			if sa.isNoReturnCall(st.Expression) {
+				return true
+			}
+			// match 语句：所有分支体都保证返回，且存在 _ 通配分支兜底
+			// （无 _ 时可能存在未覆盖的值落空，保守按"可能不返回"处理）
+			if me, ok := st.Expression.(*ast.MatchExpression); ok {
+				if sa.matchAllArmsReturn(me) {
+					return true
+				}
+			}
+		case *ast.BlockStatement:
+			// 裸 { } 块：递归扫描内部语句
+			if sa.blockDefinitelyReturns(st.Statements) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchAllArmsReturn 判断 match 的每个分支体是否都保证返回，且带 _ 通配分支。
+func (sa *SemanticAnalyzer) matchAllArmsReturn(me *ast.MatchExpression) bool {
+	if me == nil || len(me.Arms) == 0 {
+		return false
+	}
+	hasWildcard := false
+	for _, arm := range me.Arms {
+		if arm == nil {
+			return false
+		}
+		if arm.Pattern != nil && arm.Pattern.Kind == ast.PatternWildcard {
+			hasWildcard = true
+		}
+		if !sa.blockDefinitelyReturns(arm.Body) {
+			return false
+		}
+	}
+	return hasWildcard
+}
+
+// isTrueCondition 判断条件表达式是否为字面 true。
+func isTrueCondition(cond ast.Expression) bool {
+	switch c := cond.(type) {
+	case *ast.BooleanLiteral:
+		return c.Value
+	case *ast.Identifier:
+		return c.Name == "true"
+	}
+	return false
+}
+
+// blockContainsBreak 判断语句块内（含嵌套 if 分支）是否出现 break。
+// 注意：嵌套循环里的 break 属于内层循环，此处保守地视为"外层可能被跳出"
+// ——宁可少认定 noreturn，也不会产生误报方向的错误。
+func blockContainsBreak(stmts []ast.Statement) bool {
+	for _, s := range stmts {
+		switch st := s.(type) {
+		case *ast.BreakStatement:
+			return true
+		case *ast.IfStatement:
+			if blockContainsBreak(st.Body) || blockContainsBreak(st.Else) {
+				return true
+			}
+		case *ast.BlockStatement:
+			if blockContainsBreak(st.Statements) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNoReturnCall 判断表达式是否为对 #[noreturn] 函数的裸名调用。
+// 用于 missing_return 的路径终结判定（如 fn die() i32 #[noreturn]）。
+func (sa *SemanticAnalyzer) isNoReturnCall(expr ast.Expression) bool {
+	call, ok := expr.(*ast.CallExpression)
+	if !ok || call == nil {
+		return false
+	}
+	id, ok := call.Function.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	if fn := sa.findFunctionDeclaration(id.Name); fn != nil {
+		return ast.HasAttribute(fn.Attributes, "noreturn")
 	}
 	return false
 }

@@ -1,0 +1,15 @@
+import std.io
+
+# p9_missing_return.kl — 前端严格化负向用例（missing_return）
+# 非 void 函数存在不经过 return 的执行路径（if 无 else 且 then 返回），
+# 期望 sema 报 missing_return 并 fail-fast，codegen/clang 不再运行。
+fn pick(flag: bool) i32 {
+    if flag {
+        return 1
+    }
+}
+
+fn main() {
+    i32 v = pick(true)
+    std.io.println(v)
+}
