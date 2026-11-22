@@ -1,8 +1,18 @@
 # Kaula 前端严格化方案（Parser + Sema 前置拦截）
 
-> 状态：Draft · 2026-10-25
+> 状态：**Accepted**（2026-11-22 验收通过）
 > 作者：壹米佰叁（zhe116）
 > 目标：把"错误漏到 codegen / clang 才炸"的路径，收敛为"前端第一时间报错并 fail-fast"。
+>
+> **验收记录（2026-11-22）**：§1.2 表格 7 个漏报用例全部前端拦截（`test/errors/p*.kl`
+> 9 个负向用例逐一验证错误码）；fail-fast gate 生效（前端有错即中止，无
+> `Generated Code` 输出）；`scripts/run_tests.py --quick` 128/128 全绿；
+> `test/redecl_sibling_blocks.kl` 验证兄弟块兼容路径。
+> 与原方案的偏差：`redeclaration` 因 if/while/for 体不创建符号表作用域，
+> 采用**块路径跟踪**区分"可见作用域内重复声明（错误）"与"兄弟块复用变量名
+> （警告）"，见 `sema.checkRedeclaration`；`missing_return` 以错误级别直接
+> 实现（保守路径分析，豁免 `#[noreturn]`/`#[test]`）；P2 的 `--strict`
+> 开关尚未实现，作为遗留项。
 
 ---
 

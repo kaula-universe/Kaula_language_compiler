@@ -214,6 +214,52 @@ Warning at line 25, column 5: unused variable 'temp'
 Suggestion: Remove unused variable or use it
 ```
 
+## 前端严格化错误码
+
+前端（sema）在 codegen 之前拦截的自有错误码。任何前端错误都会触发
+fail-fast gate：打印诊断后直接退出，codegen 与 clang 不再运行。
+方案细节见 [frontend-strictness-plan.md](frontend-strictness-plan.md)。
+
+### 错误（阻止编译）
+
+| 错误码 | 触发场景 |
+|---|---|
+| `wrong_arg_count_local` | 本地函数实参数量 ≠ 形参数量 |
+| `arg_type_mismatch` | 本地函数实参类型不兼容形参（整数/浮点家族互通，其余报错） |
+| `return_type_mismatch` | return 表达式类型 ≠ 函数声明返回类型 |
+| `return_value_in_void_fn` | void 函数 return 带表达式 |
+| `no_such_field` | 访问 struct/class 不存在的字段（带相似字段提示） |
+| `assign_type_mismatch` | 赋值左右类型不兼容 |
+| `redeclaration` | 同一可见作用域重复声明同名变量（见下方说明） |
+| `calling_non_callable` | 调用非函数类型的标识符 |
+| `missing_return` | 非 void 函数存在不经过 return 的执行路径 |
+
+> **redeclaration 的判定**：Kaula 的 if/while/for 体不创建新符号表作用域，
+> 编译器用块路径跟踪区分两种情况——上一次声明在当前块或祖先块 → **错误**；
+> 上一次声明在兄弟控制流块（如前一个循环体）→ 仅警告（正向回归用例
+> `test/redecl_sibling_blocks.kl`）。
+>
+> **missing_return 的豁免**：`#[noreturn]`、`#[test]` 函数豁免。路径分析
+> 保守识别：顶层 return、if/else 双分支均返回、match 全分支返回且有 `_`
+> 兜底、`while true` 无 break、调用 `#[noreturn]` 函数；识别不了的形态
+> 按"可能不返回"处理（宁可多报，不放过未定义返回值）。
+
+### 警告（不阻止编译）
+
+| 警告码 | 触发场景 |
+|---|---|
+| `redeclaration` | 兄弟控制流块之间复用变量名（合法但可读性差） |
+| `ifchain_match` | if-else if 链连续对同一变量做 == 比较，建议改用 match |
+| `uninitialized` | 变量声明未初始化 |
+| `unreachable_code` | return 之后的不可达语句 |
+| `empty_body` | if/while 空语句体 |
+| `unused_but_set` / `unused_value` / `literal_range` 等 | 未使用/未读取、纯值语句、字面量超范围 |
+
+### 负向回归用例
+
+`test/errors/p*.kl`（9 个用例，每个断言精确错误码，均在前端拦截）；
+兄弟块兼容路径的正向回归为 `test/redecl_sibling_blocks.kl`。
+
 ## 最佳实践
 
 1. **收集所有错误**：不要在第一个错误时停止

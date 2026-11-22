@@ -9,7 +9,28 @@
 
 ## [Unreleased]
 
+### Changed
+- **`redeclaration` 升级为错误（前端严格化收尾）**：同一可见作用域重复声明
+  同名变量从前端警告升级为**错误**（frontend-strictness-plan §3.2.6 验收）。
+  由于 Kaula 的 if/while/for 体不创建新符号表作用域，sema 新增**块路径跟踪**
+  （`blockPath`/`declBlocks`）区分两种情况：上一次声明在当前块或祖先块 →
+  错误（两次声明覆盖同一符号表条目，块结束后引用会拿到新类型，属类型混淆
+  隐患）；上一次声明在兄弟控制流块（如两个循环各自声明 i）→ 保留警告（合法
+  写法，历史代码大量依赖）。块入口统一 `pushBlock/popBlock`：显式 `{ }` 块、
+  if/else 分支、while/for-in 体、prefix/tree 体。正向兼容回归
+  `test/redecl_sibling_blocks.kl`；负向用例 `test/errors/p7_redecl.kl`。
+
 ### Added
+- **`missing_return` 前端错误（frontend-strictness-plan §3.2.3 末段升级）**：
+  非 void 函数存在不经过 return 的执行路径时，sema 直接报错并 fail-fast——
+  旧流程该错误漏到 clang 只给 `-Wreturn-type` 警告，函数末尾落空、返回值
+  未定义。路径分析保守识别：顶层 return、if/else 双分支均返回、match 全
+  分支返回且有 `_` 兜底、`while true` 无 break、调用 `#[noreturn]` 函数；
+  识别不了的形态按"可能不返回"处理（宁可多报，不放过未定义返回值）。
+  豁免 `#[noreturn]` / `#[test]`。负向用例 `test/errors/p9_missing_return.kl`。
+- **`docs/frontend-strictness-plan.md` 状态 Draft → Accepted**（2026-11-22
+  验收记录）；`docs/error-handling.md` 增补"前端严格化错误码"一节
+  （9 个错误码 + 警告码表 + redeclaration/missing_return 判定说明）。
 - **全标准库 adopt 胶水层**：为 39 个 std 模块补齐模块级 `.kl` 胶水层（`std/<mod>/<mod>.kl`），
   用 `type X = adopt X*` 包装各模块特有的不透明句柄（JsonValue/Regex/DBConnection/Socket/
   TLSContext/SSHSession/HttpServer 等 70+ 类型），运行时零成本（C 侧即底层指针），编译期
