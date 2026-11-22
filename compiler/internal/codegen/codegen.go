@@ -3193,7 +3193,7 @@ _Static_assert(sizeof(long) == 4, "LLP64: long is 4 bytes, never treat it as 64-
 		resultBuilder.WriteString(forwardDecls.String())
 		resultBuilder.WriteString("\n")
 
-		globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1 + strings.Count(forwardDecls.String(), "\n") + 2
+		globalOffset = typeOffset + strings.Count(typeCode.String(), "\n") + 1 + strings.Count(forwardDecls.String(), "\n") + 1
 		resultBuilder.WriteString(globalVars.String())
 		resultBuilder.WriteString("\n")
 
@@ -3218,7 +3218,20 @@ _Static_assert(sizeof(long) == 4, "LLP64: long is 4 bytes, never treat it as 64-
 			resultBuilder.WriteString("\n")
 		}
 
+		// funcOffset 必须计入 globalVars 与 functionCode 之间的全部插入段
+		// （classGlobalVars / deepPromoteCBBlock / classImplCode），否则含 class
+		// 的文件里 func/main 条目会额外漂移。换算基数：globalOffset 为
+		// globalVars 首行，"+1" 是 globalVars 后的空行。
 		funcOffset = globalOffset + strings.Count(globalVars.String(), "\n") + 1
+		if classGlobalVars.Len() > 0 {
+			funcOffset += 1 + strings.Count(classGlobalVars.String(), "\n")
+		}
+		if cg.deepPromoteCBBlock != "" {
+			funcOffset += strings.Count(cg.deepPromoteCBBlock, "\n") + 1
+		}
+		if cg.classImplCode.Len() > 0 {
+			funcOffset += 1 + strings.Count(cg.classImplCode.String(), "\n") + 1
+		}
 		// class 全局变量初始化 + 顶层可执行语句注入 main 函数体开头 (运行时构造)
 		//
 		// 顶层语句（tree/prefix 语句、函数外的普通调用等）在"无 fn main"的分支里由
@@ -3273,6 +3286,15 @@ _Static_assert(sizeof(long) == 4, "LLP64: long is 4 bytes, never treat it as 64-
 		result = resultBuilder.String()
 	}
 
+	// 版本头注释：编译器版本 (version.json) + 项目版本 (kaula.json "version" 字段)。
+	// 产物溯源用；两者均缺失时也输出生成时间。
+	//
+	// 源码映射的 generated_line 必须指向**最终写盘文件**的真实行号，因此 banner
+	// 必须先于映射条目换算前置：此前 banner 在换算之后才插入，所有条目系统性
+	// 偏移 -bannerLines（无 project version 时 -5）。
+	bannered := prependVersionBanner(result, cg.config)
+	bannerLines := strings.Count(bannered[:len(bannered)-len(result)], "\n")
+
 	cg.sourceMap = NewSourceMap(cg.sourceFile, "")
 	for _, e := range rawEntries {
 		var genLine int
@@ -3287,13 +3309,11 @@ _Static_assert(sizeof(long) == 4, "LLP64: long is 4 bytes, never treat it as 64-
 			genLine = mainOffset + e.relLine - 1
 		}
 		if genLine > 0 {
-			cg.sourceMap.AddEntry(genLine, cg.sourceFile, e.srcLine, e.srcCol, e.kind, e.symbol)
+			cg.sourceMap.AddEntry(genLine+bannerLines, cg.sourceFile, e.srcLine, e.srcCol, e.kind, e.symbol)
 		}
 	}
 
-	// 版本头注释：编译器版本 (version.json) + 项目版本 (kaula.json "version" 字段)。
-	// 产物溯源用；两者均缺失时也输出生成时间。
-	result = prependVersionBanner(result, cg.config)
+	result = bannered
 
 	if os.Getenv("KAULAC_DUMP") != "" && cg.sourceFile != "" {
 		base := strings.ReplaceAll(filepath.Base(cg.sourceFile), ".kl", "")
