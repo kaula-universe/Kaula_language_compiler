@@ -4699,6 +4699,29 @@ func (p *Parser) looksLikeStructLiteralBody() bool {
 	return p.speculativeStructFieldList()
 }
 
+// looksLikeUnambiguousStructLiteralBody 判断 `{ ... }` 是否是**无歧义**的
+// 结构体字面量形态（空体 / .field / field:）。与 looksLikeStructLiteralBody
+// 的区别：不做 speculativeStructFieldList 整段推测——`field = value` 形态
+// 与块内赋值语句序列无法区分，交给调用方按大小写约定决策。
+func (p *Parser) looksLikeUnambiguousStructLiteralBody() bool {
+	if p.curTok.Type != lexer.TOKEN_LBRACE {
+		return false
+	}
+	// 空体：Type{}
+	if p.peekTok.Type == lexer.TOKEN_RBRACE {
+		return true
+	}
+	// 点号字段：{ .x = 1 }
+	if p.peekTok.Type == lexer.TOKEN_DOT {
+		return true
+	}
+	// 冒号字段：{ x: 1 }
+	if p.peekTok.Type == lexer.TOKEN_IDENT && p.looksLikeColonFieldStart() {
+		return true
+	}
+	return false
+}
+
 // looksLikeColonFieldStart 判断当前 token 是否是 `ident :` 形态（冒号字段开头）。
 // 调用时 curTok 是 '{'、peekTok 是标识符。只读前瞻，不改 token 位置。
 func (p *Parser) looksLikeColonFieldStart() bool {
@@ -4855,8 +4878,21 @@ func (p *Parser) parseIdentifierIterative() ast.Expression {
 	//      直接跳过字面量判定——{ 是块的左花括号，不是字面量的开始。
 	//   2. 其余场景下，用 looksLikeStructLiteralBody() 做整段推测，
 	//      只有 { 内部确实是字段列表形态才算结构体字面量。
-	if p.curTok.Type == lexer.TOKEN_LBRACE && len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' && p.blockDepth == 0 && p.looksLikeStructLiteralBody() {
-		return p.parseStructLiteralWithType(name, pos)
+	//
+	// 类型名首字母的约定：大写开头保持完整判定（含 speculative 的 field=
+	// 形态，守护用例 TestCapitalizedTailOperandIsNotStructLiteral）；**小写
+	// 开头只认无歧义形态（{ } / { .x = ... } / { x: ... }）**。此前小写
+	// 名一律不走字面量分支，导致小写类型名的结构体字面量被解析成裸
+	// Identifier + 语句块，报出一串 unexpected COLON 级联——而小写命名
+	// 的 struct 声明本身合法，报错与用户写的类型毫无关系。
+	if p.curTok.Type == lexer.TOKEN_LBRACE && len(name) > 0 && p.blockDepth == 0 {
+		if name[0] >= 'A' && name[0] <= 'Z' {
+			if p.looksLikeStructLiteralBody() {
+				return p.parseStructLiteralWithType(name, pos)
+			}
+		} else if p.looksLikeUnambiguousStructLiteralBody() {
+			return p.parseStructLiteralWithType(name, pos)
+		}
 	}
 
 	return p.parsePostfixChain(expr)

@@ -690,6 +690,7 @@ func (s *localCompileState) compileFile(localPath string, inputDir string) {
 	localAnalyzer.SetLocalPubVars(collectLocalPubVars(localProgram, depDir))
 	localAnalyzer.SetLocalPubTypes(localPubTypes)
 	prefixStmts, prefixFuncs := collectLocalPrefixDefs(localProgram, depDir)
+	flushLocalImportParseErrors(s.errorCollector)
 	if len(prefixStmts) > 0 || len(prefixFuncs) > 0 {
 		localAnalyzer.SetLocalExternalPrefixes(prefixStmts, prefixFuncs)
 	}
@@ -1974,6 +1975,11 @@ func main() {
 	}
 
 	localPrefixStmts, localPrefixFuncs := collectLocalPrefixDefs(program, inputDir)
+
+	// 导入文件解析错误在此注入共享收集器：collectLocal* 各自独立解析被导入
+	// 文件，此前失败被静默丢弃，主文件只报 undefined_function。注入后
+	// fail-fast gate 会把语法错误与语义错误一起呈现。
+	flushLocalImportParseErrors(errorCollector)
 
 	concurrentSemanticAnalysisWithConfig(program, stdlibPath, stdlibConfig, errorCollector, cfg.SOR, cfg.Freestanding, localPubFuncs, localAllFuncs, localPubVars, localPubTypes, localPrefixStmts, localPrefixFuncs)
 	stage2Time := time.Since(stage2Start)
@@ -3725,6 +3731,45 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// localImportParseErrs 暂存本地 import 文件的解析错误。
+//
+// collectLocal* 系列助手在语义分析之前解析被导入的 .kl 文件，此前解析失败
+// 被静默 continue——导入文件的语法错误被整体丢弃，主文件侧只报得出
+// undefined_function（符号收集为空），真正的病根一行都看不见。
+// 这里把每次局部解析的错误暂存，由 flushLocalImportParseErrors 在 fail-fast
+// gate 之前注入共享 errorCollector，语法错误与语义错误一起呈现。
+// 以 file:line:col:message 为键去重：同一文件会被多个 collect* 助手重复解析。
+var localImportParseErrs []*errors.Error
+
+// noteLocalImportParseErrors 把局部 parser 的解析错误暂存进全局列表。
+func noteLocalImportParseErrors(localParser *parser.Parser) {
+	if localParser.GetErrorCollector() == nil {
+		return
+	}
+	localImportParseErrs = append(localImportParseErrs, localParser.GetErrorCollector().Errors()...)
+}
+
+// flushLocalImportParseErrors 把暂存的导入文件解析错误注入共享收集器。
+// 调用时机：所有 collectLocal* 完成后、fail-fast gate 之前。
+func flushLocalImportParseErrors(ec *errors.ErrorCollector) {
+	if len(localImportParseErrs) == 0 || ec == nil {
+		return
+	}
+	seen := make(map[string]bool)
+	for _, e := range localImportParseErrs {
+		if e == nil {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d:%d:%s", e.File, e.Line, e.Column, e.Message)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		ec.AddErrorInstance(e)
+	}
+	localImportParseErrs = nil
+}
+
 // collectLocalPubFuncs 扫描本地 import 的 .kl 文件，收集 pub/export 函数名
 // （在语义分析之前解析，使跨文件调用不被判为未定义）
 func collectLocalPubFuncs(program *ast.Program, inputDir string) map[string]bool {
@@ -3749,6 +3794,9 @@ func collectLocalImportSymbols(program *ast.Program, inputDir string) (pubFuncs,
 	pubFuncs = make(map[string]bool)
 	exportSet = make(map[string]bool)
 
+	// 循环 import 防护：self-import / 互 import 会造成无限递归（其余
+	// collectLocal* 助手均有 seen 表，唯独这条合并扫描路径漏了）。
+	seen := make(map[string]bool)
 	var visit func(p *ast.Program, dir string)
 	visit = func(p *ast.Program, dir string) {
 		for _, stmt := range p.Statements {
@@ -3763,6 +3811,11 @@ func collectLocalImportSymbols(program *ast.Program, inputDir string) (pubFuncs,
 						absPath = candidate
 					}
 				}
+				absPath = filepath.Clean(absPath)
+				if seen[absPath] {
+					continue
+				}
+				seen[absPath] = true
 				data, err := os.ReadFile(absPath)
 				if err != nil {
 					continue
@@ -3774,6 +3827,7 @@ func collectLocalImportSymbols(program *ast.Program, inputDir string) (pubFuncs,
 				localParser.EnableLogging(false)
 				localProgram := localParser.Parse()
 				if localParser.HasErrors() {
+					noteLocalImportParseErrors(localParser)
 					continue
 				}
 				for _, s := range localProgram.Statements {
@@ -3829,6 +3883,7 @@ func collectLocalPubFuncReturns(program *ast.Program, inputDir string) map[strin
 				localParser.EnableLogging(false)
 				localProgram := localParser.Parse()
 				if localParser.HasErrors() {
+					noteLocalImportParseErrors(localParser)
 					continue
 				}
 				for _, s := range localProgram.Statements {
@@ -3896,6 +3951,7 @@ func collectLocalPrefixDefs(program *ast.Program, inputDir string) (map[string]*
 				localParser.EnableLogging(false)
 				localProgram := localParser.Parse()
 				if localParser.HasErrors() {
+					noteLocalImportParseErrors(localParser)
 					continue
 				}
 				for _, s := range localProgram.Statements {
@@ -3954,6 +4010,7 @@ func collectLocalAllFuncs(program *ast.Program, inputDir string) map[string]bool
 				localParser.EnableLogging(false)
 				localProgram := localParser.Parse()
 				if localParser.HasErrors() {
+					noteLocalImportParseErrors(localParser)
 					continue
 				}
 				for _, s := range localProgram.Statements {
@@ -4003,6 +4060,7 @@ func collectLocalPubVars(program *ast.Program, inputDir string) map[string]bool 
 				localParser.EnableLogging(false)
 				localProgram := localParser.Parse()
 				if localParser.HasErrors() {
+					noteLocalImportParseErrors(localParser)
 					continue
 				}
 				for _, s := range localProgram.Statements {
@@ -4058,6 +4116,7 @@ func collectLocalPubTypes(program *ast.Program, inputDir string) map[string]*sem
 				localParser.EnableLogging(false)
 				localProgram := localParser.Parse()
 				if localParser.HasErrors() {
+					noteLocalImportParseErrors(localParser)
 					continue
 				}
 				for _, s := range localProgram.Statements {
