@@ -10,6 +10,28 @@
 ## [Unreleased]
 
 ### Fixed
+- **missing_return / unused_value / unused_parameter 误伤表达式级 `#[prefix] fn`**：
+  前端严格化的三个检查都不认识前缀模板体的特殊语义，教程示例
+  prefix-system#12（`#[prefix] fn Lower(c: char) -> i64 { ... base + 'a' }`）
+  连续挂掉 CI 的 `verify_tutorials.py`（95/97）：
+  - **missing_return**：路径分析把模板体当成普通函数体，尾表达式不构成
+    "definitely returns" → 误报错误。修复：`isPrefixFunction(stmt)` 的函数
+    整体豁免——模板体是宏骨架而非函数体（表达式级宏的尾表达式就是宏的
+    返回值；赋值结尾的骨架由 codegen 直译规则处理，生成的同名 C 函数只是
+    "前缀也能当普通函数调用"的兼容壳，真实调用一律走宏展开）。普通函数
+    缺 return 仍受检（保护用例 `TestNormalFnStillRequiresReturn`）。
+  - **unused_value**：宏值表达式（`base + 'a'`）被当成"结果被丢弃"的纯值
+    语句报警告。修复：分析 #[prefix] 函数体时登记"宏值语句"
+    （`prefixValueStmt`），ExpressionStatement 分支跳过该语句。
+  - **unused_parameter**：`$c` 的解析走 `currentPrefixTable` 提前返回，从不
+    经过普通标识符的 Referenced 标记 → 只被 `$name` 引用的形参误报未使用。
+    修复：前缀变量解析成功时同步标记同名形参（`markParameterReferenced`，
+    仅对 parameter/lambda_param 作用域生效，prefix 语句宏语境下 no-op）。
+  回归：`compiler/internal/sema/prefix_fn_sema_test.go`（4 用例）。
+- **`docs/tutorials/variables-and-types.md` const 数组尺寸示例自包含性**：
+  该示例引用了未定义的 `Student` 结构体且函数从未被使用，触发 tutorial
+  检查 variables-and-types#6 编译失败（错误：undefined type）。补齐 struct
+  定义、`import std.io` 与 `main` 调用链，97/97 恢复全绿。
 - **`const` 常量用作数组尺寸编译失败**：parser 把后缀数组声明 `Student roster[capacity]`
   归一化为前缀类型 `"[capacity]Student"`，数组尺寸**原样透传**进生成的 C；而顶层
   `const` 声明被折叠进编译期常量表、不生成任何 C 定义——clang 阶段报

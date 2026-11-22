@@ -119,8 +119,15 @@ fn main() {
 尺寸位置本身只接受标识符，算术请先聚合成常量再引用：
 
 ```kaula
+import std.io
+
 const capacity = 8
 const double_cap = capacity * 2
+
+struct Student {
+    name: string,
+    score: i64
+}
 
 Student roster[capacity]     # 全局：展开为 Student roster[8]
 i64 grid[double_cap]         # 引用链：展开为 i64 grid[16]
@@ -128,6 +135,12 @@ i64 grid[double_cap]         # 引用链：展开为 i64 grid[16]
 fn fill() {
     i64 local[capacity]      # 局部：定长栈声明
     local[0] = 42
+    grid[0] = local[0]
+}
+
+fn main() {
+    fill()
+    std.io.println("grid[0] = ", grid[0])
 }
 ```
 （回归语料见 `test/codegen_member_const_regression.kl`。）
