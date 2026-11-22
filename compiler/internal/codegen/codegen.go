@@ -2208,7 +2208,14 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 			}
 			// 注册全局变量到 codegen 符号表 (成员访问/方法调用需要)
 			cg.AddSymbol(varDecl.Name, varDecl.Type, varDecl.Nullable, "global", varDecl.Pos.Line, varDecl.Pos.Column)
-			initValue := cg.generateExpression(varDecl.Value)
+			// 无初始化器的全局声明（Student roster[8] / i64 calls;）没有 Value 节点。
+			// 此前直接把 nil 传给 generateExpression，触发"未处理的表达式类型 <nil>"
+			// 警告；文件级标量本就零初始化，数组由下方 {0} 兜底，故此处取 "0" 即可
+			// 保持产物与旧行为完全一致，仅消除对 nil 表达式的无效调用。
+			initValue := "0"
+			if varDecl.Value != nil {
+				initValue = cg.generateExpression(varDecl.Value)
+			}
 			// char g[16] = "global";
 			// generateExpression 对字符串字面量一律生成 String 结构体字面量，而定长
 			// char 数组的初始化器必须是 C 字符串字面量。原先只有下面那句
