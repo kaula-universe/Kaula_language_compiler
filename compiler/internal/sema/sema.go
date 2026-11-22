@@ -712,7 +712,8 @@ func (sa *SemanticAnalyzer) markParameterReferenced(name string) {
 }
 
 // analyzeImportStatement 分析导入语句
-func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {	moduleName := stmt.Module
+func (sa *SemanticAnalyzer) analyzeImportStatement(stmt *ast.ImportStatement) {
+	moduleName := stmt.Module
 	if moduleName != "" {
 		sa.symbolTable.AddSymbol(moduleName, "module", false, "global", stmt.Pos.Line, stmt.Pos.Column)
 	}
@@ -5165,7 +5166,7 @@ func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
 		}
 		if sym := sa.symbolTable.GetSymbol(e.Name); sym != nil && sym.Type != "" {
 			name := strings.TrimSuffix(sym.Type, "*")
-			if sa.findClassStmt(name) != nil {
+			if sa.findClassStmt(name) != nil || sa.isKnownStructName(name) {
 				return name
 			}
 		}
@@ -5173,7 +5174,7 @@ func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
 		fieldType := sa.classFieldType(sa.memberObjectClassName(e.Object), e.Member)
 		if fieldType != "" {
 			name := strings.TrimSuffix(fieldType, "*")
-			if sa.findClassStmt(name) != nil {
+			if sa.findClassStmt(name) != nil || sa.isKnownStructName(name) {
 				return name
 			}
 		}
@@ -5182,13 +5183,42 @@ func (sa *SemanticAnalyzer) memberObjectClassName(obj ast.Expression) string {
 }
 
 // classFieldType 在已定义类中查找字段的 Kaula 类型名；找不到时返回空串
+// structFieldType 在已定义 struct 中查找字段的 Kaula 类型名；找不到时返回空串。
+// 与 classFieldType 平行：struct 字段类型此前在 sema 侧完全查不到，
+// `if (r.field)`（bool 字段）会因类型为空报 condition_type。
+func (sa *SemanticAnalyzer) structFieldType(typeName, fieldName string) string {
+	if typeName == "" || sa.structDecls == nil {
+		return ""
+	}
+	st := sa.structDecls[typeName]
+	if st == nil {
+		return ""
+	}
+	for _, f := range st.Fields {
+		if f != nil && f.Name == fieldName {
+			return f.Type
+		}
+	}
+	return ""
+}
+
+// isKnownStructName 判断类型名是否是已声明的 struct
+func (sa *SemanticAnalyzer) isKnownStructName(name string) bool {
+	return sa.structDecls != nil && sa.structDecls[name] != nil
+}
+
+// classFieldType 在已定义类中查找字段的 Kaula 类型名；找不到时返回空串。
+// class 查不到时回落 struct：struct 声明与 class 声明在 sema 侧的字段
+// 类型解析此前只覆盖 class，struct 字段在条件判断等路径类型为空。
 func (sa *SemanticAnalyzer) classFieldType(className, fieldName string) string {
 	if className == "" {
 		return ""
 	}
 	classStmt := sa.findClassStmt(className)
 	if classStmt == nil {
-		return ""
+		// class 查不到时回落 struct：struct 字段类型此前在 sema 侧完全
+		// 查不到，`if (r.field)`（bool 字段）会因类型为空报 condition_type
+		return sa.structFieldType(className, fieldName)
 	}
 	for _, f := range classStmt.Fields {
 		if f != nil && f.Name == fieldName {
