@@ -38,8 +38,10 @@ func TestTUObjectCacheHitSkipsCompile(t *testing.T) {
 	work := t.TempDir()
 	tu := filepath.Join(work, "cache", "tu")
 	os.MkdirAll(tu, 0755)
-	writeTU(t, tu, "main.kl.tu", "int main(){return 0;}")
+	// 入口 TU 由 cache/entry.c 提供（loadTUUnits 固定读它作 main.kl.tu），
+	// 测试不得再手写 main.kl.tu.c，否则入口 TU 重复计数
 	writeTU(t, tu, "a.kl.tu", "int64_t a(void){return 1;}")
+	writeTU(t, tu, "b.kl.tu", "int64_t b(void){return 2;}")
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
@@ -74,7 +76,7 @@ func TestTUObjectCacheHitSkipsCompile(t *testing.T) {
 	if err := runBench(t, work, &counts); err != nil {
 		t.Fatalf("首次构建失败: %v", err)
 	}
-	if counts["a.kl.tu"] != 1 || counts["main.kl.tu"] != 1 {
+	if counts["a.kl.tu"] != 1 || counts["b.kl.tu"] != 1 {
 		t.Fatalf("首次构建应编译全部 TU: %v", counts)
 	}
 
@@ -87,13 +89,13 @@ func TestTUObjectCacheHitSkipsCompile(t *testing.T) {
 		t.Fatalf("无变更构建应全部命中缓存，实际重编: %v", counts)
 	}
 
-	// 触碰 a：只有 a 重编
-	writeTU(t, tu, "a.kl.tu", "int64_t a(void){return 2;}")
+	// 触碰 b：只有 b 重编
+	writeTU(t, tu, "b.kl.tu", "int64_t b(void){return 3;}")
 	counts = map[string]int{}
 	if err := runBench(t, work, &counts); err != nil {
 		t.Fatalf("增量构建失败: %v", err)
 	}
-	if counts["a.kl.tu"] != 1 || counts["main.kl.tu"] != 0 {
+	if counts["b.kl.tu"] != 1 || counts["a.kl.tu"] != 0 {
 		t.Fatalf("增量构建应只重编变更 TU: %v", counts)
 	}
 
@@ -107,7 +109,7 @@ func TestTUObjectCacheCorruptEntryRejected(t *testing.T) {
 	work := t.TempDir()
 	tu := filepath.Join(work, "cache", "tu")
 	os.MkdirAll(tu, 0755)
-	writeTU(t, tu, "main.kl.tu", "int main(){return 0;}")
+	writeTU(t, tu, "a.kl.tu", "int64_t a(void){return 1;}")
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
@@ -159,7 +161,7 @@ func TestTUObjectCacheDisabledByFlag(t *testing.T) {
 	work := t.TempDir()
 	tu := filepath.Join(work, "cache", "tu")
 	os.MkdirAll(tu, 0755)
-	writeTU(t, tu, "main.kl.tu", "int main(){return 0;}")
+	writeTU(t, tu, "a.kl.tu", "int64_t a(void){return 1;}")
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
@@ -209,7 +211,7 @@ func TestTUObjectCacheKeySensitiveToFlags(t *testing.T) {
 	work := t.TempDir()
 	tu := filepath.Join(work, "cache", "tu")
 	os.MkdirAll(tu, 0755)
-	writeTU(t, tu, "main.kl.tu", "int main(){return 0;}")
+	writeTU(t, tu, "a.kl.tu", "int64_t a(void){return 1;}")
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
