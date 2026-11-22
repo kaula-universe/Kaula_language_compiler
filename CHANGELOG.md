@@ -10,6 +10,54 @@
 ## [Unreleased]
 
 ### Fixed
+- **小写开头类型名的结构体字面量解析失败**：`struct m000_rec { ... }` 声明合法，但
+  `m000_rec r = m000_rec { ... }` 被解析成裸 Identifier + 语句块，报出一串
+  `unexpected token: COLON` 级联——parser 的结构体字面量分派硬性要求类型名首字母
+  大写。修复：小写名只认无歧义形态（`{ }` / `{ .x = ... }` / `{ x: ... }`，与语句层
+  语法无歧义），命中即走字面量分支；大写名保持原判定（含 speculative `field=`
+  形态与 blockDepth 防线，守护用例 TestCapitalizedTailOperandIsNotStructLiteral）。
+  回归：`internal/parser/lowercase_struct_literal_test.go`。
+- **本地 import 文件的解析错误被吞**：collectLocal* 系列助手在语义分析之前解析被
+  导入的 .kl 文件，解析失败被静默 `continue`——导入文件的语法错误整体丢弃，主文件
+  只报得出 undefined_function，真正的病根一行都看不见。修复：错误暂存
+  （noteLocalImportParseErrors）并在 fail-fast gate 之前注入共享收集器
+  （flushLocalImportParseErrors），语法错误与语义错误一起呈现。顺带给
+  collectLocalImportSymbols 补上其余助手都有的 seen 防护（循环 import 此前会
+  无限递归）。
+- **struct 字段条件表达式类型为空**：`if (r.active)`（bool 字段）报
+  condition_type 且类型显示为空——memberObjectClassName / classFieldType 在
+  sema 侧只查 class 不查 struct，struct 字段类型完全解析不出来（return 路径
+  只是恰好对空类型宽容）。修复：两者补 structDecls 查询，嵌套 struct 链
+  （o.inner.flag）同步打通；非 bool 条件仍受检。回归：
+  `internal/sema/struct_field_condition_test.go`。
+- **局部二维数组生成的 C 是垃圾**：parser 只消费一组 `[N]`，`i64 g[2][3]` 的
+  第二组泄漏成独立 ArrayLiteral 语句，生成 `((int64_t[]){ 3 });`，clang 报
+  subscripted value is not an array。三处修复：parser 后缀与前缀形式均循环
+  消费多组 `[N]`（类型串按源码顺序，避免逐组前挂的维度翻转）；typegen 的
+  `[N]T` 分支一次性收集全部前缀维度（此前单组递归翻转为 int64_t[3][2]，
+  m[1][2] 静默越界）；splitArrayCType 改用最外层 `[` 拆分（此前多维尺寸
+  "2][3" 被当成 count 误入运行期堆分配路径）。回归：
+  `internal/codegen/multi_dim_array_test.go`。
+- **嵌套函数提升为文件级定义后跨 TU 重名**：两个 .kl 各自的嵌套函数
+  `fn clamp64` 提升后都生成 `int64_t clamp64(...)`（外部链接），multi-TU
+  链接报 multiple definition。修复：嵌套函数统一限定名
+  （kaula_nested_<父路径>_<名>）+ static 存储；调用点/原型/捕获注册按
+  currentNestedPrefix 全路径解析（顶层函数切入 "函数名."，嵌套函数切入
+  "父路径.名."，全路径包含顶层祖先，不同父函数的同名嵌套不再撞名）。
+  同时修复捕获表 key（此前裸名 key 在不同父函数同名嵌套时互相覆盖）。
+  回归：nested_func_hoist_test.go 断言更新 + 既有保护用例全绿。
+- **multi-TU 增量编译缺失（touch 一个文件 = 全量重编）**：TU 产物从不落
+  持久缓存且每次构建无条件清空 objDir——200 个 TU 的项目改一个文件重编
+  26.8s。新增 TU 级对象缓存：键 = SHA256(构建身份 | TU 名 | TU .c 内容哈希)，
+  构建身份覆盖 cc/cmdPrefix/编译 flags/编译器构建戳/PCH 内容；命中直接链接
+  持久 .o（cache/tu-obj/），未命中照常编译并原子写入缓存（tmp+rename）；
+  meta 记录 .o 内容哈希，半写/损坏条目校验时拒绝并回退重编；
+  --no-cache / KAULAC_NO_TU_CACHE=1 关断。实测 200 模块 33.6k 行项目：
+  touch 单文件重建 26.8s → 1.8s（15x）。回归：
+  `cmd/kaulac/multi_tu_cache_test.go`（替身执行器，断言只重编变更 TU、
+  损坏条目拒绝、flags 变化失效、关断开关）。
+
+### Fixed（历史）
 - **missing_return / unused_value / unused_parameter 误伤表达式级 `#[prefix] fn`**：
   前端严格化的三个检查都不认识前缀模板体的特殊语义，教程示例
   prefix-system#12（`#[prefix] fn Lower(c: char) -> i64 { ... base + 'a' }`）
