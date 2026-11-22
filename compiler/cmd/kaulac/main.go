@@ -4470,7 +4470,12 @@ func compileMultiTU(cacheFile, outputFile, workDir, tuDir, entrySrc string, used
 	if err := compileCCodePlan(cacheFile, outputFile, workDir, usedModules, entrySrc, stdlibConfig, optLevel, poolCapacity, cfg, &plan); err != nil {
 		return err
 	}
-	return runMultiTU(plan.Args, plan.Cmd, plan.Prefix, cacheFile, outputFile, workDir, tuDir)
+	// TU 级对象缓存：--no-cache / KAULAC_NO_TU_CACHE=1 关断
+	tuNoCache := cfg != nil && cfg.NoCache
+	if os.Getenv("KAULAC_NO_TU_CACHE") == "1" {
+		tuNoCache = true
+	}
+	return runMultiTU(plan.Args, plan.Cmd, plan.Prefix, cacheFile, outputFile, workDir, tuDir, tuExec, tuNoCache, nil)
 }
 
 func compileCCode(cFile, outputFile, workDir string, usedModules []string, cCodeInMemory string, stdlibConfig *stdlib.StdlibConfig, optLevel string, poolCapacity int, cfg *config.Config) error {

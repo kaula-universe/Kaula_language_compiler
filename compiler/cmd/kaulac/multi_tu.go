@@ -232,6 +232,12 @@ func compileArgsForTU(flags []string, src, obj string) []string {
 // execFn 执行一个编译器命令（测试可替换）
 type execFn func(dir string, args []string) (string, error)
 
+// tuExec 当前生效的执行器（测试可替换为替身以断言 TU 编译次数）。
+var tuExec execFn = execCmd
+
+// tuCacheDisabled 关断 TU 级对象缓存（cfg.NoCache 或环境变量控制）。
+var tuCacheDisabled bool
+
 // execCmd 生产环境执行器：与单 TU 路径共用 compilerCommand（工具链环境一致）。
 func execCmd(dir string, args []string) (string, error) {
 	if len(args) == 0 {
@@ -243,13 +249,90 @@ func execCmd(dir string, args []string) (string, error) {
 	return string(out), err
 }
 
+// ---------- TU 级对象缓存 ----------
+//
+// 键 = SHA256(buildIdentity | TU 名 | TU 的 .c 内容哈希)。buildIdentity 覆盖
+// cc/cmdPrefix/编译 flags/编译器构建戳/PCH 内容——其中任何一项变化，旧 .o
+// 全部失效。命中时链接直接引用持久缓存里的 .o（cache/tu-obj/<key>.o），
+// 未命中则照常 clang -c，产物经 tmp+rename 原子写入缓存。
+// meta 记录 .o 的内容哈希：半写/损坏条目在校验时被拒绝，回退重编。
+
+func tuObjHashBytes(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+func tuObjHashFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return tuObjHashBytes(data), nil
+}
+
+// tuObjBuildIdentity 汇总所有"跨 TU 相同"的缓存键成分。
+func tuObjBuildIdentity(cc string, cmdPrefix, compileFlags []string, pchPath string) string {
+	parts := []string{cc}
+	parts = append(parts, cmdPrefix...)
+	parts = append(parts, compileFlags...)
+	parts = append(parts, compilerBuildStamp())
+	if pchPath != "" {
+		if h, err := tuObjHashFile(pchPath); err == nil {
+			parts = append(parts, "pch="+h)
+		} else {
+			// PCH 不可读（理论上不会出现）：把路径本身混入，保守失效
+			parts = append(parts, "pchpath="+pchPath)
+		}
+	}
+	return tuObjHashBytes([]byte(strings.Join(parts, "\x00")))
+}
+
+// tuObjCacheLookup 探测缓存。命中返回 .o 路径，未命中返回空串。
+// meta 中的 .o 内容哈希不匹配（半写/损坏）视为未命中。
+func tuObjCacheLookup(cacheDir, key string) string {
+	objPath := filepath.Join(cacheDir, key+".o")
+	metaPath := filepath.Join(cacheDir, key+".meta")
+	want, err := os.ReadFile(metaPath)
+	if err != nil || len(want) == 0 {
+		return ""
+	}
+	got, err := tuObjHashFile(objPath)
+	if err != nil || got != strings.TrimSpace(string(want)) {
+		return ""
+	}
+	return objPath
+}
+
+// tuObjCacheStore 把编译产物原子写入缓存（tmp + rename），并写 meta。
+// 任一步失败静默放弃（缓存不可用等价于回到全量重编）。
+func tuObjCacheStore(cacheDir, key, obj string) {
+	data, err := os.ReadFile(obj)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return
+	}
+	tmp := filepath.Join(cacheDir, key+".tmp")
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	final := filepath.Join(cacheDir, key+".o")
+	if err := os.Rename(tmp, final); err != nil {
+		os.Remove(tmp)
+		return
+	}
+	meta := filepath.Join(cacheDir, key+".meta")
+	os.WriteFile(meta, []byte(tuObjHashBytes(data)), 0644)
+}
+
 // compileTUsParallel 并行编译所有 TU，返回对象文件列表（已排序）。
 //
 // 语义保证：
 //   - 每个 TU 只写自己的 .o（名字由 Name 决定），互不干扰；
 //   - 全部 TU 都会被尝试（不因第一个失败就提前返回），错误一次报全；
 //   - 返回的 objs 顺序与输入顺序无关（排序后），链接命令行因此完全确定。
-func compileTUsParallel(units []tuUnit, flags []string, tuDir, objDir string, cmdPrefix []string, jobs int, exec execFn) (objs []string, failures []tuFailure) {
+func compileTUsParallel(units []tuUnit, flags []string, tuDir, objDir string, cmdPrefix []string, jobs int, exec execFn, tuCache *tuObjCache) (objs []string, failures []tuFailure) {
 	if jobs < 1 {
 		jobs = 1
 	}
@@ -272,6 +355,17 @@ func compileTUsParallel(units []tuUnit, flags []string, tuDir, objDir string, cm
 			// 尚未落盘的路径，报错信息是 clang 把整段源码当成文件名。
 			src := filepath.Join(tuDir, u.Name+".c")
 			obj := filepath.Join(objDir, u.Name+".o")
+
+			// TU 级缓存：命中则链接直接引用持久缓存里的 .o，跳过 clang -c
+			if tuCache != nil {
+				if cached := tuCache.lookup(u.Name, src); cached != "" {
+					mu.Lock()
+					objs = append(objs, cached)
+					mu.Unlock()
+					return
+				}
+			}
+
 			args := append([]string(nil), cmdPrefix...)
 			args = append(args, compileArgsForTU(flags, src, obj)...)
 			out, err := exec(tuDir, args)
@@ -285,6 +379,9 @@ func compileTUsParallel(units []tuUnit, flags []string, tuDir, objDir string, cm
 				failures = append(failures, tuFailure{Name: u.Name, Detail: detail})
 				return
 			}
+			if tuCache != nil {
+				tuCache.store(u.Name, src, obj)
+			}
 			objs = append(objs, obj)
 		}()
 	}
@@ -292,6 +389,38 @@ func compileTUsParallel(units []tuUnit, flags []string, tuDir, objDir string, cm
 	sort.Slice(failures, func(i, j int) bool { return failures[i].Name < failures[j].Name })
 	sort.Strings(objs)
 	return objs, failures
+}
+
+// tuObjCache 一个构建批次内的 TU 对象缓存会话。
+type tuObjCache struct {
+	dir      string // 持久缓存目录（cache/tu-obj）
+	identity string // 构建级身份哈希（cc/cmdPrefix/flags/buildStamp/PCH）
+	hits     int
+	misses   int
+}
+
+func (c *tuObjCache) lookup(name, src string) string {
+	srcHash, err := tuObjHashFile(src)
+	if err != nil {
+		return ""
+	}
+	key := tuObjHashBytes([]byte(c.identity + "\x00" + name + "\x00" + srcHash))
+	path := tuObjCacheLookup(c.dir, key)
+	if path != "" {
+		c.hits++
+	} else {
+		c.misses++
+	}
+	return path
+}
+
+func (c *tuObjCache) store(name, src, obj string) {
+	srcHash, err := tuObjHashFile(src)
+	if err != nil {
+		return
+	}
+	key := tuObjHashBytes([]byte(c.identity + "\x00" + name + "\x00" + srcHash))
+	tuObjCacheStore(c.dir, key, obj)
 }
 
 // writeTUSources 把内存中的 TU 源落盘。
@@ -370,7 +499,7 @@ func loadTUUnits(tuDir, entryCFile string) ([]tuUnit, error) {
 // `compilerCommand(compilerCmd, compilerPrefix..., clangArgs...)` 完全一致——
 // 顺序写反会让 clang 把 ccache.exe / clang.exe 当成输入文件，
 // lld-link 报 "unknown file type"。
-func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, outputFile, workDir, tuDir string) error {
+func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, outputFile, workDir, tuDir string, exec execFn, noCache bool, stats *map[string]int) error {
 	linkInputs, _, compileFlags := splitLinkInputs(entryArgs)
 
 	// 链接参数由"编译 flags 去掉输入描述"得到：
@@ -388,12 +517,10 @@ func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, ou
 		return fmt.Errorf("multi-TU: %s 下没有可编译的 TU", tuDir)
 	}
 	objDir := filepath.Join(tuDir, "obj")
-	// 清理上一轮对象：目录名由源内容哈希决定，内容变了就是新目录，本来
-	// 不会有残留；但同一目录在"内容相同、只改了 -D"时会复用，旧的 .o 与
-	// 本次 flags 不匹配。全清最省心，代价只是重编（本来也要重编）。
-	if err := os.RemoveAll(objDir); err != nil {
-		return fmt.Errorf("multi-TU: 清理对象目录失败 (%s): %w", objDir, err)
-	}
+	// objDir 仅作本次构建的 staging（未命中缓存的 TU 写这里）。
+	// 此前每次构建无条件 RemoveAll(objDir) 且从不引用持久产物——touch 一个
+	// .kl 就是全量重编。现在 TU 级缓存放在工作目录 cache/tu-obj/ 下，
+	// 跨构建持久，objDir 清不清都不影响正确性（链接输入以路径为准）。
 	if err := os.MkdirAll(objDir, 0755); err != nil {
 		return fmt.Errorf("multi-TU: 创建对象目录失败 (%s): %w", objDir, err)
 	}
@@ -409,7 +536,36 @@ func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, ou
 	if verboseMode {
 		fmt.Printf("[Multi-TU] %d 个 TU，并行度 %d\n", len(units), tuWorkers(len(units)))
 	}
-	objs, failures := compileTUsParallel(units, compileFlags, tuDir, objDir, prefix, tuWorkers(len(units)), execCmd)
+	// TU 级对象缓存会话：键覆盖 cc/cmdPrefix/flags/构建戳/PCH 内容。
+	// --no-cache / KAULAC_NO_TU_CACHE=1 关断；缓存不可用回退全量重编。
+	var tuCache *tuObjCache
+	if !noCache && !tuCacheDisabled {
+		pchPath := ""
+		for i, a := range compileFlags {
+			if a == "-include-pch" && i+1 < len(compileFlags) {
+				pchPath = compileFlags[i+1]
+				break
+			}
+		}
+		tuCache = &tuObjCache{
+			dir:      filepath.Join(filepath.Dir(cacheFile), "tu-obj"),
+			identity: tuObjBuildIdentity(cc, cmdPrefix, compileFlags, pchPath),
+		}
+	}
+	objs, failures := compileTUsParallel(units, compileFlags, tuDir, objDir, prefix, tuWorkers(len(units)), exec, tuCache)
+	if tuCache != nil && verboseMode && tuCache.hits+tuCache.misses > 0 {
+		fmt.Printf("[Multi-TU] TU 缓存命中 %d/%d\n", tuCache.hits, tuCache.hits+tuCache.misses)
+	}
+	if stats != nil {
+		m := map[string]int{"hits": 0, "misses": 0}
+		if tuCache != nil {
+			m["hits"] = tuCache.hits
+			m["misses"] = tuCache.misses
+		} else {
+			m["misses"] = len(units)
+		}
+		*stats = m
+	}
 	if err := formatTUFailures(len(units), failures); err != nil {
 		return err
 	}
@@ -432,7 +588,7 @@ func runMultiTU(entryArgs []string, cc string, cmdPrefix []string, cacheFile, ou
 	linkArgs = append(linkArgs, rest...)
 	linkArgs = append(linkArgs, linkInputs...)
 
-	out, err := execCmd(workDir, linkArgs)
+	out, err := exec(workDir, linkArgs)
 	if err != nil {
 		return fmt.Errorf("multi-TU: 链接失败: %v\n%s", err, strings.TrimRight(out, "\n"))
 	}
