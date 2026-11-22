@@ -850,7 +850,11 @@ func splitArrayCType(cType string) (elem, count string, ok bool) {
 	if !strings.HasSuffix(t, "]") {
 		return "", "", false
 	}
-	lb := strings.IndexByte(t, '[')
+	// 用**最外层**（最后一个）'[' 拆分：多维数组 "int64_t[2][3]" →
+	// elem="int64_t[2]", count="3"。此前取第一个 '['，多维尺寸 "2][3"
+	// 被当成 count 判非十进制 → 误入运行期堆分配路径，生成
+	// `sizeof(int64_t) * (2][3])` 的非法 C。
+	lb := strings.LastIndexByte(t, '[')
 	if lb <= 0 {
 		return "", "", false
 	}

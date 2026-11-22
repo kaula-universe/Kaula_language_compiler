@@ -307,16 +307,26 @@ func (tg *TypeGenerator) MapKaulaTypeToC(kaulaType string) string {
 	if cType, ok := globalTypeMap[typeLower]; ok {
 		return cType
 	}
-	// 处理固定大小数组类型 [N]type �?转换�?C �?"elemType[N]" 格式
-	// 注意：[N] �?N 必须非空，否则是动态数�?[]type �?指针（见下方 [] 分支�?
+	// 处理固定大小数组类型 [N]type → 转换为 C "elemType[N]" 格式
+	// 注意：[N] 的 N 必须非空，否则是动态数组 []type 或指针（见下方 [] 分支）
+	// 多维数组 [2][3]i64：一次性收集所有连续前缀 [N]，按源码顺序拼接为
+	// "int64_t[2][3]"。此前的单组递归会翻转维度顺序（[2][3]i64 →
+	// int64_t[3][2]），m[1][2] 在 C 侧静默越界。
 	if len(typeLower) > 0 && typeLower[0] == '[' {
-		closeBracket := strings.Index(typeLower, "]")
-		if closeBracket > 1 {
-			arraySize := typeLower[1:closeBracket]
-			// 元素类型保留原始大小写递归映射（用户定义类型可能含大写，如 [4]Entity�?
-			elemType := kaulaType[closeBracket+1:]
-			cElemType := mapElem(elemType)
-			return cElemType + "[" + arraySize + "]"
+		dims := ""
+		rest := kaulaType
+		for len(rest) > 0 && rest[0] == '[' {
+			closeBracket := strings.Index(rest, "]")
+			if closeBracket <= 1 {
+				break
+			}
+			dims += "[" + rest[1:closeBracket] + "]"
+			rest = rest[closeBracket+1:]
+		}
+		if dims != "" {
+			// 元素类型保留原始大小写递归映射（用户定义类型可能含大写，如 [4]Entity）
+			cElemType := mapElem(rest)
+			return cElemType + dims
 		}
 	}
 	if strings.HasPrefix(typeLower, "[]") {

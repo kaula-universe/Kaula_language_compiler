@@ -647,15 +647,24 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 			}
 		}
 	} else if p.curTok.Type == lexer.TOKEN_LBRACKET {
-		// 数组类型 [N]type 或 []type（固定大小数组 / 动态数组）
-		p.nextToken() // consume '['
-		arraySize := ""
-		if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
-			arraySize = p.curTok.Value
+		// 数组类型 [N]type / []type / [N][M]type（固定/动态/多维数组）
+		// 多维：连续消费多组 [N]，按源码顺序拼接（"[2][3]i64"）。
+		prefixDims := ""
+		for p.curTok.Type == lexer.TOKEN_LBRACKET {
+			p.nextToken() // consume '['
+			arraySize := ""
+			if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+				arraySize = p.curTok.Value
+				p.nextToken()
+			}
+			if p.curTok.Type != lexer.TOKEN_RBRACKET {
+				p.lexer.RestoreState(savedLexState)
+				p.curTok = savedCurTok
+				p.peekTok = savedPeekTok
+				return nil
+			}
 			p.nextToken()
-		}
-		if p.curTok.Type == lexer.TOKEN_RBRACKET {
-			p.nextToken()
+			prefixDims += "[" + arraySize + "]"
 		}
 		elemType := ""
 		isElemType := false
@@ -676,7 +685,7 @@ func (p *Parser) parseVariableDeclarationIterative() *ast.VariableDeclaration {
 			return nil
 		}
 		p.nextToken()
-		typeName = "[" + arraySize + "]" + elemType
+		typeName = prefixDims + elemType
 	} else {
 		// 不是类型，恢复 token 并返回 nil
 		p.lexer.RestoreState(savedLexState)
@@ -786,23 +795,35 @@ func (p *Parser) parseVarDeclarator(stmt *ast.VariableDeclaration, baseType stri
 		p.nextToken()
 	}
 
-	// 检查变量名后是否还有数组后缀 - 语法: Type name[N]
+	// 检查变量名后是否还有数组后缀 - 语法: Type name[N] / Type name[N][M]
 	// （与 [N]Type name 前缀形式等价，demo 大量使用后缀形式）
 	// 注意：若类型已用 [N] 前缀形式（typeName 以 [ 开头），不能再有后缀，
 	// 否则会吞掉下一行的前缀数组声明（如 [10]Entity ents 后跟 [3400]f64 zb）。
+	// 多维数组 `i64 g[2][3]` 用循环连续消费多组 [N]，类型串按源码顺序
+	// 前挂："[2][3]i64"（此前只吃一组，第二组 [2] 泄漏成独立的
+	// ArrayLiteral 语句 → 生成的 C 是垃圾 compound literal）。
+	// 外层 if 保持原语义：类型已是前缀形式（[ 开头）时不吃任何后缀；
+	// 进入后缀消费后，同一声明符的多组 [N] 由内层循环连续处理。
 	if p.curTok.Type == lexer.TOKEN_LBRACKET && !strings.HasPrefix(stmt.Type, "[") {
-		p.nextToken() // consume '['
-		arraySize := ""
-		if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
-			arraySize = p.curTok.Value
-			p.nextToken()
+		// 维度按源码顺序收集后一次性前挂：`i64 g[2][3]` → "[2][3]i64"。
+		// （逐组前挂会得到 "[3][2]i64"，维度顺序翻转。）
+		dims := ""
+		for p.curTok.Type == lexer.TOKEN_LBRACKET {
+			p.nextToken() // consume '['
+			arraySize := ""
+			if p.curTok.Type == lexer.TOKEN_LITERAL_INT || p.curTok.Type == lexer.TOKEN_IDENT {
+				arraySize = p.curTok.Value
+				p.nextToken()
+			}
+			if p.curTok.Type == lexer.TOKEN_RBRACKET {
+				p.nextToken()
+				dims += "[" + arraySize + "]"
+			} else {
+				p.error("expected ']' after array size")
+				break
+			}
 		}
-		if p.curTok.Type == lexer.TOKEN_RBRACKET {
-			p.nextToken()
-			stmt.Type = "[" + arraySize + "]" + stmt.Type
-		} else {
-			p.error("expected ']' after array size")
-		}
+		stmt.Type = dims + stmt.Type
 	}
 
 	// 检查是否有赋值
