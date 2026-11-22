@@ -42,6 +42,8 @@ test/**
 test/*.exe
 test/**/*.exe
 test/*.o
+# 并发专项测试的编译缓存（.c/.meta 产物，运行 run_tests.py 生成）
+test/concurrency/cache/
 docs/tutorials/examples/*.exe
 docs/tutorials/examples/cache/
 demo/*.exe

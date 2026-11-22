@@ -1,0 +1,87 @@
+// 回归：本轮 codegen 修复的四类缺陷
+//
+// 1. const 常量用作全局/局部数组尺寸（此前 clang 报
+//    use of undeclared identifier 'capacity'）；
+// 2. 数组元素的字段访问 roster[i].name 的类型推断（此前
+//    println 生成 (int64_t)(String 强转)、== 生成非法的
+//    String == String 结构体比较）；
+// 3. 无初始化器全局声明把 nil 表达式传入 generateExpression
+//    （此前触发"未处理的表达式类型 <nil>"警告）；
+// 4. sourcemap 行号系统性偏移（由 codegen 包
+//    TestSourceMapGeneratedLinePointsAtRealLines 锁定，本文件不覆盖）。
+import std.io
+
+const capacity = 8
+const double_cap = capacity * 2
+
+struct Student {
+    name: string,
+    score: i64
+}
+
+// 无初始化器的全局数组与标量（缺陷 3 的触发形态）
+Student roster[capacity]
+i64 grid[double_cap]
+i64 count = 0
+
+fn add_student(string name, i64 score) {
+    roster[count].name = name
+    roster[count].score = score
+    count = count + 1
+}
+
+fn find_student(string name) i64 {
+    for i in range(count) {
+        // 缺陷 2：数组元素字段访问的 == 必须走 strcmp 分支
+        if (roster[i].name == name) {
+            return i
+        }
+    }
+    return -1
+}
+
+fn main() {
+    // 缺陷 1：const 尺寸（含 const 算术链）解析为字面值
+    if (double_cap != 16) {
+        std.io.println("FAIL const arithmetic chain, double_cap = ", double_cap)
+        return
+    }
+
+    // 缺陷 2：println 对数组元素 string 字段的类型码必须按字符串处理
+    add_student("alice", 92)
+    add_student("bob", 55)
+    std.io.println(roster[0].name, " ", roster[0].score)
+
+    if (roster[0].score != 92 || roster[1].score != 55) {
+        std.io.println("FAIL struct field values corrupted")
+        return
+    }
+    if (roster[0].name != "alice" || roster[1].name != "bob") {
+        std.io.println("FAIL struct string fields corrupted")
+        return
+    }
+
+    // 缺陷 2：字段比较的 strcmp 分支
+    if (find_student("alice") != 0) {
+        std.io.println("FAIL find_student(alice) = ", find_student("alice"))
+        return
+    }
+    if (find_student("bob") != 1) {
+        std.io.println("FAIL find_student(bob) = ", find_student("bob"))
+        return
+    }
+    if (find_student("missing") != -1) {
+        std.io.println("FAIL find_student(missing) should be -1")
+        return
+    }
+
+    // 缺陷 1（局部）：const 尺寸的局部数组走定长栈声明
+    i64 local[capacity] = [0, 0, 0, 0, 0, 0, 0, 42]
+    local[7] = 7
+    if (local[0] != 0 || local[6] != 0 || local[7] != 7) {
+        std.io.println("FAIL const-sized local array corrupted")
+        return
+    }
+
+    std.io.println("PASS all codegen regression checks")
+}
