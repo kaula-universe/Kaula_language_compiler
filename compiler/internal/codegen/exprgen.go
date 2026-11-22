@@ -2550,6 +2550,10 @@ func (eg *ExpressionGenerator) indexElementKaulaType(obj ast.Expression) string 
 		if sym := eg.codegen.currentScope.GetSymbol(o.Name); sym != nil {
 			t = sym.Type
 		}
+	case *ast.IndexExpression:
+		// 多维数组/嵌套索引 matrix[i][j]：外层对象的元素类型递归自内层，
+		// 下方的前缀剥离再剥掉一层（"[M][N]T" → "[M]T" → 最终按调用层数收敛）
+		t = eg.indexElementKaulaType(o.Object)
 	}
 	t = strings.TrimSpace(t)
 	// string 的下标产出的是 char，不是 string。不特判的话上面会原样返回
@@ -2771,6 +2775,18 @@ func (eg *ExpressionGenerator) memberObjectClassName(obj ast.Expression) string 
 		// 链式调用的中间结果：f(...).m(...) / obj.m(...).n(...)
 		if t := isKnownType(eg.callResultTypeName(e)); t != "" {
 			return t
+		}
+	case *ast.IndexExpression:
+		// 数组元素的字段访问 roster[i].name：先解析出索引对象的元素类型
+		// （[8]Student → Student），否则 memberFieldKaulaType 返回空、
+		// println 的格式码推断回落为整数，生成 (int64_t)(String 结构体)
+		// 导致 clang 报 operand of type 'String' where arithmetic ... required；
+		// 同理 roster[i].name == name 落不到 strcmp 分支，生成非法的
+		// 结构体 == 比较。
+		if elem := eg.indexElementKaulaType(e.Object); elem != "" {
+			if t := isKnownType(elem); t != "" {
+				return t
+			}
 		}
 	}
 	return ""
