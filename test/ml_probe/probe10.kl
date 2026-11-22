@@ -1,0 +1,28 @@
+import std.io
+
+export class Point {
+    x: f64
+    y: f64
+    z: f64
+    w: f64
+
+    constructor(f64 x, f64 y, f64 z, f64 w) {
+        self.x = x
+        self.y = y
+        self.z = z
+        self.w = w
+    }
+}
+
+export class Test {
+    p: Point
+
+    constructor() {
+        self.p = Point(1.0, 2.0, 3.0, 4.0)
+        std.io.println("p = (", self.p.x, ", ", self.p.y, ", ", self.p.z, ", ", self.p.w, ")")
+    }
+}
+
+fn main() {
+    Test t = Test()
+}

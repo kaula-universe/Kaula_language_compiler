@@ -1,0 +1,25 @@
+import std.memory
+
+export class A {
+    x: f64
+    y: f64
+
+    constructor(f64 x, f64 y) {
+        self.x = x
+        self.y = y
+    }
+}
+
+export class B {
+    cnt: i32
+    items: A*
+
+    constructor(i32 n) {
+        self.cnt = n
+        self.items = as<A*>(std.memory.kmm_v4_calloc(n, 64))
+        for i in range(n) {
+            A a = A(i, i + 1)
+            self.items[i] = a
+        }
+    }
+}

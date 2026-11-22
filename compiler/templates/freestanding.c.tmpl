@@ -1,0 +1,84 @@
+{{includes}}
+
+// 裸机字符串类型（与 std/base/types.h、freestanding/base/types.h 逐字一致；
+// 若外部头已定义则跳过）
+#ifndef KAULA_STRING_DEFINED
+#define KAULA_STRING_DEFINED
+// SSO 布局必须与官方头一致：代码生成器按 (String){.len=..,.sso=".."} 产出
+// 字符串字面量并用 string_cdata() 解包实参。若这里只有 .ptr，freestanding
+// 下任何用到 Kaula string 的程序都会编译失败（field designator 'sso' /
+// undeclared function 'string_cdata'）。
+typedef struct {
+    size_t len;
+    union {
+        char* ptr;       // len > 15 时使用堆指针
+        char sso[16];    // len <= 15 时使用内嵌缓冲区（15字节 + null）
+    };
+} String;
+#endif
+
+// SSO 感知解包宏（幂等：外部头已定义则跳过；与 codegen includes 兜底一致）
+#ifndef STRING_SSO_CAPACITY
+#define STRING_SSO_CAPACITY 15
+#endif
+#ifndef string_data
+#define string_data(s) ((s).len <= STRING_SSO_CAPACITY ? (char*)(s).sso : (char*)(s).ptr)
+#endif
+#ifndef string_cdata
+#define string_cdata(s) ((s).len <= STRING_SSO_CAPACITY ? (const char*)(s).sso : (const char*)(s).ptr)
+#endif
+
+{{forward_decls}}
+{{type_code}}
+{{global_vars}}
+{{function_code}}
+
+// ==================== 裸机入口 ====================
+// 入口函数名由 kaulac --entry 指定（默认 _start）
+// 链接脚本应将此函数放置在 .text.boot 或类似段
+// 入口职责：
+//   1. 设置栈指针（通常由 boot.S 或链接脚本完成）
+//   2. 清零 BSS 段（若 boot.S 未完成）
+//   3. 调用 kaula_main（Kaula 程序的 main 函数）
+//   4. 停机（hlt/wfi/无限循环）
+
+// Kaula 程序的入口前向声明：
+// UserFuncCName keeps plain kaula_main (K_ prefix removed); must match this declaration.
+extern int32_t kaula_main(void);
+
+// 裸机入口
+// 用户可通过 #[section(".text.boot")] 属性控制放置位
+// 约定：BSS（__bss_start..__bss_end）由 boot stub 在进入本函数前清零，
+//       栈指针已由 boot stub 设置为链接脚本的 stack_top
+//       若使用自定义 boot stub，请自行完成这两项
+#if defined(__wasm__)
+// WASM：没有停机指令（hlt/wfi 在 wasm 里无对应物），调用完 kaula_main 后直接
+// 返回，由宿主 runtime（wasmtime/wasm3）决定下一步。_kaula_entry 被导出，
+// 宿主可以 `--invoke _kaula_entry`。kaula_main 的返回值通过单独导出的
+// kaula_main 暴露，便于 runtime 断言结果。
+void _kaula_entry(void) {
+    (void)kaula_main();
+}
+#else
+__attribute__((noreturn))
+void _kaula_entry(void) {
+    // 参考实现（内置 boot stub 已清零，此处无需重复）：
+    // extern uint8_t __bss_start[], __bss_end[];
+    // for (uint8_t* p = __bss_start; p < __bss_end; ) *p++ = 0;
+
+    // 初始化 KMM 池（静态池模式下只需重置 offset）
+    // KMM_V4_STATIC_POOL 模式下池已在 BSS 段，无需 OS 调用
+
+    // 调用 Kaula 程序入口
+    (void)kaula_main();
+
+    // 停机：永不返回
+    // x86: hlt; ARM: wfi; 通用: 无限循环
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("hlt");
+#else
+    __asm__ __volatile__("wfi");
+#endif
+    while (1) { }
+}
+#endif

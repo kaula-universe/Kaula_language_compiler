@@ -1,0 +1,22 @@
+# 声明路径线程逃逸：Thread t = thread_create(worker, slot) 直接初始化
+import std.memory
+import std.concurrent
+import std.io
+
+i64* g_out = 0
+
+fn worker(arg: void*) void* {
+    i64* p = as<i64*>(arg)
+    g_out[0] = p[0]
+    return null
+}
+
+fn main() {
+    i64* out = std.memory.kmm_v4_alloc(8)
+    g_out = out
+    i64* slot = std.memory.kmm_v4_alloc(8)
+    slot[0] = 555
+    Thread t = std.concurrent.thread_create(worker, slot)
+    std.concurrent.thread_join(t)
+    std.io.println("decl-val=", g_out[0])
+}

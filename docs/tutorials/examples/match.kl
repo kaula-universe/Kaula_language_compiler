@@ -1,0 +1,61 @@
+import std.io
+
+# 带载荷的枚举（ADT）：match 可以解构变体中的值
+enum Option<T> {
+    Some(T),
+    None
+}
+
+fn pick(Option<i32> opt) {
+    match opt {
+        Some(val) => {
+            std.io.println("got: ", val)
+        },
+        None => {
+            std.io.println("nothing")
+        }
+    }
+}
+
+enum Status {
+    Success,
+    Warning,
+    Failure
+}
+
+fn main() {
+    # 整数字面量 match，返回表达式值
+    i32 x = 2
+    auto description = match(x) {
+        1 => "one",
+        2 => "two",
+        _ => "many"
+    }
+    std.io.println("x is ", description)
+
+    # 枚举变体解构
+    pick(Option.Some(42))
+    pick(Option.None)
+
+    # Uppercase 为变体模式，lowercase 为变量绑定
+    Status s = Status.Success
+    match s {
+        Success => {
+            std.io.println("status: success")
+        },
+        Failure => {
+            std.io.println("status: failure")
+        },
+        _ => {
+            std.io.println("status: unknown")
+        }
+    }
+
+    # 字符串匹配
+    string cmd = "stop"
+    match cmd {
+        "start" => std.io.println("begin"),
+        "stop"  => std.io.println("end"),
+        _       => std.io.println("unknown")
+    }
+}

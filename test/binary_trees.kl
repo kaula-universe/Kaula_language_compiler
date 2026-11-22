@@ -1,0 +1,75 @@
+// binary_trees.kl — CLBG (Computer Language Benchmarks Game) binary-trees 标准实现
+//
+// 标准算法：bottomUpTree(depth) 递归分配节点，左/右子树递归建树；
+// itemCheck(tree) 递归遍历求和。反复建/弃短命树，测分配与回收吞吐。
+//
+// 历史：曾因 SOR 对跨函数返回递归分配指针误判 liveness（n.left = l 后
+// early free l）在 depth >= 8 时 UAF 段错误；已修复（字段写穿产生的
+// 字段引用随宿主存活，源对象豁免 early free 与 return 回收），
+// depth 12/14 回归见 test/recursive_ptr_tree.kl。
+// CLBG 标准参数的三边对比套件见 test/bench/clbg/（arena 形态跑标准参数，
+// 本形态为指针语义验证）。
+import std.io
+import std.memory
+import std.time
+
+struct Node {
+    left: Node*
+    right: Node*
+    item: i64
+}
+
+fn bottomUpTree(depth: i64) Node* {
+    if depth == 0 {
+        Node* leaf = as<Node*>(std.memory.kmm_v4_alloc(24))
+        leaf.left = null
+        leaf.right = null
+        leaf.item = 0
+        return leaf
+    }
+    Node* l = bottomUpTree(depth - 1)
+    Node* r = bottomUpTree(depth - 1)
+    Node* n = as<Node*>(std.memory.kmm_v4_alloc(24))
+    n.left = l
+    n.right = r
+    n.item = depth
+    return n
+}
+
+fn itemCheck(n: Node*) i64 {
+    if n.left == null {
+        return n.item
+    }
+    return itemCheck(n.left) + n.item + itemCheck(n.right)
+}
+
+fn main() {
+    i64 minDepth = 4
+    i64 maxDepth = 6
+    i64 stretchDepth = maxDepth + 1
+
+    std.io.println("Kaula binary-trees (CLBG)")
+
+    Node* stretch = bottomUpTree(stretchDepth)
+    std.io.println("stretch tree depth=", stretchDepth, " checksum=", itemCheck(stretch))
+
+    Node* longLived = bottomUpTree(maxDepth)
+    std.io.println("long lived tree depth=", maxDepth)
+
+    i64 t0 = std.time.time_now_ms()
+    i64 depth = minDepth
+    while depth <= maxDepth {
+        i64 iterations = 16
+        i64 checksum = 0
+        i64 i = 0
+        while i < iterations {
+            Node* a = bottomUpTree(depth)
+            checksum = checksum + itemCheck(a)
+            i = i + 1
+        }
+        std.io.println("depth=", depth, " iterations=", iterations, " checksum=", checksum)
+        depth = depth + 1
+    }
+    i64 t1 = std.time.time_now_ms()
+    std.io.println("total ", t1 - t0, " ms")
+}

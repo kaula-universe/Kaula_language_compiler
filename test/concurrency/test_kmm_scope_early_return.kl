@@ -1,0 +1,115 @@
+// Kaula 并发内核 · conc fn 提前 return 的 KMM 作用域平衡（缺陷钉子）
+//
+// == 缺陷 ==
+//
+// 见 test/bench/service3/KBUG_KMM_SCOPE_EARLY_RETURN.md。
+//
+// `conc fn` 里从块级 KMM 区间内部提前 return 时，旧的 codegen 只发
+// `f->result = X; f->pc = -1; return DONE;`，**不弹作用域栈** —— 块级
+// 区间由 KMM_V4_SCOPE_START/END 界定的那个 push 被永久泄漏。每执行一次
+// 泄漏一帧（16 字节），累计到 KMM_V4_MAX_SCOPE_DEPTH（默认 1024）后
+// 定长栈溢出 → abort（SIGABRT）。实测报错：
+//
+//   KMM FATAL: Scope stack overflow (depth 1024 >= max 1024), aborting
+//     innermost managed scope: <unnamed> (legacy KMM_V4_SCOPE_START)
+//
+// == 缺陷的精确形状（照 order_server.kl 复刻）==
+//
+// 三个条件同时成立才触发，缺一不可：
+//
+//   1. conc fn，且体内有一个**挂起点**（sleep / 网络 IO）；
+//   2. 挂起点之后，在一个**块级 KMM 区间内**（区间里有 kmm_v4_alloc）；
+//   3. 从该区间内部**提前 return**（连接关闭的 `got<=0 → return 0`）。
+//
+// 为什么必须挂起：不挂起时 codegen 走"直通"路径，控制流没有跨 resume
+// 断裂，作用域由普通 C 语法结构自动落平。一挂起，函数被拆成
+// enter_fn / resume_fn 状态机，块级 KMM 区间被拆到两段里，exit 落在
+// resume_fn 的某个 sub 分支 —— 而提前 return 是**另一个** sub 分支，
+// 它绕过了前者的 kmm_v4_scope_pop()。这就是泄漏点（生成 C 可直接比对：
+// SUSPEND 分支有 pop，`i >= stop-1` 的 DONE 分支没有）。
+//
+// == 本用例的判据 ==
+//
+// 反复调用该函数、每次都走「区间内提前 return」这条路，次数远超阈值
+// （4096 = 4x 1024）：
+//
+//   - 修复前：跑到第 1024 次附近 abort，rc=134（SIGABRT）。
+//   - 修复后：正常跑完，返回值精确可控。
+//
+// == 为什么必须在循环体内分配 ==
+//
+// 函数顶部的一次性分配会被 SOR/KMM 提升，根本不产生 KMM_V4_SCOPE_START，
+// 用例退化成空跑（这一点踩过坑，codegen 单测 fixture 有同样的要求）。
+//
+// == 刻意避开的一件事 ==
+//
+// 不用 `break`：`break`（含裸 `{ }` 块内的）在带挂起点的 conc fn 里当前
+// 会挂死（另一处独立缺陷，不属本用例职责），会把泄漏信号淹没在超时里。
+// 本用例只用 `return` 出口。
+
+import std.io
+import std.time
+import std.memory
+
+// 复刻 conn_task 的形状：块级区间内分配 → 挂起 → 醒后从区间内提前 return。
+// `stop` 控制循环：末轮（i >= stop-1）从区间内部提前 return。
+conc fn close_in_scope_once(stop: i64) -> i64 {
+    i64 i = 0
+    while i < 1000000 {
+        // 块级 KMM 区间（codegen 会插 KMM_V4_SCOPE_START/END）
+        u8* r = std.memory.kmm_v4_alloc(64)
+        if r == null {
+            return -2
+        }
+        r[0] = as<u8>(i)
+        std.memory.kmm_v4_free(r)
+
+        // 挂起点：必须在区间**内部** —— resume_fn 因此多出一个 sub 分支，
+        // 而「提前 return」落在另一个分支，绕过区间 exit 的弹栈。
+        std.time.time_sleep_us(1)
+
+        // 醒后从区间内部提前 return（= 连接关闭）
+        if i >= stop - 1 {
+            return stop
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// 单次调用的包装：每次调用都在区间内提前 return。
+// 反复调用 4096 次即累计 4096 次泄漏（若无修复）。
+fn one_shot() -> i64 {
+    return close_in_scope_once(1)
+}
+
+fn main() -> i32 {
+    i64 err = 0
+    i64 n = 4096
+
+    // 顺序路径：反复调用，每次泄漏一帧直到溢出/正常。
+    i64 k = 0
+    while k < n {
+        i64 v = one_shot()
+        if v != 1 {
+            err += 1
+            std.io.println("ERR seq got=", v, " want 1")
+        }
+        k = k + 1
+    }
+
+    // spawn 路径：每次 spawn 一个新任务，同样都在区间内提前 return。
+    i64 m = 0
+    while m < n {
+        Handle h = spawn close_in_scope_once(1)
+        i64 v = h.await
+        if v != 1 {
+            err += 1
+            std.io.println("ERR spawn got=", v, " want 1")
+        }
+        m = m + 1
+    }
+
+    std.io.println("kmm_scope_early_return ok n=", n, " err=", err)
+    return 0
+}

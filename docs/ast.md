@@ -1,0 +1,300 @@
+# 抽象语法树 (AST)
+
+AST 定义了编译器内部的程序表示。实现位于 `internal/ast/ast.go`。
+
+## 设计
+
+- **接口驱动**：`Node` 接口统一所有节点，`Statement` 和 `Expression` 继承 `Node`
+- **位置追踪**：每个节点携带 `Position`（行、列、文件），支持精确错误报告
+- **遍历支持**：`Traverse` 方法提供统一的树遍历机制
+
+## 节点层次
+
+```
+Node (接口)
+├── Statement (接口)
+│   ├── Program                    // 程序根节点
+│   ├── FunctionStatement          // 函数声明
+│   ├── ClassStatement             // 类定义
+│   ├── InterfaceStatement         // 接口定义
+│   ├── StructStatement            // 结构体定义
+│   ├── TypeAliasStatement         // 类型别名
+│   ├── VariableDeclaration        // 变量声明
+│   ├── IfStatement                // if 语句
+│   ├── WhileStatement             // while 循环
+│   ├── ForStatement               // (legacy) C 风格 for，已不再由解析器生成
+│   ├── ForInStatement             // range-based for: for x in range(...) / arr { body }
+│   ├── SwitchStatement            // switch 语句
+│   ├── CaseStatement              // case 分支
+│   ├── ReturnStatement            // return 语句
+│   ├── BreakStatement             // break 语句
+│   ├── ContinueStatement          // continue 语句
+│   ├── ImportStatement            // import 语句
+│   ├── ExportStatement            // export 语句
+│   ├── PackageStatement           // package 声明
+│   ├── NonLocalStatement          // nonlocal 语句
+│   ├── ExpressionStatement        // 表达式语句
+│   ├── BlockStatement             // 块语句
+│   ├── SpendStatement             // spend 语句
+│   ├── CallClause                 // call 子句
+│   ├── CallStatement              // call 语句
+│   ├── TaskStatement              // task 语句
+│   ├── PrefixStatement            // prefix 语句
+│   ├── TreeStatement              // tree 语句
+│   ├── ObjectStatement            // object 语句
+│   ├── YieldStatement             // yield 语句
+│   ├── ReleaseStatement           // release 语句
+│   ├── ExtractStatement           // extract 语句
+│   ├── MethodStatement            // 方法声明
+│   ├── ConstructorStatement       // 构造函数声明
+│   ├── FieldDeclaration           // 字段声明
+│   ├── ImplementsClause           // implements 子句
+│   └── GenericInstance            // 泛型实例
+│
+└── Expression (接口)
+    ├── Identifier                 // 标识符
+    ├── IntegerLiteral             // 整数字面量
+    ├── FloatLiteral               // 浮点字面量
+    ├── StringLiteral              // 字符串字面量
+    ├── CharLiteral                // 字符字面量
+    ├── BooleanLiteral             // 布尔字面量
+    ├── BinaryExpression           // 二元表达式
+    ├── UnaryExpression            // 一元表达式
+    ├── CallExpression             // 函数调用
+    ├── IndexExpression            // 索引访问
+    ├── MemberAccessExpression     // 成员访问
+    ├── MemberExpression           // 成员表达式
+    ├── TypeCastExpression         // 类型转换
+    ├── PrefixCallExpression       // 前缀调用
+    ├── LiteralExpression          // 字面量表达式
+    ├── ParenExpression            // 括号表达式
+    ├── ObjectLiteral              // 动态对象字面量
+    │   └── ObjectLiteralField     // 动态对象字段（字段名 + 值）
+    └── FieldCountExpression       // 字段计数表达式
+```
+
+## 关键节点详解
+
+### Program
+
+```go
+type Program struct {
+    Statements []Statement  // 顶层语句列表
+    Pos        Position
+    Source     string       // 完整源码（用于错误上下文）
+}
+```
+
+提供查找方法：
+- `FindFunction(name)` - 查找函数
+- `FindPrefix(name)` - 查找前缀
+- `FindObject(name)` - 查找对象
+- `FindClass(name)` - 查找类
+- `FindInterface(name)` - 查找接口
+- `FindStruct(name)` - 查找结构体
+
+### FunctionStatement
+
+```go
+type FunctionStatement struct {
+    Name          string
+    TypeParams    []*TypeParameter  // 泛型类型参数
+    Params        []string          // 参数名列表
+    ParamTypes    []string          // 参数类型列表
+    Body          []Statement
+    ReturnType    string
+    Generic       bool              // 是否是泛型函数
+    NoKMM         bool              // 是否禁用 KMM 内存管理
+    Inline        bool              // 是否内联
+    Annotation    TreeAnnotationType // 函数注解
+    SOREnabled    bool              // SOR 启用
+    IsPublic      bool              // pub 修饰符
+    PrefixName    string            // prefix 名称
+    TaskParams    []*TaskParam      // 任务参数
+    AsyncParams   []*AsyncParam     // 异步参数
+    Pos           Position
+}
+```
+
+注解类型（`TreeAnnotationType`）：
+- `TreeAnnotationNone` - 无注解
+- `TreeAnnotationPrefix` - `#[prefix]`
+- `TreeAnnotationTree` - `#[tree]`
+- `TreeAnnotationPrefixTree` - `#[prefix,tree]`
+- `TreeAnnotationRoot` - `#[root]`
+- `TreeAnnotationRootTree` - `#[root,tree]`
+
+### ClassStatement
+
+```go
+type ClassStatement struct {
+    Name        string
+    TypeParams  []*TypeParameter       // 泛型参数
+    Fields      []*FieldDeclaration    // 字段
+    Methods     []*MethodStatement     // 方法
+    Constructors []*ConstructorStatement // 构造函数
+    Implements  []string               // 实现的接口
+    Generic     bool
+    Pos         Position
+}
+```
+
+### VariableDeclaration
+
+```go
+type VariableDeclaration struct {
+    Type     string      // 类型名（该声明符的完整类型，含 name* / name[N] 后缀）
+    Name     string      // 变量名
+    Value    Expression  // 初始值（可选）
+    Nullable bool        // 是否可空
+    IsAuto   bool        // 是否使用 auto 推导
+    IsPublic bool        // pub 修饰符
+    // 单语句内多变量声明（i64 a = 1, b = 2）时承载后续声明符：
+    // 主声明承载第一个声明符，More 按书写顺序承载其余声明符，
+    // 每个节点都复制了共享类型与语句级修饰符，可独立分析/生成。
+    More     []*VariableDeclaration
+    // BaseType 共享类型名（仅 More 非空时填写），供格式化还原书写形式；
+    // 语义分析与代码生成阶段不使用。
+    BaseType string
+    Pos      Position
+}
+```
+
+辅助方法：
+
+- `AllDeclarators() []*VariableDeclaration` — 按书写顺序返回本语句声明的全部变量（含自身）。
+
+处理约定：`sema.Analyze` 与 `codegen.Generate` 入口会先调用
+`astutil.FlattenDeclarations(program)`，把逗号分隔的声明符展开成多条独立的
+`VariableDeclaration` 语句（同时清空 `More`），因此下游的符号表、SOR、活跃期分析、
+C 代码生成等链路无需感知 `More`。只有**直接消费原始 AST** 的组件
+（formatter、dumpast、pub 符号收集）需要通过 `AllDeclarators()` / `More` 处理。
+
+### SpendStatement
+
+```go
+type SpendStatement struct {
+    Target  Expression      // 消费目标
+    Calls   []*CallClause   // call 子句列表
+    Pos     Position
+}
+
+type CallClause struct {
+    Index Expression  // 元素索引（1-based）
+    Body  []Statement // 处理逻辑
+    Pos   Position
+}
+```
+
+### PrefixCallExpression
+
+```go
+type PrefixCallExpression struct {
+    Name       string                // 前缀名
+    Params     map[string]Expression // 参数映射
+    Body       []Statement           // 块体
+    Annotation TreeAnnotationType
+    Pos        Position
+}
+```
+
+### ObjectLiteral（动态对象字面量）
+
+```go
+type ObjectLiteralField struct {
+    Name  string      // 字段名
+    Value Expression  // 字段值（任意表达式）
+    Pos   Position
+}
+
+type ObjectLiteral struct {
+    Fields []ObjectLiteralField  // 字段列表
+    Pos    Position
+}
+```
+
+动态对象字面量在语言层面模拟 JS/Python 风格的动态对象，字段可读可写可动态增删，方法存为函数字段。
+
+语法：`object { name: value, ... }` 或 `object()`（空对象）
+
+代码生成映射：
+- `object { name: value }` → `dynobj_create()` + `dynobj_set(obj, "name", boxed_value)`
+- 字段访问 `obj.field` → `dynobj_get(obj, "field")`
+- 字段赋值 `obj.field = value` → `dynobj_set(obj, "field", boxed_value)`
+
+### ObjectStatement（全局动态对象声明语句）
+
+```go
+type ObjectField struct {
+    Name  string       // 字段名（保留键名，不再丢弃）
+    Value Expression  // 字段值表达式
+    Pos   Position
+}
+
+type ObjectStatement struct {
+    Type   string        // 可选类型标注（旧形态）
+    Name   string        // 全局对象名
+    Fields []*ObjectField // 具名字段列表
+    Value  Expression   // 可选：直接初始化表达式
+    Pos    Position
+}
+```
+
+语法：`object Name { name: value, ... }`（兼容旧形态 `object Type Name self{...}` / `self(...)` / `::[...]`）。
+
+与 ObjectLiteral 的区别：ObjectLiteral 是表达式（局部/临时对象），ObjectStatement 在文件级声明一个具名全局 `Object*` 变量，prelude 阶段初始化后可被全程序引用。
+
+代码生成映射：
+- `static Object* Name = NULL;`（文件作用域声明）
+- prelude 初始化：`dynobj_create()` + 逐字段 `dynobj_set(Name, "name", boxed_value)`
+- 字段访问 `Name.field` → `dynobj_get(Name, "field")`
+- 重复字段名在语义分析阶段报错（`duplicate_object_field`）
+
+## 泛型支持
+
+### TypeParameter
+
+```go
+type TypeParameter struct {
+    Name      string  // 类型参数名
+    Constraint string // 类型约束
+    Pos       Position
+}
+```
+
+### TypeArgument
+
+```go
+type TypeArgument struct {
+    Type string  // 类型实参
+    Pos  Position
+}
+```
+
+### GenericInstance
+
+```go
+type GenericInstance struct {
+    OriginalName    string       // 原始泛型名
+    TypeArguments   []TypeArgument // 类型实参
+    InstantiatedName string     // 实例化后的名称
+    Pos             Position
+}
+```
+
+## 遍历机制
+
+```go
+// 遍历整个程序
+program.Traverse(func(node Node) {
+    switch n := node.(type) {
+    case *FunctionStatement:
+        // 处理函数
+    case *ClassStatement:
+        // 处理类
+    // ...
+    }
+})
+```
+
+`traverseNode` 函数递归遍历所有子节点，覆盖所有 AST 节点类型。

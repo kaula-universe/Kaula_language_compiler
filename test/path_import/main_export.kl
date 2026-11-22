@@ -1,0 +1,11 @@
+import std.io
+import "mylib"
+import "util.kl"
+
+fn main() {
+    hello_from_a()
+    std.io.println("app_version = ", app_version)
+    std.io.println("C_MAX = ", C_MAX)
+    std.io.println("lib_b_value = ", lib_b_value())
+    std.io.println("triple(7) = ", util_triple(7))
+}
