@@ -1,0 +1,65 @@
+// nullable.kl —— 编译期可空类型 T? 教程完整示例
+//
+// 配套教程：docs/tutorials/pointers.md「可空类型（编译期 T?）」章节
+// 由回归语料 test/nullable_flow.kl 提炼：正向路径全演示；负向路径
+// （未判空即传递 → nullable_passed 编译错误）见该语料与教程。
+//
+// 编译运行：
+//     kaulac docs/tutorials/examples/nullable.kl -o nullable && ./nullable
+
+import std.io
+
+// 非 nil 语义：可空形参自己也要判空后才解引用
+fn maybeDeref(i64? p) i64 {
+    if (p != null) {
+        return *p
+    }
+    return -1
+}
+
+// 非可空形参：编译期拒绝 null（未判空的可空变量传进来会报 nullable_passed）
+fn deref(i64* p) i64 {
+    return *p
+}
+
+fn main() {
+    i64 v = 42
+
+    // ---- 1. 声明：类型加 ? 后缀，可赋 null ----
+    i64? p = &v
+    i64? none = null
+
+    // ---- 2. 流敏感判空：if 分支内视为「已检查」，可安全解引用 ----
+    if (p != null) {
+        std.io.println("[2] *p = ", *p)          // 42
+    } else {
+        std.io.println("[2] p is null")
+    }
+
+    // ---- 3. 判空后传递给非可空形参：经 as<T*> 显式转换 ----
+    if (p != null) {
+        std.io.println("[3] deref(as<i64*>(p)) = ", deref(as<i64*>(p)))
+    }
+
+    // ---- 4. 可空形参：null 与非空指针都接受 ----
+    std.io.println("[4] maybeDeref(null) = ", maybeDeref(null))   // -1
+    i64? nn = &v          // 非空指针经 T? 变量中转（as<T?> 不是合法语法）
+    std.io.println("[4] maybeDeref(nn) = ", maybeDeref(nn))       // 42
+
+    // ---- 5. null 检查 ----
+    if (none != null) {
+        std.io.println("[5] none has value")
+    } else {
+        std.io.println("[5] none is null")
+    }
+
+    std.io.println("nullable example done")
+}
+
+// ---- 负向路径速查（均被编译期拒绝，正向示例不含）----
+//
+// 未判空即传递（nullable_passed + arg_type_mismatch）：
+//     deref(p)                    // p 是 i64?，未判空
+//
+// as 的类型实参不支持 ? 后缀（parser: expected '>' to close 'as<...>'）：
+//     maybeDeref(as<i64?>(&v))    // 请改用 i64? tmp = &v 中转

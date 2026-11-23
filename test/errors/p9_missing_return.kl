@@ -1,3 +1,4 @@
+// kaulac:expect-fail missing_return
 import std.io
 
 # p9_missing_return.kl — 前端严格化负向用例（missing_return）

@@ -1,3 +1,4 @@
+// kaulac:expect-fail arg_type_mismatch
 import std.io
 
 fn takes_int(i32 a) i32 { return a * 2 }

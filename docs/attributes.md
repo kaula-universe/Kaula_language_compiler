@@ -21,6 +21,7 @@ Kaula 支持通过 `#[attribute]` 语法为函数、结构体、字段等添加�
 > **注意**：`kaulac test` 与 `kaulac unittest` 是两套不同的东西，不要混淆。
 > - `kaulac unittest <file.kl>` — 本节的 `#[test]` runner。
 > - `kaulac test [file.kl|dir]` — 语料库**快照回归测试**：以普通模式编译每个含顶层 `fn main()` 的 `.kl`，运行后与 `<file>.kl.stdout` 比对。与 `#[test]` 属性无关。
+>   负向语料支持 `// kaulac:expect-fail [期望错误码]` 标注：标注的 fixture 必须**编译失败**（且输出含期望错误码），失败即 PASS——见 `test/errors/README.md`。
 
 ### 基本用法
 

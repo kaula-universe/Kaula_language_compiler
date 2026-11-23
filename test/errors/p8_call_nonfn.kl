@@ -1,3 +1,4 @@
+// kaulac:expect-fail calling_non_callable
 import std.io
 
 fn main() {

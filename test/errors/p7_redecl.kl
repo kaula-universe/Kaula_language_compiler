@@ -1,3 +1,4 @@
+// kaulac:expect-fail redeclaration
 import std.io
 
 fn main() {

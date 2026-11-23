@@ -95,7 +95,8 @@ error[nullable_passed]: 可空变量 'p' 未判空即作为实参传递,
 > 抛可捕获 panic），适合把「有值/无值」当作数据传递的场景。用法见
 > [std 错误处理](error-and-panic.md)。
 >
-> 回归语料：`test/nullable_flow.kl`。
+> 回归语料：`test/nullable_flow.kl`；完整可运行示例见
+> [examples/nullable.kl](examples/nullable.kl)。
 
 ## 指针与函数参数
 

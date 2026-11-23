@@ -1,21 +1,20 @@
 # 负向回归用例（Frontend Strictness）
 
 这些 .kl 文件**故意写错**，用于验证前端（sema）能在 codegen 之前拦下错误。
-它们不被 `scripts/run_tests.py` 收集（那个脚本期望全部 PASS）。
+每个文件首行带 `// kaulac:expect-fail <错误码>` 标注：`kaulac test` 的
+runner 看到标注后要求**编译失败**，且编译器输出包含期望错误码——失败即
+PASS，编译成功或错误码不符都是 FAIL（防止"失败原因变了也通过"）。
 
 ## 验证方法
 
 ```bash
-# 期望：每个文件都在前端报错（exit != 0），且输出包含指定错误码
-for f in test/errors/*.kl; do
-  echo "=== $f ==="
-  build/bin/kaulac "$f" 2>&1 | grep -E "语义错误|semantic error" | head -3
-done
+# 一条命令跑全部负向语料（含 expect-fail 标注的 PASS/FAIL 判定）
+kaulac test test/errors
 ```
 
 ## 用例清单
 
-| 文件 | 期望错误码 | 场景 |
+| 文件 | 期望错误码（expect-fail 标注） | 场景 |
 |---|---|---|
 | p1_arg_count.kl | wrong_arg_count_local | 本地函数实参数量 ≠ 形参 |
 | p2_arg_type.kl | arg_type_mismatch | 实参类型不兼容形参 |

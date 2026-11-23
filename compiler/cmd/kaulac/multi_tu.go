@@ -403,6 +403,7 @@ func compileTUsParallel(units []tuUnit, flags []string, tuDir, objDir string, cm
 type tuObjCache struct {
 	dir      string // 持久缓存目录（cache/tu-obj）
 	identity string // 构建级身份哈希（cc/cmdPrefix/flags/buildStamp/PCH）
+	mu       sync.Mutex
 	hits     int
 	misses   int
 }
@@ -414,11 +415,15 @@ func (c *tuObjCache) lookup(name, src string) string {
 	}
 	key := tuObjHashBytes([]byte(c.identity + "\x00" + name + "\x00" + srcHash))
 	path := tuObjCacheLookup(c.dir, key)
+	// lookup 被 compileTUsParallel 的多个 worker 并发调用，hits/misses
+	// 计数必须在锁内更新（此前是裸 int 自增，-race 下报 DATA RACE）。
+	c.mu.Lock()
 	if path != "" {
 		c.hits++
 	} else {
 		c.misses++
 	}
+	c.mu.Unlock()
 	return path
 }
 

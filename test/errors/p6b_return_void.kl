@@ -1,3 +1,4 @@
+// kaulac:expect-fail return_value_in_void_fn
 import std.io
 
 fn g() { return 42 }

@@ -7,12 +7,48 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // TU 级对象缓存的单元测试：不跑真实 clang，用 exec 替身。
 // 覆盖：首编全量写入缓存 → 二次构建（改一个 TU）只重编该 TU →
 // .o 内容哈希校验拦截半写条目 → NoCache 关断。
+
+// tuCounters 并发安全的计数器：runMultiTU 并行编译 TU，exec 替身会被
+// 多个 worker 同时调用。此前替身直接 counts[name]++ 写共享 map，偶发
+// fatal error: concurrent map writes（TestTUObjectCacheKeySensitiveToFlags
+// 在全量 go test 下崩溃）。所有替身改用 bump 记数。
+type tuCounters struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func newTUCounters() *tuCounters { return &tuCounters{m: map[string]int{}} }
+
+func (c *tuCounters) bump(name string) {
+	c.mu.Lock()
+	c.m[name]++
+	c.mu.Unlock()
+}
+
+func (c *tuCounters) reset() {
+	c.mu.Lock()
+	c.m = map[string]int{}
+	c.mu.Unlock()
+}
+
+func (c *tuCounters) get(name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.m[name]
+}
+
+func (c *tuCounters) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.m)
+}
 
 func sha256hex(b []byte) string {
 	h := sha256.Sum256(b)
@@ -26,7 +62,7 @@ func writeTU(t *testing.T, dir, name, src string) {
 	}
 }
 
-func runBench(t *testing.T, workDir string, counts *map[string]int) error {
+func runBench(t *testing.T, workDir string, counts *tuCounters) error {
 	t.Helper()
 	return runMultiTU([]string{"-O2", "-x", "c", "ignored.c"}, "clang", nil,
 		filepath.Join(workDir, "cache", "entry.c"),
@@ -45,7 +81,7 @@ func TestTUObjectCacheHitSkipsCompile(t *testing.T) {
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
-	counts := map[string]int{}
+	counts := newTUCounters()
 	fake := func(dir string, args []string) (string, error) {
 		isCompile := false
 		for i, a := range args {
@@ -55,7 +91,7 @@ func TestTUObjectCacheHitSkipsCompile(t *testing.T) {
 				obj := args[i+2]
 				os.WriteFile(obj, []byte("OBJ:"+filepath.Base(obj)), 0644)
 				name := strings.TrimSuffix(filepath.Base(obj), ".o")
-				counts[name]++
+				counts.bump(name)
 			}
 		}
 		if !isCompile {
@@ -73,30 +109,30 @@ func TestTUObjectCacheHitSkipsCompile(t *testing.T) {
 	tuExec = fake
 	defer func() { tuExec = orig }()
 
-	if err := runBench(t, work, &counts); err != nil {
+	if err := runBench(t, work, counts); err != nil {
 		t.Fatalf("首次构建失败: %v", err)
 	}
-	if counts["a.kl.tu"] != 1 || counts["b.kl.tu"] != 1 {
-		t.Fatalf("首次构建应编译全部 TU: %v", counts)
+	if counts.get("a.kl.tu") != 1 || counts.get("b.kl.tu") != 1 {
+		t.Fatalf("首次构建应编译全部 TU")
 	}
 
 	// 二次构建：无任何变更 → 全部命中缓存
-	counts = map[string]int{}
-	if err := runBench(t, work, &counts); err != nil {
+	counts.reset()
+	if err := runBench(t, work, counts); err != nil {
 		t.Fatalf("二次构建失败: %v", err)
 	}
-	if len(counts) != 0 {
-		t.Fatalf("无变更构建应全部命中缓存，实际重编: %v", counts)
+	if counts.len() != 0 {
+		t.Fatalf("无变更构建应全部命中缓存，实际重编")
 	}
 
 	// 触碰 b：只有 b 重编
 	writeTU(t, tu, "b.kl.tu", "int64_t b(void){return 3;}")
-	counts = map[string]int{}
-	if err := runBench(t, work, &counts); err != nil {
+	counts.reset()
+	if err := runBench(t, work, counts); err != nil {
 		t.Fatalf("增量构建失败: %v", err)
 	}
-	if counts["b.kl.tu"] != 1 || counts["a.kl.tu"] != 0 {
-		t.Fatalf("增量构建应只重编变更 TU: %v", counts)
+	if counts.get("b.kl.tu") != 1 || counts.get("a.kl.tu") != 0 {
+		t.Fatalf("增量构建应只重编变更 TU")
 	}
 
 	// 输出存在且两个缓存 .o 都能被链接引用（内容校验）
@@ -113,7 +149,7 @@ func TestTUObjectCacheCorruptEntryRejected(t *testing.T) {
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
-	counts := map[string]int{}
+	counts := newTUCounters()
 	fake := func(dir string, args []string) (string, error) {
 		isCompile := false
 		for i, a := range args {
@@ -121,7 +157,7 @@ func TestTUObjectCacheCorruptEntryRejected(t *testing.T) {
 				isCompile = true
 				obj := args[i+2]
 				os.WriteFile(obj, []byte("OBJ:"+filepath.Base(obj)), 0644)
-				counts[filepath.Base(obj)]++
+				counts.bump(filepath.Base(obj))
 			}
 		}
 		fmt.Println("CALL isCompile=", isCompile, "nargs=", len(args))
@@ -138,7 +174,7 @@ func TestTUObjectCacheCorruptEntryRejected(t *testing.T) {
 	tuExec = fake
 	defer func() { tuExec = orig }()
 
-	if err := runBench(t, work, &counts); err != nil {
+	if err := runBench(t, work, counts); err != nil {
 		t.Fatalf("首次构建失败: %v", err)
 	}
 	// 篡改缓存 .o（半写条目）：meta 中的哈希不再匹配 → 必须重编
@@ -148,11 +184,11 @@ func TestTUObjectCacheCorruptEntryRejected(t *testing.T) {
 	}
 	os.WriteFile(matches[0], []byte("CORRUPT"), 0644)
 
-	counts = map[string]int{}
-	if err := runBench(t, work, &counts); err != nil {
+	counts.reset()
+	if err := runBench(t, work, counts); err != nil {
 		t.Fatalf("二次构建失败: %v", err)
 	}
-	if len(counts) == 0 {
+	if counts.len() == 0 {
 		t.Fatal("缓存条目损坏后必须重编对应 TU")
 	}
 }
@@ -165,7 +201,7 @@ func TestTUObjectCacheDisabledByFlag(t *testing.T) {
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
-	counts := map[string]int{}
+	counts := newTUCounters()
 	fake := func(dir string, args []string) (string, error) {
 		isCompile := false
 		for i, a := range args {
@@ -173,7 +209,7 @@ func TestTUObjectCacheDisabledByFlag(t *testing.T) {
 				isCompile = true
 				obj := args[i+2]
 				os.WriteFile(obj, []byte("OBJ"), 0644)
-				counts[filepath.Base(obj)]++
+				counts.bump(filepath.Base(obj))
 			}
 		}
 		fmt.Println("CALL isCompile=", isCompile, "nargs=", len(args))
@@ -191,17 +227,17 @@ func TestTUObjectCacheDisabledByFlag(t *testing.T) {
 	tuCacheDisabled = true
 	defer func() { tuExec = orig; tuCacheDisabled = false }()
 
-	if err := runBench(t, work, &counts); err != nil {
+	if err := runBench(t, work, counts); err != nil {
 		t.Fatalf("构建失败: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(work, "cache", "tu-obj")); err == nil {
 		t.Fatal("禁用缓存时不应写 tu-obj 目录")
 	}
-	counts = map[string]int{}
-	if err := runBench(t, work, &counts); err != nil {
+	counts.reset()
+	if err := runBench(t, work, counts); err != nil {
 		t.Fatalf("二次构建失败: %v", err)
 	}
-	if len(counts) == 0 {
+	if counts.len() == 0 {
 		t.Fatal("禁用缓存时必须每次全量编译")
 	}
 }
@@ -215,7 +251,10 @@ func TestTUObjectCacheKeySensitiveToFlags(t *testing.T) {
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 	os.WriteFile(filepath.Join(work, "cache", "entry.c"), []byte("int main(){return 0;}"), 0644)
 
-	counts := map[string]int{}
+	// stats 传 nil：runMultiTU 末尾会用 {hits,misses} 替换 *stats（生产语义），
+	// 传 &counts 会让替身记录被顶掉，len(counts) 变成恒真的 2——断言失效。
+	// 判定完全依赖替身 counts：flags 变化若未使缓存失效则第二次全命中，counts 为空。
+	counts := newTUCounters()
 	fake := func(dir string, args []string) (string, error) {
 		isCompile := false
 		for i, a := range args {
@@ -223,7 +262,7 @@ func TestTUObjectCacheKeySensitiveToFlags(t *testing.T) {
 				isCompile = true
 				obj := args[i+2]
 				os.WriteFile(obj, []byte("OBJ"), 0644)
-				counts[filepath.Base(obj)]++
+				counts.bump(filepath.Base(obj))
 			}
 		}
 		fmt.Println("CALL isCompile=", isCompile, "nargs=", len(args))
@@ -242,16 +281,16 @@ func TestTUObjectCacheKeySensitiveToFlags(t *testing.T) {
 
 	if err := runMultiTU([]string{"-O2", "-x", "c", "i.c"}, "clang", nil,
 		filepath.Join(work, "cache", "entry.c"), filepath.Join(work, "o1.exe"),
-		work, tu, tuExec, false, &counts); err != nil {
+		work, tu, tuExec, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	counts = map[string]int{}
+	counts.reset()
 	if err := runMultiTU([]string{"-O0", "-x", "c", "i.c"}, "clang", nil,
 		filepath.Join(work, "cache", "entry.c"), filepath.Join(work, "o2.exe"),
-		work, tu, tuExec, false, &counts); err != nil {
+		work, tu, tuExec, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(counts) == 0 {
+	if counts.len() == 0 {
 		t.Fatal("flags 变化必须使 TU 缓存失效")
 	}
 }
@@ -266,7 +305,7 @@ func TestEntryTUFromCacheStillLinks(t *testing.T) {
 	os.MkdirAll(tu, 0755)
 	os.MkdirAll(filepath.Join(work, "cache"), 0755)
 
-	counts := map[string]int{}
+	counts := newTUCounters()
 	fake := func(dir string, args []string) (string, error) {
 		isCompile := false
 		for i, a := range args {
@@ -274,7 +313,7 @@ func TestEntryTUFromCacheStillLinks(t *testing.T) {
 				isCompile = true
 				obj := args[i+2]
 				os.WriteFile(obj, []byte("OBJ:"+filepath.Base(obj)), 0644)
-				counts[filepath.Base(obj)]++
+				counts.bump(filepath.Base(obj))
 			}
 		}
 		if !isCompile {

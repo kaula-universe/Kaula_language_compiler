@@ -1,3 +1,4 @@
+// kaulac:expect-fail return_type_mismatch
 import std.io
 
 fn f() i32 { return "not an int" }

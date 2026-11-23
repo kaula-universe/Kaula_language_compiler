@@ -121,6 +121,35 @@ func hasMain(source string) bool {
 // SnapshotPath keeps the source extension so fixtures remain unambiguous.
 func SnapshotPath(file string) string { return file + ".stdout" }
 
+// expectFailDirective 解析负向语料标注：`// kaulac:expect-fail [期望子串]`。
+//
+// 标注的 fixture 必须**编译失败**（sema/clang 任一阶段退出码非零均可）；
+// 给出期望子串时（通常写 sema 错误码，如 wrong_arg_count_local），编译器
+// 输出（stdout+stderr 合并）必须包含该子串，防止"失败原因变了也 PASS"。
+// 返回是否标注以及期望子串（可为空）。
+func expectFailDirective(file string) (marked bool, want string) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return false, ""
+	}
+	const marker = "kaulac:expect-fail"
+	for _, line := range strings.Split(string(data), "\n") {
+		idx := strings.Index(line, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[idx+len(marker):])
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, ":"))
+		// 只取首个空白分隔 token 作为期望子串（通常是错误码），
+		// 行内其余部分视为人类可读的说明注释。
+		if i := strings.IndexAny(rest, " \t"); i >= 0 {
+			rest = rest[:i]
+		}
+		return true, rest
+	}
+	return false, ""
+}
+
 func Run(paths []string, opts Options) (Summary, error) { return run(paths, opts, execute) }
 
 func run(paths []string, opts Options, execFn executor) (Summary, error) {
@@ -213,6 +242,23 @@ func runFile(file, compiler string, opts Options, execFn executor) bool {
 			fmt.Fprintf(opts.Output, "--- expected stdout ---\n%s\n", expected)
 		}
 		return false
+	}
+	// 负向语料（`// kaulac:expect-fail [子串]`）：必须编译失败，且输出
+	// 含期望子串。失败即通过，成功反而是 FAIL。
+	if marked, want := expectFailDirective(file); marked {
+		if compiled.err == nil {
+			return fail("expect-fail: 标注了 expect-fail 但编译成功", nil, nil)
+		}
+		if want != "" {
+			combined := make([]byte, 0, len(compiled.stdout)+len(compiled.stderr))
+			combined = append(combined, compiled.stdout...)
+			combined = append(combined, compiled.stderr...)
+			if !strings.Contains(string(combined), want) {
+				return fail("expect-fail: 编译器输出缺少期望子串 "+strconv.Quote(want), nil, nil)
+			}
+		}
+		fmt.Fprintf(opts.Output, "PASS %s (expected compile failure)\n", file)
+		return true
 	}
 	if compiled.err != nil {
 		return fail("compile: "+compiled.err.Error(), nil, nil)

@@ -3074,7 +3074,7 @@ func (sa *SemanticAnalyzer) analyzeReturnStatement(stmt *ast.ReturnStatement) {
 						fmt.Sprintf("函数 '%s' 声明返回 '%s'，但 return 表达式类型为 '%s'", sa.currentFunction.Name, declaredRet, actualT),
 						stmt.Pos.Line, stmt.Pos.Column,
 						"return_type_mismatch",
-						fmt.Sprintf("考虑显式转换 as<%s>(...)", declaredRet),
+						castSuggestion(declaredRet),
 					)
 				}
 			}
@@ -3887,7 +3887,7 @@ func (sa *SemanticAnalyzer) analyzeBinaryExpression(expr *ast.BinaryExpression) 
 					fmt.Sprintf("不能把 '%s' 类型的值赋给 '%s' 类型的变量", rightType, leftType),
 					expr.Pos.Line, expr.Pos.Column,
 					"assign_type_mismatch",
-					fmt.Sprintf("考虑显式转换 as<%s>(...)", leftType),
+					castSuggestion(leftType),
 				)
 			}
 		}
@@ -4328,7 +4328,7 @@ func (sa *SemanticAnalyzer) analyzeCallExpression(expr *ast.CallExpression) {
 					fmt.Sprintf("函数 '%s' 的第 %d 个参数期望 '%s'，实际传入 '%s'", localDispName, i+1, expectedT, actualT),
 					arg.GetPosition().Line, arg.GetPosition().Column,
 					"arg_type_mismatch",
-					fmt.Sprintf("考虑显式转换 as<%s>(...)", expectedT),
+					castSuggestion(expectedT),
 				)
 			}
 		}
@@ -5629,6 +5629,19 @@ func typesCompatibleArrayToPointer(expected, actual string) bool {
 		return false
 	}
 	return typesAssignable(eElem, aElem) || eElem == aElem
+}
+
+// castSuggestion 生成显式转换建议文案。
+//
+// `as<T?>` 不是合法语法（as 的类型实参不接受 ? 后缀，parser 报
+// "expected '>' to close 'as<...'"），所以当目标类型带可空后缀时
+// 不能建议 as<> 转换——那会让用户写出编译器自己拒绝的代码。
+// 可空目标的正确路径是经 T? 变量中转（先声明再判空/传递）。
+func castSuggestion(target string) string {
+	if strings.Contains(target, "?") {
+		return fmt.Sprintf("%s 是可空类型，as<%s> 不是合法语法；请用可空变量中转: %s tmp = ... 后判空使用", target, target, target)
+	}
+	return fmt.Sprintf("考虑显式转换 as<%s>(...)", target)
 }
 
 func typesAssignable(expected, actual string) bool {

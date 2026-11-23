@@ -210,3 +210,94 @@ func TestExecuteRealProcess(t *testing.T) {
 		t.Fatalf("timeout=%v", result.err)
 	}
 }
+
+
+// expectFailDirective 解析与负向语料执行行为。
+// 标注 `// kaulac:expect-fail [子串]` 的 fixture：编译失败 = PASS（可选要求
+// 输出含子串）；编译成功 = FAIL。未标注文件行为不变（编译失败 = FAIL）。
+func TestExpectFailDirectiveParse(t *testing.T) {
+	dir := t.TempDir()
+	marked, want := expectFailDirective(fixture(t, dir, "plain.kl", "fn main() {}\n"))
+	if marked || want != "" {
+		t.Fatalf("plain: marked=%v want=%q", marked, want)
+	}
+	marked, want = expectFailDirective(fixture(t, dir, "bare.kl", "// kaulac:expect-fail\nfn main() {}\n"))
+	if !marked || want != "" {
+		t.Fatalf("bare: marked=%v want=%q", marked, want)
+	}
+	marked, want = expectFailDirective(fixture(t, dir, "code.kl", "import std.io\n// kaulac:expect-fail wrong_arg_count_local —— 说明\nfn main() {}\n"))
+	if !marked || want != "wrong_arg_count_local" {
+		t.Fatalf("code: marked=%v want=%q", marked, want)
+	}
+	marked, want = expectFailDirective(fixture(t, dir, "colon.kl", "// kaulac:expect-fail:missing_return\nfn main() {}\n"))
+	if !marked || want != "missing_return" {
+		t.Fatalf("colon: marked=%v want=%q", marked, want)
+	}
+}
+
+func TestExpectFailRunner(t *testing.T) {
+	compileFail := commandResult{
+		stdout: []byte("Semantic Error: wrong_arg_count_local\n"),
+		err:    context.DeadlineExceeded, // 任意非 nil 即"编译失败"
+	}
+	compileOK := commandResult{}
+
+	cases := []struct {
+		name     string
+		source   string
+		compile  commandResult
+		wantPass bool
+		wantText string
+	}{
+		{
+			name:     "失败且含错误码 -> PASS",
+			source:   "// kaulac:expect-fail wrong_arg_count_local\nfn main() {}\n",
+			compile:  compileFail,
+			wantPass: true,
+		},
+		{
+			name:     "编译成功 -> FAIL",
+			source:   "// kaulac:expect-fail wrong_arg_count_local\nfn main() {}\n",
+			compile:  compileOK,
+			wantPass: false,
+			wantText: "标注了 expect-fail 但编译成功",
+		},
+		{
+			name:     "失败但错误码不符 -> FAIL",
+			source:   "// kaulac:expect-fail missing_return\nfn main() {}\n",
+			compile:  compileFail,
+			wantPass: false,
+			wantText: "缺少期望子串",
+		},
+		{
+			name:     "未标注且失败 -> FAIL（原行为）",
+			source:   "fn main() {}\n",
+			compile:  compileFail,
+			wantPass: false,
+			wantText: "compile:",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := fixture(t, dir, "neg.kl", c.source)
+			calls := 0
+			runner := func(ctx context.Context, cwd, name string, args ...string) commandResult {
+				calls++
+				return c.compile
+			}
+			var out bytes.Buffer
+			summary, err := run([]string{file}, Options{Output: &out}, runner)
+			if c.wantPass != (err == nil && summary.Passed == 1) {
+				t.Fatalf("summary=%+v err=%v out=%s", summary, err, out.String())
+			}
+			// PASS 时不得执行运行阶段（负向语料没有可执行文件）
+			if c.wantPass && calls != 1 {
+				t.Fatalf("PASS 路径不应执行 fixture, calls=%d", calls)
+			}
+			if c.wantText != "" && !strings.Contains(out.String(), c.wantText) {
+				t.Fatalf("missing %q in %s", c.wantText, out.String())
+			}
+		})
+	}
+}

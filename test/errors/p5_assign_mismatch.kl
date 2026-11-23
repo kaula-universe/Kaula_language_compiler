@@ -1,3 +1,4 @@
+// kaulac:expect-fail assign_type_mismatch
 import std.io
 
 fn main() {

@@ -1,3 +1,4 @@
+// kaulac:expect-fail no_such_field
 import std.io
 
 struct Point {
