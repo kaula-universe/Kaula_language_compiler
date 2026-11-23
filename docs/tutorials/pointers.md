@@ -46,29 +46,56 @@ fn main() {
 }
 ```
 
-## 可空类型（std.option）
+## 可空类型（编译期 `T?`）
 
-Kaula 不使用 `int?` 后缀语法表示可空，而是用标准库 `std.option.Option`：
+Kaula 的可空性是**语言级编译期机制**：类型加 `?` 后缀（如 `i64?`），
+配合流敏感判空分析在编译期拒绝未判空的使用；生成的 C 代码中 `?` 被
+完全擦除（与 `T` 是同一个 C 类型），**零运行时开销**。
 
 ```kaula
 import std.io
-import std.option
 
 fn main() {
-    Option some = std.option.option_some_i64(42)
-    Option none = std.option.option_none()
+    i64 x = 42
+    i64? p = &x          # 可空指针
+    i64? none = null
 
-    if (std.option.option_is_some(&some)) {
-        i64 v = std.option.option_unwrap_i64(&some)
-        std.io.println("some = ", v)              # some = 42
+    if (p != null) {
+        # 判空分支内 p 被标记为「已检查」，可安全解引用
+        std.io.println(*p)   # 42
     }
-    i64 d = std.option.option_unwrap_or_i64(&none, 7)
-    std.io.println("none fallback = ", d)         # none fallback = 7
+    if (none == null) {
+        std.io.println("none is null")
+    }
 }
 ```
 
-`Option` 在编译期强制处理「有值/无值」两种情况，减少空引用崩溃。
-完整 API 见 [error-and-panic.md](error-and-panic.md) 与 `std/option`。
+**流敏感判空跟踪**：`if (v != null)` / `if (v == null)` 的分支会更新
+`v` 的「已判空」状态（快照/合并，`if/else` 两路各自成立）。把未判空的
+可空变量传给非可空形参会在编译期被拒绝：
+
+```text
+error[nullable_passed]: 可空变量 'p' 未判空即作为实参传递,
+  但形参类型 'i64*' 不接受 null
+  Suggestion: 先判空再传递: if p != null { ... }
+```
+
+规则小结：
+
+| 写法 | 结果 |
+|------|------|
+| `T? v = expr` | 声明可空变量 |
+| `v = null` | 赋空值（`null` 兼容所有可空类型） |
+| `if (v != null) { ... }` | 分支内 `v` 视为已判空，可解引用/传递 |
+| 未判空即传递 | 编译错误 `nullable_passed` |
+| 生成的 C | `?` 擦除，零运行时开销 |
+
+> **与 `std.option` 的分工**：`T?` 适合指针/引用的「空或不空」，安全
+> 保证在编译期；`std.option.Option` 是运行期装箱的可选值（unwrap 失败
+> 抛可捕获 panic），适合把「有值/无值」当作数据传递的场景。用法见
+> [std 错误处理](error-and-panic.md)。
+>
+> 回归语料：`test/nullable_flow.kl`。
 
 ## 指针与函数参数
 

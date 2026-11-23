@@ -216,6 +216,13 @@ fn main() {
 
 > 注意：Kaula 不支持隐式整数提升，`i64 + u8`、`i64 < usize` 等操作必须先通过 `as<T>()` 统一类型。
 
+## 可空类型 `T?`
+
+任何指针/引用类型加 `?` 后缀即为**编译期可空类型**（如 `i64?`），
+可赋 `null`；未判空即解引用或传递会在编译期报 `nullable_passed`，
+生成的 C 中 `?` 被擦除、零运行时开销。语法与流敏感判空规则详见
+[指针与可空类型](pointers.md#可空类型编译期-t)。
+
 ## 完整示例
 
 参见 [examples/variables.kl](examples/variables.kl)。

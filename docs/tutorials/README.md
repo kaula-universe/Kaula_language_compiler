@@ -17,7 +17,7 @@
 | 7 | [类与接口](class-and-interface.md) | 面向对象与抽象 |
 | 8 | [模式匹配 (match)](match.md) | 解构匹配与分支 |
 | 9 | [泛型](generics.md) | 类型参数与约束 |
-| 10 | [指针与可空类型](pointers.md) | 指针语义与空值处理 |
+| 10 | [指针与可空类型](pointers.md) | 指针语义与编译期可空 `T?` |
 | 11 | [SOR Sub-structural Ownership](sor-ownership.md) | 编译期内存安全机制 |
 | 12 | [前缀系统](prefix-system.md) | 存储前缀与内存作用域 |
 | 13 | [属性注解与编译期反射](attributes-and-compiletime.md) | `#[]` 属性与编译期求值 |

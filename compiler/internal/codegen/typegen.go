@@ -1041,6 +1041,13 @@ func tgReturnTypeToC(tg *TypeGenerator, kaulaType string) string {
 }
 
 func (tg *TypeGenerator) convertType(kaulaType string, nullable bool) string {
+	// 可空类型后缀 `?`（如 `i64?`）：C 中不存在该记法，擦除并视为可空。
+	// parser 在形参 ParamTypes 里保留 `?` 原文（ParamNullables 单独记录），
+	// 局部变量声明路径会先剥掉；这里兜底统一处理，防止 `i64?*` 这类非法 C。
+	if strings.HasSuffix(kaulaType, "?") {
+		nullable = true
+		kaulaType = strings.TrimSuffix(kaulaType, "?")
+	}
 	if cType, ok := tg.clibTypeMap[kaulaType]; ok {
 		if nullable && !strings.HasSuffix(cType, "*") {
 			cType += "*"

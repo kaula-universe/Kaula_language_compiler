@@ -1,0 +1,66 @@
+// nullable_flow.kl —— 编译期可空类型 T? 流敏感判空回归语料。
+//
+// 守护语言级可空机制的核心语义：
+//   1. `T?` 声明 + null 赋值（null 兼容所有可空类型）
+//   2. 流敏感判空：if (p != null) 分支内可安全解引用
+//   3. if/else 两路各自判空后合并状态
+//   4. 已判空的可空变量经 as<T*> 显式转换后可传给非可空形参；
+//      非空指针经 T? 变量中转可传给可空形参（as<T?> 不支持）
+//   5. 可空形参（i64?）接受 null，分支内解引用
+//   6. 违规路径由编译期拒绝（nullable_passed），正向语料不包含
+//
+// 返回 i32：0 = 全部通过，非零 = 失败分支编号。
+// 负向验证（未判空即传参报 nullable_passed）见 docs/tutorials/pointers.md。
+
+import std.io
+
+fn deref(i64* p) i64 {
+    return *p
+}
+
+fn maybeDeref(i64? p) i64 {
+    if (p != null) {
+        return *p
+    }
+    return -1
+}
+
+fn main() i32 {
+    i64 v = 42
+
+    // —— 1. 声明与判空解引用 ——
+    i64? p = &v
+    if (p != null) {
+        if (*p != 42) { return 1 }
+    } else {
+        return 2
+    }
+
+    // —— 2. null 赋值与判空 ——
+    i64? none = null
+    if (none != null) {
+        return 3
+    }
+
+    // —— 3. 判空后经显式转换传给非可空形参 ——
+    if (p != null) {
+        if (deref(as<i64*>(p)) != 42) { return 5 }
+    } else {
+        return 6
+    }
+
+    // —— 4. 可空形参：null 与非空指针都接受（非空值经 T? 变量中转） ——
+    i64? nn = &v
+    if (maybeDeref(null) != -1) { return 7 }
+    if (maybeDeref(nn) != 42) { return 8 }
+
+    // —— 5. if/else 双路判空合并 ——
+    if (p != null) {
+        if (deref(as<i64*>(p)) != 42) { return 9 }
+    } else {
+        if (deref(as<i64*>(p)) == 42) { return 10 }
+    }
+
+    std.io.println("nullable flow OK")
+    return 0
+}
