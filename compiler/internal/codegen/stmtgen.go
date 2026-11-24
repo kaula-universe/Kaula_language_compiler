@@ -1747,7 +1747,7 @@ func (sg *StatementGenerator) generateWhileStatement(stmt *ast.WhileStatement) s
 	// Phase 2：函数级已有 checkpoint 时，循环内 survivor 变量降级为 offset 回收
 	//   （函数级 checkpoint 在函数出口统一回收所有 survivor 对象，
 	//    循环内 offset_restore 只回收 bump 区域，不影响 survivor 区域）
-	hasSurvivor := bodyHasSurvivorType(stmt.Body)
+	hasSurvivor := bodyHasSurvivorType(stmt.Body, sg.codegen)
 	hasBumpAlloc := bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
 	funcLevelCheckpoint := sg.codegen.funcHasKMMCheckpoint
 
@@ -1925,7 +1925,7 @@ func (sg *StatementGenerator) shouldUseKMMScope() bool {
 			if sym.Scope == "parameter" || sym.Scope == "param" {
 				continue
 			}
-			if needsKMMForType(sym.Type) {
+			if sg.codegen.typeMayNeedKMM(sym.Type) {
 				return true
 			}
 		}
@@ -1958,39 +1958,62 @@ func bodyContainsAllocation(stmts []ast.Statement, isFreestanding bool) bool {
 // bodyHasSurvivorType 递归检测语句列表中是否声明了需要 survivor 管理的类型变量
 // （指针、string、[]slice、map 等）。这些类型需要完整 survivor checkpoint/rewind，
 // 不能仅用 offset_save/restore 回收。
-func bodyHasSurvivorType(stmts []ast.Statement) bool {
+//
+// 精度优化（kmm_precision.go）：
+//   - POD struct（传递纯值闭包）→ 不算 survivor
+//   - 全程仅字面量赋值的局部 String（SSO-only）→ 不算 survivor
+//   - 无载荷枚举 → 不算 survivor
+//   - 其余维持保守判定（含定长数组的 37debaa 元素递归）
+func bodyHasSurvivorType(stmts []ast.Statement, cg *CodeGenerator) bool {
 	for _, stmt := range stmts {
 		if stmt == nil {
 			continue
 		}
 		switch s := stmt.(type) {
 		case *ast.VariableDeclaration:
-			if needsKMMForType(s.Type) {
+			if typeDeclMaySurvive(s, cg) {
 				return true
 			}
 		case *ast.IfStatement:
-			if bodyHasSurvivorType(s.Body) || bodyHasSurvivorType(s.Else) {
+			if bodyHasSurvivorType(s.Body, cg) || bodyHasSurvivorType(s.Else, cg) {
 				return true
 			}
 		case *ast.WhileStatement:
-			if bodyHasSurvivorType(s.Body) {
+			if bodyHasSurvivorType(s.Body, cg) {
 				return true
 			}
 		case *ast.ForStatement:
-			if bodyHasSurvivorType(s.Body) {
+			if bodyHasSurvivorType(s.Body, cg) {
 				return true
 			}
 		case *ast.ForInStatement:
-			if bodyHasSurvivorType(s.Body) {
+			if bodyHasSurvivorType(s.Body, cg) {
 				return true
 			}
 		case *ast.BlockStatement:
-			if bodyHasSurvivorType(s.Statements) {
+			if bodyHasSurvivorType(s.Statements, cg) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// typeDeclMaySurvive 变量声明是否需要 survivor 管理的精细判定。
+// cg 为 nil 时回退保守路径（等价原 needsKMMForType 行为）。
+func typeDeclMaySurvive(decl *ast.VariableDeclaration, cg *CodeGenerator) bool {
+	if decl == nil {
+		return false
+	}
+	if cg == nil {
+		return needsKMMForType(decl.Type)
+	}
+	// SSO-only String：全程仅字面量赋值 → 载荷内联，无需 survivor
+	base := strings.ToLower(strings.TrimSuffix(decl.Type, "?"))
+	if (base == "string" || base == "str") && cg.IsSSOOnlyStringVar(decl.Name) {
+		return false
+	}
+	return cg.typeMayNeedKMM(decl.Type)
 }
 
 // collectOuterVarNames 收集循环外（函数级）声明的变量名，用于逃逸分析
@@ -2324,9 +2347,10 @@ func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement
 			return true
 		}
 		// SOR 决策不需要 KMM 时，补充检查 SOR 未追踪的指针类型变量
+		// （Phase 3：POD struct / SSO-only String 精细判定）
 		for _, stmt := range bodyStmts {
 			if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
-				if needsKMMForType(varDecl.Type) {
+				if typeDeclMaySurvive(varDecl, sg.codegen) {
 					return true
 				}
 			}
@@ -2339,10 +2363,10 @@ func (sg *StatementGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement
 		return false
 	}
 
-	// 非 SOR 模式：扫描 body 中的变量类型
+	// 非 SOR 模式：扫描 body 中的变量类型（Phase 3：精细判定）
 	for _, stmt := range bodyStmts {
 		if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
-			if needsKMMForType(varDecl.Type) {
+			if typeDeclMaySurvive(varDecl, sg.codegen) {
 				return true
 			}
 		}
@@ -2375,7 +2399,7 @@ func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 				continue
 			}
 			// 检查变量类型是否需要 KMM
-			if needsKMMForType(sym.Type) {
+			if sg.codegen.typeMayNeedKMM(sym.Type) {
 				return true
 			}
 		}
@@ -2743,7 +2767,7 @@ func (sg *StatementGenerator) generateForRangeStatement(stmt *ast.ForInStatement
 	// KMM scope 处理：与 while 循环一致，循环体内分配的内存在每次迭代结束时回卷
 	// Phase 1+2 优化：区分 survivor 类型变量和 bump 分配
 	// Phase 2：函数级已有 checkpoint 时，循环内 survivor 变量降级为 offset 回收
-	hasSurvivor := bodyHasSurvivorType(stmt.Body)
+	hasSurvivor := bodyHasSurvivorType(stmt.Body, sg.codegen)
 	hasBumpAlloc := bodyContainsAllocation(stmt.Body, sg.codegen.IsFreestanding())
 	funcLevelCheckpoint := sg.codegen.funcHasKMMCheckpoint
 
@@ -3397,6 +3421,22 @@ func (sg *StatementGenerator) generateBlockStatement(stmt *ast.BlockStatement) s
 		return code
 	}
 
+	// Phase 3（kmm_precision.go）：裸块按需包壳。
+	// 此前所有裸块（含 match 分支体）无条件包 KMM_V4_SCOPE_START/END，
+	// 纯字面量赋值/纯值计算的块也白付 scope push/pop。块内既无分配点
+	// （stmtsMayAllocate 覆盖 stdlib 堆返回调用）也无 survivor 类型变量
+	// （bodyHasSurvivorType 已按 POD/SSO-only 收紧）→ 发射普通块。
+	if !sg.codegen.stmtsMayAllocate(stmt.Statements) &&
+		!bodyHasSurvivorType(stmt.Statements, sg.codegen) {
+		code := "{\n"
+		sg.codegen.indent++
+		code += sg.generateStmtsWithLiveness(stmt.Statements, nil)
+		sg.codegen.indent--
+		code += indent + "}\n"
+		sg.codegen.ExitScope()
+		return code
+	}
+
 	code := sg.codegen.KMMStart("")
 	sg.codegen.indent++
 	// 与实际发射的 scope_push 配对：块内 return 必须显式 pop 这一帧。
@@ -3718,6 +3758,11 @@ func (sg *StatementGenerator) generateEarlyFreeForStmtIndex(lastUse map[string]i
 		}
 		// String 类型：SSO 感知释放（只有 len>15 才释放堆指针）
 		if sg.isStringTyped(name) {
+			// Phase 3：SSO-only String 跳过（载荷内联，释放是纯 no-op 噪音）
+			if sg.codegen.IsSSOOnlyStringVar(name) {
+				freed[name] = true
+				continue
+			}
 			b.WriteString(indent)
 			b.WriteString("string_survivor_free(")
 			b.WriteString(name)
@@ -4905,6 +4950,16 @@ func (sg *StatementGenerator) generateSurvivorFreeForScope() string {
 			b.WriteString(" (assign-escaped, ownership moved out) */\n")
 			continue
 		}
+		// Phase 3（kmm_precision.go）：SSO-only String 跳过。
+		// 全程仅字面量赋值 → 载荷内联（SSO），string_survivor_free 本身是
+		// no-op，发射纯噪音；且函数级 wrapper 可能已因该豁免而消失。
+		if sg.isStringTyped(name) && sg.codegen.IsSSOOnlyStringVar(name) {
+			b.WriteString(indent)
+			b.WriteString("/* structural: skip survivor_free for ")
+			b.WriteString(name)
+			b.WriteString(" (sso-only, payload inline) */\n")
+			continue
+		}
 		// SOR 优化层：统一通过 ShouldSkipSurvivorFree 判定
 		if sorActive {
 			if d := adapter.GetVarDecision(name); d != nil {
@@ -5510,6 +5565,14 @@ func (sg *StatementGenerator) structuralNeedsReturnPromote(name string) bool {
 	}
 	// 指针类型或 String 类型需要 promote
 	if sg.isPointerTyped(name) || sg.isStringTyped(name) {
+		// Phase 3（kmm_precision.go）：SSO-only String 免 promote（move 语义）。
+		// 全程仅字面量赋值的局部 String 载荷内联在结构体里（SSO），
+		// `return label` 按值拷贝结构体即完成移交——string_clone_global
+		// 是纯开销。该豁免必须在 extern 警告之前（SSO-only 不可能来自
+		// extern：非字面量赋值已被来源扫描拉黑）。
+		if sg.isStringTyped(name) && sg.codegen.IsSSOOnlyStringVar(name) {
+			return false
+		}
 		// extern 来源警告（从 SOR 下移的能力④）：基础层保守 promote，但提示语义可能不正确
 		if sg.codegen.IsExternOrigin(name) {
 			sg.codegen.error("[structural] 变量 '" + name + "' 来自 extern 函数返回值，" +

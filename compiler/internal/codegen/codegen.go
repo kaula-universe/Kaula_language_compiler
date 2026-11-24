@@ -434,6 +434,20 @@ type CodeGenerator struct {
 	initializerSuppliedVars map[string]bool
 	exportedFuncNames       map[string]bool
 
+	// 分配点驱动 KMM 插入精度优化（kmm_precision.go）：
+	// podStructTable/podStructBuilt: 传递纯值 struct 判定表（惰性构建）
+	// ssoStringScanned/ssoStringTainted/ssoStringEdges: 全程仅字面量赋值的
+	//   局部 String 变量（edges 为 SSO 变量间赋值边，污点不动点传播）
+	// klAllocTable/klKnownFuncs/klAllocBuilt: KL 函数跨函数分配闭包（不动点）
+	podStructBuilt   bool
+	podStructTable   map[string]bool
+	ssoStringScanned map[string]bool
+	ssoStringTainted map[string]bool
+	ssoStringEdges   map[string][]string
+	klAllocBuilt     bool
+	klAllocTable     map[string]bool
+	klKnownFuncs     map[string]bool
+
 	sourceMap  *SourceMap
 	sourceFile string
 
@@ -2408,6 +2422,9 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 	 *     → 定义在 std/string/string.c；
 	 *   - 多参数 `println(a, b, ...)` 生成 `println_multi(...)`
 	 *     → 定义在 std/io/io.c。
+	 *   - 单参 `println(s)` 生成 `println(...)`
+	 *     → 同样定义在 std/io/io.c（Phase 3 起显式登记：纯 SSO 字面量
+	 *       程序不再引用 string_survivor_free，println 成为唯一线索）。
 	 *
 	 * 于是
 	 *     fn main() { auto a = "hello"  println(a) }
@@ -2426,6 +2443,7 @@ func (cg *CodeGenerator) Generate(program *ast.Program) string {
 		{"string_survivor_free(", "std.string"},
 		{"string_length(", "std.string"},
 		{"string_substring(", "std.string"},
+		{"println(", "std.io"},
 		{"println_multi(", "std.io"},
 	}
 	emitted := functionCode.String() + mainCode.String()

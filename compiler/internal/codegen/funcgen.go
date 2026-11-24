@@ -74,7 +74,7 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForBody(bodyStmts []ast.Statement)
 
 	// 非 SOR 模式：递归扫描 body 中的变量类型（包括循环/if 内部）
 	// Phase 2：循环内的 survivor 变量也提升到函数级 checkpoint
-	return bodyHasSurvivorType(bodyStmts)
+	return bodyHasSurvivorType(bodyStmts, fg.codegen)
 }
 
 // bodyHasAllocationCall 扫描函数体是否包含 KMM 分配调用
@@ -167,7 +167,9 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForFunc(funcName string, bodyStmts
 
 	// 优化：扫描函数体是否包含分配调用或 survivor 类型变量（递归扫描循环/if内部）
 	// Phase 2：循环内的 survivor 变量也提升到函数级 checkpoint
-	if !fg.bodyHasAllocationCall(bodyStmts) && !bodyHasSurvivorType(bodyStmts) {
+	// Phase 3（kmm_precision.go）：分配点检测升级——stdlib 堆返回调用
+	// （std.string.create 等）不再漏判；KL/extern 调用保守视为可能分配
+	if !fg.codegen.stmtsMayAllocate(bodyStmts) && !bodyHasSurvivorType(bodyStmts, fg.codegen) {
 		return false
 	}
 
@@ -190,7 +192,7 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForFunc(funcName string, bodyStmts
 				continue
 			}
 			if varDecl, ok := stmt.(*ast.VariableDeclaration); ok {
-				if needsKMMForType(varDecl.Type) {
+				if typeDeclMaySurvive(varDecl, fg.codegen) {
 					return true
 				}
 			}
@@ -201,7 +203,7 @@ func (fg *FunctionGenerator) shouldUseKMMScopeForFunc(funcName string, bodyStmts
 	// 非 SOR 模式：递归扫描 body 中的变量类型（包括循环/if 内部）
 	// Phase 2 优化：循环内的 survivor 变量也提升到函数级 checkpoint，
 	// 避免每次循环迭代都重复 survivor checkpoint/rewind 开销
-	if bodyHasSurvivorType(bodyStmts) {
+	if bodyHasSurvivorType(bodyStmts, fg.codegen) {
 		return true
 	}
 	return false
@@ -235,7 +237,7 @@ func (fg *FunctionGenerator) shouldUseKMMScope() bool {
 			if sym.Scope == "parameter" || sym.Scope == "param" {
 				continue
 			}
-			if needsKMMForType(sym.Type) {
+			if fg.codegen.typeMayNeedKMM(sym.Type) {
 				return true
 			}
 		}
@@ -260,7 +262,7 @@ func (fg *FunctionGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 			if sym.Scope == "parameter" || sym.Scope == "param" {
 				continue
 			}
-			if needsKMMForType(sym.Type) {
+			if fg.codegen.typeMayNeedKMM(sym.Type) {
 				return true
 			}
 		}
@@ -611,6 +613,11 @@ func (fg *FunctionGenerator) GenerateFunctionStatement(stmt *ast.FunctionStateme
 		fg.codegen.currentCaptures = prevCaptures
 		fg.codegen.currentCaptureSet = prevCaptureSet
 	}()
+
+	// Phase 3（kmm_precision.go）：SSO-only String 来源扫描。
+	// 必须在 useKMM 判定之前完成——bodyHasSurvivorType 依赖它豁免
+	// 「全程仅字面量赋值」的局部 String 变量。
+	fg.codegen.ScanStringVarOrigins(stmt.Body)
 
 	shouldUseKMM := !stmt.NoKMM && !stmt.Inline
 	// 尾调用改写状态是"每函数"的：先取出外层（可能来自嵌套调用栈）的状态清空，
@@ -1096,6 +1103,9 @@ func (fg *FunctionGenerator) generateMainFunction(stmt *ast.FunctionStatement) s
 	}
 	code.WriteString("int " + funcName + "() {\n")
 	fg.codegen.indent++
+
+	// Phase 3：main 的 SSO-only String 来源扫描（与普通函数同语义）
+	fg.codegen.ScanStringVarOrigins(stmt.Body)
 
 	// 作用域合并优化：先预判断，如果需要 KMM 则 EnterKMMScope 再生成 body
 	useKMM := !stmt.NoKMM && fg.shouldUseKMMScopeForBody(stmt.Body)

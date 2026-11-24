@@ -660,6 +660,36 @@ TLS 元数据与 survivor checkpoint 开销。
 已知边界：纯值**结构体**局部变量目前仍走 KMM 作用域（其字段类型解析牵涉
 跨 TU / 泛型 / 循环引用，保守保留），元素为结构体的定长数组同理。
 
+### 2.4.2 分配点驱动的精准插入（Phase 3）
+
+37debaa 之后插入策略从「类型启发式」升级为「分配点驱动」（`kmm_precision.go`），
+四类判定/发射全部收紧：
+
+**POD struct 判定表**：编译期计算「传递纯值闭包」——struct 字段递归不含
+指针/string/切片/map/泛型参数/带载荷枚举即纯值。`Stats`/`Point` 这类 POD
+局部变量不再触发函数级 KMM 作用域。含指针或 String 字段的 struct 保守回退。
+
+**分配点检测**：`exprMayAllocate` 覆盖三类——KMM 命名调用（原有）、stdlib
+堆返回调用（按 stdlib.json 的 return 类型判定，修复形参重赋值
+`s = string_create(...)` 之类漏判）、KL 函数跨函数分配闭包（不动点传播；
+被调方的分配在被调方作用域回收，逃逸返回走 promote 进全局段，调用方无需
+为其包壳）。未知/extern 调用保守视为分配。
+
+**裸块按需包壳**：裸块（含 match 分支体）此前无条件发射
+`KMM_V4_SCOPE_START/END`；现在块内无分配点且无 survivor 变量时发射普通块。
+字面量赋值的 match 分支从「函数壳 + 每分支壳 + 返回 clone」变为纯 switch。
+
+**SSO-only String move**：全程仅被字符串字面量赋值的局部 String（污点沿
+SSO 变量间赋值边不动点传播）不进堆——函数级 wrapper、survivor free、
+返回时的 `string_clone_global` 全部省略，`return s` 按值拷贝即移交所有权。
+
+实测：10M 次 match 返回 String + 100M 次 POD 累加（O2 单线程）
+290ms → 135ms（约 2.1 倍）；运行输出逐字节一致。
+回归语料：`internal/codegen/kmm_precision_test.go`（含安全下界反例）。
+
+已知边界：KL 分配闭包按源码函数名匹配（类方法/构造器不参与，走保守）；
+extern 与程序外符号保守视为分配；`#[no_kmm]` 行为不变。
+
 ## 2.5 所有权语义：严格池
 
 `KMM_V4_ENABLE_FALLBACK` **默认关闭**（所有模式）。原因：fallback 会把 libc

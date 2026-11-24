@@ -26,12 +26,15 @@ func generateForMarkTest(t *testing.T, src string) string {
 	return cCode
 }
 
+// 夹具触发器说明：曾用 `string s = "abc"`，Phase 3（kmm_precision.go）起
+// SSO-only 字面量 String 不再触发 wrapper，改用指针局部变量 `i64* p`。
+//
 // TestRecursiveFuncUsesMarkNotScope 递归 + 每层分配的函数必须改用 base 感知的
 // mark save/restore：mark 落在 C 栈上，不消耗 KMM scope 栈的定长槽位，
 // 递归深度因此不再受 KMM_V4_MAX_SCOPE_DEPTH 约束。
 func TestRecursiveFuncUsesMarkNotScope(t *testing.T) {
 	src := `fn rec(i32 n) i32 {
-    string s = "abc"
+    i64* p = null
     if (n <= 0) { return 0 }
     return 1 + rec(n - 1)
 }
@@ -68,7 +71,7 @@ func TestRecursiveFuncUsesMarkNotScope(t *testing.T) {
 // 函数入口 mark，否则每层递归泄漏一层分配。
 func TestMarkFuncReturnRewindsToFunctionMark(t *testing.T) {
 	src := `fn rec(i32 n) i32 {
-    string s = "abc"
+    i64* p = null
     if (n <= 0) { return 0 }
     return 1 + rec(n - 1)
 }
@@ -94,7 +97,7 @@ func TestMarkFuncReturnRewindsToFunctionMark(t *testing.T) {
 // 确保本次改动的作用域被严格限制在递归环内。
 func TestNonRecursiveFuncStillUsesScope(t *testing.T) {
 	src := `fn helper(i32 n) i32 {
-    string s = "abc"
+    i64* p = null
     return n
 }
 ` + "\nfn main() i32 {\n    return 0\n}\n"
@@ -116,7 +119,7 @@ func TestMutualRecursionUsesMark(t *testing.T) {
     return odd(n - 1)
 }
 fn odd(i32 n) bool {
-    string s = "x"
+    i64* p = null
     if (n == 0) { return false }
     return even(n - 1)
 }
@@ -137,7 +140,7 @@ fn odd(i32 n) bool {
 // scope_pop，不能切到 mark 模式，否则 pop/restore 语义错位。
 func TestConcurrentFuncKeepsScope(t *testing.T) {
 	src := `conc fn crec(i32 n) i32 {
-    string s = "abc"
+    i64* p = null
     if (n <= 0) { return 0 }
     return crec(n - 1)
 }

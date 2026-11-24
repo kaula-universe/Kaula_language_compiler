@@ -21,11 +21,12 @@ func TestImplicitStdModuleDeps(t *testing.T) {
 		src    string
 		module string
 	}{
-		{
-			name:   "string literal without import",
-			src:    "fn main() {\n    auto a = \"hello\"\n    println(a)\n}\n",
-			module: "std.string",
-		},
+		// 注：曾有一个 "string literal without import → std.string" 用例。
+		// Phase 3（kmm_precision.go）起该用例的前提不复存在：纯 SSO 字面量
+		// 字符串只生成结构体字面量 + string_cdata 宏 + printf，不引用任何
+		// std 库符号（string_survivor_free 对 SSO-only 变量也已省略），
+		// usedModules 为空是正确结果，链接不再需要任何 std 模块。
+		// 堆来源字符串的隐式依赖由下方 "reflection string result" 用例覆盖。
 		{
 			name:   "multi-arg println without import",
 			src:    "fn main() {\n    println(1, 2)\n}\n",

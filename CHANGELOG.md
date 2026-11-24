@@ -10,6 +10,39 @@
 ## [Unreleased]
 
 ### Performance
+- **KMM 插入策略 Phase 3：分配点驱动的精准插入**：37debaa 收紧了定长数组，
+  本条把同一思想推广到其余误判与冗余发射（新文件 `kmm_precision.go`）。
+  五项改进：
+  1. **POD struct 判定表**：传递纯值闭包（字段递归无指针/string/切片/泛型/
+     带载荷枚举）的 struct 不再被"未知类型保守 true"误判——`Stats`/`Point`
+     这类纯值局部变量不再把整个函数套进 KMM 作用域。
+  2. **分配点检测升级**：从"kmm_v4 命名调用"扩展到"stdlib 堆返回调用"
+     （std.string.create 等按 std.json return 类型判定，修复形参重赋值
+     `s = string_create(...)` 漏判泄漏的既有隐患）；KL 函数跨函数分配
+     闭包用不动点传播求解（被调方分配在自己作用域回收、逃逸走 promote，
+     调用方无需为不分配的被调方包壳）；未知/extern 调用保守 true。
+  3. **裸块按需包壳**：此前所有裸块（含 match 分支体）无条件发射
+     `KMM_V4_SCOPE_START/END`；块内无分配点且无 survivor 变量时发射普通块。
+  4. **循环 mark_save/restore 门控精细化**：循环体仅含 SSO-only String /
+     POD 变量时不再逐轮付 mark_save/restore（随 1/3 的判定收紧自然生效）。
+  5. **SSO-only String move**：全程仅被字符串字面量赋值的局部 String
+     （含 SSO 变量间赋值的污点不动点传播）返回时按值拷贝即 move，省掉
+     `string_clone_global` 深拷贝；survivor free 对其同步省略。
+  安全下界（全部保留）：含指针/string 字段的 struct、堆分配调用、非字面量
+  String 赋值、未知/extern 调用维持原保守路径；只做"证明不需要"。
+  实测（10M 次 match 返回 String + 100M 次 POD 累加，O2）：290ms → 135ms
+  （~2.1x）；TaskMan 生成 C 中 KMM 标记 14+ → 6、checkpoint 8 → 3、
+  clone 1 → 0，运行输出不变。
+  回归：`internal/codegen/kmm_precision_test.go`（POD/嵌套 POD/POD 数组字段/
+  string 指针字段下界/无载荷枚举/stdlib 堆返回下界/非字面量拉黑/SSO move/
+  match 分支裸块/块内堆分配下界/循环门控，含正反两向）。
+  连带登记：①单参 `println(` 纳入隐式链接依赖清单（纯 SSO 程序不再引用
+  `string_survivor_free`，println 成为 std.io 的唯一线索——顺带修复单参
+  println 未导入时不链接的既有缺口）；②纯 SSO 字面量程序零 std 符号依赖，
+  usedModules 可为空；③`kmm_mark_test` 夹具从 `string s = "abc"` 换成
+  `i64* p`（SSO-only 字面量不再触发 wrapper，指针保持测试原意）。
+  已知边界：无跨函数内联前的调用链闭包按源码名匹配（方法/构造器不参与）；
+  KL 函数表中查不到的名字（extern、外部符号）保守视为分配。
 - **KMM 插入策略：定长值数组不再触发作用域/幸存回收**：`needsKMMForType` 此前把
   所有 `[` 开头的类型一律判为需要 KMM（注释自承"大数组可能需要 KMM，保守处理"）。
   但定长数组 `[N]T` 在 C 侧是**栈对象**（生成 `int64_t buf[N]` 并带栈预算静态断言），
