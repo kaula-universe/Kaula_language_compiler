@@ -645,6 +645,21 @@ kmm_v4_survivor_rewind(cp);
 一旦某条路径漏发 free 就是单调耗尽；只有兜底没有精确回收的话，
 长循环的稳态内存会远超实际存活量。
 
+### 2.4.1 编译期作用域插入与定长值数组的豁免
+
+`KMM_V4_SCOPE` + `kmm_v4_survivor_checkpoint/rewind` 并非每个函数/块都插入：
+编译器先用 `needsKMMForType` 按变量类型预判定，只有确实可能产生 KMM 对象时才套壳。
+
+**定长值数组豁免**：`[N]T` 在 C 侧是栈对象（生成 `int64_t buf[N]` 并带栈预算
+静态断言），本体不进 KMM 池。因此 `needsKMMForType` 剥离全部 `[N]` 维度后按元素
+类型递归判定——纯值元素（`[16]i64`、`[2][3]f64`、`[N]i64`）不插入作用域，
+含指针/字符串/未知元素的数组（`[N]i64*` / `[N]string` / `[N]Point`）与切片 `[]T`
+仍走原路径。这让数值数组密集的函数/循环不再为 never-allocated 的作用域付
+TLS 元数据与 survivor checkpoint 开销。
+
+已知边界：纯值**结构体**局部变量目前仍走 KMM 作用域（其字段类型解析牵涉
+跨 TU / 泛型 / 循环引用，保守保留），元素为结构体的定长数组同理。
+
 ## 2.5 所有权语义：严格池
 
 `KMM_V4_ENABLE_FALLBACK` **默认关闭**（所有模式）。原因：fallback 会把 libc

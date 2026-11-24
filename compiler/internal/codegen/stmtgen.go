@@ -2389,10 +2389,47 @@ func (sg *StatementGenerator) needsKMMScopeNonSOR(bodyCode string) bool {
 	return false
 }
 
+// fixedArrayElementType 剥离定长数组的全部前导维度前缀，返回叶子元素类型。
+//
+// 只处理方括号内非空（[N]）的定长数组；切片 []T 的维度为空，返回 ok=false，
+// 由调用方按"切片必然需要 KMM"处理。这样 [N]i64 这类栈数组与 []i64 这类
+// 堆切片不会被混为一谈。
+//
+// 例：
+//   "[16]i64"    -> ("i64", true)
+//   "[2][3]f64"  -> ("f64", true)
+//   "[N]Point"   -> ("Point", true)   // const 尺寸 / 自定义类型原样交给递归判定
+//   "[]i64"      -> ("", false)       // 切片，不是定长数组
+//   "i64"        -> ("", false)
+//
+// 畸形输入（缺 ']'）同样返回 ok=false，调用方走保守路径。
+func fixedArrayElementType(typeName string) (string, bool) {
+	t := strings.TrimSpace(typeName)
+	stripped := false
+	for strings.HasPrefix(t, "[") {
+		closeIdx := strings.IndexByte(t, ']')
+		if closeIdx < 0 {
+			return "", false
+		}
+		if strings.TrimSpace(t[1:closeIdx]) == "" {
+			return "", false // []T 是切片，不是定长数组
+		}
+		t = strings.TrimSpace(t[closeIdx+1:])
+		stripped = true
+	}
+	if !stripped || t == "" {
+		return "", false
+	}
+	return t, true
+}
+
 // needsKMMForType 判断类型是否需要 KMM 内存管理
 // - 指针类型 (*T) 需要 KMM
 // - 字符串类型 (string, str) 需要 KMM
 // - 复合类型 ([]T, map[K]V) 需要 KMM
+// - 定长数组 ([N]T) 本体是 C 栈对象，是否托管取决于元素类型 T：
+//   纯值元素（[16]i64 / [2][3]f64）不产生任何 KMM 分配，无需 KMM；
+//   含指针/字符串/未知元素（[N]i64* / [N]string / [N]Point）保守保留 KMM。
 // - 值类型 (int, bool, float, double, etc.) 不需要 KMM
 func needsKMMForType(typeName string) bool {
 	if typeName == "" {
@@ -2424,8 +2461,13 @@ func needsKMMForType(typeName string) bool {
 		return true
 	}
 
-	// 数组类型（大数组可能需要 KMM，但这里保守处理）
+	// 数组类型：定长数组 [N]T 是栈对象（栈预算静态断言保证），需不需要 KMM
+	// 完全由元素类型决定；纯值元素不插入任何 KMM 作用域/回收代码。
+	// 切片 []T 已在上面单独判为需要 KMM；畸形维度回退到保守的 true。
 	if strings.HasPrefix(t, "[") {
+		if elem, ok := fixedArrayElementType(t); ok {
+			return needsKMMForType(elem)
+		}
 		return true
 	}
 

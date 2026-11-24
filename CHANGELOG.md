@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+### Performance
+- **KMM 插入策略：定长值数组不再触发作用域/幸存回收**：`needsKMMForType` 此前把
+  所有 `[` 开头的类型一律判为需要 KMM（注释自承"大数组可能需要 KMM，保守处理"）。
+  但定长数组 `[N]T` 在 C 侧是**栈对象**（生成 `int64_t buf[N]` 并带栈预算静态断言），
+  本体从不消耗 KMM 池。纯值元素的定长数组（`[16]i64`、`[2][3]f64`、`[N]i64` const 尺寸）
+  因此被白白套上 `kmm_v4_survivor_checkpoint` + `KMM_V4_SCOPE` + `survivor_rewind`，
+  每次函数调用白付 TLS/作用域元数据开销，循环内还每轮付一次 survivor checkpoint。
+  修复：`fixedArrayElementType` 剥离全部定长维度后按元素类型递归判定——纯值元素
+  不插入 KMM，含指针/字符串/未知元素（`[N]i64*` / `[N]string` / `[N]Point`）及切片
+  `[]T` 维持原保守路径，内存安全性不变。
+  回归：`internal/codegen/kmm_fixed_array_scope_test.go`（值数组零 KMM 标记、
+  指针/字符串/切片/混合仍保留作用域、循环内值数组无 survivor checkpoint、判定表）；
+  148/148 语言语料双模式通过，`test/perf/run_perf.py` 6/6 通过。
+  已知边界（未改，保守保留）：纯值**结构体**局部变量仍走 KMM 作用域——字段类型
+  解析需跨 TU/泛型/循环引用，风险高于收益；元素为结构体的定长数组同此。
+
 ### Fixed
 - **小写开头类型名的结构体字面量解析失败**：`struct m000_rec { ... }` 声明合法，但
   `m000_rec r = m000_rec { ... }` 被解析成裸 Identifier + 语句块，报出一串
