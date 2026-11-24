@@ -10,6 +10,27 @@
 ## [Unreleased]
 
 ### Performance
+- **KMM 插入策略 Phase 4：方法闭包 / match SSO / 分配点覆盖补全**：沿用 Phase 3
+  「只证明不需要、不猜测不需要」的路线，再收紧三处冗余发射，并补两处判定漏洞。
+  1. **类方法纳入分配闭包**：class 方法以方法名入跨函数不动点表，构造器以类名
+     入表且恒判分配（`KMM_V4_ALLOC_ZERO`）。`c.twice()` 这类纯方法调用不再让
+     裸块白套 `KMM_V4_SCOPE`；同名顶层函数与方法分表，接口动态派发、泛型类、
+     同名方法任一分配、未知/extern 一律保守回退。
+  2. **修复 Phase 3 两处分配点漏判**：①`std.string.create(...)` 在 AST 中是嵌套
+     成员访问，且 stdlib 注册名是 `string_create`——补 `memberAccessPath` 展平 +
+     `ResolveChainedFunction` 链式解析；②跨函数扫描中「直接分配点」优先于调用边，
+     避免成员形式的堆返回调用被误记成未知调用边。两处均为既有安全漏洞。
+  3. **match 值 String 的 SSO-only 判定**：`string s = match p { A => "a", B => "b" }`
+     全字面量分支时按 SSO move 处理，省掉函数级 wrapper、`string_clone_global`
+     与 survivor free；任一分支含堆返回调用则拉黑回退。
+  4. **分配点检测覆盖补全**：`exprMayAllocate` 补齐 IndexExpression、
+     MemberExpression、ArrayLiteral、Await、Spawn、PrefixCall、Lambda、Comptime
+     与 match 的 Target；`stmtMayAllocate` 补齐 Call/Yield/Extract 语句。闭包、
+     spawn、前缀宏等静态不可判定者保守视为分配，消除潜在漏判泄漏。
+  实证：纯方法调用的裸块作用域 1 → 0；match 字面量返回的 wrapper/clone 归零。
+  回归：`internal/codegen/kmm_precision_phase4_test.go` 新增 10 例（含接口派发、
+  同名方法、分配方法、match 堆分支、未知节点等安全下界）；`go test ./...` 全过；
+  语料库 148/148 双模式通过；perf 6/6 通过。
 - **KMM 插入策略 Phase 3：分配点驱动的精准插入**：37debaa 收紧了定长数组，
   本条把同一思想推广到其余误判与冗余发射（新文件 `kmm_precision.go`）。
   五项改进：

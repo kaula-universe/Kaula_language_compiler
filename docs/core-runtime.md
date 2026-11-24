@@ -687,8 +687,35 @@ SSO 变量间赋值边不动点传播）不进堆——函数级 wrapper、survi
 290ms → 135ms（约 2.1 倍）；运行输出逐字节一致。
 回归语料：`internal/codegen/kmm_precision_test.go`（含安全下界反例）。
 
-已知边界：KL 分配闭包按源码函数名匹配（类方法/构造器不参与，走保守）；
-extern 与程序外符号保守视为分配；`#[no_kmm]` 行为不变。
+已知边界（Phase 3）：KL 分配闭包按源码函数名匹配；extern 与程序外符号保守
+视为分配；`#[no_kmm]` 行为不变。Phase 4 已把类方法纳入闭包（见 2.4.3）。
+
+### 2.4.3 方法闭包与 match SSO（Phase 4）
+
+Phase 4 继续「只证明不需要」的方向，三处收紧 + 两处安全修复：
+
+**类方法分配闭包**：class 方法以方法名、构造器以类名入跨函数不动点表。
+构造器恒判为分配点（C 侧 `KMM_V4_ALLOC_ZERO` 分配 self）；纯方法调用
+（如 `c.twice()`）不再让裸块白套 `KMM_V4_SCOPE`。顶层函数与方法分表存放，
+避免同名误判；接口动态派发、泛型类、同名方法任一分配、未知/extern 方法
+一律保守视为分配。
+
+**Phase 3 判定漏洞修复**：①`std.string.create(...)` 的 AST 是嵌套成员访问，
+且 stdlib 注册名是 `string_create`——补 `memberAccessPath` 展平与链式解析；
+②跨函数扫描中直接分配点优先于调用边，避免成员形式的堆返回调用被误记成
+未知调用边，导致分配闭包漏判。
+
+**match 值 String 的 SSO-only**：`string s = match p { A => "a", B => "b" }`
+在全部分支均为字面量时按 SSO move 处理，省函数级 wrapper、
+`string_clone_global` 与 survivor free；任一分支含堆返回调用则拉黑。
+
+**分配点覆盖补全**：`exprMayAllocate` 补齐索引、成员、数组字面量、await、
+spawn、前缀宏、lambda、comptime 与 match 的被匹配表达式；`stmtMayAllocate`
+补齐 Call/Yield/Extract 语句。闭包、spawn、前缀宏等静态不可判定者保守视为
+分配，消除漏判导致的潜在泄漏。
+
+实证：纯方法调用裸块作用域 1 → 0；match 字面量返回的 wrapper 与 clone 归零。
+回归语料：`internal/codegen/kmm_precision_phase4_test.go`（10 例，含安全下界）。
 
 ## 2.5 所有权语义：严格池
 

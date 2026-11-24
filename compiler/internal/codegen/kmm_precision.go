@@ -223,6 +223,9 @@ func (cg *CodeGenerator) buildKLAllocTableIfNeeded() {
 	direct := map[string]bool{}
 	callees := map[string][]string{}
 	known := map[string]bool{}
+	// Phase 4：类方法名集合。与顶层函数表隔离——MemberAccess 调用只能按
+	// 「方法名」判定，不能拿同名顶层函数的结论套用（接口/未知 receiver 会误判）。
+	methodNames := map[string]bool{}
 
 	var walkStmts func(stmts []ast.Statement, owner string)
 	walkExpr := func(owner string, expr ast.Expression) {
@@ -234,11 +237,14 @@ func (cg *CodeGenerator) buildKLAllocTableIfNeeded() {
 			}
 			switch x := e.(type) {
 			case *ast.CallExpression:
-				if n := calledFuncName(x.Function); n != "" && !cg.isStdlibOrBuiltinName(n) {
-					callees[owner] = append(callees[owner], n)
-				} else if isAllocCall(x.Function, cg.IsFreestanding()) ||
+				// 直接分配点优先于调用边：成员形式的 stdlib 堆返回调用
+				// （std.string.create(...)）calledFuncName 只取到 "create"，
+				// 若先按调用边处理会漏判分配（跨函数闭包误判为不分配）。
+				if isAllocCall(x.Function, cg.IsFreestanding()) ||
 					cg.isHeapReturnStdlibCall(x.Function) {
 					direct[owner] = true
+				} else if n := calledFuncName(x.Function); n != "" && !cg.isStdlibOrBuiltinName(n) {
+					callees[owner] = append(callees[owner], n)
 				}
 				for _, a := range x.Args {
 					rec(a)
@@ -325,6 +331,50 @@ func (cg *CodeGenerator) buildKLAllocTableIfNeeded() {
 		}
 	}
 
+	// Phase 4：类方法 / 构造器入表，与顶层函数共享同一不动点。
+	// 构造器以类名入表（Vec2(...) 简名调用）：C 侧 KMM_V4_ALLOC_ZERO 分配
+	// self，恒为分配点；方法以方法名入表，同名方法取 OR。接口方法（动态
+	// 派发、实现未知）与泛型类方法（实例化未知）强制 true，保留安全下界。
+	for _, stmt := range prog.Statements {
+		switch s := stmt.(type) {
+		case *ast.ClassStatement:
+			if s == nil {
+				continue
+			}
+			if len(s.Constructors) > 0 {
+				known[s.Name] = true
+				direct[s.Name] = true
+			}
+			for _, m := range s.Methods {
+				if m == nil {
+					continue
+				}
+				methodNames[m.Name] = true
+				if !known[m.Name] {
+					known[m.Name] = true
+					direct[m.Name] = false
+				}
+				if s.Generic {
+					direct[m.Name] = true
+					continue
+				}
+				walkStmts(m.Body, m.Name)
+			}
+		case *ast.InterfaceStatement:
+			if s == nil {
+				continue
+			}
+			for _, m := range s.Methods {
+				if m == nil {
+					continue
+				}
+				methodNames[m.Name] = true
+				known[m.Name] = true
+				direct[m.Name] = true // 动态派发：实际实现未知，保守
+			}
+		}
+	}
+
 	// 不动点：调用方继承被调方
 	may := make(map[string]bool, len(direct))
 	for k, v := range direct {
@@ -347,6 +397,12 @@ func (cg *CodeGenerator) buildKLAllocTableIfNeeded() {
 	}
 	cg.klAllocTable = may
 	cg.klKnownFuncs = known
+	// Phase 4：方法分配闭包单独成表（只含类方法名，接口/泛型已置 true）。
+	cg.methodKnownNames = methodNames
+	cg.methodAllocTable = make(map[string]bool, len(methodNames))
+	for name := range methodNames {
+		cg.methodAllocTable[name] = may[name]
+	}
 }
 
 // isStdlibOrBuiltinName 名字是否属于 stdlib 或纯内建（不算 KL 调用边）。
@@ -370,6 +426,44 @@ func (cg *CodeGenerator) klFuncMayAllocate(name string) bool {
 	return true
 }
 
+// methodMayAllocate 查询「类方法」是否可能分配（Phase 4）。
+// 与顶层函数表隔离：只有确认是类方法才返回 known=true；接口动态派发方法
+// 在表中恒 true，未知/extern 方法不在表中——调用方一律回退保守路径。
+func (cg *CodeGenerator) methodMayAllocate(name string) (known, mayAlloc bool) {
+	cg.buildKLAllocTableIfNeeded()
+	if cg.methodKnownNames[name] {
+		return true, cg.methodAllocTable[name]
+	}
+	return false, true
+}
+
+// memberAccessPath 把嵌套成员访问展平成完整段列表：
+//   std.string.create → ["std","string","create"]
+//   v.length         → ["v","length"]
+//
+// 中间节点若是调用返回值（链式调用）等无法静态解析的形态，返回失败，
+// 调用方按保守路径处理。Phase 3 原实现只认一层 MemberAccess(Object=Identifier)，
+// 导致 std.string.create 这类两段模块路径整条判定失效。
+func memberAccessPath(expr ast.Expression) ([]string, bool) {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		if e == nil {
+			return nil, false
+		}
+		return []string{e.Name}, true
+	case *ast.MemberAccessExpression:
+		if e == nil {
+			return nil, false
+		}
+		prefix, ok := memberAccessPath(e.Object)
+		if !ok {
+			return nil, false
+		}
+		return append(prefix, e.Member), true
+	}
+	return nil, false
+}
+
 // isHeapReturnStdlibCall 判断 stdlib 函数调用是否返回堆托管类型。
 // std.json 的 return 字段是 C 侧类型（String / T* / void() 等），
 // 其中 String 按值返回但载荷可能走 kmm_v4_malloc —— 必须视为分配点。
@@ -381,10 +475,14 @@ func (cg *CodeGenerator) isHeapReturnStdlibCall(fn ast.Expression) bool {
 	var mod, name string
 	switch f := fn.(type) {
 	case *ast.MemberAccessExpression:
-		// std.string.create → mod=std.string, name=create
-		if id, ok := f.Object.(*ast.Identifier); ok && id != nil {
-			mod, name = id.Name, f.Member
+		// std.string.create 的 AST 是嵌套 MemberAccess：
+		// MemberAccess(MemberAccess(std, string), create)。展平后拆成模块键与函数名。
+		parts, ok := memberAccessPath(f)
+		if !ok || len(parts) < 2 {
+			return false
 		}
+		name = parts[len(parts)-1]
+		mod = strings.Join(parts[:len(parts)-1], ".")
 	case *ast.Identifier:
 		// 简名：省略 std. 前缀的导入形式
 		if fnAny := cfg.GetFunctionByName(f.Name); fnAny != nil {
@@ -396,6 +494,11 @@ func (cg *CodeGenerator) isHeapReturnStdlibCall(fn ast.Expression) bool {
 	}
 	if mod == "" || name == "" {
 		return false
+	}
+	// std.string.create(...) 在 stdlib.json 中注册名是 string_create：
+	// 必须走链式解析（create → string_create），否则成员写法漏判为分配点。
+	if fc, _, ok := cfg.ResolveChainedFunction(mod, []string{name}); ok {
+		return heapReturnCType(fc.Return)
 	}
 	if fc := cfg.GetFunction(mod, name); fc != nil {
 		return heapReturnCType(fc.Return)
@@ -430,8 +533,15 @@ func (cg *CodeGenerator) isScalarReturnStdlibSimple(fn ast.Expression) bool {
 			return !heapReturnCType(fc.Return)
 		}
 	case *ast.MemberAccessExpression:
-		if id, ok := f.Object.(*ast.Identifier); ok && id != nil {
-			if fc := cfg.GetFunction(id.Name, f.Member); fc != nil {
+		parts, ok := memberAccessPath(f)
+		if ok && len(parts) >= 2 {
+			// 与 isHeapReturnStdlibCall 同一展平 + 链式解析
+			// （std.string.create → 模块 std.string / 名 create → string_create）
+			m, n := strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1]
+			if fc, _, found := cfg.ResolveChainedFunction(m, []string{n}); found {
+				return !heapReturnCType(fc.Return)
+			}
+			if fc := cfg.GetFunction(m, n); fc != nil {
 				return !heapReturnCType(fc.Return)
 			}
 		}
@@ -464,7 +574,7 @@ func (cg *CodeGenerator) exprMayAllocate(expr ast.Expression) bool {
 			// KL（查闭包表）/ extern / 未知：保守
 			return cg.klFuncMayAllocate(id.Name)
 		}
-		if _, isMember := e.Function.(*ast.MemberAccessExpression); isMember {
+		if mem, isMember := e.Function.(*ast.MemberAccessExpression); isMember {
 			if cg.isHeapReturnStdlibCall(e.Function) {
 				return true
 			}
@@ -476,7 +586,24 @@ func (cg *CodeGenerator) exprMayAllocate(expr ast.Expression) bool {
 				}
 				return false
 			}
-			// 链式调用无法解析返回类型：保守 true
+			// Phase 4：KL 方法调用按「方法名」查分配闭包（与顶层函数表隔离）。
+			// 只有确认是类方法且其传递闭包不分配时才免包壳；receiver 与实参
+			// 自身的分配仍计入。接口动态派发 / 未知 / extern 方法不在方法表
+			// （或恒 true）→ 保守 true，安全下界不变。
+			if mem != nil {
+				if known, mayAlloc := cg.methodMayAllocate(mem.Member); known && !mayAlloc {
+					if cg.exprMayAllocate(mem.Object) {
+						return true
+					}
+					for _, arg := range e.Args {
+						if cg.exprMayAllocate(arg) {
+							return true
+						}
+					}
+					return false
+				}
+			}
+			// 链式调用 / 无法解析：保守 true
 			return true
 		}
 		return true
@@ -494,7 +621,10 @@ func (cg *CodeGenerator) exprMayAllocate(expr ast.Expression) bool {
 		return cg.exprMayAllocate(e.Condition) ||
 			cg.exprMayAllocate(e.TrueExpr) || cg.exprMayAllocate(e.FalseExpr)
 	case *ast.MatchExpression:
-		// match 各分支体语句保守扫描
+		// 被匹配表达式与 match 各分支体都扫描（Phase 4 补上 Target）
+		if cg.exprMayAllocate(e.Target) {
+			return true
+		}
 		for _, arm := range e.Arms {
 			for _, s := range arm.Body {
 				if cg.stmtMayAllocate(s) {
@@ -502,6 +632,53 @@ func (cg *CodeGenerator) exprMayAllocate(expr ast.Expression) bool {
 				}
 			}
 		}
+		return false
+	case *ast.IndexExpression:
+		// make()[i] / 容器索引：基址表达式可能分配
+		return cg.exprMayAllocate(e.Object) || cg.exprMayAllocate(e.Index)
+	case *ast.MemberExpression:
+		return cg.exprMayAllocate(e.Object)
+	case *ast.ArrayLiteral:
+		for _, el := range e.Elements {
+			if cg.exprMayAllocate(el) {
+				return true
+			}
+		}
+		return false
+	case *ast.AwaitExpression:
+		return cg.exprMayAllocate(e.Handle)
+	case *ast.SpawnExpression:
+		// spawn 建立任务/帧本身即分配；实参数与 Function 也一并检查
+		if cg.exprMayAllocate(e.Function) {
+			return true
+		}
+		for _, a := range e.Args {
+			if cg.exprMayAllocate(a) {
+				return true
+			}
+		}
+		return true
+	case *ast.PrefixCallExpression:
+		// 前缀宏展开体任意，静态不可判定 → 保守视为分配
+		for _, p := range e.Params {
+			if cg.exprMayAllocate(p) {
+				return true
+			}
+		}
+		for _, a := range e.VarArgs {
+			if cg.exprMayAllocate(a) {
+				return true
+			}
+		}
+		return true
+	case *ast.LambdaExpression:
+		// 闭包捕获/对象化可能分配；其 body 分配由闭包自身回收，
+		// 但捕获初始化发生在当前作用域，保守 true
+		return true
+	case *ast.ComptimeExpression:
+		return cg.exprMayAllocate(e.Inner)
+	case *ast.AttributeExpression:
+		// 编译期属性，不产生运行时分配
 		return false
 	}
 	return false
@@ -532,6 +709,12 @@ func (cg *CodeGenerator) stmtMayAllocate(stmt ast.Statement) bool {
 		return cg.exprMayAllocate(s.Iterable) || cg.stmtsMayAllocate(s.Body)
 	case *ast.BlockStatement:
 		return cg.stmtsMayAllocate(s.Statements)
+	case *ast.CallStatement:
+		return cg.exprMayAllocate(s.Target) || cg.stmtsMayAllocate(s.Body)
+	case *ast.YieldStatement:
+		return cg.exprMayAllocate(s.Source)
+	case *ast.ExtractStatement:
+		return cg.exprMayAllocate(s.Source) || cg.exprMayAllocate(s.Index)
 	}
 	return false
 }
@@ -549,6 +732,58 @@ func (cg *CodeGenerator) stmtsMayAllocate(stmts []ast.Statement) bool {
 // ---------------------------------------------------------------------------
 // SSO-only String 跟踪（#2/#5 的地基）
 // ---------------------------------------------------------------------------
+
+// matchExprYieldsLiteralStrings 判断 match 表达式值是否为 SSO-only：
+// 每条分支都必须给目标变量赋字符串字面量，且分支体内不含分配语句。
+// 这是「载荷内联、按值拷贝即移交所有权」的安全充分条件；任一分支缺赋值、
+// 非字面量来源或含分配点 → false（拉黑，走原保守路径）。
+//
+// Phase 4：`string s = match p { A => "a", B => "b" }` 此前因 Value 不是
+// StringLiteral / Identifier 被直接拉黑，白付函数级 wrapper + clone。
+func (cg *CodeGenerator) matchExprYieldsLiteralStrings(mexpr *ast.MatchExpression, varName string) bool {
+	if mexpr == nil || len(mexpr.Arms) == 0 || varName == "" {
+		return false
+	}
+	for _, arm := range mexpr.Arms {
+		if arm == nil || len(arm.Body) == 0 {
+			return false
+		}
+		assigned := false
+		for _, stmt := range arm.Body {
+			if cg.stmtMayAllocate(stmt) {
+				return false
+			}
+			exprStmt, ok := stmt.(*ast.ExpressionStatement)
+			if !ok || exprStmt == nil {
+				// break 等控制流语句不带值，忽略
+				continue
+			}
+			switch e := exprStmt.Expression.(type) {
+			case *ast.StringLiteral:
+				// match arm 的直接值：`A => "aa"`（编译器发射 s = "aa"）
+				assigned = true
+			case *ast.BinaryExpression:
+				// 显式赋值形态：`A => { s = "aa" }`
+				if e != nil && e.Operator == "=" {
+					if id, ok := e.Left.(*ast.Identifier); ok && id != nil && id.Name == varName {
+						if _, isLit := e.Right.(*ast.StringLiteral); isLit {
+							assigned = true
+						} else {
+							return false
+						}
+					}
+				}
+			default:
+				// 其他来源（调用、标识符、表达式）一律视为非 SSO
+				return false
+			}
+		}
+		if !assigned {
+			return false
+		}
+	}
+	return true
+}
 
 // ScanStringVarOrigins 扫描函数体，登记「全程只被字符串字面量赋值」的
 // 局部 String 变量（ssoStringScanned）。任何非字面量来源（函数调用、
@@ -604,6 +839,10 @@ func (cg *CodeGenerator) scanStringVarOriginsStmts(stmts []ast.Statement, paramN
 					// SSO 变量间初始化：记边，污点传播阶段判定
 					cg.ssoStringScanned[s.Name] = true
 					cg.ssoStringEdges[s.Name] = append(cg.ssoStringEdges[s.Name], id.Name)
+				} else if mexpr, ok := s.Value.(*ast.MatchExpression); ok &&
+					cg.matchExprYieldsLiteralStrings(mexpr, s.Name) {
+					// Phase 4：match 各分支全为字面量 → 载荷内联，SSO-only
+					cg.ssoStringScanned[s.Name] = true
 				} else {
 					cg.ssoStringTainted[s.Name] = true
 				}
@@ -680,6 +919,10 @@ func (cg *CodeGenerator) scanStringVarOriginsExpr(expr ast.Expression) {
 				} else if rid, isIdent := e.Right.(*ast.Identifier); isIdent && rid != nil {
 					// SSO 变量间赋值：记边，污点传播阶段判定
 					cg.ssoStringEdges[id.Name] = append(cg.ssoStringEdges[id.Name], rid.Name)
+				} else if mexpr, isMatch := e.Right.(*ast.MatchExpression); isMatch &&
+					cg.matchExprYieldsLiteralStrings(mexpr, id.Name) {
+					// Phase 4：match 各分支全为字面量 → SSO-only
+					cg.ssoStringScanned[id.Name] = true
 				} else {
 					// 非字面量非变量赋值：拉黑（无论该名当前是否登记）
 					cg.ssoStringTainted[id.Name] = true

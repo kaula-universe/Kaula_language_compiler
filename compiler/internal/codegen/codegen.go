@@ -447,6 +447,11 @@ type CodeGenerator struct {
 	klAllocBuilt     bool
 	klAllocTable     map[string]bool
 	klKnownFuncs     map[string]bool
+	// methodKnownNames/methodAllocTable: 类方法分配闭包（Phase 4）。
+	// 与 KL 函数表分离：MemberAccess 调用只能按「方法名」判定，不能拿
+	// 同名顶层函数的结果套用（接口/未知 receiver 会造成误判）。
+	methodKnownNames map[string]bool
+	methodAllocTable map[string]bool
 
 	sourceMap  *SourceMap
 	sourceFile string
