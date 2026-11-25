@@ -521,6 +521,14 @@ python docs/tools/translate.py --lang en --input docs --output docs/en
 
 ---
 
+## 参与贡献
+
+欢迎贡献！请先阅读 **[CONTRIBUTING.md](CONTRIBUTING.md)**——它同时面向人类与 AI
+贡献者，开篇即是本仓库为 AI 定制的 `skills/` 索引（代码输出契约、学习路径、
+工具链速查、贡献总纲），AI Agent 应从那里开始。
+
+---
+
 ## 许可证
 
 [Apache License 2.0](LICENSE)，附带 [Kaula Exceptions](LICENSE#kaula-exceptions-to-the-apache-20-license)

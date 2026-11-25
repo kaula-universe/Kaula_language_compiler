@@ -9,6 +9,14 @@
 
 ## [Unreleased]
 
+### Documentation
+- **新增贡献指南与 AI Skill 体系**：根目录新增 `CONTRIBUTING.md`（统一面向人类与
+  AI 贡献者的贡献规范，置顶 AI Skill 索引）；`skills/` 新增 4 个 AI 定制 skill——
+  `kaula-ai-contribution.md`（AI 贡献总纲，强制入口）、`kaula-output-contract.md`
+  （`.kl` 代码输出契约与自检清单）、`kaula-learning-path.md`（语言/运行时/编译器
+  分阶段学习路径）、`kaula-toolchain.md`（工具链命令速查）。README 新增
+  「参与贡献」一节，docs/README.md 快速导航新增 AI/贡献入口。
+
 ### Performance
 - **KMM 插入策略 Phase 4：方法闭包 / match SSO / 分配点覆盖补全**：沿用 Phase 3
   「只证明不需要、不猜测不需要」的路线，再收紧三处冗余发射，并补两处判定漏洞。

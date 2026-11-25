@@ -126,6 +126,12 @@ KMM V4 是 Kaula 的默认内存分配器，基于 per-thread heap + bump alloca
 
 查看 [裸机开发指南](bare-metal.md)，了解 freestanding 模式、内联汇编、原子操作、位域、extern 声明等特性。
 
+### AI Agent / 想参与贡献？
+
+先读仓库根目录的 [CONTRIBUTING.md](../CONTRIBUTING.md)；AI Agent 从
+[skills/kaula-ai-contribution.md](../skills/kaula-ai-contribution.md) 进入，
+按任务加载 `skills/` 下的对应 skill。
+
 ## 文档约定
 
 - 代码示例使用 Kaula 语法或 Go 语法
