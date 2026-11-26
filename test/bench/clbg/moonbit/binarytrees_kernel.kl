@@ -1,7 +1,9 @@
 IMPORT_PLACEHOLDER
 
 // Kaula binary-trees checksum kernel (freestanding, no stdout) — paired with moonbit/binarytrees.mbtx
-// Same rolling hash: acc = acc*1103515245 + v, starting from 0.
+// Same checksum as the MoonBit side: acc = stretch check + sum(per-depth checks) + long-lived check.
+// Arena is a Node{left,right} struct array; the MoonBit side uses two parallel Int arrays
+// holding left/right child indices (-1 = null) — different layout, identical algorithm and checksum.
 
 struct Node {
     left: i32
