@@ -1,0 +1,49 @@
+IMPORT_PLACEHOLDER
+// Kaula fannkuch-redux checksum kernel (freestanding, no stdout) — paired with moonbit/fannkuchredux.mbtx
+// result = checksum * 1024 + maxFlips, returned low-32 via main().
+fn fannkuch(i64 n) i64 {
+    i32 perm[64]
+    i32 perm1[64]
+    i32 count[64]
+    i64 maxFlips = 0
+    i64 checksum = 0
+    i64 permCount = 0
+    i64 r = n
+    i64 i = 0
+    while i < n { perm1[i] = as<i32>(i); i = i + 1 }
+    while true {
+        while r != 1 { count[r - 1] = as<i32>(r); r = r - 1 }
+        i64 j = 0
+        while j < n { perm[j] = perm1[j]; j = j + 1 }
+        i64 flips = 0
+        i64 k = perm[0]
+        while k != 0 {
+            i64 k2 = (k + 1) / 2
+            i64 a = 0
+            while a < k2 {
+                i32 t = perm[a]; perm[a] = perm[k - a]; perm[k - a] = t
+                a = a + 1
+            }
+            flips = flips + 1
+            k = perm[0]
+        }
+        if maxFlips < flips { maxFlips = flips }
+        if permCount % 2 == 0 { checksum = checksum + flips } else { checksum = checksum - flips }
+        while true {
+            if r == n { return checksum * 1024 + maxFlips }
+            i32 perm0 = perm1[0]
+            i = 0
+            while i < r { i64 jj = i + 1; perm1[i] = perm1[jj]; i = jj }
+            perm1[r] = perm0
+            count[r] = count[r] - 1
+            if count[r] > 0 { break }
+            r = r + 1
+        }
+        permCount = permCount + 1
+    }
+}
+
+fn main() -> i32 {
+    i64 result = fannkuch(N_PLACEHOLDER)
+    RESULT_EMIT_PLACEHOLDER
+}

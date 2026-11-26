@@ -36,6 +36,13 @@ __pycache__/
 test/**
 !test/**/*.*
 !test/**/
+# 基准套件编译产物（CLBG runner 与 Kaula-vs-MoonBit 对比 runner 生成）
+test/bench/clbg/build/
+test/bench/clbg/__pycache__/
+test/bench/clbg/moonbit/build/
+test/bench/clbg/moonbit/_build/
+test/bench/clbg/moonbit/__pycache__/
+test/cache/
 # 编辑器扩展打包产物（0.3.0 版 vsix 曾误入库 418 KB，仓库内既无源码也无引用）
 *.vsix
 

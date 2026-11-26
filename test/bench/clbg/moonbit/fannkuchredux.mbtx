@@ -1,0 +1,84 @@
+// CLBG fannkuch-redux kernel (MoonBit port of kaula/fannkuchredux.kl).
+// Exact line-by-line port of the Mazurov carry-style permutation algorithm.
+// Emits a single i64: result = checksum * 1024 + maxFlips.
+// Same formula on Kaula side -> cross-language correctness check.
+
+fn fannkuch(n : Int) -> Int64 {
+  let perm = Array::make(64, 0)
+  let perm1 = Array::make(64, 0)
+  let count = Array::make(64, 0)
+  let mut max_flips : Int64 = 0
+  let mut checksum : Int64 = 0
+  let mut perm_count : Int64 = 0
+  let mut r = n
+  let mut i = 0
+  while i < n {
+    perm1[i] = i
+    i = i + 1
+  }
+  let mut result : Int64 = 0
+  let mut outer_done = false
+  while !outer_done {
+    while r != 1 {
+      count[r - 1] = r
+      r = r - 1
+    }
+    let mut j = 0
+    while j < n {
+      perm[j] = perm1[j]
+      j = j + 1
+    }
+    let mut flips : Int64 = 0
+    let mut k = perm[0]
+    while k != 0 {
+      let k2 = (k + 1) / 2
+      let mut a = 0
+      while a < k2 {
+        let t = perm[a]
+        perm[a] = perm[k - a]
+        perm[k - a] = t
+        a = a + 1
+      }
+      flips = flips + 1
+      k = perm[0]
+    }
+    if max_flips < flips {
+      max_flips = flips
+    }
+    if perm_count % 2 == 0 {
+      checksum = checksum + flips
+    } else {
+      checksum = checksum - flips
+    }
+    let mut inner_done = false
+    while !inner_done {
+      if r == n {
+        result = checksum * 1024 + max_flips
+        outer_done = true
+        inner_done = true
+      } else {
+        let perm0 = perm1[0]
+        i = 0
+        while i < r {
+          let jj = i + 1
+          perm1[i] = perm1[jj]
+          i = jj
+        }
+        perm1[r] = perm0
+        count[r] = count[r] - 1
+        if count[r] > 0 {
+          inner_done = true
+        } else {
+          r = r + 1
+        }
+      }
+    }
+    perm_count = perm_count + 1
+  }
+  result
+}
+
+fn main {
+  let n = N_PLACEHOLDER
+  println("\{fannkuch(n)}")
+}

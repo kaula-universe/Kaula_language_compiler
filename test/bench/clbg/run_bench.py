@@ -294,12 +294,18 @@ def timed_run(exe: Path, args, stdin_file: Path = None) -> tuple:
                 ["/usr/bin/time", "-v"] + argv,
                 capture_output=True, stdin=stdin_fd,
             )
+            # /usr/bin/time 的 stderr 是 bytes；parse_elapsed/RSS_RE 按 str 匹配。
+            # 统一解码为文本（errors=replace 避免非 UTF-8 噪声中断解析）。
+            err_text = r.stderr.decode("utf-8", "replace")
             if r.returncode != 0:
-                sys.exit(f"运行失败 (exit {r.returncode}): {exe}\n{r.stderr[-2000:]}")
-            wall = parse_elapsed(r.stderr)
+                sys.exit(f"运行失败 (exit {r.returncode}): {exe}\n{err_text[-2000:]}")
+            wall = parse_elapsed(err_text)
             if wall is None:
-                sys.exit(f"无法解析 time 输出: {exe}\n{r.stderr[-2000:]}")
-            rss = int(RSS_RE.search(r.stderr).group(1))
+                sys.exit(f"无法解析 time 输出: {exe}\n{err_text[-2000:]}")
+            rss_m = RSS_RE.search(err_text)
+            if rss_m is None:
+                sys.exit(f"无法解析 peak RSS: {exe}\n{err_text[-2000:]}")
+            rss = int(rss_m.group(1))
             return r.stdout, wall, rss
 
         # 回退：无 GNU time。用 Popen + 轮询 /proc/<pid>/status 的 VmHWM 取
@@ -376,6 +382,13 @@ def verify_outputs(bench: dict, outs: dict) -> tuple:
 
 def fmt_s(s: float) -> str:
     return f"{s:.3f}"
+
+
+def fmt_ratio(num: float, den: float) -> str:
+    """格式化比值；分母为 0（超快题目计时精度不足）时输出 '—' 而非崩溃。"""
+    if den <= 0:
+        return "—"
+    return f"{num / den:.2f}×"
 
 
 def main() -> None:
@@ -516,7 +529,7 @@ def write_report(results, tv, rounds, args) -> None:
                  f"| {fmt_s(c)}s / {rc//1024}MB "
                  f"| {fmt_s(g)}s / {rg//1024}MB "
                  f"| {fmt_s(k)}s / {rk//1024}MB "
-                 f"| {k/c:.2f}× | {g/c:.2f}× |")
+                 f"| {fmt_ratio(k, c)} | {fmt_ratio(g, c)} |")
     L.append("")
 
     # 逐题读表说明（口径！）

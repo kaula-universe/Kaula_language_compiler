@@ -1,0 +1,64 @@
+IMPORT_PLACEHOLDER
+
+// Kaula binary-trees checksum kernel (freestanding, no stdout) — paired with moonbit/binarytrees.mbtx
+// Same rolling hash: acc = acc*1103515245 + v, starting from 0.
+
+struct Node {
+    left: i32
+    right: i32
+}
+
+fn build(Node* nodes, i32 idx, i32 base, i32 depth, i32 maxDepth) {
+    nodes[idx].left = -1
+    nodes[idx].right = -1
+    if depth < maxDepth {
+        i32 li = base + (idx - base) * 2 + 1
+        i32 ri = base + (idx - base) * 2 + 2
+        nodes[idx].left = li
+        nodes[idx].right = ri
+        build(nodes, li, base, depth + 1, maxDepth)
+        build(nodes, ri, base, depth + 1, maxDepth)
+    }
+}
+
+fn itemCheck(Node* nodes, i32 idx) i64 {
+    if idx < 0 { return 0 }
+    i64 l = itemCheck(nodes, nodes[idx].left)
+    i64 r = itemCheck(nodes, nodes[idx].right)
+    return 1 + l + r
+}
+
+fn main() -> i32 {
+    i64 n = N_PLACEHOLDER
+    i64 minDepth = 4
+    i64 maxDepth = n
+    if minDepth + 2 > n { maxDepth = minDepth + 2 }
+    i64 stretchDepth = maxDepth + 1
+    i64 maxNodes = (1 << (stretchDepth + 1)) - 1
+    i64 longNodes = (1 << (maxDepth + 1)) - 1
+    i64 longOff = maxNodes - longNodes
+
+    Node* nodes = as<Node*>(ALLOC_CALL_PLACEHOLDER(maxNodes * 8))
+
+    i64 acc = 0
+    build(nodes, 0, 0, 0, as<i32>(stretchDepth))
+    acc = acc + itemCheck(nodes, 0)
+
+    build(nodes, as<i32>(longOff), as<i32>(longOff), 0, as<i32>(maxDepth))
+
+    i64 depth = minDepth
+    while depth <= maxDepth {
+        i64 iterations = 1 << (maxDepth - depth + minDepth)
+        i64 checksum = 0
+        i64 i = 0
+        while i < iterations {
+            build(nodes, 0, 0, 0, as<i32>(depth))
+            checksum = checksum + itemCheck(nodes, 0)
+            i = i + 1
+        }
+        acc = acc + checksum
+        depth = depth + 2
+    }
+    acc = acc + itemCheck(nodes, as<i32>(longOff))
+    RESULT_EMIT_PLACEHOLDER
+}

@@ -1,0 +1,58 @@
+// CLBG binary-trees kernel (MoonBit) — paired with binarytrees_kernel.kl
+// Arena array form: two parallel Int arrays hold left/right child indices
+// (-1 = null), matching Kaula's Node{left,right} arena layout.
+// Emits a single i64 = stretch_check + sum(per-depth checks) + long_lived_check.
+// Kaula side computes the same i64 and returns its low 32 bits via main().
+
+fn build(l : Array[Int], r : Array[Int], idx : Int, base : Int, depth : Int, max_depth : Int) -> Unit {
+  l[idx] = -1
+  r[idx] = -1
+  if depth < max_depth {
+    let li = base + (idx - base) * 2 + 1
+    let ri = base + (idx - base) * 2 + 2
+    l[idx] = li
+    r[idx] = ri
+    build(l, r, li, base, depth + 1, max_depth)
+    build(l, r, ri, base, depth + 1, max_depth)
+  }
+}
+
+fn item(l : Array[Int], r : Array[Int], idx : Int) -> Int64 {
+  if idx < 0 { return 0 }
+  return 1 + item(l, r, l[idx]) + item(l, r, r[idx])
+}
+
+fn main {
+  let n = N_PLACEHOLDER
+  let min_depth = 4
+  let mut max_depth = n
+  if min_depth + 2 > n { max_depth = min_depth + 2 }
+  let stretch_depth = max_depth + 1
+  let max_nodes = (1 << (stretch_depth + 1)) - 1
+  let long_nodes = (1 << (max_depth + 1)) - 1
+  let long_off = max_nodes - long_nodes
+
+  let l = Array::make(max_nodes, 0)
+  let r = Array::make(max_nodes, 0)
+
+  let mut acc : Int64 = 0
+  build(l, r, 0, 0, 0, stretch_depth)
+  acc = acc + item(l, r, 0)
+  build(l, r, long_off, long_off, 0, max_depth)
+
+  let mut depth = min_depth
+  while depth <= max_depth {
+    let iterations = 1 << (max_depth - depth + min_depth)
+    let mut checksum : Int64 = 0
+    let mut i = 0
+    while i < iterations {
+      build(l, r, 0, 0, 0, depth)
+      checksum = checksum + item(l, r, 0)
+      i = i + 1
+    }
+    acc = acc + checksum
+    depth = depth + 2
+  }
+  acc = acc + item(l, r, long_off)
+  println("\{acc}")
+}
