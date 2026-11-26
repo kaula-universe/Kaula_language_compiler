@@ -40,6 +40,7 @@ test/**
 test/bench/clbg/build/
 test/bench/clbg/__pycache__/
 test/bench/clbg/moonbit/build/
+test/bench/clbg/moonbit/build_natural/
 test/bench/clbg/moonbit/_build/
 test/bench/clbg/moonbit/__pycache__/
 test/cache/

@@ -1,0 +1,52 @@
+// MoonBit 自然形态：GC 管理的递归引用树（struct Node { left/right: Node? }）。
+// 与 CLBG 标准 binary-trees 算法逐行对应，输出为标准 CLBG 格式。
+// 刻意不使用 arena / 并行数组——那是 Kaula 的内存管理特性，不是 MoonBit 的。
+// 配对：Kaula arena 原题 ../kaula/binary_trees.kl（N_PLACEHOLDER 注入）。
+
+///|
+struct Node {
+  left: Node?
+  right: Node?
+}
+
+///|
+fn bottom_up(depth : Int) -> Node {
+  if depth <= 0 {
+    return { left: None, right: None }
+  }
+  { left: Some(bottom_up(depth - 1)), right: Some(bottom_up(depth - 1)) }
+}
+
+///|
+fn item_check(n : Node) -> Int64 {
+  match n.left {
+    None => 1
+    Some(l) => 1 + item_check(l) + item_check(n.right.unwrap())
+  }
+}
+
+///|
+fn main {
+  let n = N_PLACEHOLDER
+  let min_depth = 4
+  let mut max_depth = n
+  if min_depth + 2 > n { max_depth = min_depth + 2 }
+  let stretch_depth = max_depth + 1
+
+  println("stretch tree of depth \{stretch_depth}\t check: \{item_check(bottom_up(stretch_depth))}")
+  let long_lived_tree = bottom_up(max_depth)
+
+  let mut depth = min_depth
+  while depth <= max_depth {
+    let iterations = 1 << (max_depth - depth + min_depth)
+    let mut checksum : Int64 = 0
+    let mut i = 0
+    while i < iterations {
+      checksum = checksum + item_check(bottom_up(depth))
+      i = i + 1
+    }
+    println("\{iterations}\t trees of depth \{depth}\t check: \{checksum}")
+    depth = depth + 2
+  }
+  println("long lived tree of depth \{max_depth}\t check: \{item_check(long_lived_tree)}")
+}
