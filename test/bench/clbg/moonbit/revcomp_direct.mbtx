@@ -1,0 +1,103 @@
+// MoonBit revcomp — CLBG 官方 C 示例（revcomp.gcc.c, Petr Prokhorenkov 版）的
+// 直接串行翻译，无语言特化：
+//   - 256 项互补查表（对应 lookup_t.bytes，"acbdghkmnsrutwvy" -> "TGVHCDMKNSYAAWBR"）
+//   - 读入全部 stdin 到单个缓冲（对应 main 的 buffer/calloc）
+//   - 按表头 '>' 切分序列，序列体反向互补后按 60 列折行输出（对应 reverse_complement）
+//   - 输出走 putchar FFI（对应 persistent_write）
+// 线程/pair-lookup 是官方版的并行与向量化变量，按套件惯例隔离为串行标量。
+
+///|
+extern "c" fn getchar() -> Int32 = "getchar"
+
+///|
+extern "c" fn putchar(c : Int32) -> Int32 = "putchar"
+
+///|
+const FROM : String = "acbdghkmnsrutwvy"
+
+///|
+const TO : String = "TGVHCDMKNSYAAWBR"
+
+///|
+fn init_lookup() -> Array[Int32] {
+  let tbl = Array::make(256, 0)
+  for i = 0; i < 256; i = i + 1 {
+    tbl[i] = i
+  }
+  for k = 0; k < FROM.length(); k = k + 1 {
+    let lo = FROM[k].to_int()
+    let up = TO[k].to_int()
+    // tolower/toupper：官方 C 对大小写都设
+    tbl[lo] = up
+    if lo >= 97 && lo <= 122 {
+      tbl[lo - 32] = up
+    }
+  }
+  tbl
+}
+
+///|
+fn put_char(c : Int32) -> Unit {
+  ignore(putchar(c))
+}
+
+///|
+fn reverse_complement(body : Array[Int32], tbl : Array[Int32]) -> Unit {
+  // 反向互补 + 60 列折行（对应 reverse_complement 串行语义）
+  let len = body.length()
+  let mut src = len - 1
+  while src >= 0 {
+    let mut col = 0
+    while col < 60 && src >= 0 {
+      put_char(tbl[body[src]])
+      src = src - 1
+      col = col + 1
+    }
+    put_char(10)
+  }
+}
+
+///|
+fn main {
+  let tbl = init_lookup()
+  // 读入全部 stdin（对应 buffer/calloc(stdin_size + LINE_LENGTH)）
+  let buf : Array[Int32] = []
+  let mut c = getchar()
+  while c != -1 {
+    buf.push(c)
+    c = getchar()
+  }
+  // 按表头切分：表头原样输出，序列体反向互补
+  let n = buf.length()
+  let mut i = 0
+  let body : Array[Int32] = []
+  let mut have_body = false
+  while i < n {
+    // 行首判定：i==0 或前一字符是 '\n'
+    if buf[i] == 62 && (i == 0 || buf[i - 1] == 10) {
+      // 新表头：先冲刷上一条序列体
+      if have_body {
+        reverse_complement(body, tbl)
+        body.clear()
+      }
+      // 表头原样打印（含换行）
+      while i < n {
+        put_char(buf[i])
+        if buf[i] == 10 {
+          i = i + 1
+          break
+        }
+        i = i + 1
+      }
+      have_body = true
+    } else {
+      if have_body && buf[i] != 10 {
+        body.push(buf[i])
+      }
+      i = i + 1
+    }
+  }
+  if have_body {
+    reverse_complement(body, tbl)
+  }
+}

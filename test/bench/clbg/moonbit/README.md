@@ -1,15 +1,35 @@
 # Kaula vs MoonBit 对比套件
 
-两套对比，口径不同，不可混用：
+三套对比，口径不同，不可混用：
 
 | 套件 | runner | 报告 | 原则 |
 |---|---|---|---|
-| **自然形态对比**（推荐） | `run_natural.py` | `REPORT_NATURAL.md` | **让算法在两种语言上各自用自然形态实现，不为对齐而统一数据结构** |
+| **官方 C 直译对比** | `run_direct.py` | `REPORT_DIRECT.md` | **以 ref/*.gcc.c（CLBG 官方 C 示例）为蓝本逐行直译，不做任何语言特化**——回答"纯移植质量" |
+| **自然形态对比**（推荐） | `run_natural.py` | `REPORT_NATURAL.md` | **让算法在两种语言上各自用自然形态实现，不为对齐而统一数据结构**——回答"开箱即用表现" |
 | checksum kernel 对比 | `run_compare.py` | `REPORT.md` | 为跨 wasm 而统一为纯整数 kernel，受 Kaula wasm 能力限制 |
 
 ---
 
-## 一、自然形态对比（推荐）
+## 一、官方 C 直译对比
+
+以 `../ref/*.gcc.c` 为唯一蓝本：binary-trees 用官方 Carson 版逐节点分配指针树、
+revcomp 用官方 Prokhorenkov 版的 256 互补查表 + 缓冲 + 60 列（串行口径，线程/
+pair-lookup 是被隔离的并行向量化变量），其余 5 题两边本就直译自官方 C，共用源文件。
+
+注意：官方 C 的 `DeleteTree`（逐节点 free）在 Kaula 无法直译——手动 free 属非法写法
+（`kmm_v4_free` 为 no-op，与自动回收叠加会 double-free），Kaula 边为逐节点
+`kmm_v4_alloc` 自动回收，N=21 实测峰值 ~4GB 可跑完。
+
+```bash
+python3 run_direct.py                  # 3 轮取中位数
+python3 run_direct.py --quick          # 1 轮冒烟
+```
+
+产物：`build_direct/`（gitignore）、`REPORT_DIRECT.md`。
+
+---
+
+## 二、自然形态对比（推荐）
 
 核心原则：**尊重语言差异**。Arena 是 Kaula 的内存管理特性，MoonBit 就不该模拟它；
 MoonBit 的自然形态是 GC 管理的递归引用树，Kaula 的自然形态是 arena 连续数组。
@@ -45,11 +65,11 @@ python3 run_natural.py --quick         # 1 轮冒烟
 
 **为什么不含 wasm**：Kaula `--wasm` 走 freestanding 裸机（无 stdout、无 libm、无
 `__multi3`），MoonBit wasm 带 WASI（有 stdout）——两边输出能力不对等，强行比只会得到
-误导性数字。如果需要 wasm 数据，用下面第二套的 checksum kernel 口径。
+误导性数字。如果需要 wasm 数据，用下面第三套的 checksum kernel 口径。
 
 ---
 
-## 二、checksum kernel 对比（wasm 专用）
+## 三、checksum kernel 对比（wasm 专用）
 
 Kaula 的 `kaulac --wasm` 走 freestanding 裸机路径（见 `docs/freestanding.md` §6）：
 
@@ -90,18 +110,21 @@ python3 run_compare.py --verify-only   # 只校验 checksum
 ```
 moonbit/
 ├── README.md                        # 本文件
+├── REPORT_DIRECT.md                 # 7 题官方 C 直译对比报告
 ├── REPORT_NATURAL.md                # 7 题自然形态对比报告（推荐）
 ├── REPORT.md                        # checksum kernel 对比报告
+├── run_direct.py                    # 7 题官方 C 直译 runner
 ├── run_natural.py                   # 7 题自然形态 runner
 ├── run_compare.py                   # checksum kernel runner
 ├── fmt9.mbt                         # MoonBit bigint 精确 %.9f 格式化
-├── binarytrees_gc.mbtx              # MoonBit GC 递归树（自然形态）
+├── binarytrees_gc.mbtx              # MoonBit GC 递归树（两种口径共用）
 ├── nbody.mbtx                       # MoonBit n-body
 ├── spectralnorm.mbtx                # MoonBit spectral-norm
 ├── fannkuchredux_std.mbtx           # MoonBit fannkuch 标准输出
 ├── fasta.mbtx                       # MoonBit fasta
 ├── mandelbrot.mbtx                  # MoonBit mandelbrot
-├── revcomp.mbtx                     # MoonBit reverse-complement
+├── revcomp_direct.mbtx              # MoonBit revcomp 官方 C 直译（查表+缓冲）
+├── revcomp.mbtx                     # MoonBit revcomp 自然形态
 ├── fannkuchredux.mbtx               # MoonBit fannkuch checksum kernel
 ├── fannkuchredux_kernel.kl          # Kaula fannkuch checksum kernel
 ├── binarytrees.mbtx                 # MoonBit binarytrees checksum kernel
@@ -111,7 +134,7 @@ moonbit/
 
 ## 正确性契约
 
-两个 runner 都遵循：**校验不通过不产出报告**。
+三个 runner 都遵循：**校验不通过不产出报告**。
 
-- `run_natural.py`：native 输出逐字节相等（CLBG 标准格式）；
+- `run_direct.py` / `run_natural.py`：native 输出逐字节相等（CLBG 标准格式）；
 - `run_compare.py`：native checksum 逐值相等 + wasm 返回值等于 native checksum 低 32 位。
