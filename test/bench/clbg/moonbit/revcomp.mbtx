@@ -1,0 +1,80 @@
+// MoonBit 自然形态：String 数组存序列体 + FFI getchar/putchar 做 stdin/二进制输出。
+// 与 ../kaula/revcomp.kl 算法逐行对应（反转互补表 + 60 列折行）。
+
+///|
+extern "c" fn getchar() -> Int32 = "getchar"
+
+///|
+extern "c" fn putchar(c : Int32) -> Int32 = "putchar"
+
+///|
+fn put_str(s : String) -> Unit {
+  for i = 0; i < s.length(); i = i + 1 {
+    ignore(putchar(s[i].to_int()))
+  }
+}
+
+///|
+fn complement(c : Int32) -> Int32 {
+  // ASCII 查表：大小写都设，未列出的保持原样
+  match c {
+    65 | 97 => 84   // A/a -> T
+    67 | 99 => 71   // C/c -> G
+    71 | 103 => 67  // G/g -> C
+    84 | 116 => 65  // T/t -> A
+    66 | 98 => 86   // B/b -> V
+    68 | 100 => 72  // D/d -> H
+    72 | 104 => 68  // H/h -> D
+    75 | 107 => 77  // K/k -> M
+    77 | 109 => 75  // M/m -> K
+    78 | 110 => 78  // N/n -> N
+    82 | 114 => 89  // R/r -> Y
+    83 | 115 => 83  // S/s -> S
+    86 | 118 => 66  // V/v -> B
+    87 | 119 => 87  // W/w -> W
+    89 | 121 => 82  // Y/y -> R
+    85 | 117 => 65  // U/u -> A
+    _ => c
+  }
+}
+
+///|
+fn flush_body(body : Array[Int32], len : Int) -> Unit {
+  if len == 0 { return }
+  let mut written = 0
+  let mut src = len - 1
+  while src >= 0 && written < len {
+    let mut col = 0
+    while col < 60 && written < len {
+      ignore(putchar(complement(body[src])))
+      src = src - 1
+      col = col + 1
+      written = written + 1
+    }
+    ignore(putchar(10))
+  }
+}
+
+///|
+fn main {
+  let mut body : Array[Int32] = []
+  while true {
+    let line : Array[Int32] = []
+    let mut c = getchar()
+    while c != -1 && c != 10 {
+      line.push(c)
+      c = getchar()
+    }
+    if line.length() == 0 && c == -1 { break }
+    if line.length() > 0 && line[0] == 62 {  // '>'
+      flush_body(body, body.length())
+      body = []
+      // 表头原样打印（补回换行）
+      for ch in line { ignore(putchar(ch)) }
+      ignore(putchar(10))
+    } else {
+      for ch in line { body.push(ch) }
+    }
+  }
+  flush_body(body, body.length())
+}

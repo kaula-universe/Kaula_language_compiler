@@ -15,13 +15,24 @@
 MoonBit 的自然形态是 GC 管理的递归引用树，Kaula 的自然形态是 arena 连续数组。
 两边用各自最自然的写法实现同一算法，输出逐字节一致后才比性能。
 
-| 题目 | 标准参数 | Kaula 形态 | MoonBit 形态 | 校验 |
-|---|---:|---|---|---|
-| binary-trees | N=21 | arena 连续数组 + 下标寻址（O(1) 复用） | `struct Node{left/right: Node?}` GC 递归引用树 | 标准 CLBG 输出逐字节一致 |
-| fannkuch-redux | n=12 | 定长 i32 栈数组 | 定长数组 | 标准 CLBG 输出逐字节一致 |
+**全部 7 道 CLBG 标准题**，官方标准参数，输出逐字节一致（含 32MB PBM 二进制）：
 
-> fannkuch 两边都用数组，是因为该算法的标准形态就是定长数组，没有语言特性可发挥——
-> 这一项才更接近纯粹的编译器代码生成质量对比。
+| 题目 | 标准参数 | Kaula 形态 | MoonBit 形态 |
+|---|---:|---|---|
+| binary-trees | N=21 | arena 连续数组 + 下标寻址（O(1) 复用） | `struct Node{left/right: Node?}` GC 递归引用树 |
+| n-body | 5,000,000 步 | 栈上 `Planet[5]` | `Array[Planet]` + `Double.sqrt()` |
+| spectral-norm | N=5500 | `kmm_v4_alloc` 堆向量 | `Array[Double]` + `Double.sqrt()` |
+| fannkuch-redux | n=12 | 定长 i32 栈数组 | 定长数组（算法标准形态） |
+| fasta | n=250000 | 字符缓冲 + LCG | `Array[Char]` + `Ref[Int64]` LCG |
+| mandelbrot | N=16000 | 标量 + `kmm_v4_alloc` 位图 | 标量 + `Array[Int]` 位图 + FFI `putchar` |
+| reverse-complement | fasta 输出 | 动态 `kmm_v4_realloc` 缓冲 + 查表 | `Array[Int32]` + FFI `getchar/putchar` |
+
+> **尊重语言差异的具体体现**：binary-trees 上 Kaula 用 arena、MoonBit 用 GC 递归树——
+> 完全不同但语义等价的内存管理形态。fannkuch 两边都用数组，是因为该算法的标准形态
+> 就是定长数组，没有语言特性可发挥——这一项更接近纯粹的编译器代码生成质量对比。
+>
+> `%.9f` 精确格式化：MoonBit 核心库没有定点格式化，采用 bigint 精确 round-half-even
+> 实现（`fmt9.mbt`，源自 moon-boofuzz，GPL-2.0），与 C printf 逐字节对齐。
 
 维度：native 运行（wall clock + peak RSS）、编译速度、产物大小。
 
@@ -79,12 +90,18 @@ python3 run_compare.py --verify-only   # 只校验 checksum
 ```
 moonbit/
 ├── README.md                        # 本文件
-├── REPORT_NATURAL.md                # 自然形态对比报告（推荐）
+├── REPORT_NATURAL.md                # 7 题自然形态对比报告（推荐）
 ├── REPORT.md                        # checksum kernel 对比报告
-├── run_natural.py                   # 自然形态 runner
+├── run_natural.py                   # 7 题自然形态 runner
 ├── run_compare.py                   # checksum kernel runner
+├── fmt9.mbt                         # MoonBit bigint 精确 %.9f 格式化
 ├── binarytrees_gc.mbtx              # MoonBit GC 递归树（自然形态）
-├── fannkuchredux_std.mbtx           # MoonBit fannkuch 标准输出（自然形态）
+├── nbody.mbtx                       # MoonBit n-body
+├── spectralnorm.mbtx                # MoonBit spectral-norm
+├── fannkuchredux_std.mbtx           # MoonBit fannkuch 标准输出
+├── fasta.mbtx                       # MoonBit fasta
+├── mandelbrot.mbtx                  # MoonBit mandelbrot
+├── revcomp.mbtx                     # MoonBit reverse-complement
 ├── fannkuchredux.mbtx               # MoonBit fannkuch checksum kernel
 ├── fannkuchredux_kernel.kl          # Kaula fannkuch checksum kernel
 ├── binarytrees.mbtx                 # MoonBit binarytrees checksum kernel

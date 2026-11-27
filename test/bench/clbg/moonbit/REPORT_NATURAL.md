@@ -1,44 +1,63 @@
-# Kaula vs MoonBit：语言自然形态对比
+# Kaula vs MoonBit：全部 7 道 CLBG 题 native 自然形态对比
 
 > 原则：**让算法在两种语言上各自用自然形态实现，不为对齐而统一数据结构**。
 
-> 正确性口径：native 输出逐字节一致（CLBG 标准格式），校验通过才计入计时。
+> 正确性：native 标准 CLBG 输出逐字节一致（含 32MB PBM 二进制），校验通过才计时。
 
 ## 运行环境
 
 | 项 | 值 |
 |---|---|
-| OS | Linux 6.6.117-45.19.1.tl4.x86_64 (x86_64) |
+| OS | Linux 6.6.117-45.11.6.tl4.x86_64 (x86_64) |
 | CPU | AMD EPYC 9K65 192-Core Processor / 32 核 |
-| Kaula | kaulac -release（内部 clang -O3）| 
-| MoonBit | moon 0.1.20261126 (ccd306a 2026-11-26)（LLVM native 后端）|
+| Kaula | kaulac -release（clang -O3）|
+| MoonBit | moon 0.1.20261126（LLVM native 后端）|
 | 采样 | 每边 3 轮取中位数；RSS 由 /usr/bin/time -v 单次采样 |
 
 ## 正确性校验（native 输出逐字节）
 
-| 题目 | 参数 | 形态与差异 | 结果 |
-|---|---:|---|---|
-| binarytrees | 21 | Kaula=arena连续数组 / MoonBit=GC递归引用树 | ✅ PASS |
-| fannkuchredux | 12 | 两边均定长数组（算法标准形态，无语言差异） | ✅ PASS |
+| 题目 | 参数 | 输出字节 | 形态差异 | 结果 |
+|---|---:|---:|---|---|
+| binarytrees | 21 | 455 | Kaula=arena连续数组 / MoonBit=GC递归引用树 | ✅ PASS |
+| nbody | 5000000 | 26 | 两边 Array[Planet]+Double.sqrt / MoonBit 用 bigint 精确 %.9f | ✅ PASS |
+| spectralnorm | 5500 | 12 | 两边 Array[Double]+幂迭代 / MoonBit 用 bigint 精确 %.9f | ✅ PASS |
+| fannkuchredux | 12 | 29 | 两边均定长数组（算法标准形态，无语言差异） | ✅ PASS |
+| fasta | 250000 | 2,541,745 | Kaula 字符缓冲 / MoonBit String+Ref LCG | ✅ PASS |
+| mandelbrot | 16000 | 32,000,015 | 两边标量单线程 P4 PBM / MoonBit 用 FFI putchar | ✅ PASS |
+| revcomp | fasta输出 | 2,541,745 | 两边 FFI/动态缓冲 + 互补查表 / 输入=fasta标准输出 | ✅ PASS |
 
 ## 运行性能（native，中位数）
 
-| 题目 | Kaula wall | MoonBit wall | MB/K | Kaula RSS | MoonBit RSS |
+| 题目 | Kaula wall | MoonBit wall | Moon/Kaula | Kaula RSS | MoonBit RSS |
 |---|---:|---:|---:|---:|---:|
-| binarytrees | 1.615s | 6.847s | 4.24× | 66MB | 258MB |
-| fannkuchredux | 36.367s | 38.702s | 1.06× | 2MB | 2MB |
+| binarytrees | 1.628s | 6.869s | 4.22× | 66MB | 258MB |
+| nbody | 0.285s | 0.321s | 1.12× | 2MB | 2MB |
+| spectralnorm | 1.340s | 1.359s | 1.01× | 2MB | 2MB |
+| fannkuchredux | 36.749s | 38.945s | 1.06× | 2MB | 2MB |
+| fasta | 0.034s | 0.053s | 1.57× | 2MB | 26MB |
+| mandelbrot | 14.127s | 14.142s | 1.00× | 32MB | 124MB |
+| revcomp | 0.011s | 0.055s | 4.94× | 4MB | 15MB |
 
 ## 编译速度与产物大小
 
 | 题目 | Kaula 编译 | MoonBit 编译 | Kaula 产物 | MoonBit 产物 |
 |---|---:|---:|---:|---:|
-| binarytrees | 0.12s | 0.71s | 86,864 B | 492,488 B |
-| fannkuchredux | 0.11s | 0.64s | 79,392 B | 492,384 B |
+| binarytrees | 0.13s | 0.71s | 86,864 B | 492,488 B |
+| nbody | 0.14s | 0.78s | 92,528 B | 497,048 B |
+| spectralnorm | 0.13s | 0.75s | 89,816 B | 497,112 B |
+| fannkuchredux | 0.12s | 0.64s | 79,376 B | 492,384 B |
+| fasta | 0.15s | 0.67s | 82,728 B | 492,656 B |
+| mandelbrot | 0.12s | 0.63s | 80,200 B | 492,152 B |
+| revcomp | 0.14s | 0.63s | 81,208 B | 492,264 B |
 
-## 解读
+## 口径说明
 
-- **binary-trees**：Kaula arena（连续数组、O(1) 复用）与 MoonBit GC 递归树（逐节点分配、GC 回收）是两种语言的自然形态，输出逐字节一致。性能差距反映的是**内存管理策略差异**，不是语法或代码生成能力差异。
+- 所有题目均使用 CLBG 官方标准参数，输出逐字节一致后计时。
 
-- **fannkuch-redux**：算法本身以定长数组为标准形态，两种语言均无特殊形态可用，这一项的对比才更接近纯粹的编译器代码生成质量对比。
+- nbody/spectralnorm 的 `%.9f` 用 MoonBit bigint 精确格式化（round-half-even，与 C printf 对齐）。
 
-- **wasm 未纳入本报告**：Kaula `--wasm` 走 freestanding 裸机（无 stdout、无 libm、无 `__multi3`），MoonBit wasm 带 WASI（有 stdout）——两者输出能力不对等，强行对比只会得到误导性数字。需要 wasm 数据时请使用 `run_compare.py` 的 checksum kernel 口径（已标注限制）。
+- mandelbrot 为标量单线程 P4 PBM（隔离并行度/向量化变量），输出 32,000,015 字节。
+
+- revcomp 输入为 fasta 的标准输出（CLBG 串联口径），两边用同一输入文件。
+
+- wasm 未纳入：Kaula freestanding 无 stdout/libm/`__multi3`，输出能力不对等。

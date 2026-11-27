@@ -1,0 +1,50 @@
+// MoonBit 自然形态：Array[Double] 向量 + Double.sqrt()，与 ../kaula/spectralnorm.kl 算法逐行对应。
+
+///|
+fn eval_a(i : Int, j : Int) -> Double {
+  let denom = (i + j) * (i + j + 1) / 2 + i + 1
+  1.0 / denom.to_double()
+}
+
+///|
+fn a_times_u(u : Array[Double], au : Array[Double]) -> Unit {
+  let n = u.length()
+  for i = 0; i < n; i = i + 1 {
+    let mut s = 0.0
+    for j = 0; j < n; j = j + 1 {
+      s = s + eval_a(i, j) * u[j]
+    }
+    au[i] = s
+  }
+}
+
+///|
+fn at_times_u(u : Array[Double], au : Array[Double]) -> Unit {
+  let n = u.length()
+  for i = 0; i < n; i = i + 1 {
+    let mut s = 0.0
+    for j = 0; j < n; j = j + 1 {
+      s = s + eval_a(j, i) * u[j]
+    }
+    au[i] = s
+  }
+}
+
+///|
+fn main {
+  let n = N_PLACEHOLDER
+  let u = Array::make(n, 1.0)
+  let v = Array::make(n, 0.0)
+  let t = Array::make(n, 0.0)
+  for iter = 0; iter < 10; iter = iter + 1 {
+    a_times_u(u, t); at_times_u(t, v)
+    a_times_u(v, t); at_times_u(t, u)
+  }
+  let mut vbv = 0.0
+  let mut vv = 0.0
+  for i = 0; i < n; i = i + 1 {
+    vbv = vbv + u[i] * v[i]
+    vv = vv + v[i] * v[i]
+  }
+  println(format_fixed_point((vbv / vv).sqrt(), 9))
+}

@@ -1,0 +1,52 @@
+// MoonBit 自然形态：Array[Byte] 位图缓冲 + FFI putchar 二进制输出。
+// 与 ../kaula/mandelbrot.kl 算法逐行对应（标量单线程，P4 PBM 输出）。
+
+///|
+extern "c" fn putchar(c : Int32) -> Int32 = "putchar"
+
+///|
+fn main {
+  let w = N_PLACEHOLDER
+  let inv = 2.0 / w.to_double()
+  let rowbytes = w / 8
+
+  // 位掩码 dx=0 -> 0x80 (MSB) ... dx=7 -> 0x01
+  let bit = [128, 64, 32, 16, 8, 4, 2, 1]
+  let pixels = Array::make(w * rowbytes, 0)
+
+  let mut y = 0
+  while y < w {
+    let ci = inv * y.to_double() - 1.0
+    let mut x = 0
+    while x < w {
+      let mut byte = 255
+      let mut dx = 0
+      while dx < 8 {
+        let cr = inv * (x + dx).to_double() - 1.5
+        let mut zr = 0.0
+        let mut zi = 0.0
+        let mut iter = 0
+        while iter < 50 {
+          let nzr = zr * zr - zi * zi + cr
+          let nzi = 2.0 * zr * zi + ci
+          zr = nzr
+          zi = nzi
+          if zr * zr + zi * zi > 4.0 {
+            byte = byte ^ bit[dx]
+            break
+          }
+          iter = iter + 1
+        }
+        dx = dx + 1
+      }
+      pixels[y * rowbytes + x / 8] = byte
+      x = x + 8
+    }
+    y = y + 1
+  }
+
+  // P4 头
+  for ch in "P4\n\{w} \{w}\n" { ignore(putchar(ch.to_int())) }
+  // 位图
+  for p in pixels { ignore(putchar(p.to_int())) }
+}
